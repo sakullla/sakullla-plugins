@@ -7,14 +7,15 @@ import (
 	"io"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
 )
 
 const CIHandshakeFlag = "--nre-ci-rpc-handshake"
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 1 && args[0] == CIHandshakeFlag {
-		controller, err := NewController(ControllerConfig{PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact", Admission: TypedHandleAdmissionFunc(func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error { return nil })})
+		controller, err := NewController(ControllerConfig{PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact", Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error) {
+			return PreparedAdmissionFuncs{}, nil
+		})})
 		if err != nil {
 			return err
 		}

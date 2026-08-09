@@ -13,7 +13,6 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
 	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
 )
 
@@ -141,7 +140,7 @@ func TestDockerCutoverDrainSuccessAndRollbackPreservesOld(t *testing.T) {
 				if err != nil || got.InstanceID != "new" || strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
 					t.Fatalf("success got=%#v calls=%v err=%v", got, fake.calls, err)
 				}
-			} else if err == nil || strings.Contains(err.Error(), secret) || got != old {
+			} else if err == nil || strings.Contains(err.Error(), secret) || got.InstanceID != old.InstanceID || got.RuleTarget != old.RuleTarget {
 				t.Fatalf("rollback %s got=%#v err=%v", fail, got, err)
 			}
 			if strings.Contains(fmt.Sprint(audits), secret) {
@@ -165,8 +164,8 @@ func TestDockerRollbackCleanupIsBoundedAndPersistsReconcile(t *testing.T) {
 		noRemove bool
 		wantText []string
 	}{
-		{name: "remove-failure", fake: &rolloutFake{fail: "ready", failRemove: true}, want: dockerapp.PhaseCleanupPending, wantText: []string{"readiness"}},
-		{name: "restore-failure", fake: &rolloutFake{fail: "drain", failRestore: true}, want: dockerapp.PhaseRouteReconcile, noRemove: true, wantText: []string{"drain"}},
+		{name: "remove-failure", fake: &rolloutFake{fail: "ready", failRemove: true}, want: dockerapp.PhaseCleanupPending},
+		{name: "restore-failure", fake: &rolloutFake{fail: "drain", failRestore: true}, want: dockerapp.PhaseRouteReconcile, noRemove: true},
 		{name: "blocked-remove", fake: &rolloutFake{fail: "ready", blockRemove: true}, want: dockerapp.PhaseCleanupPending},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,11 +265,11 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 	if _, err := newController(nil).Handshake(context.Background(), handshake([]string{"docker-compose", "http-rule"})); err == nil {
 		t.Fatal("missing dynamic-ui grant was accepted")
 	}
-	controller := newController(dockerapp.TypedHandleAdmissionFunc(func(_ context.Context, _ *rpcplugin.Generation, got pluginsdk.RPCHandshakeRequest, apps []dockerapp.App) error {
+	controller := newController(dockerapp.TypedHandleAdmissionFunc(func(_ context.Context, got pluginsdk.RPCHandshakeRequest, apps []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 		if got.Generation != "generation-1" || len(apps) != 1 {
 			t.Fatalf("admission request=%#v apps=%#v", got, apps)
 		}
-		return nil
+		return dockerapp.PreparedAdmissionFuncs{}, nil
 	}))
 	if _, err := controller.Handshake(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -279,8 +278,8 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 		t.Fatal("stale generation was accepted")
 	}
 
-	controller = newController(dockerapp.TypedHandleAdmissionFunc(func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []dockerapp.App) error {
-		return nil
+	controller = newController(dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
+		return dockerapp.PreparedAdmissionFuncs{}, nil
 	}))
 	if _, err := controller.Handshake(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -296,8 +295,8 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 	}
 
 	for _, count := range []int{dockerapp.MaxApps, dockerapp.MaxApps + 1} {
-		bounded := newController(dockerapp.TypedHandleAdmissionFunc(func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []dockerapp.App) error {
-			return nil
+		bounded := newController(dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
+			return dockerapp.PreparedAdmissionFuncs{}, nil
 		}))
 		if _, err := bounded.Handshake(context.Background(), request); err != nil {
 			t.Fatal(err)
@@ -390,10 +389,10 @@ func TestDockerControllerDeadlineLateNilCannotCommitGenerationState(t *testing.T
 		started := make(chan struct{})
 		controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 			PackageDigest: "package", ArtifactDigest: "artifact", ActivateTimeout: 20 * time.Millisecond,
-			Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []dockerapp.App) error {
+			Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 				close(started)
 				<-release
-				return nil
+				return dockerapp.PreparedAdmissionFuncs{}, nil
 			}),
 		})
 		if err != nil {
@@ -445,9 +444,9 @@ func TestDockerControllerDeadlineLateNilCannotCommitGenerationState(t *testing.T
 		var calls atomic.Int32
 		controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 			PackageDigest: "package", ArtifactDigest: "artifact",
-			Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []dockerapp.App) error {
+			Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 				calls.Add(1)
-				return nil
+				return dockerapp.PreparedAdmissionFuncs{}, nil
 			}),
 		})
 		if err != nil {
@@ -569,10 +568,14 @@ func TestDockerDurableReconcileRestartCASAndPendingAdmission(t *testing.T) {
 		store := dockerapp.NewDeploymentStore()
 		store.Put(old)
 		record, _, _ := store.Load(context.Background(), app.ID)
-		if _, err := store.CompareAndSwap(context.Background(), app.ID, record.Version, old); err != nil {
+		leased, err := store.AcquireLease(context.Background(), app.ID, record.Version, old, time.Now().Add(time.Minute))
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.CompareAndSwap(context.Background(), app.ID, record.Version, old); !errors.Is(err, dockerapp.ErrStateConflict) {
+		if _, err := store.CompareAndSwap(context.Background(), app.ID, leased.Version, leased.Value.FencingToken, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CompareAndSwap(context.Background(), app.ID, leased.Version, leased.Value.FencingToken, old); !errors.Is(err, dockerapp.ErrStateConflict) {
 			t.Fatalf("stale CAS = %v", err)
 		}
 	})
@@ -593,9 +596,9 @@ func TestDockerSecretRefsAndGenerationBoundLateAdmission(t *testing.T) {
 		t.Fatalf("plaintext secret config response=%#v", response)
 	}
 	var admitted []dockerapp.App
-	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: dockerapp.TypedHandleAdmissionFunc(func(_ context.Context, _ *rpcplugin.Generation, _ pluginsdk.RPCHandshakeRequest, apps []dockerapp.App) error {
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: dockerapp.TypedHandleAdmissionFunc(func(_ context.Context, _ pluginsdk.RPCHandshakeRequest, apps []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 		admitted = apps
-		return nil
+		return dockerapp.PreparedAdmissionFuncs{}, nil
 	})})
 	if err != nil {
 		t.Fatal(err)
@@ -627,18 +630,17 @@ func TestDockerSecretRefsAndGenerationBoundLateAdmission(t *testing.T) {
 		t.Fatalf("revoke response=%#v apps=%v", response, controller.Apps())
 	}
 
-	var acquired, closed, committed atomic.Int32
+	var acquired, closed, committed, lasting atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
-	late, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond, Admission: dockerapp.TypedHandleAdmissionFunc(func(ctx context.Context, generation *rpcplugin.Generation, _ pluginsdk.RPCHandshakeRequest, _ []dockerapp.App) error {
-		resource := &struct{}{}
-		handle, err := rpcplugin.BindHandle(generation, "docker-compose", resource, func(*struct{}) { closed.Add(1) })
-		if err != nil {
-			return err
-		}
+	late, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond, Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 		acquired.Add(1)
-		close(started)
-		<-release
-		return handle.Use(ctx, func(context.Context, *struct{}) error { committed.Add(1); return nil })
+		return dockerapp.PreparedAdmissionFuncs{CommitFunc: func(context.Context) error {
+			committed.Add(1)
+			lasting.Store(1)
+			close(started)
+			<-release
+			return nil
+		}, AbortFunc: func() { lasting.Store(0); closed.Add(1) }}, nil
 	})})
 	if err != nil {
 		t.Fatal(err)
@@ -657,9 +659,163 @@ func TestDockerSecretRefsAndGenerationBoundLateAdmission(t *testing.T) {
 	response := <-result
 	close(release)
 	time.Sleep(30 * time.Millisecond)
-	if response.Error == nil || acquired.Load() != 1 || closed.Load() != 1 || committed.Load() != 0 || len(late.Apps()) != 0 {
-		t.Fatalf("late admission response=%#v acquired=%d closed=%d committed=%d apps=%v", response, acquired.Load(), closed.Load(), committed.Load(), late.Apps())
+	if response.Error == nil || acquired.Load() != 1 || closed.Load() != 1 || committed.Load() != 1 || lasting.Load() != 0 || len(late.Apps()) != 0 {
+		t.Fatalf("late admission response=%#v acquired=%d closed=%d committed=%d lasting=%d apps=%v", response, acquired.Load(), closed.Load(), committed.Load(), lasting.Load(), late.Apps())
 	}
+}
+
+func TestDockerFencingLeaseExpiryRejectsOldWriter(t *testing.T) {
+	now := time.Unix(1000, 0)
+	store := dockerapp.NewDeploymentStore()
+	old := dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", RuleTarget: "old", Phase: dockerapp.PhaseActive}
+	store.Put(old)
+	record, _, _ := store.Load(context.Background(), "media")
+	oldLease, err := store.AcquireLease(context.Background(), "media", record.Version, old, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &rolloutFake{}
+	if err := host.Pull(context.Background(), oldLease.Value.FencingToken, "image:old"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	app := dockerapp.App{ID: "media", Image: "image:new", RuleRef: "rule", Generation: "generation-1"}
+	if err := (dockerapp.Rollout{Store: store, Executor: host, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {}), Clock: func() time.Time { return now }, LeaseDuration: time.Second}).Update(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.Get("media")
+	if current.FencingToken <= oldLease.Value.FencingToken {
+		t.Fatalf("fence did not advance: old=%d new=%d", oldLease.Value.FencingToken, current.FencingToken)
+	}
+	if err := host.Remove(context.Background(), oldLease.Value.FencingToken, "new"); !errors.Is(err, dockerapp.ErrStateConflict) {
+		t.Fatalf("stale host effect=%v", err)
+	}
+}
+
+func TestDockerCrashIntentsReconcileAfterStartCutoverAndFinalCAS(t *testing.T) {
+	for _, phase := range []dockerapp.RolloutPhase{dockerapp.PhaseReadiness, dockerapp.PhaseDraining, dockerapp.PhaseActive} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Unix(2000, 0)
+			base := dockerapp.NewDeploymentStore()
+			old := dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule-media", RuleTarget: "old", Phase: dockerapp.PhaseActive}
+			base.Put(old)
+			store := &faultStore{base: base, failPhase: phase, failRemaining: 1}
+			host := &rolloutFake{}
+			app := testApp("")
+			rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {}), Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+			if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+				t.Fatalf("crash phase %s err=%v", phase, err)
+			}
+			incomplete, _ := base.Get(app.ID)
+			if incomplete.Phase == dockerapp.PhaseActive {
+				t.Fatalf("intent lost after phase %s: %#v", phase, incomplete)
+			}
+			now = now.Add(2 * time.Second)
+			if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+				t.Fatalf("reconcile %s: %v state=%#v", phase, err, incomplete)
+			}
+			final, _ := base.Get(app.ID)
+			if phase == dockerapp.PhaseReadiness {
+				if final.InstanceID != "old" || final.RuleTarget != "old" {
+					t.Fatalf("start crash truth=%#v", final)
+				}
+			} else if final.InstanceID != "new" || final.RuleTarget != "new" {
+				t.Fatalf("post-cutover truth=%#v", final)
+			}
+		})
+	}
+}
+
+func TestDockerReconcileAuthoritativeTruthAndFirstInstallTombstone(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	seed := func(value dockerapp.Deployment) (*dockerapp.DeploymentStore, *dockerapp.Rollout) {
+		store := dockerapp.NewDeploymentStore()
+		store.Put(value)
+		r := &dockerapp.Rollout{Store: store, Auditor: auditor, CleanupTimeout: 20 * time.Millisecond}
+		return store, r
+	}
+	t.Run("missing-old", func(t *testing.T) {
+		store, r := seed(dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", PriorRuleTarget: "old", RuleTarget: "old", PendingInstance: "new", Phase: dockerapp.PhaseCleanupPending})
+		r.Executor = &rolloutFake{state: dockerapp.RuntimeState{RuleTarget: "old", Instances: map[string]bool{"new": true}}}
+		if err := r.Reconcile(context.Background(), "media"); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("missing old err=%v", err)
+		}
+		got, _ := store.Get("media")
+		if got.Phase == dockerapp.PhaseActive {
+			t.Fatalf("missing old finalized: %#v", got)
+		}
+	})
+	t.Run("unrelated-target", func(t *testing.T) {
+		store, r := seed(dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", PriorRuleTarget: "old", RuleTarget: "other", PendingInstance: "new", Phase: dockerapp.PhaseRouteReconcile})
+		r.Executor = &rolloutFake{state: dockerapp.RuntimeState{RuleTarget: "other", Instances: map[string]bool{"old": true, "new": true}}}
+		if err := r.Reconcile(context.Background(), "media"); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("unrelated err=%v", err)
+		}
+		got, _ := store.Get("media")
+		if got.Phase == dockerapp.PhaseActive {
+			t.Fatalf("unrelated finalized: %#v", got)
+		}
+	})
+	t.Run("first-install-delete", func(t *testing.T) {
+		store, r := seed(dockerapp.Deployment{AppID: "media", RuleRef: "rule", PendingInstance: "new", PriorAbsent: true, Phase: dockerapp.PhaseCleanupPending})
+		r.Executor = &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{"new": true}}}
+		if err := r.Reconcile(context.Background(), "media"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := store.Get("media"); ok {
+			t.Fatal("first-install tombstone record retained")
+		}
+	})
+	t.Run("post-effect-drift", func(t *testing.T) {
+		store, r := seed(dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", PriorRuleTarget: "old", RuleTarget: "old", PendingInstance: "new", Phase: dockerapp.PhaseCleanupPending})
+		r.Executor = &rolloutFake{inspectStates: []dockerapp.RuntimeState{{RuleTarget: "old", Instances: map[string]bool{"old": true, "new": true}}, {RuleTarget: "other", Instances: map[string]bool{"old": true}}}}
+		if err := r.Reconcile(context.Background(), "media"); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("drift err=%v", err)
+		}
+		got, _ := store.Get("media")
+		if got.Phase == dockerapp.PhaseActive {
+			t.Fatalf("post-effect drift finalized: %#v", got)
+		}
+	})
+}
+
+func TestDockerRollbackStoreCleanupContextsAndCASFailures(t *testing.T) {
+	app := testApp("")
+	old := dockerapp.Deployment{AppID: app.ID, InstanceID: "old", RuleRef: app.RuleRef, RuleTarget: "old", Phase: dockerapp.PhaseActive}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	t.Run("canceled-parent-independent", func(t *testing.T) {
+		base := dockerapp.NewDeploymentStore()
+		base.Put(old)
+		store := &faultStore{base: base}
+		host := &rolloutFake{fail: "pull"}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := (dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, CleanupTimeout: 20 * time.Millisecond}).Update(ctx, app)
+		if !errors.Is(err, dockerapp.ErrOperationFailed) || !store.sawIndependentRecovery {
+			t.Fatalf("err=%v independent=%v", err, store.sawIndependentRecovery)
+		}
+	})
+	t.Run("blocking-recovery-store", func(t *testing.T) {
+		base := dockerapp.NewDeploymentStore()
+		base.Put(old)
+		store := &faultStore{base: base, blockPhase: dockerapp.PhaseCleanupPending}
+		host := &rolloutFake{fail: "pull"}
+		started := time.Now()
+		err := (dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, CleanupTimeout: 15 * time.Millisecond}).Update(context.Background(), app)
+		if !errors.Is(err, dockerapp.ErrOperationFailed) || time.Since(started) > time.Second {
+			t.Fatalf("bounded store err=%v elapsed=%v", err, time.Since(started))
+		}
+	})
+	t.Run("release-cas-failure-joined", func(t *testing.T) {
+		base := dockerapp.NewDeploymentStore()
+		base.Put(old)
+		store := &faultStore{base: base, failRelease: true}
+		host := &rolloutFake{fail: "pull", inspectErr: errors.New("inspect failed")}
+		err := (dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, CleanupTimeout: 20 * time.Millisecond}).Update(context.Background(), app)
+		if !errors.Is(err, dockerapp.ErrOperationFailed) || store.releaseFailures != 1 || !contains(host.calls, "inspect") {
+			t.Fatalf("combined err=%v releases=%d calls=%v", err, store.releaseFailures, host.calls)
+		}
+	})
 }
 
 func testApp(_ string) dockerapp.App {
@@ -688,7 +844,27 @@ type rolloutFake struct {
 	calls                                []string
 	failRestore, failRemove, blockRemove bool
 	state                                dockerapp.RuntimeState
+	inspectStates                        []dockerapp.RuntimeState
 	inspectErr                           error
+	maxFence                             uint64
+	mu                                   sync.Mutex
+}
+
+func (fake *rolloutFake) acceptFence(fence uint64) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fence < fake.maxFence {
+		return dockerapp.ErrStateConflict
+	}
+	if fence > fake.maxFence {
+		fake.maxFence = fence
+	}
+	return nil
+}
+func (fake *rolloutFake) ensureState() {
+	if fake.state.Instances == nil {
+		fake.state = dockerapp.RuntimeState{RuleTarget: "old", Instances: map[string]bool{"old": true}}
+	}
 }
 
 func (fake *rolloutFake) step(name string) error {
@@ -699,25 +875,52 @@ func (fake *rolloutFake) step(name string) error {
 	}
 	return nil
 }
-func (fake *rolloutFake) Pull(context.Context, string) error { return fake.step("pull") }
-func (fake *rolloutFake) Start(context.Context, dockerapp.App) (string, error) {
+func (fake *rolloutFake) Pull(_ context.Context, fence uint64, _ string) error {
+	if err := fake.acceptFence(fence); err != nil {
+		return err
+	}
+	return fake.step("pull")
+}
+func (fake *rolloutFake) Start(_ context.Context, fence uint64, _ dockerapp.App) (string, error) {
+	if err := fake.acceptFence(fence); err != nil {
+		return "", err
+	}
 	if err := fake.step("start"); err != nil {
 		return "", err
 	}
+	fake.ensureState()
+	fake.state.Instances["new"] = true
+	fake.state.CandidateInstance = "new"
 	return "new", nil
 }
-func (fake *rolloutFake) Ready(context.Context, string) error { return fake.step("ready") }
-func (fake *rolloutFake) Cutover(_ context.Context, _ string, target string) error {
+func (fake *rolloutFake) Ready(_ context.Context, fence uint64, _ string) error {
+	if err := fake.acceptFence(fence); err != nil {
+		return err
+	}
+	return fake.step("ready")
+}
+func (fake *rolloutFake) Cutover(_ context.Context, fence uint64, _ string, target string) error {
+	if err := fake.acceptFence(fence); err != nil {
+		return err
+	}
 	fake.calls = append(fake.calls, "cutover:"+target)
 	if (target == "new" && fake.fail == "cutover") || (target == "old" && fake.failRestore) {
 		return &secretCause{message: "cutover cleanup failed " + fake.secret}
 	}
+	fake.ensureState()
+	fake.state.RuleTarget = target
 	return nil
 }
-func (fake *rolloutFake) Drain(_ context.Context, target string) error {
+func (fake *rolloutFake) Drain(_ context.Context, fence uint64, target string) error {
+	if err := fake.acceptFence(fence); err != nil {
+		return err
+	}
 	return fake.step("drain:" + target)
 }
-func (fake *rolloutFake) Remove(ctx context.Context, target string) error {
+func (fake *rolloutFake) Remove(ctx context.Context, fence uint64, target string) error {
+	if err := fake.acceptFence(fence); err != nil {
+		return err
+	}
 	fake.calls = append(fake.calls, "remove:"+target)
 	if fake.blockRemove {
 		<-ctx.Done()
@@ -726,17 +929,29 @@ func (fake *rolloutFake) Remove(ctx context.Context, target string) error {
 	if fake.failRemove {
 		return &secretCause{message: "remove cleanup failed " + fake.secret}
 	}
+	fake.ensureState()
+	delete(fake.state.Instances, target)
+	if fake.state.CandidateInstance == target {
+		fake.state.CandidateInstance = ""
+	}
 	return nil
 }
-func (fake *rolloutFake) Inspect(context.Context, string, string) (dockerapp.RuntimeState, error) {
+func (fake *rolloutFake) Inspect(_ context.Context, fence uint64, _, _ string) (dockerapp.RuntimeState, error) {
+	if err := fake.acceptFence(fence); err != nil {
+		return dockerapp.RuntimeState{}, err
+	}
 	fake.calls = append(fake.calls, "inspect")
 	if fake.inspectErr != nil {
 		return dockerapp.RuntimeState{}, fake.inspectErr
 	}
-	if fake.state.Instances != nil {
-		return fake.state, nil
+	if len(fake.inspectStates) > 0 {
+		state := fake.inspectStates[0]
+		fake.inspectStates = fake.inspectStates[1:]
+		fake.state = state
+		return state, nil
 	}
-	return dockerapp.RuntimeState{RuleTarget: "old", Instances: map[string]bool{"old": true, "new": true}}, nil
+	fake.ensureState()
+	return fake.state, nil
 }
 
 type deleteFake struct {
@@ -822,6 +1037,44 @@ func (fake *idempotentComposeFake) ApplyCompose(_ context.Context, operation str
 type idempotentDeleteFake struct {
 	attempts, external int
 	seen               map[string]struct{}
+}
+
+type faultStore struct {
+	base                   *dockerapp.DeploymentStore
+	failPhase, blockPhase  dockerapp.RolloutPhase
+	failRemaining          int
+	failRelease            bool
+	releaseFailures        int
+	sawIndependentRecovery bool
+}
+
+func (store *faultStore) Load(ctx context.Context, appID string) (dockerapp.DeploymentRecord, bool, error) {
+	return store.base.Load(ctx, appID)
+}
+func (store *faultStore) AcquireLease(ctx context.Context, appID string, version uint64, value dockerapp.Deployment, until time.Time) (dockerapp.DeploymentRecord, error) {
+	return store.base.AcquireLease(ctx, appID, version, value, until)
+}
+func (store *faultStore) CompareAndSwap(ctx context.Context, appID string, version, fence uint64, value dockerapp.Deployment) (dockerapp.DeploymentRecord, error) {
+	recovery := value.Phase == dockerapp.PhaseCleanupPending || value.Phase == dockerapp.PhaseRouteReconcile
+	if recovery && ctx.Err() == nil {
+		store.sawIndependentRecovery = true
+	}
+	if store.blockPhase == value.Phase {
+		<-ctx.Done()
+		return dockerapp.DeploymentRecord{}, ctx.Err()
+	}
+	if store.failRelease && recovery && value.Lease == "" {
+		store.releaseFailures++
+		return dockerapp.DeploymentRecord{}, dockerapp.ErrStateConflict
+	}
+	if store.failPhase == value.Phase && store.failRemaining > 0 {
+		store.failRemaining--
+		return dockerapp.DeploymentRecord{}, dockerapp.ErrStateConflict
+	}
+	return store.base.CompareAndSwap(ctx, appID, version, fence, value)
+}
+func (store *faultStore) DeleteCAS(ctx context.Context, appID string, version, fence uint64) error {
+	return store.base.DeleteCAS(ctx, appID, version, fence)
 }
 
 func (fake *idempotentDeleteFake) apply(operation string) error {

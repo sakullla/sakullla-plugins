@@ -18,20 +18,44 @@ import (
 const MaxConfigBytes = 1 << 20
 
 type TypedHandleAdmission interface {
-	// Admit may acquire resources only by binding them to generation before
-	// use. Any host-visible commit must happen through a bound handle's Use.
-	Admit(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error
+	// Prepare validates/acquires a transaction without any host-visible effect.
+	Prepare(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error)
 }
-type TypedHandleAdmissionFunc func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error
+type TypedHandleAdmissionFunc func(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error)
 
-func (function TypedHandleAdmissionFunc) Admit(ctx context.Context, generation *rpcplugin.Generation, request pluginsdk.RPCHandshakeRequest, apps []App) error {
-	return function(ctx, generation, request, apps)
+func (function TypedHandleAdmissionFunc) Prepare(ctx context.Context, request pluginsdk.RPCHandshakeRequest, apps []App) (PreparedAdmission, error) {
+	return function(ctx, request, apps)
+}
+
+// PreparedAdmission is controller-owned after Prepare returns. Commit may
+// perform effects. Abort must be idempotent and non-blocking; generation revoke
+// invokes it synchronously as the final compensation boundary.
+type PreparedAdmission interface {
+	Commit(context.Context) error
+	Abort()
+}
+
+type PreparedAdmissionFuncs struct {
+	CommitFunc func(context.Context) error
+	AbortFunc  func()
+}
+
+func (prepared PreparedAdmissionFuncs) Commit(ctx context.Context) error {
+	if prepared.CommitFunc == nil {
+		return nil
+	}
+	return prepared.CommitFunc(ctx)
+}
+func (prepared PreparedAdmissionFuncs) Abort() {
+	if prepared.AbortFunc != nil {
+		prepared.AbortFunc()
+	}
 }
 
 type unavailableAdmission struct{}
 
-func (unavailableAdmission) Admit(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error {
-	return ErrTypedHandlesUnavailable
+func (unavailableAdmission) Prepare(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error) {
+	return nil, ErrTypedHandlesUnavailable
 }
 
 type ControllerConfig struct {
@@ -187,7 +211,19 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 		if value != epoch || !value.live.Load() {
 			return rpcplugin.ErrRevoked
 		}
-		return controller.admission.Admit(ctx, generation, request, apps)
+		prepared, err := controller.admission.Prepare(ctx, request, apps)
+		if err != nil {
+			return err
+		}
+		if prepared == nil {
+			return ErrTypedHandlesUnavailable
+		}
+		transaction, err := rpcplugin.BindHandle(generation, "docker-compose", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
+		if err != nil {
+			prepared.Abort()
+			return err
+		}
+		return transaction.Use(ctx, func(ctx context.Context, prepared PreparedAdmission) error { return prepared.Commit(ctx) })
 	})
 }
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {

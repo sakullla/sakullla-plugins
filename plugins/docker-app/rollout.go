@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type Deployment struct {
 	AppID, InstanceID, Image, RuleRef, RuleTarget, Generation string
 	Phase                                                     RolloutPhase
-	PendingInstance, DesiredRuleTarget, LastFailure, Lease    string
+	PendingInstance, DesiredRuleTarget, PriorRuleTarget       string
+	LastFailure, Lease                                        string
 	LeaseUntil                                                time.Time
+	FencingToken                                              uint64
+	PriorAbsent                                               bool
 }
 
 type RolloutPhase string
@@ -37,278 +39,373 @@ type DeploymentRecord struct {
 	Value   Deployment
 }
 
-// DeploymentStateStore is the durable CAS boundary. Production adapters must
-// persist records and versions across process restart. DeploymentStore is only
-// the deterministic in-memory repository model.
+// DeploymentStateStore is a durable versioned fencing boundary. AcquireLease
+// must issue a strictly increasing token for an app. All later writes require
+// both the record version and that token. DeploymentStore is test-only.
 type DeploymentStateStore interface {
 	Load(context.Context, string) (DeploymentRecord, bool, error)
-	CompareAndSwap(context.Context, string, uint64, Deployment) (DeploymentRecord, error)
+	AcquireLease(context.Context, string, uint64, Deployment, time.Time) (DeploymentRecord, error)
+	CompareAndSwap(context.Context, string, uint64, uint64, Deployment) (DeploymentRecord, error)
+	DeleteCAS(context.Context, string, uint64, uint64) error
 }
 
 type DeploymentStore struct {
 	mu     sync.RWMutex
 	values map[string]DeploymentRecord
+	fences map[string]uint64
 }
 
 func NewDeploymentStore() *DeploymentStore {
-	return &DeploymentStore{values: make(map[string]DeploymentRecord)}
+	return &DeploymentStore{values: make(map[string]DeploymentRecord), fences: make(map[string]uint64)}
 }
-func (store *DeploymentStore) Load(_ context.Context, appID string) (DeploymentRecord, bool, error) {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	record, ok := store.values[appID]
-	return record, ok, nil
+func (s *DeploymentStore) Load(_ context.Context, id string) (DeploymentRecord, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.values[id]
+	return r, ok, nil
 }
-func (store *DeploymentStore) CompareAndSwap(_ context.Context, appID string, expected uint64, value Deployment) (DeploymentRecord, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current := store.values[appID]
-	if current.Version != expected {
+func (s *DeploymentStore) AcquireLease(_ context.Context, id string, version uint64, value Deployment, until time.Time) (DeploymentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.values[id]
+	if current.Version != version {
 		return DeploymentRecord{}, ErrStateConflict
 	}
-	value.AppID = appID
-	next := DeploymentRecord{Version: expected + 1, Value: value}
-	store.values[appID] = next
+	s.fences[id]++
+	value.AppID, value.FencingToken, value.Lease, value.LeaseUntil = id, s.fences[id], fmt.Sprintf("fence-%d", s.fences[id]), until
+	next := DeploymentRecord{Version: version + 1, Value: value}
+	s.values[id] = next
 	return next, nil
 }
-func (store *DeploymentStore) Get(appID string) (Deployment, bool) {
-	record, ok, _ := store.Load(context.Background(), appID)
-	return record.Value, ok
+func (s *DeploymentStore) CompareAndSwap(_ context.Context, id string, version, fence uint64, value Deployment) (DeploymentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.values[id]
+	if current.Version != version || current.Value.FencingToken != fence {
+		return DeploymentRecord{}, ErrStateConflict
+	}
+	value.AppID, value.FencingToken = id, fence
+	next := DeploymentRecord{Version: version + 1, Value: value}
+	s.values[id] = next
+	return next, nil
 }
-func (store *DeploymentStore) Put(value Deployment) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current := store.values[value.AppID]
-	store.values[value.AppID] = DeploymentRecord{Version: current.Version + 1, Value: value}
+func (s *DeploymentStore) DeleteCAS(_ context.Context, id string, version, fence uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.values[id]
+	if !ok || current.Version != version || current.Value.FencingToken != fence {
+		return ErrStateConflict
+	}
+	delete(s.values, id)
+	return nil
+}
+func (s *DeploymentStore) Get(id string) (Deployment, bool) {
+	r, ok, _ := s.Load(context.Background(), id)
+	return r.Value, ok
+}
+func (s *DeploymentStore) Put(value Deployment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.values[value.AppID]
+	if value.FencingToken > s.fences[value.AppID] {
+		s.fences[value.AppID] = value.FencingToken
+	}
+	s.values[value.AppID] = DeploymentRecord{Version: current.Version + 1, Value: value}
 }
 
 type RuntimeState struct {
-	RuleTarget string
-	Instances  map[string]bool
+	RuleTarget, CandidateInstance string
+	Instances                     map[string]bool
 }
 
-// RolloutExecutor is a capability-backed business adapter. Production uses
-// future typed public SDK handles; this is not a Host wire contract.
+// RolloutExecutor is a capability host boundary. It must reject every effect
+// whose fencing token is lower than the highest token observed for the app.
 type RolloutExecutor interface {
-	Pull(context.Context, string) error
-	Start(context.Context, App) (string, error)
-	Ready(context.Context, string) error
-	Cutover(context.Context, string, string) error
-	Drain(context.Context, string) error
-	Remove(context.Context, string) error
-	Inspect(context.Context, string, string) (RuntimeState, error)
+	Pull(context.Context, uint64, string) error
+	Start(context.Context, uint64, App) (string, error)
+	Ready(context.Context, uint64, string) error
+	Cutover(context.Context, uint64, string, string) error
+	Drain(context.Context, uint64, string) error
+	Remove(context.Context, uint64, string) error
+	Inspect(context.Context, uint64, string, string) (RuntimeState, error)
 }
 
 type Rollout struct {
-	Store          DeploymentStateStore
-	Executor       RolloutExecutor
-	Auditor        Auditor
-	CleanupTimeout time.Duration
-	LeaseDuration  time.Duration
-	Clock          func() time.Time
+	Store                         DeploymentStateStore
+	Executor                      RolloutExecutor
+	Auditor                       Auditor
+	CleanupTimeout, LeaseDuration time.Duration
+	Clock                         func() time.Time
 }
 
-var leaseSequence atomic.Uint64
-
-func (rollout Rollout) Update(ctx context.Context, app App) error {
-	if rollout.Auditor == nil {
+func (r Rollout) Update(ctx context.Context, app App) error {
+	if r.Auditor == nil {
 		return ErrAuditRequired
 	}
 	if err := app.Validate(); err != nil {
-		audit(rollout.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
 		return safeFailure(ErrInvalidPreview, err)
 	}
-	if rollout.Store == nil || rollout.Executor == nil {
-		audit(rollout.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+	if r.Store == nil || r.Executor == nil {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	oldRecord, hadOld, err := rollout.Store.Load(ctx, app.ID)
+	prior, existed, err := r.Store.Load(ctx, app.ID)
 	if err != nil {
 		return safeFailure(ErrOperationFailed, err)
 	}
-	old := oldRecord.Value
-	now := rollout.now()
-	if hadOld && (old.Phase == PhaseCleanupPending || old.Phase == PhaseRouteReconcile || (old.Lease != "" && old.LeaseUntil.After(now))) {
+	if existed && ((prior.Value.Phase != "" && prior.Value.Phase != PhaseActive) || (prior.Value.Lease != "" && prior.Value.LeaseUntil.After(r.now()))) {
 		return ErrReconcilePending
 	}
-	lease := fmt.Sprintf("rollout-%d", leaseSequence.Add(1))
-	leased := old
-	leased.AppID, leased.Lease, leased.LeaseUntil = app.ID, lease, now.Add(rollout.leaseDuration())
-	leasedRecord, err := rollout.Store.CompareAndSwap(ctx, app.ID, oldRecord.Version, leased)
+	base := prior.Value
+	base.AppID, base.PriorAbsent, base.PriorRuleTarget = app.ID, !existed, prior.Value.RuleTarget
+	record, err := r.Store.AcquireLease(ctx, app.ID, prior.Version, base, r.now().Add(r.leaseDuration()))
 	if err != nil {
 		return ErrReconcilePending
 	}
-	restoreOld := func() error {
-		_, err := rollout.Store.CompareAndSwap(context.Background(), app.ID, leasedRecord.Version, old)
-		return err
-	}
-	persistPending := func(phase RolloutPhase, pending, actualTarget, desiredTarget string, cause error) error {
-		value := old
-		value.AppID, value.Generation, value.PendingInstance, value.RuleTarget = app.ID, app.Generation, pending, actualTarget
-		value.DesiredRuleTarget, value.Phase, value.LastFailure, value.Lease, value.LeaseUntil = desiredTarget, phase, ErrOperationFailed.Error(), "", time.Time{}
-		_, err := rollout.Store.CompareAndSwap(context.Background(), app.ID, leasedRecord.Version, value)
-		return errors.Join(cause, err)
-	}
-	fail := func(phase string, cause error) error {
-		audit(rollout.Auditor, AuditRecord{Action: "rollout." + phase, Outcome: "failed", Detail: ErrOperationFailed.Error()})
-		return fmt.Errorf("rollout %s: %w", phase, safeFailure(ErrOperationFailed, cause))
-	}
-	rollout.progress(app, PhasePulling)
-	if err := rollout.Executor.Pull(ctx, app.Image); err != nil {
-		return fail("pull", errors.Join(err, restoreOld()))
-	}
-	rollout.progress(app, PhaseStarting)
-	newInstance, err := rollout.Executor.Start(ctx, app)
-	if err != nil {
-		if newInstance == "" {
-			return fail("start", errors.Join(err, restoreOld()))
-		}
-		removeErr := rollout.removeWithCleanup(newInstance)
-		if removeErr != nil {
-			return fail("start", persistPending(PhaseCleanupPending, newInstance, old.RuleTarget, old.RuleTarget, errors.Join(err, removeErr)))
-		}
-		return fail("start", errors.Join(err, restoreOld()))
-	}
-	rollout.progress(app, PhaseReadiness)
-	if err := rollout.Executor.Ready(ctx, newInstance); err != nil {
-		removeErr := rollout.removeWithCleanup(newInstance)
-		if removeErr != nil {
-			return fail("readiness", persistPending(PhaseCleanupPending, newInstance, old.RuleTarget, old.RuleTarget, errors.Join(err, removeErr)))
-		}
-		return fail("readiness", errors.Join(err, restoreOld()))
-	}
-	rollout.progress(app, PhaseCutover)
-	if err := rollout.Executor.Cutover(ctx, app.RuleRef, newInstance); err != nil {
-		if hadOld {
-			restoreErr := rollout.restoreWithCleanup(old)
-			if restoreErr != nil {
-				return fail("cutover", persistPending(PhaseRouteReconcile, newInstance, newInstance, old.RuleTarget, errors.Join(err, restoreErr)))
-			}
-		}
-		removeErr := rollout.removeWithCleanup(newInstance)
-		if removeErr != nil {
-			return fail("cutover", persistPending(PhaseCleanupPending, newInstance, old.RuleTarget, old.RuleTarget, errors.Join(err, removeErr)))
-		}
-		return fail("cutover", errors.Join(err, restoreOld()))
-	}
-	if hadOld && old.InstanceID != "" {
-		rollout.progress(app, PhaseDraining)
-		if err := rollout.Executor.Drain(ctx, old.InstanceID); err != nil {
-			restoreErr := rollout.restoreWithCleanup(old)
-			if restoreErr != nil {
-				return fail("drain", persistPending(PhaseRouteReconcile, newInstance, newInstance, old.RuleTarget, errors.Join(err, restoreErr)))
-			}
-			removeErr := rollout.removeWithCleanup(newInstance)
-			if removeErr != nil {
-				return fail("drain", persistPending(PhaseCleanupPending, newInstance, old.RuleTarget, old.RuleTarget, errors.Join(err, removeErr)))
-			}
-			return fail("drain", errors.Join(err, restoreOld()))
-		}
-	}
-	active := Deployment{AppID: app.ID, InstanceID: newInstance, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: newInstance, Generation: app.Generation, Phase: PhaseActive}
-	if _, err := rollout.Store.CompareAndSwap(ctx, app.ID, leasedRecord.Version, active); err != nil {
+	if record, err = r.intent(ctx, record, PhasePulling, "", prior.Value.RuleTarget, ""); err != nil {
 		return ErrReconcilePending
 	}
-	audit(rollout.Auditor, AuditRecord{Action: "rollout", Outcome: "succeeded", Detail: app.ID})
+	r.progress(app, PhasePulling)
+	if err = r.Executor.Pull(ctx, record.Value.FencingToken, app.Image); err != nil {
+		return r.rollback(record, prior.Value, existed, "", false, err)
+	}
+	if record, err = r.intent(ctx, record, PhaseStarting, "", prior.Value.RuleTarget, ""); err != nil {
+		return ErrReconcilePending
+	}
+	r.progress(app, PhaseStarting)
+	pending, startErr := r.Executor.Start(ctx, record.Value.FencingToken, app)
+	if startErr != nil {
+		return r.rollback(record, prior.Value, existed, pending, false, startErr)
+	}
+	if record, err = r.intent(ctx, record, PhaseReadiness, pending, prior.Value.RuleTarget, prior.Value.RuleTarget); err != nil {
+		return ErrReconcilePending
+	}
+	r.progress(app, PhaseReadiness)
+	if err = r.Executor.Ready(ctx, record.Value.FencingToken, pending); err != nil {
+		return r.rollback(record, prior.Value, existed, pending, false, err)
+	}
+	if record, err = r.intent(ctx, record, PhaseCutover, pending, prior.Value.RuleTarget, pending); err != nil {
+		return ErrReconcilePending
+	}
+	r.progress(app, PhaseCutover)
+	if err = r.Executor.Cutover(ctx, record.Value.FencingToken, app.RuleRef, pending); err != nil {
+		return r.rollback(record, prior.Value, existed, pending, true, err)
+	}
+	if record, err = r.intent(ctx, record, PhaseDraining, pending, pending, pending); err != nil {
+		return ErrReconcilePending
+	}
+	if existed && prior.Value.InstanceID != "" {
+		r.progress(app, PhaseDraining)
+		if err = r.Executor.Drain(ctx, record.Value.FencingToken, prior.Value.InstanceID); err != nil {
+			return r.rollback(record, prior.Value, true, pending, true, err)
+		}
+	}
+	active := Deployment{AppID: app.ID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken}
+	if _, err = r.Store.CompareAndSwap(ctx, app.ID, record.Version, record.Value.FencingToken, active); err != nil {
+		return ErrReconcilePending
+	}
+	audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "succeeded", Detail: app.ID})
 	return nil
 }
 
-func (rollout Rollout) Reconcile(ctx context.Context, appID string) error {
-	if rollout.Auditor == nil {
+func (r Rollout) intent(ctx context.Context, record DeploymentRecord, phase RolloutPhase, pending, actual, desired string) (DeploymentRecord, error) {
+	v := record.Value
+	v.Phase, v.PendingInstance, v.RuleTarget, v.DesiredRuleTarget = phase, pending, actual, desired
+	return r.Store.CompareAndSwap(ctx, v.AppID, record.Version, v.FencingToken, v)
+}
+
+func (r Rollout) rollback(record DeploymentRecord, prior Deployment, existed bool, pending string, routeMayPending bool, cause error) error {
+	v := record.Value
+	v.PendingInstance, v.PriorAbsent, v.PriorRuleTarget, v.LastFailure = pending, !existed, prior.RuleTarget, ErrOperationFailed.Error()
+	phase := PhaseCleanupPending
+	if routeMayPending {
+		phase = PhaseRouteReconcile
+	}
+	v.Phase, v.DesiredRuleTarget = phase, prior.RuleTarget
+	ctx, cancel := r.cleanupContext()
+	next, persistErr := r.Store.CompareAndSwap(ctx, v.AppID, record.Version, v.FencingToken, v)
+	cancel()
+	if persistErr != nil {
+		return r.fail(errors.Join(cause, persistErr))
+	}
+	reconcileErr := r.reconcileRecord(next)
+	return r.fail(errors.Join(cause, reconcileErr))
+}
+
+func (r Rollout) Reconcile(ctx context.Context, appID string) error {
+	if r.Auditor == nil {
 		return ErrAuditRequired
 	}
-	if rollout.Store == nil || rollout.Executor == nil {
+	if r.Store == nil || r.Executor == nil {
+		audit(r.Auditor, AuditRecord{Action: "rollout.reconcile", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	record, ok, err := rollout.Store.Load(ctx, appID)
+	record, ok, err := r.Store.Load(ctx, appID)
 	if err != nil {
 		return safeFailure(ErrOperationFailed, err)
 	}
-	if !ok || (record.Value.Phase != PhaseCleanupPending && record.Value.Phase != PhaseRouteReconcile) || (record.Value.Lease != "" && record.Value.LeaseUntil.After(rollout.now())) {
+	if !ok || record.Value.Phase == PhaseActive || (record.Value.Lease != "" && record.Value.LeaseUntil.After(r.now())) {
 		return ErrReconcilePending
 	}
-	value := record.Value
-	value.Lease, value.LeaseUntil = fmt.Sprintf("reconcile-%d", leaseSequence.Add(1)), rollout.now().Add(rollout.leaseDuration())
-	leased, err := rollout.Store.CompareAndSwap(ctx, appID, record.Version, value)
+	v := record.Value
+	v.Lease = ""
+	leased, err := r.Store.AcquireLease(ctx, appID, record.Version, v, r.now().Add(r.leaseDuration()))
 	if err != nil {
 		return ErrReconcilePending
 	}
-	state, err := rollout.Executor.Inspect(ctx, appID, value.RuleRef)
+	err = r.reconcileRecord(leased)
+	outcome := "succeeded"
 	if err != nil {
-		rollout.releasePending(leased, record.Value)
-		return safeFailure(ErrOperationFailed, err)
+		outcome = "failed"
 	}
-	pending := value.PendingInstance
-	if value.Phase == PhaseRouteReconcile || (pending != "" && state.RuleTarget == pending) {
-		desired := value.DesiredRuleTarget
-		if desired == "" || (value.InstanceID != "" && !state.Instances[value.InstanceID]) {
-			rollout.releasePending(leased, record.Value)
-			return ErrReconcilePending
-		}
-		if state.RuleTarget != desired {
-			if err := rollout.restoreTarget(value.RuleRef, desired); err != nil {
-				rollout.releasePending(leased, record.Value)
-				return safeFailure(ErrOperationFailed, err)
-			}
-		}
-	}
-	if pending != "" && state.Instances[pending] {
-		if err := rollout.removeWithCleanup(pending); err != nil {
-			rollout.releasePending(leased, record.Value)
-			return safeFailure(ErrOperationFailed, err)
-		}
-	}
-	recovered := record.Value
-	recovered.Phase, recovered.PendingInstance, recovered.DesiredRuleTarget, recovered.LastFailure, recovered.Lease, recovered.LeaseUntil = PhaseActive, "", "", "", "", time.Time{}
-	recovered.RuleTarget = recovered.DesiredRuleTarget
-	if record.Value.DesiredRuleTarget != "" {
-		recovered.RuleTarget = record.Value.DesiredRuleTarget
-	}
-	if _, err := rollout.Store.CompareAndSwap(ctx, appID, leased.Version, recovered); err != nil {
-		return ErrReconcilePending
-	}
-	audit(rollout.Auditor, AuditRecord{Action: "rollout.reconcile", Outcome: "succeeded", Detail: appID})
-	return nil
+	audit(r.Auditor, AuditRecord{Action: "rollout.reconcile", Outcome: outcome, Detail: map[bool]string{true: ErrOperationFailed.Error(), false: appID}[err != nil]})
+	return err
 }
 
-func (rollout Rollout) releasePending(leased DeploymentRecord, pending Deployment) {
-	pending.Lease, pending.LeaseUntil = "", time.Time{}
-	_, _ = rollout.Store.CompareAndSwap(context.Background(), pending.AppID, leased.Version, pending)
+func (r Rollout) reconcileRecord(record DeploymentRecord) error {
+	v, fence := record.Value, record.Value.FencingToken
+	ctx, cancel := r.cleanupContext()
+	state, inspectErr := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+	cancel()
+	if inspectErr != nil {
+		return r.release(record, safeFailure(ErrOperationFailed, inspectErr))
+	}
+	pending := v.PendingInstance
+	if pending == "" {
+		pending = state.CandidateInstance
+	}
+	if pending != v.PendingInstance {
+		v.PendingInstance = pending
+		ctx, cancel = r.cleanupContext()
+		var err error
+		record, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, v)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	priorExists := !v.PriorAbsent && v.InstanceID != "" && state.Instances[v.InstanceID]
+	newExists := pending != "" && state.Instances[pending]
+	unrelated := state.RuleTarget != "" && state.RuleTarget != v.PriorRuleTarget && state.RuleTarget != pending
+	if unrelated {
+		return r.release(record, ErrReconcilePending)
+	}
+	finishNew := (v.Phase == PhaseCutover || v.Phase == PhaseDraining) && newExists && state.RuleTarget == pending
+	if finishNew {
+		if priorExists {
+			ctx, cancel = r.cleanupContext()
+			err := r.Executor.Drain(ctx, fence, v.InstanceID)
+			cancel()
+			if err != nil {
+				return r.release(record, safeFailure(ErrOperationFailed, err))
+			}
+		}
+		ctx, cancel = r.cleanupContext()
+		post, err := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+		cancel()
+		if err != nil || !post.Instances[pending] || post.RuleTarget != pending {
+			return r.release(record, ErrReconcilePending)
+		}
+		active := Deployment{AppID: v.AppID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence}
+		ctx, cancel = r.cleanupContext()
+		_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, active)
+		cancel()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	if !v.PriorAbsent {
+		if !priorExists {
+			return r.release(record, ErrReconcilePending)
+		}
+		if state.RuleTarget != v.PriorRuleTarget {
+			ctx, cancel = r.cleanupContext()
+			err := r.Executor.Cutover(ctx, fence, v.RuleRef, v.PriorRuleTarget)
+			cancel()
+			if err != nil {
+				return r.release(record, safeFailure(ErrOperationFailed, err))
+			}
+		}
+	} else if pending != "" && state.RuleTarget == pending {
+		return r.release(record, ErrReconcilePending)
+	}
+	if newExists {
+		v.Phase = PhaseCleanupPending
+		ctx, cancel = r.cleanupContext()
+		var err error
+		record, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, v)
+		cancel()
+		if err != nil {
+			return err
+		}
+		ctx, cancel = r.cleanupContext()
+		err = r.Executor.Remove(ctx, fence, pending)
+		cancel()
+		if err != nil {
+			return r.release(record, safeFailure(ErrOperationFailed, err))
+		}
+	}
+	ctx, cancel = r.cleanupContext()
+	post, err := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+	cancel()
+	if err != nil || (pending != "" && post.Instances[pending]) {
+		return r.release(record, ErrReconcilePending)
+	}
+	if v.PriorAbsent {
+		if pending != "" && post.RuleTarget == pending {
+			return r.release(record, ErrReconcilePending)
+		}
+		ctx, cancel = r.cleanupContext()
+		err = r.Store.DeleteCAS(ctx, v.AppID, record.Version, fence)
+		cancel()
+		return err
+	}
+	if !post.Instances[v.InstanceID] || post.RuleTarget != v.PriorRuleTarget {
+		return r.release(record, ErrReconcilePending)
+	}
+	prior := v
+	prior.Phase, prior.RuleTarget, prior.PendingInstance, prior.DesiredRuleTarget, prior.PriorRuleTarget, prior.LastFailure, prior.Lease, prior.LeaseUntil, prior.PriorAbsent = PhaseActive, v.PriorRuleTarget, "", "", "", "", "", time.Time{}, false
+	ctx, cancel = r.cleanupContext()
+	_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, prior)
+	cancel()
+	return err
 }
-func (rollout Rollout) now() time.Time {
-	if rollout.Clock != nil {
-		return rollout.Clock()
+
+func (r Rollout) release(record DeploymentRecord, result error) error {
+	v := record.Value
+	v.Lease, v.LeaseUntil = "", time.Time{}
+	ctx, cancel := r.cleanupContext()
+	_, err := r.Store.CompareAndSwap(ctx, v.AppID, record.Version, v.FencingToken, v)
+	cancel()
+	return errors.Join(result, err)
+}
+func (r Rollout) cleanupContext() (context.Context, context.CancelFunc) {
+	d := r.CleanupTimeout
+	if d <= 0 {
+		d = DefaultCleanupTimeout
+	}
+	return context.WithTimeout(context.Background(), d)
+}
+func (r Rollout) now() time.Time {
+	if r.Clock != nil {
+		return r.Clock()
 	}
 	return time.Now()
 }
-func (rollout Rollout) leaseDuration() time.Duration {
-	if rollout.LeaseDuration > 0 {
-		return rollout.LeaseDuration
+func (r Rollout) leaseDuration() time.Duration {
+	if r.LeaseDuration > 0 {
+		return r.LeaseDuration
 	}
 	return 30 * time.Second
 }
-func (rollout Rollout) cleanupContext() (context.Context, context.CancelFunc) {
-	timeout := rollout.CleanupTimeout
-	if timeout <= 0 {
-		timeout = DefaultCleanupTimeout
-	}
-	return context.WithTimeout(context.Background(), timeout)
+func (r Rollout) progress(app App, phase RolloutPhase) {
+	audit(r.Auditor, AuditRecord{Action: "rollout.progress", Outcome: string(phase), Detail: app.ID})
 }
-func (rollout Rollout) restoreWithCleanup(old Deployment) error {
-	return rollout.restoreTarget(old.RuleRef, old.RuleTarget)
-}
-func (rollout Rollout) restoreTarget(ruleRef, target string) error {
-	ctx, cancel := rollout.cleanupContext()
-	defer cancel()
-	return rollout.Executor.Cutover(ctx, ruleRef, target)
-}
-func (rollout Rollout) removeWithCleanup(instance string) error {
-	ctx, cancel := rollout.cleanupContext()
-	defer cancel()
-	return rollout.Executor.Remove(ctx, instance)
-}
-func (rollout Rollout) progress(app App, phase RolloutPhase) {
-	audit(rollout.Auditor, AuditRecord{Action: "rollout.progress", Outcome: string(phase), Detail: app.ID})
+func (r Rollout) fail(err error) error {
+	audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+	return safeFailure(ErrOperationFailed, err)
 }
 
 type ResourceOwner string
@@ -363,12 +460,10 @@ func PreviewDelete(appID, generation string, impacts []ResourceImpact) (DeletePr
 	if err != nil {
 		return DeletePreview{}, ErrInvalidPreview
 	}
-	return DeletePreview{AppID: appID, Generation: generation, Digest: digest, Impacts: normalized}, nil
+	return DeletePreview{appID, generation, digest, normalized}, nil
 }
 
 type DeleteExecutor interface {
-	// operation is a canonical digest and must be capability-backed and
-	// idempotent before durable journal acknowledgement.
 	DeleteOwned(context.Context, string, ResourceImpact) error
 	ReleaseCoreRef(context.Context, string, ResourceImpact) error
 }
@@ -377,10 +472,9 @@ type DeleteInventory interface {
 }
 type DeleteInventoryFunc func(context.Context, string, string) ([]ResourceImpact, error)
 
-func (f DeleteInventoryFunc) CurrentDelete(ctx context.Context, appID, generation string) ([]ResourceImpact, error) {
-	return f(ctx, appID, generation)
+func (f DeleteInventoryFunc) CurrentDelete(ctx context.Context, a, g string) ([]ResourceImpact, error) {
+	return f(ctx, a, g)
 }
-
 func ExecuteDelete(ctx context.Context, shown DeletePreview, authorization Authorization, inventory DeleteInventory, verifier AuthorizationVerifier, executor DeleteExecutor, journal ProgressJournal, auditor Auditor) error {
 	if auditor == nil {
 		return ErrAuditRequired
@@ -417,29 +511,28 @@ func ExecuteDelete(ctx context.Context, shown DeletePreview, authorization Autho
 			continue
 		}
 		effect, _ := canonicalDigest(impact)
-		completed, journalErr := journal.Completed(ctx, operation, effect)
-		if journalErr != nil {
+		done, e := journal.Completed(ctx, operation, effect)
+		if e != nil {
 			audit(auditor, AuditRecord{Action: "delete.progress", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-			return safeFailure(ErrOperationFailed, journalErr)
+			return safeFailure(ErrOperationFailed, e)
 		}
-		if completed {
+		if done {
 			continue
 		}
 		audit(auditor, AuditRecord{Action: "delete.progress", Outcome: "applying", Detail: effect})
-		idempotencyKey, _ := canonicalDigest(struct{ Operation, Effect string }{operation, effect})
-		var effectErr error
+		key, _ := canonicalDigest(struct{ Operation, Effect string }{operation, effect})
 		if impact.Owner == OwnerCore {
-			effectErr = executor.ReleaseCoreRef(ctx, idempotencyKey, impact)
+			e = executor.ReleaseCoreRef(ctx, key, impact)
 		} else {
-			effectErr = executor.DeleteOwned(ctx, idempotencyKey, impact)
+			e = executor.DeleteOwned(ctx, key, impact)
 		}
-		if effectErr != nil {
+		if e != nil {
 			audit(auditor, AuditRecord{Action: "delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-			return safeFailure(ErrOperationFailed, effectErr)
+			return safeFailure(ErrOperationFailed, e)
 		}
-		if journalErr := journal.MarkCompleted(ctx, operation, effect); journalErr != nil {
+		if e = journal.MarkCompleted(ctx, operation, effect); e != nil {
 			audit(auditor, AuditRecord{Action: "delete.progress", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-			return safeFailure(ErrOperationFailed, journalErr)
+			return safeFailure(ErrOperationFailed, e)
 		}
 		audit(auditor, AuditRecord{Action: "delete.progress", Outcome: "completed", Detail: effect})
 	}
