@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
 
@@ -60,5 +61,15 @@ func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 	})
 	if !verified || !errors.Is(err, buildSentinel) || !strings.Contains(err.Error(), "SDK release gate") {
 		t.Fatalf("plugin command did not fail at the SDK capability gate before build: %v", err)
+	}
+}
+
+func TestPerformanceReleaseRejectsSelfAttestedOrMissingEvidence(t *testing.T) {
+	err := checkPerformance(context.Background(), []string{"--profile", "release"})
+	if !errors.Is(err, performance.ErrReleaseCapabilities) {
+		t.Fatalf("release profile did not fail at the trusted Agent capability gate: %v", err)
+	}
+	if err := checkPerformance(context.Background(), []string{"--profile", "release", "--evidence", "self-attested.json"}); err == nil {
+		t.Fatal("performance command accepted caller-supplied release evidence")
 	}
 }

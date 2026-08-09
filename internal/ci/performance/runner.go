@@ -1,0 +1,302 @@
+// Package performance implements the reproducible local measurement harness
+// and the stricter real-Agent release evidence gate.
+package performance
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+)
+
+type Profile string
+
+const (
+	ProfileLocal   Profile = "local"
+	ProfileRelease Profile = "release"
+
+	WarmupPasses      = 1
+	MeasurementRounds = 3
+
+	MaxThroughputRegression  = 0.10
+	MaxP95Latency            = time.Millisecond
+	MaxP99Latency            = 2 * time.Millisecond
+	MaxAdditionalMemoryBytes = uint64(64 << 20)
+)
+
+var ErrReleaseCapabilities = errors.New("real Agent release capabilities are incomplete")
+
+type CapabilityEvidence struct {
+	RealAgent      bool `json:"real_agent"`
+	TrustedSource  bool `json:"trusted_source"`
+	AtomicState    bool `json:"atomic_state"`
+	MonotonicClock bool `json:"monotonic_clock"`
+	// verified is intentionally not externally constructible or decodable.
+	// The current repository has no canonical real-Agent evidence adapter.
+	verified bool
+}
+
+func (evidence CapabilityEvidence) ValidateRelease() error {
+	var missing []string
+	if !evidence.RealAgent {
+		missing = append(missing, "real-agent")
+	}
+	if !evidence.verified {
+		missing = append(missing, "verified-real-agent-evidence")
+	}
+	if !evidence.TrustedSource {
+		missing = append(missing, "policy.trusted-source")
+	}
+	if !evidence.AtomicState {
+		missing = append(missing, "policy.atomic-state")
+	}
+	if !evidence.MonotonicClock {
+		missing = append(missing, "policy.monotonic-clock")
+	}
+	if len(missing) != 0 {
+		return fmt.Errorf("%w: %s", ErrReleaseCapabilities, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+type Sample struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Path   string `json:"path"`
+	Method string `json:"method"`
+	Body   []byte `json:"body"`
+}
+
+// FixedCorpus returns a fresh copy of the immutable 256-sample corpus.
+func FixedCorpus() []Sample {
+	result := make([]Sample, 256)
+	methods := [...]string{"GET", "POST", "HEAD", "PUT"}
+	paths := [...]string{"/", "/api/items", "/stream/segment", "/admin/login", "/health"}
+	for index := range result {
+		bodySize := index % 97
+		body := make([]byte, bodySize)
+		for offset := range body {
+			body[offset] = byte('a' + (index+offset)%26)
+		}
+		result[index] = Sample{
+			ID: fmt.Sprintf("sample-%03d", index), Source: fmt.Sprintf("192.0.2.%d", index%250+1),
+			Path: paths[index%len(paths)], Method: methods[index%len(methods)], Body: body,
+		}
+	}
+	return result
+}
+
+func CorpusDigest(corpus []Sample) (string, error) {
+	encoded, err := json.Marshal(corpus)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+type Workload func(context.Context, Sample) error
+
+type WorkloadMetrics struct {
+	Operations       int     `json:"operations"`
+	ElapsedNS        int64   `json:"elapsed_ns"`
+	ThroughputPerSec float64 `json:"throughput_per_sec"`
+	P95NS            int64   `json:"p95_ns"`
+	P99NS            int64   `json:"p99_ns"`
+	HeapAllocBytes   uint64  `json:"heap_alloc_bytes"`
+	RawSamplesNS     []int64 `json:"raw_samples_ns"`
+}
+
+type Round struct {
+	Number                int             `json:"number"`
+	DisabledBaseline      WorkloadMetrics `json:"disabled_baseline"`
+	Enabled               WorkloadMetrics `json:"enabled"`
+	ThroughputRegression  float64         `json:"throughput_regression"`
+	AdditionalMemoryBytes uint64          `json:"additional_memory_bytes"`
+}
+
+type Summary struct {
+	Profile       Profile            `json:"profile"`
+	EvidenceClass string             `json:"evidence_class"`
+	Capabilities  CapabilityEvidence `json:"capabilities"`
+	CorpusSHA256  string             `json:"corpus_sha256"`
+	CorpusSize    int                `json:"corpus_size"`
+	WarmupPasses  int                `json:"warmup_passes"`
+	Rounds        []Round            `json:"rounds"`
+	Passed        bool               `json:"passed"`
+}
+
+// Run executes one disabled/candidate warmup pair and exactly three measured
+// disabled/candidate pairs. Local results are reproducible harness evidence,
+// never release evidence. Release rejects missing real Agent capabilities
+// before invoking either workload.
+func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disabled, enabled Workload) (Summary, error) {
+	summary := Summary{Profile: profile, Capabilities: evidence, WarmupPasses: WarmupPasses}
+	switch profile {
+	case ProfileLocal:
+		summary.EvidenceClass = "local-harness"
+	case ProfileRelease:
+		summary.EvidenceClass = "real-agent-release"
+		if err := evidence.ValidateRelease(); err != nil {
+			return summary, err
+		}
+	default:
+		return summary, fmt.Errorf("unknown performance profile %q", profile)
+	}
+	if disabled == nil || enabled == nil {
+		return summary, errors.New("disabled and enabled workloads are required")
+	}
+
+	corpus := FixedCorpus()
+	digest, err := CorpusDigest(corpus)
+	if err != nil {
+		return summary, err
+	}
+	summary.CorpusSHA256 = digest
+	summary.CorpusSize = len(corpus)
+	if err := executeWarmup(ctx, corpus, disabled, enabled); err != nil {
+		return summary, err
+	}
+	for number := 1; number <= MeasurementRounds; number++ {
+		baseline, err := measure(ctx, corpus, disabled)
+		if err != nil {
+			return summary, fmt.Errorf("round %d disabled baseline: %w", number, err)
+		}
+		candidate, err := measure(ctx, corpus, enabled)
+		if err != nil {
+			return summary, fmt.Errorf("round %d enabled: %w", number, err)
+		}
+		regression := 0.0
+		if baseline.ThroughputPerSec > 0 && candidate.ThroughputPerSec < baseline.ThroughputPerSec {
+			regression = (baseline.ThroughputPerSec - candidate.ThroughputPerSec) / baseline.ThroughputPerSec
+		}
+		additionalMemory := uint64(0)
+		if candidate.HeapAllocBytes > baseline.HeapAllocBytes {
+			additionalMemory = candidate.HeapAllocBytes - baseline.HeapAllocBytes
+		}
+		summary.Rounds = append(summary.Rounds, Round{
+			Number: number, DisabledBaseline: baseline, Enabled: candidate,
+			ThroughputRegression: regression, AdditionalMemoryBytes: additionalMemory,
+		})
+	}
+	if profile == ProfileLocal {
+		return summary, nil
+	}
+	if err := Evaluate(summary); err != nil {
+		return summary, err
+	}
+	summary.Passed = true
+	return summary, nil
+}
+
+func executeWarmup(ctx context.Context, corpus []Sample, workloads ...Workload) error {
+	for _, workload := range workloads {
+		for _, sample := range corpus {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := workload(ctx, cloneSample(sample)); err != nil {
+				return fmt.Errorf("warmup sample %s: %w", sample.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func measure(ctx context.Context, corpus []Sample, workload Workload) (WorkloadMetrics, error) {
+	runtime.GC()
+	latencies := make([]int64, 0, len(corpus))
+	started := time.Now()
+	for _, sample := range corpus {
+		if err := ctx.Err(); err != nil {
+			return WorkloadMetrics{}, err
+		}
+		operationStarted := time.Now()
+		if err := workload(ctx, cloneSample(sample)); err != nil {
+			return WorkloadMetrics{}, fmt.Errorf("sample %s: %w", sample.ID, err)
+		}
+		latencies = append(latencies, time.Since(operationStarted).Nanoseconds())
+	}
+	elapsed := time.Since(started)
+	runtime.GC()
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	metrics := WorkloadMetrics{
+		Operations: len(corpus), ElapsedNS: elapsed.Nanoseconds(), HeapAllocBytes: memory.HeapAlloc,
+		RawSamplesNS: append([]int64(nil), latencies...),
+	}
+	if elapsed > 0 {
+		metrics.ThroughputPerSec = float64(len(corpus)) / elapsed.Seconds()
+	}
+	metrics.P95NS = percentile(latencies, 0.95)
+	metrics.P99NS = percentile(latencies, 0.99)
+	return metrics, nil
+}
+
+func percentile(samples []int64, quantile float64) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	ordered := append([]int64(nil), samples...)
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
+	index := int(float64(len(ordered))*quantile+0.999999999) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(ordered) {
+		index = len(ordered) - 1
+	}
+	return ordered[index]
+}
+
+func cloneSample(sample Sample) Sample {
+	sample.Body = append([]byte(nil), sample.Body...)
+	return sample
+}
+
+type ThresholdError struct {
+	Violations []string
+}
+
+func (failure *ThresholdError) Error() string {
+	return "performance release gate failed: " + strings.Join(failure.Violations, "; ")
+}
+
+// Evaluate applies the non-configurable release thresholds to every round.
+func Evaluate(summary Summary) error {
+	var violations []string
+	if len(summary.Rounds) != MeasurementRounds {
+		violations = append(violations, fmt.Sprintf("got %d rounds, want %d", len(summary.Rounds), MeasurementRounds))
+	}
+	for _, round := range summary.Rounds {
+		if round.ThroughputRegression > MaxThroughputRegression {
+			violations = append(violations, fmt.Sprintf("round %d throughput regression %.4f > %.2f", round.Number, round.ThroughputRegression, MaxThroughputRegression))
+		}
+		if time.Duration(round.Enabled.P95NS) > MaxP95Latency {
+			violations = append(violations, fmt.Sprintf("round %d p95 %s > %s", round.Number, time.Duration(round.Enabled.P95NS), MaxP95Latency))
+		}
+		if time.Duration(round.Enabled.P99NS) > MaxP99Latency {
+			violations = append(violations, fmt.Sprintf("round %d p99 %s > %s", round.Number, time.Duration(round.Enabled.P99NS), MaxP99Latency))
+		}
+		if round.AdditionalMemoryBytes > MaxAdditionalMemoryBytes {
+			violations = append(violations, fmt.Sprintf("round %d additional memory %d > %d", round.Number, round.AdditionalMemoryBytes, MaxAdditionalMemoryBytes))
+		}
+		if len(round.DisabledBaseline.RawSamplesNS) == 0 || len(round.Enabled.RawSamplesNS) == 0 {
+			violations = append(violations, fmt.Sprintf("round %d raw samples are missing", round.Number))
+		}
+	}
+	if len(violations) != 0 {
+		return &ThresholdError{Violations: violations}
+	}
+	return nil
+}
+
+func MarshalSummary(summary Summary) ([]byte, error) {
+	return json.MarshalIndent(summary, "", "  ")
+}

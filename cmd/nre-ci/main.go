@@ -14,6 +14,7 @@ import (
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
+	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
 	ciwasm "github.com/sakullla/sakullla-plugins/internal/ci/wasm"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
@@ -60,6 +61,8 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "plugin":
 		return checkPlugin(ctx, args[1:])
+	case "performance":
+		return checkPerformance(ctx, args[1:])
 	case "repository":
 		root, err := rootFlag("repository", args[1:])
 		if err != nil {
@@ -105,6 +108,39 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
+}
+
+func checkPerformance(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("performance", flag.ContinueOnError)
+	profile := flags.String("profile", string(performance.ProfileRelease), "local or release evidence profile")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected performance arguments: %v", flags.Args())
+	}
+
+	var (
+		summary performance.Summary
+		err     error
+	)
+	switch performance.Profile(*profile) {
+	case performance.ProfileLocal:
+		summary, err = performance.RunLocalHarness(ctx)
+	case performance.ProfileRelease:
+		summary, err = performance.Run(ctx, performance.ProfileRelease, performance.CapabilityEvidence{}, nil, nil)
+	default:
+		return fmt.Errorf("unknown performance profile %q", *profile)
+	}
+	if err != nil {
+		return err
+	}
+	encoded, err := performance.MarshalSummary(summary)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func checkPlugin(ctx context.Context, args []string) error {
