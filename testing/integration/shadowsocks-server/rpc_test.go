@@ -15,8 +15,9 @@ import (
 
 type reservation struct{}
 
-func (reservation) Commit(context.Context, uint64) error { return nil }
-func (reservation) Release(context.Context) error        { return nil }
+func (reservation) Consume(context.Context, uint64) error { return nil }
+func (reservation) Finish(context.Context) error          { return nil }
+func (reservation) Abort(context.Context) error           { return nil }
 
 type runtime struct{ listened atomic.Int32 }
 

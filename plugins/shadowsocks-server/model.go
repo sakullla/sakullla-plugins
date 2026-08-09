@@ -82,11 +82,15 @@ type SecretVerifier interface {
 	Resolve(context.Context, string, string) ([]byte, error)
 }
 
-// TrafficReservation is a capability-backed atomic quota reservation. Commit
-// must reject final bytes beyond the quota and Release must be idempotent.
+// TrafficReservation is a capability-backed atomic quota reservation. Consume
+// is called before bytes are forwarded; it must fail without consuming when
+// the requested allowance would exceed the user's quota. Consume, Finish and
+// Abort must be linearizable: once Finish or Abort commits, a late Consume must
+// fail without changing the ledger.
 type TrafficReservation interface {
-	Commit(context.Context, uint64) error
-	Release(context.Context) error
+	Consume(context.Context, uint64) error
+	Finish(context.Context) error
+	Abort(context.Context) error
 }
 type Traffic interface {
 	Reserve(context.Context, string, uint64, string) (TrafficReservation, error)
@@ -213,6 +217,7 @@ type Service struct {
 	cancel        context.CancelFunc
 	secrets       map[*SecretOnce]struct{}
 	engines       map[string]*ProtocolEngine
+	engineGate    sync.RWMutex
 }
 type flowToken struct {
 	mu          sync.Mutex
@@ -223,21 +228,57 @@ type flowToken struct {
 }
 type Flow struct{ token *flowToken }
 
-func (f Flow) Close(bytes uint64) error {
+func (f Flow) Close() error {
+	return f.close()
+}
+
+func (f Flow) Consume(ctx context.Context, bytes uint64) error {
+	if f.token == nil {
+		return nil
+	}
+	f.token.mu.Lock()
+	defer f.token.mu.Unlock()
+	if f.token.done {
+		return f.token.result
+	}
+	if bytes == 0 {
+		return nil
+	}
+	if err := f.token.service.host(ctx, func(ctx context.Context) error { return f.token.reservation.Consume(ctx, bytes) }); err != nil {
+		f.token.result = ErrQuota
+		f.token.finishLocked(false)
+		return f.token.result
+	}
+	return nil
+}
+
+func (f Flow) close() error {
 	if f.token == nil {
 		return nil
 	}
 	f.token.mu.Lock()
 	defer f.token.mu.Unlock()
 	if !f.token.done {
-		f.token.done = true
-		defer func() { <-f.token.service.slots; f.token.service.sessions.Done() }()
-		f.token.result = f.token.service.cleanup(func(ctx context.Context) error { return f.token.reservation.Commit(ctx, bytes) })
-		if f.token.result != nil {
-			_ = f.token.service.cleanup(f.token.reservation.Release)
-		}
+		f.token.finishLocked(true)
 	}
 	return f.token.result
+}
+
+func (f *flowToken) finishLocked(success bool) {
+	if f.done {
+		return
+	}
+	f.done = true
+	defer func() { <-f.service.slots; f.service.sessions.Done() }()
+	if success {
+		f.result = f.service.cleanup(f.reservation.Finish)
+	}
+	if !success || f.result != nil {
+		abortErr := f.service.cleanup(f.reservation.Abort)
+		if f.result == nil {
+			f.result = abortErr
+		}
+	}
 }
 func clone(c Configuration) Configuration {
 	c.Users = append([]User(nil), c.Users...)

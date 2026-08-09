@@ -22,24 +22,22 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 	var zero T
 	callCtx, cancel := context.WithTimeout(ctx, hostCallTimeout)
 	stop := func() bool { return true }
-	if !cleanup {
-		s.hostMu.Lock()
-		if !s.hostOpen {
-			s.hostMu.Unlock()
-			cancel()
-			return zero, ErrRevoked
-		}
-		s.hostCalls.Add(1)
+	s.hostMu.Lock()
+	if !cleanup && !s.hostOpen {
 		s.hostMu.Unlock()
+		cancel()
+		return zero, ErrRevoked
+	}
+	s.hostCalls.Add(1)
+	s.hostMu.Unlock()
+	if !cleanup {
 		stop = context.AfterFunc(s.root, cancel)
 	}
 	defer func() { stop(); cancel() }()
 	select {
 	case s.hostSlots <- struct{}{}:
 	case <-callCtx.Done():
-		if !cleanup {
-			s.hostCalls.Done()
-		}
+		s.hostCalls.Done()
 		return zero, callCtx.Err()
 	}
 	result := make(chan callResult[T], 1)
@@ -47,9 +45,7 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 		value, err := f(callCtx)
 		result <- callResult[T]{value, err}
 		<-s.hostSlots
-		if !cleanup {
-			s.hostCalls.Done()
-		}
+		s.hostCalls.Done()
 	}()
 	select {
 	case <-callCtx.Done():
@@ -102,6 +98,8 @@ func (s *Service) Initialize(ctx context.Context) error {
 }
 
 func (s *Service) Engine(userID string) (*ProtocolEngine, bool) {
+	s.engineGate.RLock()
+	defer s.engineGate.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	engine, ok := s.engines[userID]
@@ -147,6 +145,8 @@ func (s *Service) AcceptTCP(ctx context.Context, wire []byte) (Flow, *TCPServerS
 	if err != nil {
 		return Flow{}, nil, ProxyRequest{}, ErrDenied
 	}
+	s.engineGate.RLock()
+	defer s.engineGate.RUnlock()
 	s.mu.Lock()
 	type candidate struct {
 		userID string
@@ -163,7 +163,7 @@ func (s *Service) AcceptTCP(ctx context.Context, wire []byte) (Flow, *TCPServerS
 	for _, candidate := range candidates {
 		request, session, openErr := candidate.engine.OpenTCPServerSession(wire, instant)
 		if openErr != nil {
-			if errors.Is(openErr, ErrReplay) || errors.Is(openErr, ErrRevoked) {
+			if errors.Is(openErr, ErrReplay) {
 				return Flow{}, nil, ProxyRequest{}, openErr
 			}
 			continue
@@ -171,6 +171,10 @@ func (s *Service) AcceptTCP(ctx context.Context, wire []byte) (Flow, *TCPServerS
 		request.UserID = candidate.userID
 		flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: TCP, UserID: candidate.userID, ReplayToken: request.ReplayToken}, false)
 		if admissionErr != nil {
+			session.Close()
+			return Flow{}, nil, ProxyRequest{}, admissionErr
+		}
+		if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
 			session.Close()
 			return Flow{}, nil, ProxyRequest{}, admissionErr
 		}
@@ -193,6 +197,8 @@ func (s *Service) openWire(ctx context.Context, protocol Protocol, wire []byte) 
 	if err != nil {
 		return Flow{}, ProxyRequest{}, ErrDenied
 	}
+	s.engineGate.RLock()
+	defer s.engineGate.RUnlock()
 	s.mu.Lock()
 	type candidate struct {
 		userID string
@@ -214,7 +220,7 @@ func (s *Service) openWire(ctx context.Context, protocol Protocol, wire []byte) 
 			request, err = candidate.engine.OpenUDPPacket(wire, instant)
 		}
 		if err != nil {
-			if errors.Is(err, ErrReplay) || errors.Is(err, ErrRevoked) {
+			if errors.Is(err, ErrReplay) {
 				return Flow{}, ProxyRequest{}, err
 			}
 			continue
@@ -222,6 +228,9 @@ func (s *Service) openWire(ctx context.Context, protocol Protocol, wire []byte) 
 		request.UserID = candidate.userID
 		flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: protocol, UserID: candidate.userID, ReplayToken: request.ReplayToken}, false)
 		if admissionErr != nil {
+			return Flow{}, ProxyRequest{}, admissionErr
+		}
+		if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
 			return Flow{}, ProxyRequest{}, admissionErr
 		}
 		return flow, request, nil
@@ -262,7 +271,7 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 	var reservation TrafficReservation
 	fail := func(cause error) (Flow, error) {
 		if reservation != nil {
-			_ = s.cleanup(reservation.Release)
+			_ = s.cleanup(reservation.Abort)
 		}
 		releaseSlot()
 		if err := s.audit(ctx, AuditRecord{Action: "admit", Outcome: "failed", UserID: r.UserID}); err != nil {
@@ -350,6 +359,8 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 	}
 	clear(material)
 	if resolveErr != nil {
+		s.engineGate.Lock()
+		defer s.engineGate.Unlock()
 		s.mu.Lock()
 		if s.configuration.Users[index].SecretRef == current.SecretRef && s.configuration.Users[index].SecretVersion == current.SecretVersion {
 			s.configuration.Users[index].Enabled = false
@@ -362,6 +373,8 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 		secret.discard()
 		return nil, ErrDenied
 	}
+	s.engineGate.Lock()
+	defer s.engineGate.Unlock()
 	s.mu.Lock()
 	if !s.live.Load() || s.root.Err() != nil || s.configuration.Users[index].SecretRef != current.SecretRef || s.configuration.Users[index].SecretVersion != current.SecretVersion {
 		s.mu.Unlock()
@@ -401,6 +414,8 @@ func (s *Service) Disable() {
 	s.hostMu.Lock()
 	s.hostOpen = false
 	s.hostMu.Unlock()
+	s.engineGate.Lock()
+	defer s.engineGate.Unlock()
 	s.mu.Lock()
 	s.live.Store(false)
 	s.cancel()
@@ -417,7 +432,11 @@ func (s *Service) Disable() {
 func (s *Service) Drain(ctx context.Context) error {
 	s.Disable()
 	done := make(chan struct{})
-	go func() { s.sessions.Wait(); s.hostCalls.Wait(); close(done) }()
+	go func() {
+		s.sessions.Wait()
+		s.hostCalls.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 		return nil
