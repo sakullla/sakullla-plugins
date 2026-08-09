@@ -45,8 +45,8 @@ func CheckSecrets(root string) error {
 	}
 	for _, file := range files {
 		path, rel := file.path, file.rel
-		if forbiddenSecretExtensions[strings.ToLower(filepath.Ext(rel))] {
-			findings = append(findings, rel+": forbidden secret/key extension")
+		if forbiddenSecretPath(rel) {
+			findings = append(findings, rel+": forbidden secret/runtime path")
 			continue
 		}
 		data, err := os.ReadFile(path)
@@ -64,6 +64,21 @@ func CheckSecrets(root string) error {
 		return fmt.Errorf("secret-like material found:\n%s", strings.Join(findings, "\n"))
 	}
 	return nil
+}
+
+func forbiddenSecretPath(rel string) bool {
+	normalized := filepath.ToSlash(filepath.Clean(rel))
+	segments := strings.Split(normalized, "/")
+	base := segments[len(segments)-1]
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	for _, segment := range segments[:len(segments)-1] {
+		if segment == "runtime-data" {
+			return true
+		}
+	}
+	return forbiddenSecretExtensions[strings.ToLower(filepath.Ext(base))]
 }
 
 type LicensePolicy struct {

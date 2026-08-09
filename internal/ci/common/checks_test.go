@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -44,6 +45,32 @@ func TestSecretCheckRejectsNULPEMAndBinaryKeyExtension(t *testing.T) {
 		if err := CheckSecrets(root); err == nil {
 			t.Errorf("secret fixture %s was not rejected", name)
 		}
+	}
+}
+
+func TestSecretCheckRejectsForcedTrackedIgnoredPaths(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{".env", ".env.production", "runtime-data/session.db", "nested/runtime-data/state.bin"} {
+		rel := rel
+		t.Run(rel, func(t *testing.T) {
+			root := t.TempDir()
+			runGit(t, root, "init", "--quiet")
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".env\n.env.*\nruntime-data/\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("PASSWORD=hunter2\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, root, "add", ".gitignore")
+			runGit(t, root, "add", "-f", filepath.ToSlash(rel))
+			if err := CheckSecrets(root); err == nil {
+				t.Fatal("forced tracked secret/runtime path was accepted")
+			}
+		})
 	}
 }
 
@@ -154,5 +181,13 @@ func writeCargoLock(t *testing.T, root, packages string) {
 	contents := "# generated fixture\nversion = 4\n" + packages
 	if err := os.WriteFile(filepath.Join(root, "Cargo.lock"), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func runGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	commandArgs := append([]string{"-C", root}, args...)
+	if output, err := exec.Command("git", commandArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
 	}
 }
