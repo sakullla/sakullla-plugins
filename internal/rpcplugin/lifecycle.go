@@ -210,6 +210,9 @@ func (l *Lifecycle) Prepare(ctx context.Context, request pluginsdk.LifecycleRequ
 	}
 	callCtx, cancel := context.WithTimeout(ctx, l.config.Timeouts.Prepare)
 	err = l.hooks.Prepare(callCtx, generation, append([]byte(nil), request.Config...))
+	if contextErr := callCtx.Err(); contextErr != nil {
+		err = contextErr
+	}
 	cancel()
 	if err != nil {
 		response := l.failureWithGeneration(generation, err)
@@ -228,6 +231,9 @@ func (l *Lifecycle) Activate(ctx context.Context, request pluginsdk.LifecycleReq
 	}
 	callCtx, cancel := context.WithTimeout(ctx, l.config.Timeouts.Activate)
 	err = l.hooks.Activate(callCtx, generation)
+	if contextErr := callCtx.Err(); contextErr != nil {
+		err = contextErr
+	}
 	cancel()
 	if err != nil {
 		response := l.failureWithGeneration(generation, err)
@@ -249,10 +255,16 @@ func (l *Lifecycle) Stop(ctx context.Context, request pluginsdk.LifecycleRequest
 	generation.BeginDrain()
 	stopCtx, cancelStop := context.WithTimeout(ctx, l.config.Timeouts.Stop)
 	hookErr := l.hooks.Stop(stopCtx, generation)
+	if contextErr := stopCtx.Err(); contextErr != nil {
+		hookErr = contextErr
+	}
 	cancelStop()
 
 	drainCtx, cancelDrain := context.WithTimeout(ctx, l.config.Timeouts.Drain)
 	drainErr := generation.Wait(drainCtx)
+	if contextErr := drainCtx.Err(); contextErr != nil {
+		drainErr = contextErr
+	}
 	cancelDrain()
 	var failure pluginsdk.LifecycleResponse
 	if hookErr != nil {

@@ -1,10 +1,14 @@
 package sdklock
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +22,7 @@ type Verification struct {
 	MissingCapabilities  []string `json:"missing_capabilities"`
 }
 
-func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool) (Verification, error) {
+func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, repositoryRoot string) (Verification, error) {
 	root, err := os.MkdirTemp("", "sakullla-sdk-checkout-")
 	if err != nil {
 		return Verification{}, err
@@ -84,18 +88,15 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool) (Verif
 	if guestDigest != lock.Artifacts.CanonicalGuestSHA256 {
 		return Verification{}, fmt.Errorf("canonical compatibility guest digest mismatch")
 	}
+	if err := verifyRustProjection(ctx, root, repositoryRoot, sdkRoot, lock.SDK.ModulePath); err != nil {
+		return Verification{}, err
+	}
 	for _, capability := range lock.RequiredCapabilities {
 		if !capability.Available {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(checkout, filepath.FromSlash(capability.EvidencePath)))
-		if err != nil {
-			return Verification{}, fmt.Errorf("read capability %s evidence: %w", capability.ID, err)
-		}
-		for _, symbol := range capability.Symbols {
-			if !strings.Contains(string(data), symbol) {
-				return Verification{}, fmt.Errorf("capability %s evidence symbol %q is missing", capability.ID, symbol)
-			}
+		if err := verifyCapability(ctx, root, checkout, sdkRoot, lock.SDK.ModulePath, capability); err != nil {
+			return Verification{}, err
 		}
 	}
 	missing := lock.MissingCapabilities()
@@ -104,6 +105,141 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool) (Verif
 		return result, fmt.Errorf("required host capabilities are unavailable: %s", strings.Join(missing, "; "))
 	}
 	return result, nil
+}
+
+func verifyRustProjection(ctx context.Context, temporaryRoot, repositoryRoot, sdkRoot, modulePath string) error {
+	if repositoryRoot == "" {
+		return fmt.Errorf("repository root is required for lock-resolved Rust projection verification")
+	}
+	expectedPath := filepath.Join(repositoryRoot, "crates", "nre-policy-guest", "src", "abi_generated.rs")
+	expected, err := os.ReadFile(expectedPath)
+	if err != nil {
+		return fmt.Errorf("read repository Rust SDK projection: %w", err)
+	}
+	projectionRoot := filepath.Join(temporaryRoot, "projection-workspace")
+	if err := os.Mkdir(projectionRoot, 0o755); err != nil {
+		return err
+	}
+	module := fmt.Sprintf("module github.com/sakullla/sakullla-plugins\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
+	if err := os.WriteFile(filepath.Join(projectionRoot, "go.mod"), []byte(module), 0o644); err != nil {
+		return err
+	}
+	sourceDirectory := filepath.Join(repositoryRoot, "internal", "ci", "sdk", "cmd", "generate-policy-rust")
+	targetDirectory := filepath.Join(projectionRoot, "cmd", "generate-policy-rust")
+	if err := copyGoSources(sourceDirectory, targetDirectory); err != nil {
+		return fmt.Errorf("copy repository Rust SDK generator: %w", err)
+	}
+	actualPath := filepath.Join(temporaryRoot, "abi_generated.rs")
+	if output, err := run(ctx, projectionRoot, "go", "run", "-mod=mod", "./cmd/generate-policy-rust", "--output", actualPath); err != nil {
+		return fmt.Errorf("generate Rust SDK projection from lock-resolved checkout: %w: %s", err, output)
+	}
+	actual, err := os.ReadFile(actualPath)
+	if err != nil {
+		return fmt.Errorf("read lock-resolved Rust SDK projection: %w", err)
+	}
+	if !bytes.Equal(expected, actual) {
+		return fmt.Errorf("repository Rust SDK projection differs from lock-resolved canonical SDK")
+	}
+	return nil
+}
+
+func copyGoSources(source, target string) error {
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	copied := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("generator source %s is not a regular file", entry.Name())
+		}
+		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(target, entry.Name()), data, 0o644); err != nil {
+			return err
+		}
+		copied++
+	}
+	if copied == 0 {
+		return fmt.Errorf("generator has no Go sources")
+	}
+	return nil
+}
+
+func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, modulePath string, capability Capability) error {
+	data, err := gitRegularBlob(ctx, checkout, capability.EvidencePath)
+	if err != nil {
+		return fmt.Errorf("read capability %s evidence: %w", capability.ID, err)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), capability.EvidencePath, data, 0)
+	if err != nil {
+		return fmt.Errorf("parse capability %s evidence as Go source: %w", capability.ID, err)
+	}
+	declared := make(map[string]bool)
+	for _, declaration := range file.Decls {
+		switch value := declaration.(type) {
+		case *ast.FuncDecl:
+			declared[value.Name.Name] = true
+		case *ast.GenDecl:
+			for _, specification := range value.Specs {
+				switch item := specification.(type) {
+				case *ast.TypeSpec:
+					declared[item.Name.Name] = true
+				case *ast.ValueSpec:
+					for _, name := range item.Names {
+						declared[name.Name] = true
+					}
+				}
+			}
+		}
+	}
+	for _, symbol := range capability.Symbols {
+		if !declared[symbol] {
+			return fmt.Errorf("capability %s evidence declaration %q is missing", capability.ID, symbol)
+		}
+	}
+	probe, ok := capabilityProbe(capability.ID, modulePath)
+	if !ok {
+		return fmt.Errorf("available capability %s has no typed public-contract probe", capability.ID)
+	}
+	probeRoot := filepath.Join(temporaryRoot, "capability-"+strings.ReplaceAll(capability.ID, ".", "-"))
+	if err := os.Mkdir(probeRoot, 0o755); err != nil {
+		return err
+	}
+	module := fmt.Sprintf("module capabilityprobe\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
+	if err := os.WriteFile(filepath.Join(probeRoot, "go.mod"), []byte(module), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(probeRoot, "main.go"), []byte(probe), 0o644); err != nil {
+		return err
+	}
+	if output, err := run(ctx, probeRoot, "go", "run", "."); err != nil {
+		return fmt.Errorf("capability %s typed public-contract probe failed: %w: %s", capability.ID, err, output)
+	}
+	return nil
+}
+
+func capabilityProbe(id, modulePath string) (string, bool) {
+	quotedImport := fmt.Sprintf("sdk %q", modulePath)
+	switch id {
+	case "policy.body-window":
+		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\nvar _ required = (sdk.PolicyHost)(nil)\nconst _ string = sdk.PolicyHostReadBodyWindow\nfunc main() {}\n", quotedImport), true
+	case "policy.event-metric":
+		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, string, []byte) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
+	case "rpc.lifecycle":
+		return fmt.Sprintf("package main\nimport %s\nconst _ string = sdk.RPCABIV1\nvar _ = sdk.RPCHandshakeRequest{ABI: \"\", PluginID: \"\", PluginVersion: \"\", PackageDigest: \"\", ArtifactDigest: \"\", GrantedScopes: []string{}, Generation: \"\"}\nvar _ = sdk.RPCHandshakeResponse{ABI: \"\", Capabilities: []string{}}\nvar _ = sdk.LifecycleRequest{Generation: \"\", Config: []byte{}}\nvar _ = sdk.LifecycleResponse{Success: &sdk.LifecycleSuccess{Ready: true}}\nvar _ = sdk.LifecycleResponse.Validate\nfunc main() {}\n", quotedImport), true
+	default:
+		return "", false
+	}
 }
 
 func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath string) (string, error) {
@@ -127,12 +263,24 @@ func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath
 }
 
 func gitBlobSHA256(ctx context.Context, checkout, path string) (string, error) {
-	data, err := run(ctx, checkout, "git", "cat-file", "blob", "HEAD:"+path)
+	data, err := gitRegularBlob(ctx, checkout, path)
 	if err != nil {
 		return "", err
 	}
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func gitRegularBlob(ctx context.Context, checkout, path string) ([]byte, error) {
+	listing, err := run(ctx, checkout, "git", "ls-tree", "HEAD", "--", path)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(string(listing))
+	if len(fields) < 3 || (fields[0] != "100644" && fields[0] != "100755") || fields[1] != "blob" {
+		return nil, fmt.Errorf("%s is not a regular file in the locked commit", path)
+	}
+	return run(ctx, checkout, "git", "cat-file", "blob", "HEAD:"+path)
 }
 
 func goModulePath(goMod []byte) string {

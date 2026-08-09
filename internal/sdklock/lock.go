@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	pathpkg "path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -102,6 +104,10 @@ func (lock Lock) Validate() error {
 			if capability.EvidencePath == "" || len(capability.Symbols) == 0 || capability.MissingReason != "" {
 				return fmt.Errorf("available capability %s requires evidence and no missing reason", capability.ID)
 			}
+			if !canonicalRepositoryPath(capability.EvidencePath) ||
+				(capability.EvidencePath != lock.SDK.ModuleDirectory && !strings.HasPrefix(capability.EvidencePath, lock.SDK.ModuleDirectory+"/")) {
+				return fmt.Errorf("capability %s evidence must be a canonical path inside the public SDK module", capability.ID)
+			}
 		} else if capability.MissingReason == "" || capability.EvidencePath != "" || len(capability.Symbols) != 0 {
 			return fmt.Errorf("missing capability %s requires only a missing reason", capability.ID)
 		}
@@ -110,6 +116,14 @@ func (lock Lock) Validate() error {
 		return fmt.Errorf("capability contract digest mismatch: got %s, want %s", lock.CapabilityContractSHA256, actual)
 	}
 	return nil
+}
+
+func canonicalRepositoryPath(value string) bool {
+	if value == "" || strings.Contains(value, `\`) || pathpkg.IsAbs(value) || filepath.IsAbs(filepath.FromSlash(value)) || strings.Contains(value, ":") {
+		return false
+	}
+	cleaned := pathpkg.Clean(value)
+	return cleaned == value && cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
 }
 
 func CapabilityDigest(capabilities []Capability) string {

@@ -137,6 +137,60 @@ fn host_client_retries_once_within_fixed_response_budget() {
     assert_eq!(host.capacities, [2, 7]);
 }
 
+#[derive(Default)]
+struct ExecutedThenExhaustedHost {
+    calls: usize,
+}
+
+impl HostTransport for ExecutedThenExhaustedHost {
+    fn call(&mut self, import: HostImport, _: &[u8], response: &mut [u8]) -> u64 {
+        assert!(matches!(
+            import,
+            HostImport::StatePut | HostImport::EmitEvent | HostImport::AddMetric
+        ));
+        // Model a Host that performed the side effect but could not encode its
+        // response in the supplied window. Reissuing this request would apply
+        // the state/event/metric mutation twice.
+        self.calls += 1;
+        pack_host_result(
+            AbiStatus::ResourceExhausted,
+            response.len().saturating_add(1) as u32,
+        )
+    }
+}
+
+#[test]
+fn side_effecting_imports_are_not_retried_after_exhaustion() {
+    let limits = HostLimits::new(6, 1);
+
+    let mut state =
+        HostClient::<_, 64, 32>::new(ExecutedThenExhaustedHost::default(), limits).unwrap();
+    assert_eq!(
+        state.state_put("key", b"value").unwrap_err().reason,
+        ReasonCode::HostResourceExhausted
+    );
+    assert_eq!(state.calls_used(), 1);
+    assert_eq!(state.into_transport().calls, 1);
+
+    let mut events =
+        HostClient::<_, 64, 32>::new(ExecutedThenExhaustedHost::default(), limits).unwrap();
+    assert_eq!(
+        events.emit_event("match", b"bounded").unwrap_err().reason,
+        ReasonCode::HostResourceExhausted
+    );
+    assert_eq!(events.calls_used(), 1);
+    assert_eq!(events.into_transport().calls, 1);
+
+    let mut metrics =
+        HostClient::<_, 64, 32>::new(ExecutedThenExhaustedHost::default(), limits).unwrap();
+    assert_eq!(
+        metrics.add_metric("matches", 1).unwrap_err().reason,
+        ReasonCode::HostResourceExhausted
+    );
+    assert_eq!(metrics.calls_used(), 1);
+    assert_eq!(metrics.into_transport().calls, 1);
+}
+
 struct OversizedHost;
 
 impl HostTransport for OversizedHost {

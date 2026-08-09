@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
@@ -37,7 +38,11 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		verification, err := sdklock.Verify(ctx, lock, *requireCapabilities)
+		absoluteLock, err := filepath.Abs(*lockPath)
+		if err != nil {
+			return err
+		}
+		verification, err := sdklock.Verify(ctx, lock, *requireCapabilities, filepath.Dir(absoluteLock))
 		if err != nil {
 			return err
 		}

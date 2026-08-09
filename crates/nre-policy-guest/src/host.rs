@@ -28,6 +28,13 @@ impl HostImport {
             Self::AddMetric => abi_generated::HOST_ADD_METRIC,
         }
     }
+
+    const fn permits_response_growth_retry(self) -> bool {
+        matches!(
+            self,
+            Self::ReadField | Self::ReadBodyWindow | Self::StateGet
+        )
+    }
 }
 
 /// Injectable transport for the canonical four-pointer Host-call convention.
@@ -221,7 +228,10 @@ where
     fn invoke(&mut self, import: HostImport, request_length: usize) -> Result<usize, GuestError> {
         let first_capacity = self.limits.initial_response_bytes;
         let (mut status, mut length) = self.call_once(import, request_length, first_capacity)?;
-        if status == AbiStatus::ResourceExhausted && length as usize > first_capacity {
+        if import.permits_response_growth_retry()
+            && status == AbiStatus::ResourceExhausted
+            && length as usize > first_capacity
+        {
             let required = length as usize;
             if required > RESPONSE_BYTES || required > self.limits.response_wire.max_frame_bytes {
                 return Err(GuestError::new(

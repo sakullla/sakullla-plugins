@@ -208,16 +208,25 @@ func (handle *handleCore) revoke() {
 // Handle wraps a process-local typed client/resource and binds its authority
 // to a Generation. It carries no wire contract and cannot mint host grants.
 type Handle[T any] struct {
-	generation *Generation
-	core       *handleCore
-	value      T
+	generation    *Generation
+	requiredScope string
+	core          *handleCore
+	value         T
 }
 
-func BindHandle[T any](generation *Generation, value T, close func(T)) (*Handle[T], error) {
+// BindHandle requires the generation to hold requiredScope before registering
+// the handle. Use rechecks the same immutable grant snapshot for every call.
+func BindHandle[T any](generation *Generation, requiredScope string, value T, close func(T)) (*Handle[T], error) {
 	if generation == nil {
 		return nil, errors.New("generation is required")
 	}
-	handle := &Handle[T]{generation: generation, value: value}
+	if requiredScope == "" {
+		return nil, errors.New("handle required scope is required")
+	}
+	if err := generation.grants.Require(requiredScope); err != nil {
+		return nil, err
+	}
+	handle := &Handle[T]{generation: generation, requiredScope: requiredScope, value: value}
 	handle.core = &handleCore{close: func() {
 		if close != nil {
 			close(value)
@@ -237,6 +246,9 @@ func (handle *Handle[T]) Use(ctx context.Context, call func(context.Context, T) 
 	}
 	if call == nil {
 		return errors.New("handle callback is required")
+	}
+	if err := handle.generation.grants.Require(handle.requiredScope); err != nil {
+		return err
 	}
 	release, err := handle.generation.acquire()
 	if err != nil {

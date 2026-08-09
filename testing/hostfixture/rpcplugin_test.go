@@ -80,6 +80,21 @@ func TestGrantMissingAndImmutable(t *testing.T) {
 	}
 }
 
+func TestGrantRequiredForHandleCreation(t *testing.T) {
+	hooks := rpcplugin.HookFuncs{PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+		_, err := rpcplugin.BindHandle(generation, "resource.write", "resource", nil)
+		return err
+	}}
+	lifecycle := newLifecycle(t, hooks, nil)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	if response.Success != nil || response.Error == nil || response.Error.Code != pluginsdk.ErrorPermissionDenied {
+		t.Fatalf("missing handle grant response = %#v", response)
+	}
+}
+
 func TestGenerationMismatchFailsClosed(t *testing.T) {
 	lifecycle := newLifecycle(t, rpcplugin.HookFuncs{}, nil)
 	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
@@ -96,7 +111,7 @@ func TestRevokeGenerationOwnedHandle(t *testing.T) {
 	closed := 0
 	hooks := rpcplugin.HookFuncs{PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
 		var err error
-		handle, err = rpcplugin.BindHandle(generation, "resource", func(string) { closed++ })
+		handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", func(string) { closed++ })
 		return err
 	}}
 	lifecycle := readyLifecycle(t, hooks, nil)
@@ -117,7 +132,7 @@ func TestGenerationGracefulDrainRejectsNewAdmission(t *testing.T) {
 	var handle *rpcplugin.Handle[string]
 	hooks := rpcplugin.HookFuncs{PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
 		var err error
-		handle, err = rpcplugin.BindHandle(generation, "resource", nil)
+		handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
 		return err
 	}}
 	lifecycle := readyLifecycle(t, hooks, nil)
@@ -219,6 +234,99 @@ func TestGenerationDeadlineBoundsPrepare(t *testing.T) {
 	response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
 	if response.Error == nil || response.Error.Code != pluginsdk.ErrorDeadlineExceeded {
 		t.Fatalf("deadline response = %#v", response)
+	}
+}
+
+func TestGenerationDeadlineRejectsLateNilPrepare(t *testing.T) {
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{PrepareFunc: func(ctx context.Context, generation *rpcplugin.Generation, _ []byte) error {
+		var err error
+		handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+		if err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}}
+	lifecycle := newLifecycleWithShortPhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertDeadlineAndRevoked(t, response, handle)
+}
+
+func TestGenerationDeadlineRejectsLateNilActivate(t *testing.T) {
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		ActivateFunc: func(ctx context.Context, _ *rpcplugin.Generation) error {
+			<-ctx.Done()
+			return nil
+		},
+	}
+	lifecycle := newLifecycleWithShortPhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	response := lifecycle.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertDeadlineAndRevoked(t, response, handle)
+}
+
+func TestGenerationDeadlineRejectsLateNilStop(t *testing.T) {
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		StopFunc: func(ctx context.Context, _ *rpcplugin.Generation) error {
+			<-ctx.Done()
+			return nil
+		},
+	}
+	lifecycle := newLifecycleWithShortPhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := lifecycle.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	response := lifecycle.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertDeadlineAndRevoked(t, response, handle)
+}
+
+func newLifecycleWithShortPhase(t *testing.T, hooks rpcplugin.Hooks) *rpcplugin.Lifecycle {
+	t.Helper()
+	return newLifecycleWithTimeouts(t, hooks, nil, rpcplugin.Timeouts{
+		Prepare:  10 * time.Millisecond,
+		Activate: 10 * time.Millisecond,
+		Stop:     10 * time.Millisecond,
+		Drain:    time.Second,
+	})
+}
+
+func assertDeadlineAndRevoked(t *testing.T, response pluginsdk.LifecycleResponse, handle *rpcplugin.Handle[string]) {
+	t.Helper()
+	if response.Success != nil || response.Error == nil || response.Error.Code != pluginsdk.ErrorDeadlineExceeded {
+		t.Fatalf("late-nil deadline response = %#v", response)
+	}
+	if handle == nil {
+		t.Fatal("test hook did not create a generation handle")
+	}
+	if err := handle.Use(context.Background(), func(context.Context, string) error { return nil }); !errors.Is(err, rpcplugin.ErrRevoked) {
+		t.Fatalf("handle use after deadline error = %v", err)
 	}
 }
 

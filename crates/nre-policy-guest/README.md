@@ -14,4 +14,3 @@ generator owns refreshes when the pinned upstream SDK changes.
 The library has no allocator, filesystem, network, clock, random, WASI, or host
 implementation dependency. On `wasm32`, `WasmHost` binds only the six canonical
 Host imports. Native tests inject a `HostTransport` fake.
-
