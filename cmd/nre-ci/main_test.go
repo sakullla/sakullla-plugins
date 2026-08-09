@@ -162,6 +162,29 @@ func TestPluginDoHPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
 	}
 }
 
+func TestPluginCloudflareDNSPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
+	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkPluginWithVerifier(context.Background(), []string{"--id", "cloudflare-dns", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
+		if !required {
+			t.Fatal("Cloudflare DNS RPC plugin bypassed capability gate")
+		}
+		return sdklock.Verification{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "cloudflare-dns"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "cloudflare-dns", name)); err != nil || info.IsDir() {
+		t.Fatalf("Cloudflare DNS RPC artifact missing: %v", err)
+	}
+}
+
 func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -182,6 +205,10 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	dohArtifact, err := pluginArtifactSpecFor(repositoryRoot, "doh")
 	if err != nil || dohArtifact.kind != artifactRPCService || !strings.Contains(dohArtifact.sourcePath, "doh/cmd/doh") {
 		t.Fatalf("DoH artifact spec = %#v err=%v", dohArtifact, err)
+	}
+	cloudflareArtifact, err := pluginArtifactSpecFor(repositoryRoot, "cloudflare-dns")
+	if err != nil || cloudflareArtifact.kind != artifactRPCService || !strings.Contains(cloudflareArtifact.sourcePath, "cloudflare-dns/cmd/cloudflare-dns") {
+		t.Fatalf("Cloudflare DNS artifact spec = %#v err=%v", cloudflareArtifact, err)
 	}
 	wasm, err := pluginArtifactSpecFor(repositoryRoot, "waf")
 	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
@@ -258,6 +285,23 @@ func TestPluginDoHManifestDriftFailsClosed(t *testing.T) {
 			writeRPCManifest(t, root, "doh", test.id, test.kind, test.abi, test.entry)
 			if _, err := pluginArtifactSpecFor(root, "doh"); err == nil {
 				t.Fatal("DoH manifest drift was accepted")
+			}
+		})
+	}
+}
+
+func TestPluginCloudflareDNSManifestDriftFailsClosed(t *testing.T) {
+	for _, test := range []struct{ name, id, kind, abi, entry string }{
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/cloudflare-dns"},
+		{name: "kind", id: "cloudflare-dns", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/cloudflare-dns"},
+		{name: "abi", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/cloudflare-dns"},
+		{name: "entry", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeRPCManifest(t, root, "cloudflare-dns", test.id, test.kind, test.abi, test.entry)
+			if _, err := pluginArtifactSpecFor(root, "cloudflare-dns"); err == nil {
+				t.Fatal("Cloudflare DNS manifest drift was accepted")
 			}
 		})
 	}

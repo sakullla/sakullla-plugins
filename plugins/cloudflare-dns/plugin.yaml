@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "cloudflare-dns",
+  "version": "0.1.0",
+  "name": "Cloudflare DNS",
+  "description": "Vault-backed, zone-scoped Cloudflare DNS control plane",
+  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
+  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "artifacts/cloudflare-dns"},
+  "permissions": ["audit", "authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"],
+  "config_schema": "config.schema.json",
+  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
+  "cleanup": {"secret": "retain-host-owned", "dns_records": "never-delete-implicitly", "status": "delete-generation"},
+  "metadata": {"capability.typed-cloudflare-handles": "unavailable"}
+}

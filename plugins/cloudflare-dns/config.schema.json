@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generation", "secret_ref", "resource_group_ref"],
+  "properties": {
+    "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "resource_group_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"}
+  }
+}
