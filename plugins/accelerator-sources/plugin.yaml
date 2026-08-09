@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "accelerator-sources",
+  "version": "0.1.0",
+  "name": "Accelerator Sources",
+  "description": "Brokered Docker and GitHub accelerator source control plane",
+  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
+  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "artifacts/accelerator-sources"},
+  "permissions": ["network-probe", "scheduler", "dynamic-ui", "audit"],
+  "config_schema": "config.schema.json",
+  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
+  "cleanup": {"sources": "delete-owned", "probe_results": "delete-owned", "host_configuration": "never-modify"},
+  "metadata": {"capability.typed-accelerator-handles": "unavailable"}
+}
+

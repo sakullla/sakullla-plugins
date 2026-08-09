@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generation", "schedule_seconds", "probe", "sources"],
+  "properties": {
+    "generation": {"type": "string", "minLength": 1, "maxLength": 128},
+    "schedule_seconds": {"type": "integer", "minimum": 30, "maximum": 86400},
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "max_redirects", "max_response_bytes", "timeout_ms", "concurrency"],
+      "properties": {
+        "method": {"enum": ["HEAD", "GET"]},
+        "max_redirects": {"type": "integer", "minimum": 0, "maximum": 4},
+        "max_response_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 5000},
+        "concurrency": {"type": "integer", "minimum": 1, "maximum": 16}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "url", "enabled", "manual_priority"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
+          "category": {"enum": ["docker", "github"]},
+          "url": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^https://"},
+          "enabled": {"type": "boolean"},
+          "manual_priority": {"type": "integer", "minimum": -1000, "maximum": 1000}
+        }
+      }
+    }
+  }
+}
+

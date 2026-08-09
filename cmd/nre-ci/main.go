@@ -228,7 +228,7 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 	switch pluginID {
 	case "waf", "ip-policy", "rate-limit":
 		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
-	case "reverse-l4", "docker-app":
+	case "reverse-l4", "docker-app", "accelerator-sources":
 		manifestPath := filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml")
 		manifestFile, err := os.Open(manifestPath)
 		if err != nil {
