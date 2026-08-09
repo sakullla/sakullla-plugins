@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -32,28 +33,50 @@ func (unavailableAdmission) Admit(context.Context, pluginsdk.RPCHandshakeRequest
 }
 
 type ControllerConfig struct {
-	PackageDigest, ArtifactDigest string
-	Admission                     TypedHandleAdmission
+	PackageDigest, ArtifactDigest                              string
+	Admission                                                  TypedHandleAdmission
+	PrepareGate                                                func(context.Context) error
+	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 }
 
 type Controller struct {
-	mu        sync.Mutex
-	apps      []App
-	request   pluginsdk.RPCHandshakeRequest
-	admission TypedHandleAdmission
-	lifecycle *rpcplugin.Lifecycle
+	mu          sync.Mutex
+	apps        []App
+	request     pluginsdk.RPCHandshakeRequest
+	admission   TypedHandleAdmission
+	prepareGate func(context.Context) error
+	lifecycle   *rpcplugin.Lifecycle
+	commit      *rpcplugin.Handle[*commitEpoch]
+	epoch       *commitEpoch
+}
+
+type commitEpoch struct {
+	generation string
+	live       atomic.Bool
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
 	if config.Admission == nil {
 		config.Admission = unavailableAdmission{}
 	}
-	controller := &Controller{admission: config.Admission}
+	if config.PrepareTimeout <= 0 {
+		config.PrepareTimeout = time.Second
+	}
+	if config.ActivateTimeout <= 0 {
+		config.ActivateTimeout = time.Second
+	}
+	if config.StopTimeout <= 0 {
+		config.StopTimeout = time.Second
+	}
+	if config.DrainTimeout <= 0 {
+		config.DrainTimeout = time.Second
+	}
+	controller := &Controller{admission: config.Admission, prepareGate: config.PrepareGate}
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:   []string{"docker-app.business-model"},
-		RequiredGrants: []string{"docker-compose", "http-rule"},
-		Timeouts:       rpcplugin.Timeouts{Prepare: time.Second, Activate: time.Second, Stop: time.Second, Drain: time.Second},
+		RequiredGrants: []string{"docker-compose", "dynamic-ui", "http-rule"},
+		Timeouts:       rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err
@@ -86,7 +109,7 @@ func (controller *Controller) Apps() []App {
 	return cloneApps(controller.apps)
 }
 
-func (controller *Controller) prepare(_ context.Context, generation *rpcplugin.Generation, config []byte) error {
+func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, config []byte) error {
 	if len(config) > MaxConfigBytes {
 		return fmt.Errorf("%w: config exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
 	}
@@ -96,7 +119,7 @@ func (controller *Controller) prepare(_ context.Context, generation *rpcplugin.G
 		Apps *[]App `json:"apps"`
 	}
 	if err := decoder.Decode(&document); err != nil {
-		return err
+		return errors.New("config JSON is invalid")
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -114,27 +137,73 @@ func (controller *Controller) prepare(_ context.Context, generation *rpcplugin.G
 			return errors.New("app generation does not match lifecycle generation")
 		}
 	}
-	controller.mu.Lock()
-	controller.apps = cloneApps(configuration.Apps)
-	controller.mu.Unlock()
-	return nil
+	if controller.prepareGate != nil {
+		if err := controller.prepareGate(ctx); err != nil {
+			return err
+		}
+	}
+	for appIndex := range configuration.Apps {
+		for secretIndex, material := range configuration.Apps[appIndex].Secrets {
+			reference := fmt.Sprintf("app-%d-secret-%d", appIndex, secretIndex)
+			if _, err := generation.Secret(reference, []byte(material)); err != nil {
+				return err
+			}
+		}
+	}
+	epoch := &commitEpoch{generation: generation.ID()}
+	epoch.live.Store(true)
+	handle, err := rpcplugin.BindHandle(generation, "docker-compose", epoch, func(epoch *commitEpoch) {
+		epoch.live.Store(false)
+		controller.mu.Lock()
+		if controller.epoch == epoch {
+			controller.apps = nil
+			controller.commit = nil
+			controller.epoch = nil
+		}
+		controller.mu.Unlock()
+	})
+	if err != nil {
+		return err
+	}
+	return handle.Use(ctx, func(ctx context.Context, epoch *commitEpoch) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		if !epoch.live.Load() {
+			return rpcplugin.ErrRevoked
+		}
+		controller.apps, controller.commit, controller.epoch = cloneApps(configuration.Apps), handle, epoch
+		return nil
+	})
 }
 
 func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
 	controller.mu.Lock()
-	request, apps := controller.request, cloneApps(controller.apps)
+	request, apps, handle, epoch := controller.request, cloneApps(controller.apps), controller.commit, controller.epoch
 	controller.mu.Unlock()
+	if handle == nil || epoch == nil {
+		return rpcplugin.ErrRevoked
+	}
 	if err := controller.admission.Admit(ctx, request, apps); err != nil {
-		controller.mu.Lock()
-		controller.apps = nil
-		controller.mu.Unlock()
 		return err
 	}
-	return nil
+	return handle.Use(ctx, func(ctx context.Context, value *commitEpoch) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if value != epoch || !value.live.Load() {
+			return rpcplugin.ErrRevoked
+		}
+		return nil
+	})
 }
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
 	controller.mu.Lock()
 	controller.apps = nil
+	controller.commit = nil
+	controller.epoch = nil
 	controller.mu.Unlock()
 	return nil
 }

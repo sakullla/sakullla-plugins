@@ -2,6 +2,7 @@ package dockerapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,6 +18,8 @@ type ComposeService struct {
 }
 
 type ComposePlan struct {
+	AppID       string
+	Generation  string
 	Project     string
 	Services    []ComposeService
 	RuleImpacts []string
@@ -39,18 +42,18 @@ type RiskItem struct {
 }
 
 type RiskPreview struct {
-	Project string
-	Items   []RiskItem
+	AppID, Generation, Project, Digest string
+	Items                              []RiskItem
 }
 
 func PreviewCompose(plan ComposePlan) (RiskPreview, error) {
-	if !validID(plan.Project) || len(plan.Services) > MaxComposeServices || len(plan.RuleImpacts) > MaxCollectionItems {
+	if !validID(plan.AppID) || !boundedText(plan.Generation, 128) || !validID(plan.Project) || len(plan.Services) > MaxComposeServices || len(plan.RuleImpacts) > MaxCollectionItems {
 		return RiskPreview{}, ErrBoundExceeded
 	}
-	preview := RiskPreview{Project: plan.Project}
+	preview := RiskPreview{AppID: plan.AppID, Generation: plan.Generation, Project: plan.Project}
 	for _, service := range plan.Services {
 		if !validID(service.Name) {
-			return RiskPreview{}, fmt.Errorf("compose service %q is invalid", service.Name)
+			return RiskPreview{}, errors.New("compose service is invalid")
 		}
 		for _, collection := range [][]string{service.HostMounts, service.AddCapabilities, service.Networks, service.Volumes} {
 			if _, err := sortedUnique(collection, MaxCollectionItems); err != nil {
@@ -88,31 +91,37 @@ func PreviewCompose(plan ComposePlan) (RiskPreview, error) {
 		}
 		return preview.Items[i].Kind < preview.Items[j].Kind
 	})
+	digest, err := canonicalDigest(struct {
+		AppID, Generation, Project string
+		Items                      []RiskItem
+	}{preview.AppID, preview.Generation, preview.Project, preview.Items})
+	if err != nil {
+		return RiskPreview{}, ErrInvalidPreview
+	}
+	preview.Digest = digest
 	return preview, nil
 }
 
-type Authorization struct {
-	Approved map[RiskKind]bool
-}
-
-func (authorization Authorization) Validate(preview RiskPreview) error {
-	for _, item := range preview.Items {
-		if !authorization.Approved[item.Kind] {
-			return fmt.Errorf("%w: risk %s requires approval", ErrUnauthorized, item.Kind)
-		}
-	}
-	return nil
-}
-
-// ComposeExecutor is an injectable business-test boundary. It is not a Host
-// API or wire contract; production remains gated on future typed SDK handles.
+// ComposeExecutor is an injectable business-test boundary. The operation key
+// must be applied idempotently so a journal-write failure can safely resume.
+// It is not a Host API or wire contract; production remains gated on future
+// typed SDK handles.
 type ComposeExecutor interface {
-	ApplyCompose(context.Context, ComposePlan) error
+	ApplyCompose(context.Context, string, ComposePlan) error
 }
-type ComposeExecutorFunc func(context.Context, ComposePlan) error
+type ComposeExecutorFunc func(context.Context, string, ComposePlan) error
 
-func (function ComposeExecutorFunc) ApplyCompose(ctx context.Context, plan ComposePlan) error {
-	return function(ctx, plan)
+func (function ComposeExecutorFunc) ApplyCompose(ctx context.Context, operation string, plan ComposePlan) error {
+	return function(ctx, operation, plan)
+}
+
+type ComposeInventory interface {
+	CurrentCompose(context.Context, string, string) (ComposePlan, error)
+}
+type ComposeInventoryFunc func(context.Context, string, string) (ComposePlan, error)
+
+func (function ComposeInventoryFunc) CurrentCompose(ctx context.Context, appID, generation string) (ComposePlan, error) {
+	return function(ctx, appID, generation)
 }
 
 type AuditRecord struct{ Action, Outcome, Detail string }
@@ -121,25 +130,61 @@ type AuditorFunc func(AuditRecord)
 
 func (function AuditorFunc) Record(record AuditRecord) { function(record) }
 
-func ExecuteCompose(ctx context.Context, plan ComposePlan, authorization Authorization, executor ComposeExecutor, auditor Auditor, secrets []string) error {
-	preview, err := PreviewCompose(plan)
-	if err == nil {
-		err = authorization.Validate(preview)
+func ExecuteCompose(ctx context.Context, shown RiskPreview, authorization Authorization, inventory ComposeInventory, verifier AuthorizationVerifier, executor ComposeExecutor, journal ProgressJournal, auditor Auditor, secrets []string) error {
+	if auditor == nil {
+		return ErrAuditRequired
 	}
-	if err != nil {
-		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "denied", Detail: err.Error()})
-		return err
-	}
-	if executor == nil {
+	if inventory == nil || verifier == nil || executor == nil || journal == nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	err = executor.ApplyCompose(ctx, plan)
+	plan, err := inventory.CurrentCompose(ctx, shown.AppID, shown.Generation)
+	if err != nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "failed", Detail: err.Error()})
+		return safeFailure(ErrOperationFailed, err, secrets)
+	}
+	trusted, err := PreviewCompose(plan)
+	if err != nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "denied", Detail: err.Error()})
+		return safeFailure(ErrInvalidPreview, err, secrets)
+	}
+	shownDigest, _ := canonicalDigest(struct {
+		AppID, Generation, Project string
+		Items                      []RiskItem
+	}{shown.AppID, shown.Generation, shown.Project, shown.Items})
+	if shownDigest != shown.Digest || shown.AppID != trusted.AppID || shown.Generation != trusted.Generation || shown.Digest != trusted.Digest || authorization.AppID != trusted.AppID || authorization.Generation != trusted.Generation || authorization.PreviewDigest != trusted.Digest {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return ErrInvalidPreview
+	}
+	if err := verifier.Verify(ctx, authorization, trusted.AppID, trusted.Generation, trusted.Digest); err != nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "denied", Detail: err.Error()})
+		return safeFailure(ErrUnauthorized, err, secrets)
+	}
+	operation := trusted.Digest
+	completed, err := journal.Completed(ctx, operation, "compose")
+	if err != nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.progress", Outcome: "failed", Detail: err.Error()})
+		return safeFailure(ErrOperationFailed, err, secrets)
+	}
+	if completed {
+		audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: "succeeded", Detail: "already completed"})
+		return nil
+	}
+	audit(auditor, secrets, AuditRecord{Action: "compose.progress", Outcome: "applying", Detail: operation})
+	err = executor.ApplyCompose(ctx, operation, plan)
 	outcome := "succeeded"
 	if err != nil {
 		outcome = "failed"
 	}
 	audit(auditor, secrets, AuditRecord{Action: "compose.apply", Outcome: outcome, Detail: fmt.Sprint(err)})
-	return redactFailure(err, secrets)
+	if err != nil {
+		return safeFailure(ErrOperationFailed, err, secrets)
+	}
+	if err := journal.MarkCompleted(ctx, operation, "compose"); err != nil {
+		audit(auditor, secrets, AuditRecord{Action: "compose.progress", Outcome: "failed", Detail: err.Error()})
+		return safeFailure(ErrOperationFailed, err, secrets)
+	}
+	return nil
 }
 
 func audit(auditor Auditor, secrets []string, record AuditRecord) {
@@ -159,18 +204,4 @@ func redactText(value string, secrets []string) string {
 		}
 	}
 	return value
-}
-
-type redactedFailure struct {
-	cause   error
-	message string
-}
-
-func (failure *redactedFailure) Error() string { return failure.message }
-func (failure *redactedFailure) Unwrap() error { return failure.cause }
-func redactFailure(err error, secrets []string) error {
-	if err == nil {
-		return nil
-	}
-	return &redactedFailure{cause: err, message: redactText(err.Error(), secrets)}
 }

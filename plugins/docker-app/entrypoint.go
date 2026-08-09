@@ -19,7 +19,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 		}
 		response, err := controller.Handshake(ctx, pluginsdk.RPCHandshakeRequest{
 			ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact",
-			GrantedScopes: []string{"docker-compose", "http-rule"}, Generation: "nre-ci-generation",
+			GrantedScopes: []string{"docker-compose", "dynamic-ui", "http-rule"}, Generation: "nre-ci-generation",
 		})
 		if err != nil {
 			return err

@@ -61,7 +61,7 @@ func (configuration Configuration) Validate() error {
 			return err
 		}
 		if _, exists := seen[app.ID]; exists {
-			return fmt.Errorf("app %q is duplicated", app.ID)
+			return errors.New("app id is duplicated")
 		}
 		seen[app.ID] = struct{}{}
 	}
@@ -95,7 +95,7 @@ func sortedUnique(values []string, maximum int) ([]string, error) {
 			return nil, errors.New("collection value is invalid")
 		}
 		if index > 0 && result[index-1] == value {
-			return nil, fmt.Errorf("value %q is duplicated", value)
+			return nil, errors.New("collection contains a duplicate value")
 		}
 	}
 	return result, nil
