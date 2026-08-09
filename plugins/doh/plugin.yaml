@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "doh",
+  "version": "0.1.0",
+  "name": "DNS over HTTPS",
+  "description": "Brokered RFC 8484 forwarding with token and shared IP-policy admission",
+  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
+  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "agent", "entry": "artifacts/doh"},
+  "permissions": ["audit", "cache", "ip-policy", "listener", "log", "monotonic-clock", "network", "secret"],
+  "config_schema": "config.schema.json",
+  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
+  "cleanup": {"cache": "delete-generation", "listener": "release", "ip_policy": "shared-reference-only", "secrets": "never-store"},
+  "metadata": {"capability.typed-doh-handles": "unavailable"}
+}
