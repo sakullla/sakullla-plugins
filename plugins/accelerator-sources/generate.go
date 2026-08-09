@@ -27,7 +27,8 @@ type GitHubGeneration struct {
 }
 
 func (manager *Manager) GenerateDocker(ctx context.Context, policy GenerationPolicy) ([]byte, error) {
-	if err := manager.beforeEffect(ctx, "generate-docker", "", DynamicEvent{Kind: "action", Action: "generate-docker"}); err != nil {
+	flow, err := manager.startOperation(ctx, "generate-docker", "", &DynamicEvent{Kind: "action", Action: "generate-docker"})
+	if err != nil {
 		return nil, err
 	}
 	records := eligibleRecords(manager.Snapshot(), CategoryDocker, policy)
@@ -37,17 +38,18 @@ func (manager *Manager) GenerateDocker(ctx context.Context, policy GenerationPol
 	}
 	wire, err := json.Marshal(configuration)
 	if err != nil {
-		return nil, ErrInvalidSource
+		return nil, flow.fail(ErrInvalidSource, false)
 	}
-	return wire, nil
+	return wire, flow.finish(true)
 }
 
 func (manager *Manager) GenerateGitHub(ctx context.Context, original string, policy GenerationPolicy) (GitHubGeneration, error) {
 	canonical, err := CanonicalHTTPSURL(original)
 	if err != nil || canonical != original || (!strings.HasPrefix(original, "https://github.com/") && original != "https://github.com") {
-		return GitHubGeneration{}, manager.denied(ctx, "generate-github", "", ErrInvalidSource)
+		return GitHubGeneration{}, manager.failedAttempt(ctx, "generate-github", "", ErrInvalidSource)
 	}
-	if err := manager.beforeEffect(ctx, "generate-github", "", DynamicEvent{Kind: "action", Action: "generate-github"}); err != nil {
+	flow, err := manager.startOperation(ctx, "generate-github", "", &DynamicEvent{Kind: "action", Action: "generate-github"})
+	if err != nil {
 		return GitHubGeneration{}, err
 	}
 	records := eligibleRecords(manager.Snapshot(), CategoryGitHub, policy)
@@ -56,13 +58,13 @@ func (manager *Manager) GenerateGitHub(ctx context.Context, original string, pol
 	for _, record := range records {
 		replacement := record.Source.URL + "/" + strings.TrimPrefix(original, "https://")
 		if _, err := CanonicalHTTPSURL(replacement); err != nil {
-			return GitHubGeneration{}, ErrInvalidSource
+			return GitHubGeneration{}, flow.fail(ErrInvalidSource, false)
 		}
 		result.Replacements = append(result.Replacements, GitHubReplacement{SourceID: record.Source.ID, URL: replacement})
 		lines = append(lines, replacement)
 	}
 	result.Text = strings.Join(lines, "\n")
-	return result, nil
+	return result, flow.finish(true)
 }
 
 func eligibleRecords(records []SourceRecord, category Category, policy GenerationPolicy) []SourceRecord {

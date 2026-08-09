@@ -56,6 +56,9 @@ func (policy ProbePolicy) validate() error {
 // these budgets at the broker boundary.
 type ProbeRequest struct {
 	SourceID         string
+	SourceRevision   uint64
+	Category         Category
+	Enabled          bool
 	URL              string
 	Method           ProbeMethod
 	MaxRedirects     int
@@ -66,20 +69,25 @@ type ProbeRequest struct {
 func (request ProbeRequest) Digest() string {
 	wire, _ := json.Marshal(struct {
 		SourceID         string      `json:"source_id"`
+		SourceRevision   uint64      `json:"source_revision"`
+		Category         Category    `json:"category"`
+		Enabled          bool        `json:"enabled"`
 		URL              string      `json:"url"`
 		Method           ProbeMethod `json:"method"`
 		MaxRedirects     int         `json:"max_redirects"`
 		MaxResponseBytes int64       `json:"max_response_bytes"`
 		TimeoutNanos     int64       `json:"timeout_nanos"`
-	}{request.SourceID, request.URL, request.Method, request.MaxRedirects, request.MaxResponseBytes, int64(request.Timeout)})
+	}{request.SourceID, request.SourceRevision, request.Category, request.Enabled, request.URL, request.Method, request.MaxRedirects, request.MaxResponseBytes, int64(request.Timeout)})
 	digest := sha256.Sum256(wire)
 	return hex.EncodeToString(digest[:])
 }
 
 type ProbeHop struct {
-	URL       string
-	Resolved  []netip.Addr
-	Connected netip.Addr
+	URL        string
+	Resolved   []netip.Addr
+	Connected  netip.Addr
+	StatusCode int
+	RedirectTo string
 }
 
 // ProbeObservation must be host-attested and complete. Connected is the
@@ -204,7 +212,7 @@ func publicProbeAddress(address netip.Addr) bool {
 }
 
 func ValidateProbeObservation(request ProbeRequest, observation ProbeObservation) error {
-	if observation.RequestDigest != request.Digest() || !observation.Attested || !observation.Complete || observation.Method != request.Method || observation.RequestedURL != request.URL || len(observation.Hops) == 0 || len(observation.Hops) > request.MaxRedirects+1 || len(observation.Hops) > MaxProbeHops || observation.ResponseBytes < 0 || observation.ResponseBytes > request.MaxResponseBytes || observation.Latency < 0 || observation.Latency > request.Timeout || observation.StatusCode < 200 || observation.StatusCode >= 400 {
+	if observation.RequestDigest != request.Digest() || !observation.Attested || !observation.Complete || observation.Method != request.Method || observation.RequestedURL != request.URL || len(observation.Hops) == 0 || len(observation.Hops) > request.MaxRedirects+1 || len(observation.Hops) > MaxProbeHops || observation.ResponseBytes < 0 || observation.ResponseBytes > request.MaxResponseBytes || observation.Latency < 0 || observation.Latency > request.Timeout || observation.StatusCode < 100 || observation.StatusCode > 599 {
 		return ErrProbeRejected
 	}
 	requested, err := CanonicalHTTPSURL(observation.RequestedURL)
@@ -223,6 +231,14 @@ func ValidateProbeObservation(request ProbeRequest, observation ProbeObservation
 			return ErrProbeRejected
 		}
 		if index == 0 && hop.URL != request.URL {
+			return ErrProbeRejected
+		}
+		last := index == len(observation.Hops)-1
+		if last {
+			if hop.StatusCode != observation.StatusCode || hop.RedirectTo != "" {
+				return ErrProbeRejected
+			}
+		} else if !redirectStatus(hop.StatusCode) || hop.RedirectTo != observation.Hops[index+1].URL {
 			return ErrProbeRejected
 		}
 		if _, duplicate := seenURLs[hop.URL]; duplicate {
@@ -262,9 +278,33 @@ func ValidateProbeObservation(request ProbeRequest, observation ProbeObservation
 	return nil
 }
 
+func redirectStatus(status int) bool {
+	return status == 301 || status == 302 || status == 303 || status == 307 || status == 308
+}
+
+// ClassifyProbeObservation separates a trusted transport attestation from the
+// remote HTTP outcome. Only a final 2xx response is available. A final 3xx
+// means the redirect budget ended without another attested hop; 4xx/5xx are
+// ordinary remote failures, not evidence that the host attestation was forged.
+func ClassifyProbeObservation(request ProbeRequest, observation ProbeObservation) (SourceStatus, error) {
+	if err := ValidateProbeObservation(request, observation); err != nil {
+		return SourceStatus{Availability: AvailabilityUnavailable, Failure: ProbeFailureUntrusted}, ErrProbeRejected
+	}
+	if observation.StatusCode < 200 || observation.StatusCode >= 300 {
+		return SourceStatus{Availability: AvailabilityUnavailable, Failure: ProbeFailureHTTPStatus}, ErrProbeFailed
+	}
+	return SourceStatus{Availability: AvailabilityAvailable, LatencyNanos: int64(observation.Latency), Failure: ProbeFailureNone}, nil
+}
+
 type probeResult struct {
 	observation ProbeObservation
 	err         error
+}
+
+type probeCallEpoch struct {
+	id     uint64
+	parent context.Context
+	live   atomic.Bool
 }
 
 // ProbeEnabled schedules an isolated, bounded pass. A non-cooperative broker
@@ -272,25 +312,35 @@ type probeResult struct {
 // new pass until those calls return, preventing unbounded goroutine growth.
 func (manager *Manager) ProbeEnabled(ctx context.Context, probe NetworkProbe, policy ProbePolicy) map[string]error {
 	results := make(map[string]error)
+	if ctx.Err() != nil {
+		auditCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		results[""] = manager.failedAttempt(auditCtx, "probe-schedule", "", ErrProbeCanceled)
+		cancel()
+		return results
+	}
 	if probe == nil {
-		results[""] = manager.denied(ctx, "probe-schedule", "", ErrTypedHandlesUnavailable)
+		results[""] = manager.failedAttempt(ctx, "probe-schedule", "", ErrTypedHandlesUnavailable)
 		return results
 	}
 	if err := policy.validate(); err != nil {
-		results[""] = manager.denied(ctx, "probe-schedule", "", err)
+		results[""] = manager.failedAttempt(ctx, "probe-schedule", "", err)
 		return results
 	}
 	manager.probeMu.Lock()
 	if manager.probeActive {
 		manager.probeMu.Unlock()
-		results[""] = manager.denied(ctx, "probe-schedule", "", ErrSchedulerBusy)
+		results[""] = manager.failedAttempt(ctx, "probe-schedule", "", ErrSchedulerBusy)
 		return results
 	}
 	manager.probeActive = true
+	manager.probeEpoch++
+	epoch := &probeCallEpoch{id: manager.probeEpoch, parent: ctx}
+	epoch.live.Store(true)
+	manager.activeProbe = epoch
 	manager.probeMu.Unlock()
 
 	records := manager.Snapshot()
-	jobs := make(chan Source)
+	jobs := make(chan SourceRecord)
 	var workers sync.WaitGroup
 	var brokerCalls sync.WaitGroup
 	var activeBrokerCalls atomic.Int32
@@ -303,20 +353,23 @@ func (manager *Manager) ProbeEnabled(ctx context.Context, probe NetworkProbe, po
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for source := range jobs {
+			for expected := range jobs {
 				preflightCtx, preflightCancel := context.WithTimeout(context.Background(), time.Second)
-				preflightErr := manager.auditAttempt(preflightCtx, "probe", "authorized", source.ID)
-				if preflightErr == nil && manager.ui == nil {
-					preflightErr = ErrDynamicUIRequired
-				}
+				flow, preflightErr := manager.startOperation(preflightCtx, "probe", expected.Source.ID, &DynamicEvent{Kind: "action", Action: "probe-start", SourceID: expected.Source.ID})
 				preflightCancel()
 				if preflightErr != nil {
 					resultsMu.Lock()
-					results[source.ID] = preflightErr
+					results[expected.Source.ID] = preflightErr
 					resultsMu.Unlock()
 					continue
 				}
-				request := ProbeRequest{SourceID: source.ID, URL: source.URL, Method: policy.Method, MaxRedirects: policy.MaxRedirects, MaxResponseBytes: policy.MaxResponseBytes, Timeout: policy.Timeout}
+				if ctx.Err() != nil || !epoch.live.Load() {
+					resultsMu.Lock()
+					results[expected.Source.ID] = flow.fail(ErrProbeCanceled, false)
+					resultsMu.Unlock()
+					continue
+				}
+				request := ProbeRequest{SourceID: expected.Source.ID, SourceRevision: expected.Revision, Category: expected.Source.Category, Enabled: expected.Source.Enabled, URL: expected.Source.URL, Method: policy.Method, MaxRedirects: policy.MaxRedirects, MaxResponseBytes: policy.MaxResponseBytes, Timeout: policy.Timeout}
 				callCtx, cancel := context.WithTimeout(ctx, policy.Timeout)
 				resultChannel := make(chan probeResult, 1)
 				brokerCalls.Add(1)
@@ -339,37 +392,45 @@ func (manager *Manager) ProbeEnabled(ctx context.Context, probe NetworkProbe, po
 				if result.err != nil && errorsIsTimeout(result.err) {
 					status.Failure = ProbeFailureTimeout
 				} else if result.err == nil {
-					if err := ValidateProbeObservation(request, result.observation); err != nil {
-						status.Failure = ProbeFailureUntrusted
-						returned = ErrProbeRejected
-					} else {
-						status.Availability = AvailabilityAvailable
-						status.LatencyNanos = int64(result.observation.Latency)
-						status.Failure = ProbeFailureNone
-						returned = nil
+					status, returned = ClassifyProbeObservation(request, result.observation)
+				}
+				if ctx.Err() != nil || !epoch.live.Load() {
+					returned = ErrProbeCanceled
+				} else {
+					statusCtx, statusCancel := context.WithTimeout(context.Background(), time.Second)
+					if err := manager.updateStatus(statusCtx, expected, epoch, status); err != nil {
+						returned = err
 					}
+					statusCancel()
 				}
-				statusCtx, statusCancel := context.WithTimeout(context.Background(), time.Second)
-				if err := manager.updateStatus(statusCtx, source.ID, status); err != nil {
-					returned = err
+				if returned != nil {
+					returned = flow.fail(returned, true)
+				} else if terminalErr := flow.finish(true); terminalErr != nil {
+					returned = terminalErr
 				}
-				statusCancel()
 				resultsMu.Lock()
-				results[source.ID] = returned
+				results[expected.Source.ID] = returned
 				resultsMu.Unlock()
 			}
 		}()
 	}
 	for _, record := range records {
 		if record.Source.Enabled {
-			jobs <- record.Source
+			jobs <- record
 		}
 	}
 	close(jobs)
 	workers.Wait()
+	// Status commits are complete when workers leave. Lingering broker callbacks
+	// keep admission closed but lose all commit authority immediately.
+	epoch.live.Store(false)
 	clearActive := func() {
 		manager.probeMu.Lock()
-		manager.probeActive = false
+		if manager.activeProbe == epoch {
+			epoch.live.Store(false)
+			manager.probeActive = false
+			manager.activeProbe = nil
+		}
 		manager.probeMu.Unlock()
 	}
 	if activeBrokerCalls.Load() == 0 {

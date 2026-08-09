@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 const (
@@ -31,6 +32,10 @@ var (
 	ErrSchedulerBusy           = errors.New("accelerator probe scheduler is still draining")
 	ErrProbeRejected           = errors.New("attested probe observation was rejected")
 	ErrProbeFailed             = errors.New("accelerator probe failed")
+	ErrProbeCanceled           = errors.New("accelerator probe call was canceled")
+	ErrSourceChanged           = errors.New("accelerator source changed during the operation")
+	ErrTerminalAuditPending    = errors.New("operation completed with terminal audit pending")
+	ErrAdapterOperationFailed  = errors.New("accelerator handle operation failed")
 )
 
 type Category string
@@ -96,12 +101,14 @@ type SourceStatus struct {
 }
 
 type SourceRecord struct {
-	Source Source       `json:"source"`
-	Status SourceStatus `json:"status"`
+	Source   Source       `json:"source"`
+	Status   SourceStatus `json:"status"`
+	Revision uint64       `json:"revision"`
 }
 
 type AuditRecord struct {
 	Action, Outcome, SourceID string
+	Operation                 uint64
 }
 
 type Auditor interface {
@@ -130,74 +137,191 @@ func (function DynamicUIFunc) Emit(ctx context.Context, event DynamicEvent) erro
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	sources map[string]SourceRecord
-	seq     uint64
-	auditor Auditor
-	ui      DynamicUI
+	mu       sync.RWMutex
+	sources  map[string]SourceRecord
+	seq      uint64
+	revision uint64
+	auditor  Auditor
+	ui       DynamicUI
 
 	probeMu     sync.Mutex
 	probeActive bool
+	probeEpoch  uint64
+	activeProbe *probeCallEpoch
+
+	auditMu       sync.Mutex
+	flushMu       sync.Mutex
+	operation     uint64
+	pendingAudits []AuditRecord
 }
 
 func NewManager(auditor Auditor, ui DynamicUI) *Manager {
 	return &Manager{sources: make(map[string]SourceRecord), auditor: auditor, ui: ui}
 }
 
+type operationFlow struct {
+	manager   *Manager
+	action    string
+	sourceID  string
+	operation uint64
+}
+
+func (manager *Manager) startOperation(ctx context.Context, action, sourceID string, event *DynamicEvent) (*operationFlow, error) {
+	manager.auditMu.Lock()
+	manager.operation++
+	flow := &operationFlow{manager: manager, action: action, sourceID: sourceID, operation: manager.operation}
+	manager.auditMu.Unlock()
+	if err := manager.writeAudit(ctx, flow.record("started")); err != nil {
+		return nil, err
+	}
+	if event != nil {
+		if manager.ui == nil {
+			return nil, flow.fail(ErrDynamicUIRequired, false)
+		}
+		if err := manager.ui.Emit(ctx, *event); err != nil {
+			return nil, flow.fail(ErrDynamicUIUnavailable, false)
+		}
+	}
+	return flow, nil
+}
+
+func (flow *operationFlow) record(outcome string) AuditRecord {
+	return AuditRecord{Action: flow.action, Outcome: outcome, SourceID: flow.sourceID, Operation: flow.operation}
+}
+
+func (flow *operationFlow) finish(completed bool) error {
+	return flow.terminal("succeeded", completed)
+}
+
+func (flow *operationFlow) fail(result error, completed bool) error {
+	if err := flow.terminal("failed", completed); err != nil {
+		return err
+	}
+	return result
+}
+
+func (flow *operationFlow) terminal(outcome string, completed bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err := flow.manager.writeAudit(ctx, flow.record(outcome))
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if !completed {
+		return err
+	}
+	flow.manager.auditMu.Lock()
+	flow.manager.pendingAudits = append(flow.manager.pendingAudits, flow.record(outcome))
+	flow.manager.auditMu.Unlock()
+	return ErrTerminalAuditPending
+}
+
+func (manager *Manager) writeAudit(ctx context.Context, record AuditRecord) error {
+	if manager.auditor == nil {
+		return ErrAuditRequired
+	}
+	if err := manager.auditor.Audit(ctx, record); err != nil {
+		return ErrAuditUnavailable
+	}
+	return nil
+}
+
+func (manager *Manager) failedAttempt(ctx context.Context, action, sourceID string, result error) error {
+	flow, err := manager.startOperation(ctx, action, sourceID, nil)
+	if err != nil {
+		return err
+	}
+	return flow.fail(result, false)
+}
+
+func (manager *Manager) PendingTerminalAudits() int {
+	manager.auditMu.Lock()
+	defer manager.auditMu.Unlock()
+	return len(manager.pendingAudits)
+}
+
+func (manager *Manager) FlushTerminalAudits(ctx context.Context) error {
+	manager.flushMu.Lock()
+	defer manager.flushMu.Unlock()
+	manager.auditMu.Lock()
+	pending := append([]AuditRecord(nil), manager.pendingAudits...)
+	manager.auditMu.Unlock()
+	for _, record := range pending {
+		if err := manager.writeAudit(ctx, record); err != nil {
+			return err
+		}
+		manager.auditMu.Lock()
+		for index, pendingRecord := range manager.pendingAudits {
+			if pendingRecord == record {
+				manager.pendingAudits = append(manager.pendingAudits[:index], manager.pendingAudits[index+1:]...)
+				break
+			}
+		}
+		manager.auditMu.Unlock()
+	}
+	return nil
+}
+
 func (manager *Manager) Create(ctx context.Context, source Source) error {
 	if err := source.Validate(); err != nil {
-		return manager.denied(ctx, "create", source.ID, err)
+		return manager.failedAttempt(ctx, "create", source.ID, err)
 	}
 	manager.mu.RLock()
 	_, exists := manager.sources[source.ID]
 	count := len(manager.sources)
 	manager.mu.RUnlock()
 	if exists {
-		return manager.denied(ctx, "create", source.ID, ErrSourceExists)
+		return manager.failedAttempt(ctx, "create", source.ID, ErrSourceExists)
 	}
 	if count >= MaxSources {
-		return manager.denied(ctx, "create", source.ID, ErrBoundExceeded)
+		return manager.failedAttempt(ctx, "create", source.ID, ErrBoundExceeded)
 	}
-	if err := manager.beforeEffect(ctx, "create", source.ID, DynamicEvent{Kind: "collection", Action: "create", SourceID: source.ID}); err != nil {
+	flow, err := manager.startOperation(ctx, "create", source.ID, &DynamicEvent{Kind: "collection", Action: "create", SourceID: source.ID})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if _, exists := manager.sources[source.ID]; exists {
-		return ErrSourceExists
+		manager.mu.Unlock()
+		return flow.fail(ErrSourceExists, false)
 	}
 	if len(manager.sources) >= MaxSources {
-		return ErrBoundExceeded
+		manager.mu.Unlock()
+		return flow.fail(ErrBoundExceeded, false)
 	}
-	manager.sources[source.ID] = SourceRecord{Source: source, Status: SourceStatus{Availability: AvailabilityUnknown}}
-	return nil
+	manager.sources[source.ID] = SourceRecord{Source: source, Status: SourceStatus{Availability: AvailabilityUnknown}, Revision: manager.nextRevisionLocked()}
+	manager.mu.Unlock()
+	return flow.finish(true)
 }
 
 func (manager *Manager) Update(ctx context.Context, source Source) error {
 	if err := source.Validate(); err != nil {
-		return manager.denied(ctx, "update", source.ID, err)
+		return manager.failedAttempt(ctx, "update", source.ID, err)
 	}
 	manager.mu.RLock()
 	current, exists := manager.sources[source.ID]
 	manager.mu.RUnlock()
 	if !exists {
-		return manager.denied(ctx, "update", source.ID, ErrSourceNotFound)
+		return manager.failedAttempt(ctx, "update", source.ID, ErrSourceNotFound)
 	}
-	if err := manager.beforeEffect(ctx, "update", source.ID, DynamicEvent{Kind: "collection", Action: "update", SourceID: source.ID}); err != nil {
+	flow, err := manager.startOperation(ctx, "update", source.ID, &DynamicEvent{Kind: "collection", Action: "update", SourceID: source.ID})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	current, exists = manager.sources[source.ID]
 	if !exists {
-		return ErrSourceNotFound
+		manager.mu.Unlock()
+		return flow.fail(ErrSourceNotFound, false)
 	}
 	if current.Source.URL != source.URL || current.Source.Category != source.Category {
 		current.Status = SourceStatus{Availability: AvailabilityUnknown}
 	}
 	current.Source = source
+	current.Revision = manager.nextRevisionLocked()
 	manager.sources[source.ID] = current
-	return nil
+	manager.mu.Unlock()
+	return flow.finish(true)
 }
 
 func (manager *Manager) Delete(ctx context.Context, sourceID string) error {
@@ -205,80 +329,99 @@ func (manager *Manager) Delete(ctx context.Context, sourceID string) error {
 	_, exists := manager.sources[sourceID]
 	manager.mu.RUnlock()
 	if !exists {
-		return manager.denied(ctx, "delete", sourceID, ErrSourceNotFound)
+		return manager.failedAttempt(ctx, "delete", sourceID, ErrSourceNotFound)
 	}
-	if err := manager.beforeEffect(ctx, "delete", sourceID, DynamicEvent{Kind: "collection", Action: "delete", SourceID: sourceID}); err != nil {
+	flow, err := manager.startOperation(ctx, "delete", sourceID, &DynamicEvent{Kind: "collection", Action: "delete", SourceID: sourceID})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if _, exists := manager.sources[sourceID]; !exists {
-		return ErrSourceNotFound
+		manager.mu.Unlock()
+		return flow.fail(ErrSourceNotFound, false)
 	}
+	manager.nextRevisionLocked()
 	delete(manager.sources, sourceID)
-	return nil
+	manager.mu.Unlock()
+	return flow.finish(true)
 }
 
 func (manager *Manager) SetEnabled(ctx context.Context, sourceID string, enabled bool) error {
-	manager.mu.RLock()
-	current, exists := manager.sources[sourceID]
-	manager.mu.RUnlock()
-	if !exists {
-		return manager.denied(ctx, "enable", sourceID, ErrSourceNotFound)
-	}
 	action := "disable"
 	if enabled {
 		action = "enable"
 	}
-	if err := manager.beforeEffect(ctx, action, sourceID, DynamicEvent{Kind: "action", Action: action, SourceID: sourceID}); err != nil {
+	manager.mu.RLock()
+	current, exists := manager.sources[sourceID]
+	manager.mu.RUnlock()
+	if !exists {
+		return manager.failedAttempt(ctx, action, sourceID, ErrSourceNotFound)
+	}
+	flow, err := manager.startOperation(ctx, action, sourceID, &DynamicEvent{Kind: "action", Action: action, SourceID: sourceID})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	current, exists = manager.sources[sourceID]
 	if !exists {
-		return ErrSourceNotFound
+		manager.mu.Unlock()
+		return flow.fail(ErrSourceNotFound, false)
 	}
 	current.Source.Enabled = enabled
+	current.Revision = manager.nextRevisionLocked()
 	manager.sources[sourceID] = current
-	return nil
+	manager.mu.Unlock()
+	return flow.finish(true)
 }
 
 // ReplaceFromV1 atomically migrates the plugin-owned configuration. Invalid or
 // oversized input leaves the prior snapshot untouched.
 func (manager *Manager) ReplaceFromV1(ctx context.Context, sources []Source) error {
 	if len(sources) > MaxSources {
-		return manager.denied(ctx, "migrate", "", ErrBoundExceeded)
+		return manager.failedAttempt(ctx, "migrate", "", ErrBoundExceeded)
 	}
-	next := make(map[string]SourceRecord, len(sources))
-	for _, source := range sources {
+	nextSources := append([]Source(nil), sources...)
+	sort.Slice(nextSources, func(i, j int) bool { return nextSources[i].ID < nextSources[j].ID })
+	next := make(map[string]SourceRecord, len(nextSources))
+	for _, source := range nextSources {
 		if err := source.Validate(); err != nil {
-			return manager.denied(ctx, "migrate", source.ID, err)
+			return manager.failedAttempt(ctx, "migrate", source.ID, err)
 		}
 		if _, duplicate := next[source.ID]; duplicate {
-			return manager.denied(ctx, "migrate", source.ID, ErrSourceExists)
+			return manager.failedAttempt(ctx, "migrate", source.ID, ErrSourceExists)
 		}
 		next[source.ID] = SourceRecord{Source: source, Status: SourceStatus{Availability: AvailabilityUnknown}}
 	}
-	if err := manager.beforeEffect(ctx, "migrate", "", DynamicEvent{Kind: "collection", Action: "replace"}); err != nil {
+	flow, err := manager.startOperation(ctx, "migrate", "", &DynamicEvent{Kind: "collection", Action: "replace"})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
+	for _, source := range nextSources {
+		record := next[source.ID]
+		record.Revision = manager.nextRevisionLocked()
+		next[source.ID] = record
+	}
 	manager.sources = next
-	manager.seq = 0
 	manager.mu.Unlock()
-	return nil
+	return flow.finish(true)
 }
 
 func (manager *Manager) Cleanup(ctx context.Context) error {
-	if err := manager.beforeEffect(ctx, "cleanup", "", DynamicEvent{Kind: "collection", Action: "cleanup"}); err != nil {
+	flow, err := manager.startOperation(ctx, "cleanup", "", &DynamicEvent{Kind: "collection", Action: "cleanup"})
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
+	manager.nextRevisionLocked()
 	manager.sources = make(map[string]SourceRecord)
-	manager.seq = 0
 	manager.mu.Unlock()
-	return nil
+	return flow.finish(true)
+}
+
+func (manager *Manager) nextRevisionLocked() uint64 {
+	manager.revision++
+	return manager.revision
 }
 
 func (manager *Manager) Snapshot() []SourceRecord {
@@ -292,59 +435,28 @@ func (manager *Manager) Snapshot() []SourceRecord {
 	return result
 }
 
-func (manager *Manager) beforeEffect(ctx context.Context, action, sourceID string, event DynamicEvent) error {
-	if err := manager.auditAttempt(ctx, action, "authorized", sourceID); err != nil {
-		return err
-	}
-	if manager.ui == nil {
-		return ErrDynamicUIRequired
-	}
-	if err := manager.ui.Emit(ctx, event); err != nil {
-		return ErrDynamicUIUnavailable
-	}
-	return nil
-}
-
-func (manager *Manager) denied(ctx context.Context, action, sourceID string, result error) error {
-	if err := manager.auditAttempt(ctx, action, "denied", sourceID); err != nil {
-		return err
-	}
-	return result
-}
-
-func (manager *Manager) auditAttempt(ctx context.Context, action, outcome, sourceID string) error {
-	if manager.auditor == nil {
-		return ErrAuditRequired
-	}
-	if err := manager.auditor.Audit(ctx, AuditRecord{Action: action, Outcome: outcome, SourceID: sourceID}); err != nil {
-		return ErrAuditUnavailable
-	}
-	return nil
-}
-
-func (manager *Manager) updateStatus(ctx context.Context, sourceID string, status SourceStatus) error {
-	manager.mu.RLock()
-	_, exists := manager.sources[sourceID]
-	manager.mu.RUnlock()
-	if !exists {
-		return ErrSourceNotFound
-	}
-	if manager.ui == nil {
-		return ErrDynamicUIRequired
-	}
-	if err := manager.ui.Emit(ctx, DynamicEvent{Kind: "status", Action: "probe", SourceID: sourceID, Status: status}); err != nil {
-		return ErrDynamicUIUnavailable
-	}
+func (manager *Manager) updateStatus(ctx context.Context, expected SourceRecord, epoch *probeCallEpoch, status SourceStatus) error {
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	record, exists := manager.sources[sourceID]
-	if !exists {
-		return ErrSourceNotFound
+	if epoch == nil || !epoch.live.Load() || epoch.parent.Err() != nil {
+		manager.mu.Unlock()
+		return ErrProbeCanceled
+	}
+	record, exists := manager.sources[expected.Source.ID]
+	if !exists || record.Revision != expected.Revision || record.Source != expected.Source || !record.Source.Enabled {
+		manager.mu.Unlock()
+		return ErrSourceChanged
 	}
 	manager.seq++
 	status.Sequence = manager.seq
 	record.Status = status
-	manager.sources[sourceID] = record
+	manager.sources[expected.Source.ID] = record
+	manager.mu.Unlock()
+	if manager.ui == nil {
+		return ErrDynamicUIRequired
+	}
+	if err := manager.ui.Emit(ctx, DynamicEvent{Kind: "status", Action: "probe", SourceID: expected.Source.ID, Status: status}); err != nil {
+		return ErrDynamicUIUnavailable
+	}
 	return nil
 }
 

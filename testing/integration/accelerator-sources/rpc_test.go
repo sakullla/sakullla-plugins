@@ -44,6 +44,13 @@ func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T)
 	var commits, aborts, schedules, audits atomic.Int32
 	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
+		ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
+			if record.Action != "activate" {
+				t.Fatalf("activation audit=%#v", record)
+			}
+			audits.Add(1)
+			return nil
+		}),
 		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(_ context.Context, request pluginsdk.RPCHandshakeRequest, configuration acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
 			if request.Generation != configuration.Generation {
 				t.Fatal("admission generation drift")
@@ -56,20 +63,14 @@ func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T)
 							return acceleratorsources.ProbeObservation{}, nil
 						}),
 						Scheduler: acceleratorsources.SchedulerFunc(func(_ context.Context, registration acceleratorsources.SchedulerRegistration) error {
-							if registration.Generation != "generation-1" || registration.Interval != time.Minute || registration.MaxConcurrency != 2 {
+							if registration.Generation != "generation-1" || registration.Interval != time.Minute || registration.MaxConcurrency != 2 || registration.OperationKey != "activate:generation-1" {
 								t.Fatalf("scheduler registration=%#v", registration)
 							}
 							schedules.Add(1)
 							return nil
 						}),
-						UI: acceleratorsources.DynamicUIFunc(func(context.Context, acceleratorsources.DynamicEvent) error { return nil }),
-						Auditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
-							if record.Action != "activate" {
-								t.Fatalf("activation audit=%#v", record)
-							}
-							audits.Add(1)
-							return nil
-						}),
+						UI:      acceleratorsources.DynamicUIFunc(func(context.Context, acceleratorsources.DynamicEvent) error { return nil }),
+						Auditor: acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
 					}, nil
 				},
 				AbortFunc: func() { aborts.Add(1) },
@@ -88,7 +89,7 @@ func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T)
 	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
 		t.Fatal(response.Error)
 	}
-	if commits.Load() != 1 || schedules.Load() != 1 || audits.Load() != 1 || len(controller.Sources()) != 2 {
+	if commits.Load() != 1 || schedules.Load() != 1 || audits.Load() != 2 || len(controller.Sources()) != 2 {
 		t.Fatalf("commits=%d schedules=%d audits=%d sources=%v", commits.Load(), schedules.Load(), audits.Load(), controller.Sources())
 	}
 	if response := controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil || aborts.Load() != 1 || len(controller.Sources()) != 0 {
@@ -98,9 +99,14 @@ func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T)
 
 func TestProbeControllerLateAdmissionDeadlineAbortsAndCannotCommit(t *testing.T) {
 	var aborts, lasting atomic.Int32
+	trace := &eventTrace{}
 	started, release := make(chan struct{}), make(chan struct{})
 	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact", ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond,
+		ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
+			trace.add("audit:" + record.Action + ":" + record.Outcome)
+			return nil
+		}),
 		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
 			return acceleratorsources.PreparedAdmissionFuncs{
 				CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
@@ -131,6 +137,7 @@ func TestProbeControllerLateAdmissionDeadlineAbortsAndCannotCommit(t *testing.T)
 	if response.Error == nil || aborts.Load() != 1 || lasting.Load() != 0 || len(controller.Sources()) != 0 {
 		t.Fatalf("deadline response=%#v aborts=%d lasting=%d sources=%v", response, aborts.Load(), lasting.Load(), controller.Sources())
 	}
+	assertTrace(t, trace.snapshot(), []string{"audit:activate:started", "audit:activate:failed"})
 	close(release)
 	time.Sleep(30 * time.Millisecond)
 	if aborts.Load() != 1 || lasting.Load() != 0 || len(controller.Sources()) != 0 {
@@ -169,6 +176,86 @@ func TestProbeEntrypointCanonicalRPCHandshakeAndRuntimeFailClosed(t *testing.T) 
 	}
 	if err := acceleratorsources.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, acceleratorsources.ErrTypedHandlesUnavailable) {
 		t.Fatalf("runtime did not fail closed: %v", err)
+	}
+}
+
+func TestTerminalActivationAuditSequenceSuccessAndFailures(t *testing.T) {
+	for _, test := range []struct {
+		name                                          string
+		admissionFail, scheduleFail, successAuditFail bool
+		wantError                                     bool
+		want                                          []string
+	}{
+		{name: "success", want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded"}},
+		{name: "admission-failure", admissionFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "audit:activate:failed"}},
+		{name: "scheduler-failure", scheduleFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "admission:abort", "audit:activate:failed"}},
+		{name: "terminal-audit-failure-compensates", successAuditFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded", "admission:abort", "audit:activate:failed"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := &eventTrace{}
+			var lasting atomic.Int32
+			controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
+				PackageDigest: "package", ArtifactDigest: "artifact",
+				ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
+					trace.add("audit:" + record.Action + ":" + record.Outcome)
+					if test.successAuditFail && record.Outcome == "succeeded" {
+						return errors.New("raw audit secret")
+					}
+					return nil
+				}),
+				Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
+					trace.add("admission:prepare")
+					if test.admissionFail {
+						return nil, errors.New("raw admission secret")
+					}
+					return acceleratorsources.PreparedAdmissionFuncs{
+						CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
+							lasting.Store(1)
+							return acceleratorsources.RuntimeAdapters{
+								Probe: acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+									return acceleratorsources.ProbeObservation{}, nil
+								}),
+								Scheduler: acceleratorsources.SchedulerFunc(func(context.Context, acceleratorsources.SchedulerRegistration) error {
+									trace.add("scheduler:register")
+									if test.scheduleFail {
+										return errors.New("raw scheduler secret")
+									}
+									return nil
+								}),
+								UI: acceleratorsources.DynamicUIFunc(func(_ context.Context, event acceleratorsources.DynamicEvent) error {
+									trace.add("ui:" + event.Action)
+									return nil
+								}),
+								Auditor: acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
+							}, nil
+						},
+						AbortFunc: func() { lasting.Store(0); trace.add("admission:abort") },
+					}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+				t.Fatal(err)
+			}
+			if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
+				t.Fatal(response.Error)
+			}
+			response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+			if (response.Error != nil) != test.wantError || (response.Error != nil && strings.Contains(response.Error.Error(), "secret")) {
+				t.Fatalf("activation response=%#v", response)
+			}
+			assertTrace(t, trace.snapshot(), test.want)
+			if test.wantError && lasting.Load() != 0 {
+				t.Fatalf("failed activation left lasting effect=%d", lasting.Load())
+			}
+			if !test.wantError {
+				if response := controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+					t.Fatal(response.Error)
+				}
+			}
+		})
 	}
 }
 

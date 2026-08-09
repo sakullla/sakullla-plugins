@@ -59,6 +59,7 @@ type SchedulerRegistration struct {
 	Generation     string
 	Interval       time.Duration
 	MaxConcurrency int
+	OperationKey   string
 }
 
 type Scheduler interface {
@@ -79,6 +80,8 @@ type RuntimeAdapters struct {
 }
 
 type PreparedAdmission interface {
+	// Abort compensates Commit and any idempotent scheduler registration made
+	// with the returned adapters. It must be safe after partial activation.
 	Commit(context.Context) (RuntimeAdapters, error)
 	Abort()
 }
@@ -123,12 +126,53 @@ func (unavailableAdmission) Prepare(context.Context, pluginsdk.RPCHandshakeReque
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	Admission                                                  TypedHandleAdmission
+	ActivationAuditor                                          Auditor
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 }
 
 type controllerEpoch struct {
 	generation string
 	live       atomic.Bool
+}
+
+type activationAuditState struct {
+	auditor  Auditor
+	started  atomic.Bool
+	terminal atomic.Bool
+}
+
+func (state *activationAuditState) write(ctx context.Context, outcome string) error {
+	if state == nil || state.auditor == nil {
+		return ErrAuditRequired
+	}
+	if outcome != "started" && state.terminal.Load() {
+		return nil
+	}
+	if err := state.auditor.Audit(ctx, AuditRecord{Action: "activate", Outcome: outcome}); err != nil {
+		return ErrAuditUnavailable
+	}
+	if outcome == "started" {
+		state.started.Store(true)
+	} else {
+		state.terminal.Store(true)
+	}
+	return nil
+}
+
+// close is the bounded generation-revoke fallback when an activation hook
+// cannot return to its ordinary terminal-audit path.
+func (state *activationAuditState) close() {
+	if state == nil || !state.started.Load() || state.terminal.Load() {
+		return
+	}
+	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	go func() { done <- state.write(ctx, "failed") }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	cancel()
 }
 
 type boundRuntime struct {
@@ -140,14 +184,16 @@ type boundRuntime struct {
 }
 
 type Controller struct {
-	mu            sync.Mutex
-	configuration Configuration
-	request       pluginsdk.RPCHandshakeRequest
-	epoch         *controllerEpoch
-	commit        *rpcplugin.Handle[*controllerEpoch]
-	runtime       *boundRuntime
-	admission     TypedHandleAdmission
-	lifecycle     *rpcplugin.Lifecycle
+	mu               sync.Mutex
+	configuration    Configuration
+	request          pluginsdk.RPCHandshakeRequest
+	epoch            *controllerEpoch
+	commit           *rpcplugin.Handle[*controllerEpoch]
+	runtime          *boundRuntime
+	activationAudit  *rpcplugin.Handle[*activationAuditState]
+	admission        TypedHandleAdmission
+	bootstrapAuditor Auditor
+	lifecycle        *rpcplugin.Lifecycle
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -166,7 +212,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if config.DrainTimeout <= 0 {
 		config.DrainTimeout = time.Second
 	}
-	controller := &Controller{admission: config.Admission}
+	controller := &Controller{admission: config.Admission, bootstrapAuditor: config.ActivationAuditor}
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:   []string{"accelerator-sources.business-model"},
@@ -238,11 +284,21 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			controller.commit = nil
 			controller.epoch = nil
 			controller.runtime = nil
+			controller.activationAudit = nil
 		}
 		controller.mu.Unlock()
 	})
 	if err != nil {
 		return err
+	}
+	var activationAudit *rpcplugin.Handle[*activationAuditState]
+	if controller.bootstrapAuditor != nil {
+		state := &activationAuditState{auditor: controller.bootstrapAuditor}
+		activationAudit, err = rpcplugin.BindHandle(generation, "audit", state, func(state *activationAuditState) { state.close() })
+		if err != nil {
+			handle.Revoke()
+			return err
+		}
 	}
 	return handle.Use(ctx, func(ctx context.Context, value *controllerEpoch) error {
 		if err := ctx.Err(); err != nil || !value.live.Load() {
@@ -256,6 +312,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		controller.commit = handle
 		controller.epoch = epoch
 		controller.runtime = nil
+		controller.activationAudit = activationAudit
 		controller.mu.Unlock()
 		return nil
 	})
@@ -263,9 +320,9 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 
 func (controller *Controller) activate(ctx context.Context, generation *rpcplugin.Generation) error {
 	controller.mu.Lock()
-	request, configuration, commit, epoch := controller.request, cloneConfiguration(controller.configuration), controller.commit, controller.epoch
+	request, configuration, commit, epoch, activationAudit := controller.request, cloneConfiguration(controller.configuration), controller.commit, controller.epoch, controller.activationAudit
 	controller.mu.Unlock()
-	if commit == nil || epoch == nil {
+	if commit == nil || epoch == nil || activationAudit == nil {
 		return rpcplugin.ErrRevoked
 	}
 	return commit.Use(ctx, func(ctx context.Context, value *controllerEpoch) error {
@@ -275,17 +332,29 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			}
 			return rpcplugin.ErrRevoked
 		}
-		prepared, err := controller.admission.Prepare(ctx, request, configuration)
-		if err != nil {
+		if err := controller.writeActivationAudit(ctx, activationAudit, "started"); err != nil {
 			return err
 		}
+		fail := func(result error) error {
+			terminalCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			auditErr := controller.writeActivationAudit(terminalCtx, activationAudit, "failed")
+			cancel()
+			if auditErr != nil {
+				return auditErr
+			}
+			return result
+		}
+		prepared, err := controller.admission.Prepare(ctx, request, configuration)
+		if err != nil {
+			return fail(safeAdapterFailure(err))
+		}
 		if prepared == nil {
-			return ErrTypedHandlesUnavailable
+			return fail(ErrTypedHandlesUnavailable)
 		}
 		transaction, err := rpcplugin.BindHandle(generation, "network-probe", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
 		if err != nil {
 			prepared.Abort()
-			return err
+			return fail(err)
 		}
 		var runtime RuntimeAdapters
 		if err = transaction.Use(ctx, func(ctx context.Context, prepared PreparedAdmission) error {
@@ -294,59 +363,74 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			return commitErr
 		}); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(safeAdapterFailure(err))
 		}
 		if runtime.Probe == nil || runtime.Scheduler == nil || runtime.UI == nil || runtime.Auditor == nil {
 			transaction.Revoke()
-			return ErrTypedHandlesUnavailable
+			return fail(ErrTypedHandlesUnavailable)
 		}
 		bound := &boundRuntime{transaction: transaction}
 		if bound.probe, err = rpcplugin.BindHandle(generation, "network-probe", runtime.Probe, nil); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(err)
 		}
 		if bound.scheduler, err = rpcplugin.BindHandle(generation, "scheduler", runtime.Scheduler, nil); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(err)
 		}
 		if bound.ui, err = rpcplugin.BindHandle(generation, "dynamic-ui", runtime.UI, nil); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(err)
 		}
 		if bound.auditor, err = rpcplugin.BindHandle(generation, "audit", runtime.Auditor, nil); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(err)
 		}
-		if err = bound.auditor.Use(ctx, func(ctx context.Context, auditor Auditor) error {
-			if err := auditor.Audit(ctx, AuditRecord{Action: "activate", Outcome: "authorized"}); err != nil {
-				return ErrAuditUnavailable
+		if err = bound.ui.Use(ctx, func(ctx context.Context, ui DynamicUI) error {
+			if err := ui.Emit(ctx, DynamicEvent{Kind: "action", Action: "activate-start"}); err != nil {
+				return ErrDynamicUIUnavailable
 			}
 			return nil
 		}); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(err)
 		}
 		if err = bound.scheduler.Use(ctx, func(ctx context.Context, scheduler Scheduler) error {
-			return scheduler.Register(ctx, SchedulerRegistration{Generation: generation.ID(), Interval: time.Duration(configuration.ScheduleSeconds) * time.Second, MaxConcurrency: configuration.Probe.Concurrency})
+			return scheduler.Register(ctx, SchedulerRegistration{Generation: generation.ID(), Interval: time.Duration(configuration.ScheduleSeconds) * time.Second, MaxConcurrency: configuration.Probe.Concurrency, OperationKey: "activate:" + generation.ID()})
 		}); err != nil {
 			transaction.Revoke()
-			return err
+			return fail(safeAdapterFailure(err))
 		}
 		if err := ctx.Err(); err != nil || !epoch.live.Load() {
 			transaction.Revoke()
 			if err != nil {
-				return err
+				return fail(err)
 			}
-			return rpcplugin.ErrRevoked
+			return fail(rpcplugin.ErrRevoked)
 		}
 		controller.mu.Lock()
 		if controller.epoch != epoch || !epoch.live.Load() {
 			controller.mu.Unlock()
 			transaction.Revoke()
-			return rpcplugin.ErrRevoked
+			return fail(rpcplugin.ErrRevoked)
 		}
 		controller.runtime = bound
 		controller.mu.Unlock()
+		terminalCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err = controller.writeActivationAudit(terminalCtx, activationAudit, "succeeded")
+		cancel()
+		if err != nil {
+			transaction.Revoke()
+			controller.mu.Lock()
+			if controller.runtime == bound {
+				controller.runtime = nil
+			}
+			controller.mu.Unlock()
+			failedCtx, failedCancel := context.WithTimeout(context.Background(), time.Second)
+			_ = controller.writeActivationAudit(failedCtx, activationAudit, "failed")
+			failedCancel()
+			return err
+		}
 		return nil
 	})
 }
@@ -357,8 +441,43 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.commit = nil
 	controller.epoch = nil
 	controller.runtime = nil
+	controller.activationAudit = nil
 	controller.mu.Unlock()
 	return nil
+}
+
+func (controller *Controller) writeActivationAudit(ctx context.Context, handle *rpcplugin.Handle[*activationAuditState], outcome string) error {
+	if handle == nil {
+		return ErrAuditRequired
+	}
+	return handle.Use(ctx, func(ctx context.Context, state *activationAuditState) error {
+		return state.write(ctx, outcome)
+	})
+}
+
+func safeAdapterFailure(err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, rpcplugin.ErrRevoked):
+		return rpcplugin.ErrRevoked
+	case errors.Is(err, rpcplugin.ErrDraining):
+		return rpcplugin.ErrDraining
+	case errors.Is(err, ErrAuditRequired):
+		return ErrAuditRequired
+	case errors.Is(err, ErrAuditUnavailable):
+		return ErrAuditUnavailable
+	case errors.Is(err, ErrDynamicUIRequired):
+		return ErrDynamicUIRequired
+	case errors.Is(err, ErrDynamicUIUnavailable):
+		return ErrDynamicUIUnavailable
+	case errors.Is(err, ErrTypedHandlesUnavailable):
+		return ErrTypedHandlesUnavailable
+	default:
+		return ErrAdapterOperationFailed
+	}
 }
 
 func cloneConfiguration(configuration Configuration) Configuration {

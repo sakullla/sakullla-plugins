@@ -56,7 +56,7 @@ func TestProbeAttestationSSRFRebindingAndBudgets(t *testing.T) {
 	publicA := netip.MustParseAddr("1.1.1.1")
 	valid := acceleratorsources.ProbeObservation{
 		RequestDigest: request.Digest(), Method: request.Method, RequestedURL: request.URL, FinalURL: request.URL,
-		Hops:       []acceleratorsources.ProbeHop{{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA}},
+		Hops:       []acceleratorsources.ProbeHop{{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA, StatusCode: 204}},
 		StatusCode: 204, Latency: 10 * time.Millisecond, Attested: true, Complete: true,
 	}
 	if err := acceleratorsources.ValidateProbeObservation(request, valid); err != nil {
@@ -82,7 +82,6 @@ func TestProbeAttestationSSRFRebindingAndBudgets(t *testing.T) {
 		"rebound-connected": mutate(func(value *acceleratorsources.ProbeObservation) { value.Hops[0].Connected = publicB }),
 		"oversize":          mutate(func(value *acceleratorsources.ProbeObservation) { value.ResponseBytes = request.MaxResponseBytes + 1 }),
 		"late":              mutate(func(value *acceleratorsources.ProbeObservation) { value.Latency = request.Timeout + 1 }),
-		"status":            mutate(func(value *acceleratorsources.ProbeObservation) { value.StatusCode = 500 }),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := acceleratorsources.ValidateProbeObservation(request, observation); !errors.Is(err, acceleratorsources.ErrProbeRejected) {
@@ -94,8 +93,8 @@ func TestProbeAttestationSSRFRebindingAndBudgets(t *testing.T) {
 	rebound := valid
 	rebound.FinalURL = "https://mirror.example.com/next"
 	rebound.Hops = []acceleratorsources.ProbeHop{
-		{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA},
-		{URL: rebound.FinalURL, Resolved: []netip.Addr{publicB}, Connected: publicB},
+		{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA, StatusCode: 302, RedirectTo: rebound.FinalURL},
+		{URL: rebound.FinalURL, Resolved: []netip.Addr{publicB}, Connected: publicB, StatusCode: 204},
 	}
 	if err := acceleratorsources.ValidateProbeObservation(request, rebound); !errors.Is(err, acceleratorsources.ErrProbeRejected) {
 		t.Fatalf("same-host DNS rebinding accepted: %v", err)
@@ -104,8 +103,8 @@ func TestProbeAttestationSSRFRebindingAndBudgets(t *testing.T) {
 	redirectPrivate := valid
 	redirectPrivate.FinalURL = "https://10.0.0.9"
 	redirectPrivate.Hops = []acceleratorsources.ProbeHop{
-		{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA},
-		{URL: redirectPrivate.FinalURL, Resolved: []netip.Addr{private}, Connected: private},
+		{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA, StatusCode: 302, RedirectTo: redirectPrivate.FinalURL},
+		{URL: redirectPrivate.FinalURL, Resolved: []netip.Addr{private}, Connected: private, StatusCode: 204},
 	}
 	if err := acceleratorsources.ValidateProbeObservation(request, redirectPrivate); !errors.Is(err, acceleratorsources.ErrProbeRejected) {
 		t.Fatalf("private redirect accepted: %v", err)
@@ -162,7 +161,15 @@ func TestProbeTimeoutIsolationAndNoncooperativeBound(t *testing.T) {
 	if next := bounded.ProbeEnabled(context.Background(), noncooperative, policy); !errors.Is(next[""], acceleratorsources.ErrSchedulerBusy) {
 		t.Fatalf("legacy call did not bound next schedule: %v", next)
 	}
+	timeoutStatus := bounded.Snapshot()[0].Status
+	if timeoutStatus.Failure != acceleratorsources.ProbeFailureTimeout {
+		t.Fatalf("noncooperative timeout status=%#v", timeoutStatus)
+	}
 	close(release)
+	time.Sleep(10 * time.Millisecond)
+	if late := bounded.Snapshot()[0].Status; late != timeoutStatus {
+		t.Fatalf("late noncooperative result overwrote timeout: before=%#v after=%#v", timeoutStatus, late)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if next := bounded.ProbeEnabled(context.Background(), acceleratorsources.NetworkProbeFunc(func(_ context.Context, request acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
@@ -303,6 +310,265 @@ func TestProbeAuditFailureDoesNotOverwriteLatestStatus(t *testing.T) {
 	}
 }
 
+func TestRevisionRejectsStaleProbeAfterUpdateRecreateAndDisable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *acceleratorsources.Manager, acceleratorsources.Source)
+	}{
+		{name: "url-update", mutate: func(t *testing.T, manager *acceleratorsources.Manager, source acceleratorsources.Source) {
+			source.URL = "https://changed.example.com"
+			if err := manager.Update(context.Background(), source); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "delete-recreate-same-id", mutate: func(t *testing.T, manager *acceleratorsources.Manager, source acceleratorsources.Source) {
+			if err := manager.Delete(context.Background(), source.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Create(context.Background(), source); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "disable", mutate: func(t *testing.T, manager *acceleratorsources.Manager, source acceleratorsources.Source) {
+			if err := manager.SetEnabled(context.Background(), source.ID, false); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := &eventTrace{}
+			manager := tracedManager(trace)
+			source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://mirror.example.com", Enabled: true}
+			if err := manager.Create(context.Background(), source); err != nil {
+				t.Fatal(err)
+			}
+			initial := manager.Snapshot()[0]
+			entered := make(chan acceleratorsources.ProbeRequest, 1)
+			release := make(chan struct{})
+			done := make(chan map[string]error, 1)
+			go func() {
+				done <- manager.ProbeEnabled(context.Background(), acceleratorsources.NetworkProbeFunc(func(_ context.Context, request acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+					entered <- request
+					<-release
+					return validObservation(request, "1.1.1.1", time.Millisecond), nil
+				}), acceleratorsources.DefaultProbePolicy())
+			}()
+			request := <-entered
+			if request.SourceRevision != initial.Revision || request.URL != initial.Source.URL || request.Category != initial.Source.Category || !request.Enabled {
+				t.Fatalf("request did not bind snapshot: %#v initial=%#v", request, initial)
+			}
+			test.mutate(t, manager, source)
+			current := manager.Snapshot()[0]
+			if current.Revision <= initial.Revision {
+				t.Fatalf("revision did not advance: initial=%d current=%d", initial.Revision, current.Revision)
+			}
+			close(release)
+			if result := <-done; !errors.Is(result[source.ID], acceleratorsources.ErrSourceChanged) {
+				t.Fatalf("stale probe result=%v", result)
+			}
+			current = manager.Snapshot()[0]
+			if current.Status.Availability != acceleratorsources.AvailabilityUnknown || current.Status.Sequence != 0 || trace.count("ui:probe") != 0 {
+				t.Fatalf("stale probe committed status/events: record=%#v trace=%v", current, trace.snapshot())
+			}
+		})
+	}
+}
+
+func TestRevisionRemainsMonotonicAcrossMigrationCleanupAndABA(t *testing.T) {
+	manager := trustedManager()
+	source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://mirror.example.com", Enabled: true}
+	if err := manager.Create(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	first := manager.Snapshot()[0].Revision
+	if err := manager.Delete(context.Background(), source.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Create(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	second := manager.Snapshot()[0].Revision
+	if second <= first {
+		t.Fatalf("delete/recreate reused revision: first=%d second=%d", first, second)
+	}
+	if err := manager.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReplaceFromV1(context.Background(), []acceleratorsources.Source{source}); err != nil {
+		t.Fatal(err)
+	}
+	third := manager.Snapshot()[0].Revision
+	if third <= second {
+		t.Fatalf("cleanup/migration reused revision: second=%d third=%d", second, third)
+	}
+}
+
+func TestCancelEpochPreCanceledAndInFlightNeverCommitsStatus(t *testing.T) {
+	manager := trustedManager()
+	source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://mirror.example.com", Enabled: true}
+	if err := manager.Create(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	preCanceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := manager.ProbeEnabled(preCanceled, acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+		calls.Add(1)
+		return acceleratorsources.ProbeObservation{}, nil
+	}), acceleratorsources.DefaultProbePolicy())
+	if !errors.Is(result[""], acceleratorsources.ErrProbeCanceled) || calls.Load() != 0 || manager.Snapshot()[0].Status.Sequence != 0 {
+		t.Fatalf("pre-cancel result=%v calls=%d status=%#v", result, calls.Load(), manager.Snapshot()[0].Status)
+	}
+
+	callCtx, revoke := context.WithCancel(context.Background())
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan map[string]error, 1)
+	go func() {
+		done <- manager.ProbeEnabled(callCtx, acceleratorsources.NetworkProbeFunc(func(_ context.Context, request acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+			calls.Add(1)
+			close(entered)
+			<-release
+			return validObservation(request, "1.1.1.1", time.Millisecond), nil
+		}), acceleratorsources.DefaultProbePolicy())
+	}()
+	<-entered
+	revoke()
+	result = <-done
+	if !errors.Is(result[source.ID], acceleratorsources.ErrProbeCanceled) || manager.Snapshot()[0].Status.Sequence != 0 {
+		t.Fatalf("revoked result=%v status=%#v", result, manager.Snapshot()[0].Status)
+	}
+	close(release)
+	time.Sleep(10 * time.Millisecond)
+	if manager.Snapshot()[0].Status.Sequence != 0 {
+		t.Fatalf("late result committed after revoke: %#v", manager.Snapshot()[0])
+	}
+}
+
+func TestHTTPStatusClassificationAndCompleteRedirectChain(t *testing.T) {
+	request := acceleratorsources.ProbeRequest{SourceID: "mirror", SourceRevision: 1, Category: acceleratorsources.CategoryDocker, Enabled: true, URL: "https://mirror.example.com", Method: acceleratorsources.ProbeHEAD, MaxRedirects: 2, MaxResponseBytes: 4096, Timeout: time.Second}
+	for _, status := range []int{301, 302, 404, 500} {
+		observation := validObservation(request, "1.1.1.1", time.Millisecond)
+		observation.StatusCode = status
+		observation.Hops[0].StatusCode = status
+		if err := acceleratorsources.ValidateProbeObservation(request, observation); err != nil {
+			t.Fatalf("HTTP %d was treated as untrusted: %v", status, err)
+		}
+		classified, err := acceleratorsources.ClassifyProbeObservation(request, observation)
+		if !errors.Is(err, acceleratorsources.ErrProbeFailed) || classified.Failure != acceleratorsources.ProbeFailureHTTPStatus || classified.Availability != acceleratorsources.AvailabilityUnavailable {
+			t.Fatalf("HTTP %d classification=%#v err=%v", status, classified, err)
+		}
+	}
+
+	target := "https://target.example.com/final"
+	publicA, publicB := netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("8.8.8.8")
+	redirected := acceleratorsources.ProbeObservation{
+		RequestDigest: request.Digest(), Method: request.Method, RequestedURL: request.URL, FinalURL: target,
+		Hops: []acceleratorsources.ProbeHop{
+			{URL: request.URL, Resolved: []netip.Addr{publicA}, Connected: publicA, StatusCode: 302, RedirectTo: target},
+			{URL: target, Resolved: []netip.Addr{publicB}, Connected: publicB, StatusCode: 204},
+		},
+		StatusCode: 204, Latency: 2 * time.Millisecond, Attested: true, Complete: true,
+	}
+	classified, err := acceleratorsources.ClassifyProbeObservation(request, redirected)
+	if err != nil || classified.Availability != acceleratorsources.AvailabilityAvailable {
+		t.Fatalf("complete redirect classification=%#v err=%v", classified, err)
+	}
+	broken := redirected
+	broken.Hops = append([]acceleratorsources.ProbeHop(nil), redirected.Hops...)
+	broken.Hops[0].RedirectTo = "https://other.example.com"
+	classified, err = acceleratorsources.ClassifyProbeObservation(request, broken)
+	if !errors.Is(err, acceleratorsources.ErrProbeRejected) || classified.Failure != acceleratorsources.ProbeFailureUntrusted {
+		t.Fatalf("broken redirect classification=%#v err=%v", classified, err)
+	}
+
+	manager := trustedManager()
+	source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: request.URL, Enabled: true}
+	if err := manager.Create(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	result := manager.ProbeEnabled(context.Background(), acceleratorsources.NetworkProbeFunc(func(_ context.Context, bound acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+		observation := validObservation(bound, "1.1.1.1", time.Millisecond)
+		observation.StatusCode = 404
+		observation.Hops[0].StatusCode = 404
+		return observation, nil
+	}), acceleratorsources.DefaultProbePolicy())
+	status := manager.Snapshot()[0].Status
+	if !errors.Is(result[source.ID], acceleratorsources.ErrProbeFailed) || status.Failure != acceleratorsources.ProbeFailureHTTPStatus || status.Availability != acceleratorsources.AvailabilityUnavailable {
+		t.Fatalf("scheduled HTTP classification result=%v status=%#v", result, status)
+	}
+}
+
+func TestTerminalAuditAndDynamicUISequenceForCRUDGenerateAndProbe(t *testing.T) {
+	trace := &eventTrace{}
+	manager := tracedManager(trace)
+	source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://mirror.example.com", Enabled: true}
+	if err := manager.Create(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	assertTrace(t, trace.snapshot(), []string{"audit:create:started", "ui:create", "audit:create:succeeded"})
+	trace.reset()
+	if _, err := manager.GenerateDocker(context.Background(), acceleratorsources.GenerationPolicy{Sort: acceleratorsources.SortManual}); err != nil {
+		t.Fatal(err)
+	}
+	assertTrace(t, trace.snapshot(), []string{"audit:generate-docker:started", "ui:generate-docker", "audit:generate-docker:succeeded"})
+	trace.reset()
+	result := manager.ProbeEnabled(context.Background(), acceleratorsources.NetworkProbeFunc(func(_ context.Context, request acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+		trace.add("broker:probe")
+		return validObservation(request, "1.1.1.1", time.Millisecond), nil
+	}), acceleratorsources.DefaultProbePolicy())
+	if result[source.ID] != nil {
+		t.Fatal(result)
+	}
+	assertTrace(t, trace.snapshot(), []string{"audit:probe:started", "ui:probe-start", "broker:probe", "ui:probe", "audit:probe:succeeded"})
+	trace.reset()
+	result = manager.ProbeEnabled(context.Background(), acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
+		trace.add("broker:probe-failed")
+		return acceleratorsources.ProbeObservation{}, errors.New("raw secret transport cause")
+	}), acceleratorsources.DefaultProbePolicy())
+	if !errors.Is(result[source.ID], acceleratorsources.ErrProbeFailed) || strings.Contains(result[source.ID].Error(), "secret") {
+		t.Fatalf("probe failure=%v", result)
+	}
+	assertTrace(t, trace.snapshot(), []string{"audit:probe:started", "ui:probe-start", "broker:probe-failed", "ui:probe", "audit:probe:failed"})
+	trace.reset()
+	missing := source
+	missing.ID = "missing"
+	if err := manager.Update(context.Background(), missing); !errors.Is(err, acceleratorsources.ErrSourceNotFound) {
+		t.Fatal(err)
+	}
+	assertTrace(t, trace.snapshot(), []string{"audit:update:started", "audit:update:failed"})
+}
+
+func TestTerminalAuditPendingRecordsCompletedOutcomeWithoutEffectRetry(t *testing.T) {
+	trace := &eventTrace{}
+	var failTerminal atomic.Bool
+	failTerminal.Store(true)
+	manager := acceleratorsources.NewManager(
+		acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
+			trace.add("audit:" + record.Action + ":" + record.Outcome)
+			if record.Outcome == "succeeded" && failTerminal.Load() {
+				return errors.New("raw audit backend secret")
+			}
+			return nil
+		}),
+		acceleratorsources.DynamicUIFunc(func(_ context.Context, event acceleratorsources.DynamicEvent) error {
+			trace.add("ui:" + event.Action)
+			return nil
+		}),
+	)
+	source := acceleratorsources.Source{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://mirror.example.com", Enabled: true}
+	err := manager.Create(context.Background(), source)
+	if !errors.Is(err, acceleratorsources.ErrTerminalAuditPending) || strings.Contains(err.Error(), "secret") || len(manager.Snapshot()) != 1 || manager.PendingTerminalAudits() != 1 {
+		t.Fatalf("terminal pending err=%v snapshot=%v pending=%d", err, manager.Snapshot(), manager.PendingTerminalAudits())
+	}
+	if trace.count("ui:create") != 1 {
+		t.Fatalf("effect/UI repeated before flush: %v", trace.snapshot())
+	}
+	failTerminal.Store(false)
+	if err := manager.FlushTerminalAudits(context.Background()); err != nil || manager.PendingTerminalAudits() != 0 || trace.count("ui:create") != 1 {
+		t.Fatalf("flush err=%v pending=%d trace=%v", err, manager.PendingTerminalAudits(), trace.snapshot())
+	}
+}
+
 func trustedManager() *acceleratorsources.Manager {
 	return acceleratorsources.NewManager(
 		acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
@@ -314,7 +580,7 @@ func validObservation(request acceleratorsources.ProbeRequest, address string, l
 	resolved := netip.MustParseAddr(address)
 	return acceleratorsources.ProbeObservation{
 		RequestDigest: request.Digest(), Method: request.Method, RequestedURL: request.URL, FinalURL: request.URL,
-		Hops:       []acceleratorsources.ProbeHop{{URL: request.URL, Resolved: []netip.Addr{resolved}, Connected: resolved}},
+		Hops:       []acceleratorsources.ProbeHop{{URL: request.URL, Resolved: []netip.Addr{resolved}, Connected: resolved, StatusCode: 204}},
 		StatusCode: 204, Latency: latency, Attested: true, Complete: true,
 	}
 }
@@ -333,4 +599,57 @@ func recordIDs(records []acceleratorsources.SourceRecord) []string {
 		result[index] = record.Source.ID
 	}
 	return result
+}
+
+type eventTrace struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (trace *eventTrace) add(value string) {
+	trace.mu.Lock()
+	trace.entries = append(trace.entries, value)
+	trace.mu.Unlock()
+}
+
+func (trace *eventTrace) snapshot() []string {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	return append([]string(nil), trace.entries...)
+}
+
+func (trace *eventTrace) count(value string) int {
+	count := 0
+	for _, entry := range trace.snapshot() {
+		if entry == value {
+			count++
+		}
+	}
+	return count
+}
+
+func (trace *eventTrace) reset() {
+	trace.mu.Lock()
+	trace.entries = nil
+	trace.mu.Unlock()
+}
+
+func assertTrace(t *testing.T, got, want []string) {
+	t.Helper()
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("event sequence=%v, want=%v", got, want)
+	}
+}
+
+func tracedManager(trace *eventTrace) *acceleratorsources.Manager {
+	return acceleratorsources.NewManager(
+		acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
+			trace.add("audit:" + record.Action + ":" + record.Outcome)
+			return nil
+		}),
+		acceleratorsources.DynamicUIFunc(func(_ context.Context, event acceleratorsources.DynamicEvent) error {
+			trace.add("ui:" + event.Action)
+			return nil
+		}),
+	)
 }
