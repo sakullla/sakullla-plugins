@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apps"],
+  "properties": {
+    "apps": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["id", "image", "rule_ref", "generation"], "properties": {
+      "id": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
+      "image": {"type": "string", "minLength": 1, "maxLength": 512},
+      "rule_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+      "generation": {"type": "string", "minLength": 1, "maxLength": 128},
+      "secrets": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+    }} }
+  }
+}

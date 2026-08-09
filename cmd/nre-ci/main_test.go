@@ -93,6 +93,29 @@ func TestPluginReverseL4PostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
 	}
 }
 
+func TestPluginDockerAppPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
+	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkPluginWithVerifier(context.Background(), []string{"--id", "docker-app", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
+		if !required {
+			t.Fatal("Docker RPC plugin bypassed capability gate")
+		}
+		return sdklock.Verification{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "docker-app"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "docker-app", name)); err != nil || info.IsDir() {
+		t.Fatalf("Docker RPC artifact missing: %v", err)
+	}
+}
+
 func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -101,6 +124,10 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	rpc, err := pluginArtifactSpecFor(repositoryRoot, "reverse-l4")
 	if err != nil || rpc.kind != artifactRPCService || !strings.Contains(rpc.sourcePath, "reverse-l4/cmd/reverse-l4") {
 		t.Fatalf("reverse-l4 artifact spec = %#v err=%v", rpc, err)
+	}
+	docker, err := pluginArtifactSpecFor(repositoryRoot, "docker-app")
+	if err != nil || docker.kind != artifactRPCService || !strings.Contains(docker.sourcePath, "docker-app/cmd/docker-app") {
+		t.Fatalf("docker-app artifact spec = %#v err=%v", docker, err)
 	}
 	wasm, err := pluginArtifactSpecFor(repositoryRoot, "waf")
 	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
@@ -122,7 +149,7 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeRPCManifest(t, root, test.id, test.kind, test.abi, test.entry)
+			writeRPCManifest(t, root, "reverse-l4", test.id, test.kind, test.abi, test.entry)
 			_, err := pluginArtifactSpecFor(root, "reverse-l4")
 			if err == nil || !strings.Contains(err.Error(), test.needle) {
 				t.Fatalf("manifest drift error = %v", err)
@@ -131,9 +158,26 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 	}
 }
 
-func writeRPCManifest(t *testing.T, root, id, kind, abi, entry string) {
+func TestPluginDockerAppManifestDriftFailsClosed(t *testing.T) {
+	for _, test := range []struct{ name, id, kind, abi, entry string }{
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/docker-app"},
+		{name: "kind", id: "docker-app", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/docker-app"},
+		{name: "abi", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/docker-app"},
+		{name: "entry", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeRPCManifest(t, root, "docker-app", test.id, test.kind, test.abi, test.entry)
+			if _, err := pluginArtifactSpecFor(root, "docker-app"); err == nil {
+				t.Fatal("docker-app manifest drift was accepted")
+			}
+		})
+	}
+}
+
+func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string) {
 	t.Helper()
-	directory := filepath.Join(root, "plugins", "reverse-l4")
+	directory := filepath.Join(root, "plugins", pluginID)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -228,7 +228,7 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 	switch pluginID {
 	case "waf", "ip-policy", "rate-limit":
 		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
-	case "reverse-l4":
+	case "reverse-l4", "docker-app":
 		manifestPath := filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml")
 		manifestFile, err := os.Open(manifestPath)
 		if err != nil {
@@ -260,7 +260,7 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 		if manifest.Runtime.Entry != wantEntry {
 			return pluginArtifactSpec{}, fmt.Errorf("plugin %q entry %q is not %q", pluginID, manifest.Runtime.Entry, wantEntry)
 		}
-		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/reverse-l4/cmd/reverse-l4", artifactName: filepath.Base(manifest.Runtime.Entry)}, nil
+		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/" + pluginID + "/cmd/" + pluginID, artifactName: filepath.Base(manifest.Runtime.Entry)}, nil
 	default:
 		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q has no declared artifact source", pluginID)
 	}
