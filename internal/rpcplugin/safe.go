@@ -2,6 +2,8 @@ package rpcplugin
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -57,11 +59,26 @@ func (redactor *Redactor) Text(value string) string {
 }
 
 func (redactor *Redactor) Sanitize(record Record) Record {
+	record.Level = redactor.Text(record.Level)
 	record.Message = redactor.Text(record.Message)
-	record.Fields = cloneFields(record.Fields)
-	for key, value := range record.Fields {
-		record.Fields[key] = redactor.Text(value)
+	keys := make([]string, 0, len(record.Fields))
+	for key := range record.Fields {
+		keys = append(keys, key)
 	}
+	sort.Strings(keys)
+	fields := make(map[string]string, len(keys))
+	for _, key := range keys {
+		safeKey := redactor.Text(key)
+		candidate := safeKey
+		for suffix := 2; ; suffix++ {
+			if _, exists := fields[candidate]; !exists {
+				break
+			}
+			candidate = fmt.Sprintf("%s#%d", safeKey, suffix)
+		}
+		fields[candidate] = redactor.Text(record.Fields[key])
+	}
+	record.Fields = fields
 	return record
 }
 

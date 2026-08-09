@@ -110,6 +110,20 @@ func TestSDKCapabilityEvidenceRejectsSymlinkBlob(t *testing.T) {
 	}
 }
 
+func TestSDKCleanGoProbeIgnoresExternalModuleOverrides(t *testing.T) {
+	t.Setenv("GOENV", filepath.Join(t.TempDir(), "malicious-goenv"))
+	t.Setenv("GOFLAGS", "-modfile="+filepath.Join(t.TempDir(), "malicious.mod"))
+	t.Setenv("GOWORK", filepath.Join(t.TempDir(), "malicious.work"))
+	output, err := run(context.Background(), t.TempDir(), "go", "env", "GOENV", "GOFLAGS", "GOWORK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
+	if len(lines) < 3 || lines[0] != "" || lines[1] != "" || lines[2] != "off" {
+		t.Fatalf("clean Go environment retained external module overrides: %q", output)
+	}
+}
+
 func TestSDKGoModulePathAcceptsCheckoutLineEndings(t *testing.T) {
 	t.Parallel()
 	const want = "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"

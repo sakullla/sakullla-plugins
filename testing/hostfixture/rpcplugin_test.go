@@ -194,7 +194,10 @@ func TestSecretNeverAppearsInStatusLogOrError(t *testing.T) {
 		}); err != nil {
 			return err
 		}
-		generation.Log(ctx, "info", "resolved "+testSecret, map[string]string{"token": testSecret})
+		generation.Log(ctx, "level-"+testSecret, "resolved "+testSecret, map[string]string{
+			"token-" + testSecret: testSecret,
+			"token-[REDACTED]":    "collision-value",
+		})
 		status := generation.Status("ready "+testSecret, map[string]string{"detail": testSecret})
 		if strings.Contains(fmt.Sprint(status), testSecret) {
 			return errors.New("status exposed secret")
@@ -217,6 +220,18 @@ func TestSecretNeverAppearsInStatusLogOrError(t *testing.T) {
 	defer recordsMu.Unlock()
 	if len(records) != 1 || strings.Contains(fmt.Sprint(records[0]), testSecret) {
 		t.Fatalf("unsafe log records: %#v", records)
+	}
+	if len(records[0].Fields) != 2 {
+		t.Fatalf("redacted field-key collision lost data: %#v", records[0].Fields)
+	}
+	if records[0].Level != "level-[REDACTED]" {
+		t.Fatalf("secret-bearing level was not redacted: %q", records[0].Level)
+	}
+	if _, ok := records[0].Fields["token-[REDACTED]"]; !ok {
+		t.Fatalf("redacted field key is missing: %#v", records[0].Fields)
+	}
+	if _, ok := records[0].Fields["token-[REDACTED]#2"]; !ok {
+		t.Fatalf("colliding redacted field key was not preserved: %#v", records[0].Fields)
 	}
 }
 
@@ -305,6 +320,163 @@ func TestGenerationDeadlineRejectsLateNilStop(t *testing.T) {
 	}
 	response := lifecycle.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
 	assertDeadlineAndRevoked(t, response, handle)
+}
+
+func TestGenerationDeadlineBoundsNonCooperativePrepare(t *testing.T) {
+	blocker := newNonCooperativeHook()
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+		var err error
+		handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+		if err != nil {
+			return err
+		}
+		return blocker.Wait()
+	}}
+	lifecycle := newLifecycleWithNonCooperativePhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	assertNonCooperativeHookIsolated(t, lifecycle, blocker, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	}, func() *rpcplugin.Handle[string] { return handle })
+}
+
+func TestGenerationDeadlineBoundsNonCooperativeActivate(t *testing.T) {
+	blocker := newNonCooperativeHook()
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		ActivateFunc: func(context.Context, *rpcplugin.Generation) error { return blocker.Wait() },
+	}
+	lifecycle := newLifecycleWithNonCooperativePhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	assertNonCooperativeHookIsolated(t, lifecycle, blocker, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	}, func() *rpcplugin.Handle[string] { return handle })
+}
+
+func TestGenerationDeadlineBoundsNonCooperativeStop(t *testing.T) {
+	blocker := newNonCooperativeHook()
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		StopFunc: func(context.Context, *rpcplugin.Generation) error { return blocker.Wait() },
+	}
+	lifecycle := newLifecycleWithNonCooperativePhase(t, hooks)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := lifecycle.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	assertNonCooperativeHookIsolated(t, lifecycle, blocker, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	}, func() *rpcplugin.Handle[string] { return handle })
+}
+
+type nonCooperativeHook struct {
+	started chan struct{}
+	release chan struct{}
+	done    chan struct{}
+}
+
+func newNonCooperativeHook() *nonCooperativeHook {
+	return &nonCooperativeHook{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+// Wait deliberately ignores the lifecycle context. release exists only to
+// reap the test goroutine after proving that the lifecycle did not wait for it.
+func (hook *nonCooperativeHook) Wait() error {
+	close(hook.started)
+	<-hook.release
+	close(hook.done)
+	return nil
+}
+
+func assertNonCooperativeHookIsolated(
+	t *testing.T,
+	lifecycle *rpcplugin.Lifecycle,
+	hook *nonCooperativeHook,
+	call func() pluginsdk.LifecycleResponse,
+	handle func() *rpcplugin.Handle[string],
+) {
+	t.Helper()
+	responses := make(chan pluginsdk.LifecycleResponse, 1)
+	go func() { responses <- call() }()
+	select {
+	case <-hook.started:
+	case response := <-responses:
+		t.Fatalf("lifecycle returned before non-cooperative hook started: %#v", response)
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative hook did not start")
+	}
+
+	var response pluginsdk.LifecycleResponse
+	select {
+	case response = <-responses:
+	case <-time.After(time.Second):
+		close(hook.release)
+		t.Fatal("lifecycle did not return at hook deadline")
+	}
+	assertDeadlineAndRevoked(t, response, handle())
+	assertLifecycleStopped(t, lifecycle)
+	retry := call()
+	if retry.Success != nil || retry.Error == nil || retry.Error.Code != pluginsdk.ErrorInvalidArgument {
+		t.Fatalf("terminal lifecycle accepted a retry: %#v", retry)
+	}
+	select {
+	case <-hook.done:
+		t.Fatal("non-cooperative hook unexpectedly returned before test release")
+	default:
+	}
+
+	close(hook.release)
+	select {
+	case <-hook.done:
+	case <-time.After(time.Second):
+		t.Fatal("released late hook did not return")
+	}
+	// The late nil result has no state-commit authority.
+	assertLifecycleStopped(t, lifecycle)
+}
+
+func assertLifecycleStopped(t *testing.T, lifecycle *rpcplugin.Lifecycle) {
+	t.Helper()
+	status := lifecycle.Status("fixture", nil)
+	if phase := status.Fields["phase"]; phase != "stopped" {
+		t.Fatalf("lifecycle phase after deadline = %q, want stopped", phase)
+	}
+}
+
+func newLifecycleWithNonCooperativePhase(t *testing.T, hooks rpcplugin.Hooks) *rpcplugin.Lifecycle {
+	t.Helper()
+	return newLifecycleWithTimeouts(t, hooks, nil, rpcplugin.Timeouts{
+		Prepare:  50 * time.Millisecond,
+		Activate: 50 * time.Millisecond,
+		Stop:     50 * time.Millisecond,
+		Drain:    time.Second,
+	})
 }
 
 func newLifecycleWithShortPhase(t *testing.T, hooks rpcplugin.Hooks) *rpcplugin.Lifecycle {

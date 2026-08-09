@@ -296,10 +296,26 @@ func goModulePath(goMod []byte) string {
 func run(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	command.Env = commandEnvironment(name)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return output, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return output, nil
+}
+
+func commandEnvironment(name string) []string {
+	environment := os.Environ()
+	if strings.ToLower(filepath.Base(name)) != "go" && strings.ToLower(filepath.Base(name)) != "go.exe" {
+		return environment
+	}
+	blocked := map[string]bool{"GOENV": true, "GOFLAGS": true, "GOTOOLCHAIN": true, "GOWORK": true}
+	controlled := make([]string, 0, len(environment)+4)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if !blocked[strings.ToUpper(key)] {
+			controlled = append(controlled, entry)
+		}
+	}
+	return append(controlled, "GOENV=off", "GOFLAGS=", "GOTOOLCHAIN=local", "GOWORK=off")
 }

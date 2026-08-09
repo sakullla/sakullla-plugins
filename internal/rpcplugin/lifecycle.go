@@ -48,6 +48,13 @@ type Config struct {
 
 // Hooks contains plugin-owned lifecycle work. Generation exposes only
 // process-local safety primitives; it is not a replacement Host API.
+//
+// Hooks must honor the supplied context and must not commit externally visible
+// side effects after it expires. Lifecycle isolates its own state commit and
+// revokes the generation at the deadline, but Go cannot forcibly terminate an
+// arbitrary callback. A non-cooperative callback can therefore leave at most
+// one goroutine behind for this terminal Lifecycle instance; the supervised
+// plugin process is the final forced-termination boundary.
 type Hooks interface {
 	Prepare(context.Context, *Generation, []byte) error
 	Activate(context.Context, *Generation) error
@@ -209,10 +216,8 @@ func (l *Lifecycle) Prepare(ctx context.Context, request pluginsdk.LifecycleRequ
 		return l.failure(err)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, l.config.Timeouts.Prepare)
-	err = l.hooks.Prepare(callCtx, generation, append([]byte(nil), request.Config...))
-	if contextErr := callCtx.Err(); contextErr != nil {
-		err = contextErr
-	}
+	config := append([]byte(nil), request.Config...)
+	err = runHook(callCtx, func() error { return l.hooks.Prepare(callCtx, generation, config) })
 	cancel()
 	if err != nil {
 		response := l.failureWithGeneration(generation, err)
@@ -230,10 +235,7 @@ func (l *Lifecycle) Activate(ctx context.Context, request pluginsdk.LifecycleReq
 		return l.failure(err)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, l.config.Timeouts.Activate)
-	err = l.hooks.Activate(callCtx, generation)
-	if contextErr := callCtx.Err(); contextErr != nil {
-		err = contextErr
-	}
+	err = runHook(callCtx, func() error { return l.hooks.Activate(callCtx, generation) })
 	cancel()
 	if err != nil {
 		response := l.failureWithGeneration(generation, err)
@@ -254,10 +256,7 @@ func (l *Lifecycle) Stop(ctx context.Context, request pluginsdk.LifecycleRequest
 	}
 	generation.BeginDrain()
 	stopCtx, cancelStop := context.WithTimeout(ctx, l.config.Timeouts.Stop)
-	hookErr := l.hooks.Stop(stopCtx, generation)
-	if contextErr := stopCtx.Err(); contextErr != nil {
-		hookErr = contextErr
-	}
+	hookErr := runHook(stopCtx, func() error { return l.hooks.Stop(stopCtx, generation) })
 	cancelStop()
 
 	drainCtx, cancelDrain := context.WithTimeout(ctx, l.config.Timeouts.Drain)
@@ -278,6 +277,26 @@ func (l *Lifecycle) Stop(ctx context.Context, request pluginsdk.LifecycleRequest
 		return failure
 	}
 	return lifecycleSuccess()
+}
+
+// runHook separates callback completion from lifecycle state commit. The
+// buffered result lets a late cooperative return finish without blocking even
+// after the lifecycle has selected the deadline. The caller is the only state
+// owner and never consumes a late result.
+func runHook(ctx context.Context, hook func() error) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- hook()
+	}()
+	select {
+	case err := <-result:
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (l *Lifecycle) begin(generation string, from, transitional lifecycleState) (*Generation, error) {
