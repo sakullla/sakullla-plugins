@@ -284,6 +284,9 @@ func (l *Lifecycle) Stop(ctx context.Context, request pluginsdk.LifecycleRequest
 // after the lifecycle has selected the deadline. The caller is the only state
 // owner and never consumes a late result.
 func runHook(ctx context.Context, hook func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	result := make(chan error, 1)
 	go func() {
 		result <- hook()

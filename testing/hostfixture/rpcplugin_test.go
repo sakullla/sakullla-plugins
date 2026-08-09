@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -389,6 +390,104 @@ func TestGenerationDeadlineBoundsNonCooperativeStop(t *testing.T) {
 	assertNonCooperativeHookIsolated(t, lifecycle, blocker, func() pluginsdk.LifecycleResponse {
 		return lifecycle.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
 	}, func() *rpcplugin.Handle[string] { return handle })
+}
+
+func TestGenerationPreCanceledPrepareDoesNotInvokeHook(t *testing.T) {
+	var calls atomic.Int32
+	hooks := rpcplugin.HookFuncs{PrepareFunc: func(context.Context, *rpcplugin.Generation, []byte) error {
+		calls.Add(1)
+		return nil
+	}}
+	lifecycle := newLifecycle(t, hooks, nil)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := lifecycle.Prepare(ctx, pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertPreCanceledHookRejected(t, lifecycle, response, pluginsdk.ErrorUnavailable, calls.Load(), nil, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	})
+}
+
+func TestGenerationPreExpiredActivateDoesNotInvokeHook(t *testing.T) {
+	var calls atomic.Int32
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		ActivateFunc: func(context.Context, *rpcplugin.Generation) error {
+			calls.Add(1)
+			return nil
+		},
+	}
+	lifecycle := newLifecycle(t, hooks, nil)
+	if _, err := lifecycle.Handshake(context.Background(), handshakeRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if response := lifecycle.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	response := lifecycle.Activate(ctx, pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertPreCanceledHookRejected(t, lifecycle, response, pluginsdk.ErrorDeadlineExceeded, calls.Load(), handle, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	})
+}
+
+func TestGenerationPreCanceledStopDoesNotInvokeHook(t *testing.T) {
+	var calls atomic.Int32
+	var handle *rpcplugin.Handle[string]
+	hooks := rpcplugin.HookFuncs{
+		PrepareFunc: func(_ context.Context, generation *rpcplugin.Generation, _ []byte) error {
+			var err error
+			handle, err = rpcplugin.BindHandle(generation, "resource.read", "resource", nil)
+			return err
+		},
+		StopFunc: func(context.Context, *rpcplugin.Generation) error {
+			calls.Add(1)
+			return nil
+		},
+	}
+	lifecycle := readyLifecycle(t, hooks, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := lifecycle.Stop(ctx, pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	assertPreCanceledHookRejected(t, lifecycle, response, pluginsdk.ErrorUnavailable, calls.Load(), handle, func() pluginsdk.LifecycleResponse {
+		return lifecycle.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	})
+}
+
+func assertPreCanceledHookRejected(
+	t *testing.T,
+	lifecycle *rpcplugin.Lifecycle,
+	response pluginsdk.LifecycleResponse,
+	expectedCode pluginsdk.ErrorCode,
+	calls int32,
+	handle *rpcplugin.Handle[string],
+	retry func() pluginsdk.LifecycleResponse,
+) {
+	t.Helper()
+	if calls != 0 {
+		t.Fatalf("pre-canceled lifecycle invoked hook %d time(s)", calls)
+	}
+	if response.Success != nil || response.Error == nil || response.Error.Code != expectedCode {
+		t.Fatalf("pre-canceled lifecycle response = %#v", response)
+	}
+	assertLifecycleStopped(t, lifecycle)
+	if handle != nil {
+		if err := handle.Use(context.Background(), func(context.Context, string) error { return nil }); !errors.Is(err, rpcplugin.ErrRevoked) {
+			t.Fatalf("handle use after pre-canceled lifecycle error = %v", err)
+		}
+	}
+	retryResponse := retry()
+	if retryResponse.Success != nil || retryResponse.Error == nil || retryResponse.Error.Code != pluginsdk.ErrorInvalidArgument {
+		t.Fatalf("terminal lifecycle accepted retry: %#v", retryResponse)
+	}
 }
 
 type nonCooperativeHook struct {
