@@ -1,0 +1,124 @@
+package shadowsocksserver_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	ss "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
+)
+
+type reservation struct{}
+
+func (reservation) Commit(context.Context, uint64) error { return nil }
+func (reservation) Release(context.Context) error        { return nil }
+
+type runtime struct{ listened atomic.Int32 }
+
+func (*runtime) Verify(context.Context, string, string, []byte) error { return nil }
+func (*runtime) Resolve(context.Context, string, string) ([]byte, error) {
+	return []byte("fixture-password"), nil
+}
+func (*runtime) Reserve(context.Context, string, uint64, string) (ss.TrafficReservation, error) {
+	return reservation{}, nil
+}
+func (*runtime) Now(context.Context) (uint64, error)                   { return 1, nil }
+func (*runtime) Admit(context.Context, string, []byte) error           { return nil }
+func (r *runtime) Register(context.Context, string, *ss.Service) error { r.listened.Add(1); return nil }
+func (*runtime) Rotate(context.Context, string, string, string, string) (*ss.SecretOnce, error) {
+	return ss.NewSecretOnce("secret/new", "v2", []byte("one-time")), nil
+}
+func (*runtime) Audit(context.Context, ss.AuditRecord) error { return nil }
+func (r *runtime) adapters() ss.RuntimeAdapters {
+	return ss.RuntimeAdapters{Secrets: r, Traffic: r, Clock: r, Replay: r, Listener: r, Vault: r, Auditor: r}
+}
+
+func config() ss.Configuration {
+	return ss.Configuration{Generation: "generation-1", ListenerRef: "listener/1", Cipher: "aes-256-gcm", MaxSessions: 4, Users: []ss.User{{ID: "alice", SecretRef: "secret/alice", SecretVersion: "v1", Enabled: true, QuotaBytes: 100}}}
+}
+func wire(t *testing.T) []byte {
+	t.Helper()
+	b, err := json.Marshal(config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+func grants() []string {
+	return []string{"audit", "listener", "monotonic-clock", "replay", "secret", "traffic"}
+}
+func handshake(scopes []string) pluginsdk.RPCHandshakeRequest {
+	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: ss.PluginID, PluginVersion: ss.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: scopes, Generation: "generation-1"}
+}
+
+func TestShadowsocksRPCGenerationGrantsAndDefaultFailClosed(t *testing.T) {
+	c, err := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Handshake(context.Background(), handshake(grants()[:5])); err == nil {
+		t.Fatal("missing traffic grant accepted")
+	}
+	c, _ = ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if _, err = c.Handshake(context.Background(), handshake(grants())); err != nil {
+		t.Fatal(err)
+	}
+	if result := c.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire(t)}); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if result := c.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); result.Error == nil {
+		t.Fatal("default typed admission accepted")
+	}
+}
+func TestShadowsocksRPCInjectedTCPUDPDrainAndRevoke(t *testing.T) {
+	r := &runtime{}
+	var aborts atomic.Int32
+	c, err := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: ss.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, ss.Configuration) (ss.PreparedAdmission, error) {
+		return ss.PreparedAdmissionFuncs{CommitFunc: func(context.Context) (ss.RuntimeAdapters, error) { return r.adapters(), nil }, AbortFunc: func() { aborts.Add(1) }}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Handshake(context.Background(), handshake(grants())); err != nil {
+		t.Fatal(err)
+	}
+	if x := c.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire(t)}); x.Error != nil {
+		t.Fatal(x.Error)
+	}
+	if x := c.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); x.Error != nil {
+		t.Fatal(x.Error)
+	}
+	if r.listened.Load() != 1 {
+		t.Fatalf("listener=%d", r.listened.Load())
+	}
+	if x := c.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); x.Error != nil {
+		t.Fatal(x.Error)
+	}
+	if aborts.Load() != 1 {
+		t.Fatalf("aborts=%d", aborts.Load())
+	}
+	if err := c.Use(context.Background(), func(context.Context, *ss.Service) error { return nil }); !errors.Is(err, ss.ErrRevoked) {
+		t.Fatalf("post-stop=%v", err)
+	}
+}
+func TestShadowsocksCanonicalRPCEntrypointAndSecretRedact(t *testing.T) {
+	var output bytes.Buffer
+	if err := ss.RunEntrypoint(context.Background(), []string{ss.CIHandshakeFlag}, &output); err != nil || strings.TrimSpace(output.String()) != pluginsdk.RPCABIV1 {
+		t.Fatalf("output=%q err=%v", output.String(), err)
+	}
+	if err := ss.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, ss.ErrTypedHandlesUnavailable) {
+		t.Fatalf("default=%v", err)
+	}
+	c, _ := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	_, _ = c.Handshake(context.Background(), handshake(grants()))
+	bad := append(wire(t)[:len(wire(t))-1], []byte(`,"password":"raw-secret"}`)...)
+	result := c.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: bad})
+	if result.Error == nil || strings.Contains(result.Error.Error(), "raw-secret") {
+		t.Fatalf("unsafe result=%#v", result)
+	}
+}

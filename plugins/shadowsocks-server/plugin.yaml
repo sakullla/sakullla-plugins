@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "shadowsocks-server",
+  "version": "0.1.0",
+  "name": "Shadowsocks Server",
+  "description": "Brokered TCP and UDP Shadowsocks service with generation-owned credentials and accounting",
+  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
+  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "agent", "entry": "artifacts/shadowsocks-server"},
+  "permissions": ["audit", "listener", "monotonic-clock", "replay", "secret", "traffic"],
+  "config_schema": "config.schema.json",
+  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
+  "cleanup": {"listener": "drain-generation", "secrets": "revoke-generation", "traffic": "flush-bounded"},
+  "metadata": {"capability.typed-shadowsocks-handles": "unavailable", "protocol.engine": "repository-local-go", "protocol.ss2022": "aes-128-gcm,aes-256-gcm", "egress.provider": "false"}
+}

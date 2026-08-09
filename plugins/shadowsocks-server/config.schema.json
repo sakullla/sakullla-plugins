@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generation", "listener_ref", "cipher", "max_sessions", "users"],
+  "properties": {
+    "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "listener_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "cipher": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
+    "max_sessions": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "users": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "secret_ref", "secret_version", "enabled", "expires_at", "quota_bytes"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+          "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+          "secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+          "enabled": {"type": "boolean"},
+          "expires_at": {"type": "integer", "minimum": 0},
+          "quota_bytes": {"type": "integer", "minimum": 1}
+        }
+      }
+    }
+  }
+}

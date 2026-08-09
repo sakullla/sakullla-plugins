@@ -185,6 +185,29 @@ func TestPluginCloudflareDNSPostGateBuildsAndValidatesRPCArtifact(t *testing.T) 
 	}
 }
 
+func TestPluginShadowsocksPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
+	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkPluginWithVerifier(context.Background(), []string{"--id", "shadowsocks-server", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
+		if !required {
+			t.Fatal("Shadowsocks RPC plugin bypassed capability gate")
+		}
+		return sdklock.Verification{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "shadowsocks-server"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "shadowsocks-server", name)); err != nil || info.IsDir() {
+		t.Fatalf("Shadowsocks RPC artifact missing: %v", err)
+	}
+}
+
 func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -209,6 +232,10 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	cloudflareArtifact, err := pluginArtifactSpecFor(repositoryRoot, "cloudflare-dns")
 	if err != nil || cloudflareArtifact.kind != artifactRPCService || !strings.Contains(cloudflareArtifact.sourcePath, "cloudflare-dns/cmd/cloudflare-dns") {
 		t.Fatalf("Cloudflare DNS artifact spec = %#v err=%v", cloudflareArtifact, err)
+	}
+	shadowsocksArtifact, err := pluginArtifactSpecFor(repositoryRoot, "shadowsocks-server")
+	if err != nil || shadowsocksArtifact.kind != artifactRPCService || !strings.Contains(shadowsocksArtifact.sourcePath, "shadowsocks-server/cmd/shadowsocks-server") {
+		t.Fatalf("Shadowsocks artifact spec = %#v err=%v", shadowsocksArtifact, err)
 	}
 	wasm, err := pluginArtifactSpecFor(repositoryRoot, "waf")
 	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
@@ -302,6 +329,23 @@ func TestPluginCloudflareDNSManifestDriftFailsClosed(t *testing.T) {
 			writeRPCManifest(t, root, "cloudflare-dns", test.id, test.kind, test.abi, test.entry)
 			if _, err := pluginArtifactSpecFor(root, "cloudflare-dns"); err == nil {
 				t.Fatal("Cloudflare DNS manifest drift was accepted")
+			}
+		})
+	}
+}
+
+func TestPluginShadowsocksManifestDriftFailsClosed(t *testing.T) {
+	for _, test := range []struct{ name, id, kind, abi, entry string }{
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/shadowsocks-server"},
+		{name: "kind", id: "shadowsocks-server", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/shadowsocks-server"},
+		{name: "abi", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/shadowsocks-server"},
+		{name: "entry", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeRPCManifest(t, root, "shadowsocks-server", test.id, test.kind, test.abi, test.entry)
+			if _, err := pluginArtifactSpecFor(root, "shadowsocks-server"); err == nil {
+				t.Fatal("Shadowsocks manifest drift was accepted")
 			}
 		})
 	}
