@@ -158,15 +158,28 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 	if existed && ((prior.Value.Phase != "" && prior.Value.Phase != PhaseActive) || (prior.Value.Lease != "" && prior.Value.LeaseUntil.After(r.now()))) {
 		return ErrReconcilePending
 	}
-	base := prior.Value
-	base.AppID, base.PriorAbsent = app.ID, !existed
-	base.PriorImage, base.PriorGeneration, base.PriorRuleRef, base.PriorRuleTarget, base.PriorInstance = prior.Value.Image, prior.Value.Generation, prior.Value.RuleRef, prior.Value.RuleTarget, prior.Value.InstanceID
-	base.Image, base.Generation, base.RuleRef = app.Image, app.Generation, app.RuleRef
-	record, err := r.Store.AcquireLease(ctx, app.ID, prior.Version, base, r.now().Add(r.leaseDuration()))
-	if err != nil {
-		return ErrReconcilePending
+	// Acquiring the lease is also the first durable intent. A successful or
+	// outcome-unknown AcquireLease must never leave a record that still looks
+	// active while carrying the new desired metadata. Build this value from
+	// scratch so recovery fields from an earlier rollout cannot leak forward.
+	pulling := Deployment{
+		AppID:             app.ID,
+		InstanceID:        prior.Value.InstanceID,
+		Image:             app.Image,
+		RuleRef:           app.RuleRef,
+		RuleTarget:        prior.Value.RuleTarget,
+		Generation:        app.Generation,
+		Phase:             PhasePulling,
+		PriorImage:        prior.Value.Image,
+		PriorGeneration:   prior.Value.Generation,
+		PriorRuleRef:      prior.Value.RuleRef,
+		PriorRuleTarget:   prior.Value.RuleTarget,
+		PriorInstance:     prior.Value.InstanceID,
+		PriorAbsent:       !existed,
+		DesiredRuleTarget: "", // no candidate exists until Start succeeds
 	}
-	if record, err = r.intent(ctx, record, PhasePulling, "", prior.Value.RuleTarget, ""); err != nil {
+	record, err := r.Store.AcquireLease(ctx, app.ID, prior.Version, pulling, r.now().Add(r.leaseDuration()))
+	if err != nil {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhasePulling)

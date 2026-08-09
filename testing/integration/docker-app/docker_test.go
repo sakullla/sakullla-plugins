@@ -904,6 +904,155 @@ func TestDockerDesiredMetadataSurvivesCrashAndFinalCAS(t *testing.T) {
 	})
 }
 
+func TestDockerPullingIntentAcquireFailureAndUnknownCommit(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	desired := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new", RuleRef: "rule-new"}
+	prior := dockerapp.Deployment{AppID: "media", InstanceID: "old", Image: "image:old", Generation: "generation-old", RuleRef: "rule-old", RuleTarget: "old", Phase: dockerapp.PhaseActive}
+	assertDesiredActive := func(t *testing.T, store *dockerapp.DeploymentStore) {
+		t.Helper()
+		got, ok := store.Get(desired.ID)
+		if !ok || got.Phase != dockerapp.PhaseActive || got.InstanceID != "new" || got.Image != desired.Image || got.Generation != desired.Generation || got.RuleRef != desired.RuleRef || got.RuleTarget != "new" {
+			t.Fatalf("desired deployment not active: %#v, exists=%v", got, ok)
+		}
+	}
+	assertPriorActive := func(t *testing.T, store *dockerapp.DeploymentStore) {
+		t.Helper()
+		got, ok := store.Get(prior.AppID)
+		if !ok || got.Phase != dockerapp.PhaseActive || got.InstanceID != prior.InstanceID || got.Image != prior.Image || got.Generation != prior.Generation || got.RuleRef != prior.RuleRef || got.RuleTarget != prior.RuleTarget {
+			t.Fatalf("prior deployment not restored exactly: %#v, exists=%v", got, ok)
+		}
+		if got.PendingInstance != "" || got.DesiredRuleTarget != "" || got.PriorImage != "" || got.PriorGeneration != "" || got.PriorRuleRef != "" || got.PriorRuleTarget != "" || got.PriorInstance != "" || got.LastFailure != "" || got.Lease != "" || !got.LeaseUntil.IsZero() || got.PriorAbsent {
+			t.Fatalf("restored deployment retained recovery fields: %#v", got)
+		}
+	}
+	assertPulling := func(t *testing.T, got dockerapp.Deployment, firstInstall bool) {
+		t.Helper()
+		if got.Phase != dockerapp.PhasePulling || got.Image != desired.Image || got.Generation != desired.Generation || got.RuleRef != desired.RuleRef || got.PriorAbsent != firstInstall || got.PendingInstance != "" || got.DesiredRuleTarget != "" || got.LastFailure != "" {
+			t.Fatalf("incomplete pulling intent: %#v", got)
+		}
+		if firstInstall {
+			if got.InstanceID != "" || got.RuleTarget != "" || got.PriorImage != "" || got.PriorGeneration != "" || got.PriorRuleRef != "" || got.PriorRuleTarget != "" || got.PriorInstance != "" {
+				t.Fatalf("first-install intent retained prior state: %#v", got)
+			}
+			return
+		}
+		if got.InstanceID != prior.InstanceID || got.RuleTarget != prior.RuleTarget || got.PriorImage != prior.Image || got.PriorGeneration != prior.Generation || got.PriorRuleRef != prior.RuleRef || got.PriorRuleTarget != prior.RuleTarget || got.PriorInstance != prior.InstanceID {
+			t.Fatalf("update intent lost prior state: %#v", got)
+		}
+	}
+
+	t.Run("first-install-failure-before-commit", func(t *testing.T) {
+		base := dockerapp.NewDeploymentStore()
+		store := &faultStore{base: base, failAcquireBefore: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor}
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("acquire failure=%v", err)
+		}
+		if len(host.calls) != 0 {
+			t.Fatalf("host effects before durable intent: %v", host.calls)
+		}
+		if _, ok := base.Get(desired.ID); ok {
+			t.Fatal("failed acquire created a deployment")
+		}
+		if err := rollout.Update(context.Background(), desired); err != nil {
+			t.Fatalf("retry after pre-commit failure: %v", err)
+		}
+		assertDesiredActive(t, base)
+	})
+
+	t.Run("update-failure-before-commit", func(t *testing.T) {
+		base := dockerapp.NewDeploymentStore()
+		base.Put(prior)
+		store := &faultStore{base: base, failAcquireBefore: 1}
+		host := &rolloutFake{}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor}
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("acquire failure=%v", err)
+		}
+		if len(host.calls) != 0 {
+			t.Fatalf("host effects before durable intent: %v", host.calls)
+		}
+		assertPriorActive(t, base)
+		if err := rollout.Update(context.Background(), desired); err != nil {
+			t.Fatalf("retry after pre-commit failure: %v", err)
+		}
+		assertDesiredActive(t, base)
+	})
+
+	t.Run("first-install-unknown-commit", func(t *testing.T) {
+		now := time.Unix(6000, 0)
+		base := dockerapp.NewDeploymentStore()
+		store := &faultStore{base: base, failAcquireAfter: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("unknown acquire outcome=%v", err)
+		}
+		if len(host.calls) != 0 {
+			t.Fatalf("host effects after unknown acquire outcome: %v", host.calls)
+		}
+		intent, ok := base.Get(desired.ID)
+		if !ok {
+			t.Fatal("committed pulling intent missing")
+		}
+		assertPulling(t, intent, true)
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) || len(host.calls) != 0 {
+			t.Fatalf("live lease retry err=%v calls=%v", err, host.calls)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), desired.ID); err != nil {
+			t.Fatalf("first-install reconcile: %v", err)
+		}
+		if _, ok := base.Get(desired.ID); ok {
+			t.Fatal("first-install recovery did not write tombstone")
+		}
+		if err := rollout.Reconcile(context.Background(), desired.ID); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("repeated tombstone reconcile=%v", err)
+		}
+		if err := rollout.Update(context.Background(), desired); err != nil {
+			t.Fatalf("retry after tombstone: %v", err)
+		}
+		assertDesiredActive(t, base)
+	})
+
+	t.Run("update-unknown-commit", func(t *testing.T) {
+		now := time.Unix(7000, 0)
+		base := dockerapp.NewDeploymentStore()
+		base.Put(prior)
+		store := &faultStore{base: base, failAcquireAfter: 1}
+		host := &rolloutFake{}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("unknown acquire outcome=%v", err)
+		}
+		if len(host.calls) != 0 {
+			t.Fatalf("host effects after unknown acquire outcome: %v", host.calls)
+		}
+		intent, ok := base.Get(desired.ID)
+		if !ok {
+			t.Fatal("committed pulling intent missing")
+		}
+		assertPulling(t, intent, false)
+		if err := rollout.Update(context.Background(), desired); !errors.Is(err, dockerapp.ErrReconcilePending) || len(host.calls) != 0 {
+			t.Fatalf("live lease retry err=%v calls=%v", err, host.calls)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), desired.ID); err != nil {
+			t.Fatalf("update reconcile: %v", err)
+		}
+		assertPriorActive(t, base)
+		if err := rollout.Reconcile(context.Background(), desired.ID); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("repeated active reconcile=%v", err)
+		}
+		assertPriorActive(t, base)
+		if err := rollout.Update(context.Background(), desired); err != nil {
+			t.Fatalf("retry after prior restore: %v", err)
+		}
+		assertDesiredActive(t, base)
+	})
+}
+
 func testApp(_ string) dockerapp.App {
 	return dockerapp.App{ID: "media", Image: "registry/media:new", RuleRef: "rule-media", Generation: "generation-1", SecretRefs: []string{"registry-credential"}}
 }
@@ -1132,6 +1281,8 @@ type faultStore struct {
 	base                   *dockerapp.DeploymentStore
 	failPhase, blockPhase  dockerapp.RolloutPhase
 	failRemaining          int
+	failAcquireBefore      int
+	failAcquireAfter       int
 	failRelease            bool
 	releaseFailures        int
 	sawIndependentRecovery bool
@@ -1141,7 +1292,16 @@ func (store *faultStore) Load(ctx context.Context, appID string) (dockerapp.Depl
 	return store.base.Load(ctx, appID)
 }
 func (store *faultStore) AcquireLease(ctx context.Context, appID string, version uint64, value dockerapp.Deployment, until time.Time) (dockerapp.DeploymentRecord, error) {
-	return store.base.AcquireLease(ctx, appID, version, value, until)
+	if store.failAcquireBefore > 0 {
+		store.failAcquireBefore--
+		return dockerapp.DeploymentRecord{}, dockerapp.ErrStateConflict
+	}
+	record, err := store.base.AcquireLease(ctx, appID, version, value, until)
+	if err == nil && store.failAcquireAfter > 0 {
+		store.failAcquireAfter--
+		return dockerapp.DeploymentRecord{}, dockerapp.ErrStateConflict
+	}
+	return record, err
 }
 func (store *faultStore) CompareAndSwap(ctx context.Context, appID string, version, fence uint64, value dockerapp.Deployment) (dockerapp.DeploymentRecord, error) {
 	recovery := value.Phase == dockerapp.PhaseCleanupPending || value.Phase == dockerapp.PhaseRouteReconcile
