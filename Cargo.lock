@@ -14,6 +14,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakullla-rate-limit"
+version = "0.1.0"
+dependencies = [
+ "nre-policy-guest",
+]
+
+[[package]]
 name = "sakullla-waf"
 version = "0.1.0"
 dependencies = [

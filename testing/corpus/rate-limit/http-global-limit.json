@@ -1,0 +1,10 @@
+{
+  "case": "http-global-limit",
+  "kind": "http",
+  "times_ns": [0, 0],
+  "source_ids": [41, 42],
+  "source_bucket": {"emission_interval_ns": 1, "burst": 10},
+  "global_bucket": {"emission_interval_ns": 100, "burst": 1},
+  "expected": ["allowed", "rule_global_limited"],
+  "denial_status": 429
+}

@@ -1,0 +1,9 @@
+{
+  "case": "l4-existing-session",
+  "kind": "l4_existing_session",
+  "times_ns": [0, 0, 0],
+  "source_ids": [41, 41, 41],
+  "source_bucket": {"emission_interval_ns": 100, "burst": 1},
+  "expected": ["existing_session", "existing_session", "existing_session"],
+  "expected_key_count": 0
+}

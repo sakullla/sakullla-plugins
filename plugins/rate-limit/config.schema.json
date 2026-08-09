@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["enabled", "max_keys", "http", "l4"],
+  "properties": {
+    "enabled": {"type": "boolean"},
+    "max_keys": {"type": "integer", "minimum": 1, "maximum": 65536},
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "global"],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["emission_interval_ns", "burst"],
+          "properties": {
+            "emission_interval_ns": {"type": "integer", "minimum": 1, "maximum": 3600000000000},
+            "burst": {"type": "integer", "minimum": 1, "maximum": 1000000}
+          }
+        },
+        "global": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "emission_interval_ns", "burst"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "emission_interval_ns": {"type": "integer", "minimum": 1, "maximum": 3600000000000},
+            "burst": {"type": "integer", "minimum": 1, "maximum": 1000000}
+          }
+        }
+      }
+    },
+    "l4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["emission_interval_ns", "burst"],
+          "properties": {
+            "emission_interval_ns": {"type": "integer", "minimum": 1, "maximum": 3600000000000},
+            "burst": {"type": "integer", "minimum": 1, "maximum": 1000000}
+          }
+        }
+      }
+    }
+  }
+}

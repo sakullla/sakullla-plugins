@@ -1,0 +1,10 @@
+{
+  "case": "http-source-limit",
+  "kind": "http",
+  "times_ns": [0, 0],
+  "source_ids": [41, 41],
+  "source_bucket": {"emission_interval_ns": 100, "burst": 1},
+  "global_bucket": {"emission_interval_ns": 1, "burst": 10},
+  "expected": ["allowed", "source_limited"],
+  "denial_status": 429
+}

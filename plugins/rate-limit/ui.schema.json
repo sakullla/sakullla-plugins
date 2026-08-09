@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "title": "Rate limit settings",
+  "description": "Node-local HTTP and L4 admission using bounded GCRA counters",
+  "components": [
+    {
+      "type": "section",
+      "id": "general",
+      "label": "Local admission",
+      "children": [
+        {"type": "toggle", "id": "enabled", "label": "Enabled", "binding": "/enabled"},
+        {"type": "number", "id": "max_keys", "label": "Maximum local keys", "binding": "/max_keys"},
+        {"type": "number", "id": "http_source_interval", "label": "HTTP source interval (ns)", "binding": "/http/source/emission_interval_ns"},
+        {"type": "number", "id": "http_source_burst", "label": "HTTP source burst", "binding": "/http/source/burst"},
+        {"type": "toggle", "id": "http_global_enabled", "label": "HTTP rule-global bucket", "binding": "/http/global/enabled"},
+        {"type": "number", "id": "l4_source_interval", "label": "L4 new-flow interval (ns)", "binding": "/l4/source/emission_interval_ns"},
+        {"type": "number", "id": "l4_source_burst", "label": "L4 new-flow burst", "binding": "/l4/source/burst"}
+      ]
+    },
+    {
+      "type": "notice",
+      "id": "local_scope",
+      "label": "Single-Agent local counters",
+      "description": "These counters apply independently on each Agent. They are not user, resource-group, bandwidth, or traffic quotas.",
+      "tone": "info"
+    },
+    {
+      "type": "notice",
+      "id": "capability_gate",
+      "label": "Host capabilities required",
+      "description": "Installation remains blocked until the Host provides a monotonic clock and atomic generation-local state mutation.",
+      "tone": "warning"
+    }
+  ],
+  "actions": [
+    {"type": "submit", "id": "save", "label": "Save"},
+    {"type": "reset", "id": "reset", "label": "Reset", "confirm": "Reset rate-limit settings and local counters?"}
+  ]
+}

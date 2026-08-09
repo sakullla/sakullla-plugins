@@ -1,0 +1,9 @@
+{
+  "case": "generation-reset",
+  "kind": "l4_new_flow",
+  "times_ns": [0, 0],
+  "generation_ids": [7, 8],
+  "source_ids": [41, 41],
+  "source_bucket": {"emission_interval_ns": 100, "burst": 1},
+  "expected": ["allowed", "allowed"]
+}

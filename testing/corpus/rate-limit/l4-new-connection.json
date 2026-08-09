@@ -1,0 +1,8 @@
+{
+  "case": "l4-new-connection",
+  "kind": "l4_new_connection",
+  "times_ns": [0, 0],
+  "source_ids": [41, 41],
+  "source_bucket": {"emission_interval_ns": 100, "burst": 1},
+  "expected": ["allowed", "source_limited"]
+}
