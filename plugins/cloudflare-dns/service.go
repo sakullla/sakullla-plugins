@@ -207,7 +207,7 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 	if err != nil {
 		return DNSRecord{}, err
 	}
-	if outcome, outcomeErr := service.inspect(ctx, operation); outcomeErr != nil {
+	if outcome, outcomeErr := service.inspectDNS(ctx, operation); outcomeErr != nil {
 		return DNSRecord{}, ErrReconcilePending
 	} else if outcome.State == OperationCommitted {
 		return service.finishMutation(ctx, action, operation, request, outcome.Record)
@@ -215,6 +215,8 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 		return DNSRecord{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
 	} else if outcome.State == OperationFailed {
 		return DNSRecord{}, service.fail(ctx, action, operation, request, "dns", ErrDNSOperationFailed)
+	} else if outcome.State != OperationAbsent {
+		return DNSRecord{}, ErrReconcilePending
 	}
 	result, err := await(service, ctx, func(callCtx context.Context) (DNSRecord, error) { return effect(callCtx, attestation, operation) })
 	if err != nil {
@@ -222,7 +224,7 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return DNSRecord{}, service.fail(ctx, action, operation, request, "dns", failure)
 		}
-		outcome, inspectErr := service.inspect(ctx, operation)
+		outcome, inspectErr := service.inspectDNS(ctx, operation)
 		if inspectErr == nil && outcome.State == OperationCommitted {
 			return service.finishMutation(ctx, action, operation, request, outcome.Record)
 		}
@@ -265,7 +267,7 @@ func (service *Service) Delete(ctx context.Context, request ActionRequest, recor
 	if err != nil {
 		return err
 	}
-	if outcome, outcomeErr := service.inspect(ctx, operation); outcomeErr != nil {
+	if outcome, outcomeErr := service.inspectDNS(ctx, operation); outcomeErr != nil {
 		return ErrReconcilePending
 	} else if outcome.State == OperationCommitted {
 		return service.finishDelete(ctx, operation, request, recordID)
@@ -273,6 +275,8 @@ func (service *Service) Delete(ctx context.Context, request ActionRequest, recor
 		return service.pendingRecord(ctx, "dns-delete", operation, request, recordID, "operation", ErrReconcilePending)
 	} else if outcome.State == OperationFailed {
 		return service.failRecord(ctx, "dns-delete", operation, request, recordID, "dns", ErrDNSOperationFailed)
+	} else if outcome.State != OperationAbsent {
+		return ErrReconcilePending
 	}
 	_, effectErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
 		return struct{}{}, service.runtime.DNS.Delete(callCtx, attestation, request.ZoneID, recordID, operation)
@@ -282,7 +286,7 @@ func (service *Service) Delete(ctx context.Context, request ActionRequest, recor
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return service.failRecord(ctx, "dns-delete", operation, request, recordID, "dns", failure)
 		}
-		outcome, inspectErr := service.inspect(ctx, operation)
+		outcome, inspectErr := service.inspectDNS(ctx, operation)
 		if inspectErr == nil && outcome.State == OperationCommitted {
 			return service.finishDelete(ctx, operation, request, recordID)
 		}
@@ -354,6 +358,8 @@ func (service *Service) changeToken(ctx context.Context, action string, request 
 		return TokenMetadata{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
 	} else if outcome.State == OperationFailed {
 		return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
+	} else if outcome.State != OperationAbsent {
+		return TokenMetadata{}, ErrReconcilePending
 	}
 	ownedSecret := secret
 	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
@@ -403,6 +409,8 @@ func (service *Service) rotateToken(ctx context.Context, request ActionRequest, 
 		return TokenMetadata{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
 	} else if outcome.State == OperationFailed {
 		return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
+	} else if outcome.State != OperationAbsent {
+		return TokenMetadata{}, ErrReconcilePending
 	}
 	ownedSecret := secret
 	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
@@ -457,7 +465,7 @@ func (service *Service) authorize(ctx context.Context, action string, request Ac
 	if action == "token-rotate" {
 		authorizationPermission = PermissionVaultRotate
 	}
-	coarse := ActionContext{Phase: "coarse", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Permission: authorizationPermission, OperationKey: operation}
+	coarse := ActionContext{Phase: "coarse", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Permission: authorizationPermission, SecretRef: service.configuration.SecretRef, OperationKey: operation}
 	if _, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
 		return struct{}{}, service.runtime.Authorizer.Authorize(callCtx, coarse)
 	}); err != nil {
@@ -692,6 +700,12 @@ func (service *Service) emitUI(ctx context.Context, projection UIProjection) err
 func (service *Service) inspect(ctx context.Context, operation string) (OperationOutcome, error) {
 	return await(service, ctx, func(callCtx context.Context) (OperationOutcome, error) {
 		return service.runtime.Operations.Inspect(callCtx, operation)
+	})
+}
+
+func (service *Service) inspectDNS(ctx context.Context, operation string) (OperationOutcome, error) {
+	return await(service, ctx, func(callCtx context.Context) (OperationOutcome, error) {
+		return service.runtime.DNS.Inspect(callCtx, operation)
 	})
 }
 

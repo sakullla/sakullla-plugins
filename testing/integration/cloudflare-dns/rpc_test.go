@@ -149,7 +149,7 @@ func TestCloudflareRPCStrictConfigAndCanonicalEntrypoint(t *testing.T) {
 }
 
 func runtimeFor(vault *fakeVault, dns *fakeDNS, trace *safeTrace) cloudflaredns.RuntimeAdapters {
-	return cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault, dns: dns}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, record cloudflaredns.UIProjection) error { trace.addUI(record); return nil }), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error { trace.addAudit(record); return nil }), Logger: cloudflaredns.EventLoggerFunc(func(_ context.Context, record cloudflaredns.EventRecord) error { trace.addLog(record); return nil })}
+	return cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, record cloudflaredns.UIProjection) error { trace.addUI(record); return nil }), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error { trace.addAudit(record); return nil }), Logger: cloudflaredns.EventLoggerFunc(func(_ context.Context, record cloudflaredns.EventRecord) error { trace.addLog(record); return nil })}
 }
 func requiredGrants() []string {
 	return []string{"audit", "authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"}

@@ -120,6 +120,11 @@ func (record DNSRecord) Validate(write bool) error {
 }
 
 type DNSHandle interface {
+	// Inspect and all mutations use one authoritative operation journal.
+	// Create, Update, and Delete atomically claim the operation key in that
+	// journal and are exactly-once: concurrent calls with the same key either
+	// return the same committed outcome or an inspectable pending/failure state.
+	OperationInspector
 	ListZones(context.Context, TokenAttestation, string) ([]Zone, error)
 	ListRecords(context.Context, TokenAttestation, string, int) ([]DNSRecord, error)
 	Create(context.Context, TokenAttestation, DNSRecord, string) (DNSRecord, error)
@@ -198,8 +203,10 @@ func (function EventLoggerFunc) Log(ctx context.Context, record EventRecord) err
 }
 
 type RuntimeAdapters struct {
-	Vault      Vault
-	DNS        DNSHandle
+	Vault Vault
+	DNS   DNSHandle
+	// Operations is the authoritative journal for Vault enrollment/rotation.
+	// DNS effects are inspected through DNSHandle itself.
 	Operations OperationInspector
 	Lease      GenerationLease
 	Authorizer Authorizer

@@ -194,6 +194,16 @@ func TestCloudflareRotateCASAndCoarseAuthorizationZeroSecretCalls(t *testing.T) 
 	if _, err := denied.ListZones(context.Background(), wrongGroup); !errors.Is(err, cloudflaredns.ErrAuthorizationDenied) || vault.verifyCalls.Load() != beforeVerify {
 		t.Fatalf("group denial err=%v verify=%d", err, vault.verifyCalls.Load())
 	}
+	secretDenied := newTestService(t, vault, dns, trace, func(action cloudflaredns.ActionContext) error {
+		if action.SecretRef == "vault/cloudflare" {
+			return errors.New("raw secret scope denied")
+		}
+		return nil
+	})
+	beforeVerify = vault.verifyCalls.Load()
+	if _, err := secretDenied.ListZones(context.Background(), validAction("")); !errors.Is(err, cloudflaredns.ErrAuthorizationDenied) || vault.verifyCalls.Load() != beforeVerify {
+		t.Fatalf("secret-scope denial err=%v verify=%d", err, vault.verifyCalls.Load())
+	}
 
 	rotated := atomic.Bool{}
 	service := newTestService(t, vault, dns, trace, func(action cloudflaredns.ActionContext) error {
@@ -212,7 +222,7 @@ func TestCloudflareDNSCommittedEffectReconcilesWithoutOppositeAudit(t *testing.T
 	vault, trace := newFakeVault(), &safeTrace{}
 	dns := newFakeDNS(vault)
 	var uiCalls atomic.Int32
-	runtime := cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault, dns: dns}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
+	runtime := cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
 		trace.addUI(projection)
 		if projection.Kind == "dns-create" && uiCalls.Add(1) == 1 {
 			return errors.New("raw UI failure")
@@ -254,7 +264,7 @@ func TestCloudflareDNSCommitBeforeErrorRestartAndAuditReconcile(t *testing.T) {
 	dns.commitBeforeError.Store(true)
 	var failAudit atomic.Bool
 	failAudit.Store(true)
-	runtime := cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault, dns: dns}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
+	runtime := cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
 		trace.addUI(projection)
 		return nil
 	}), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error {
@@ -292,6 +302,62 @@ func TestCloudflareDNSCommitBeforeErrorRestartAndAuditReconcile(t *testing.T) {
 	}
 }
 
+func TestCloudflareDNSExactlyOnceConcurrentOperationAndMalformedState(t *testing.T) {
+	vault, dns, trace := newFakeVault(), newFakeDNS(newFakeVault()), &safeTrace{}
+	dns.vault = vault
+	dns.inspectStarted = make(chan struct{}, 2)
+	dns.inspectRelease = make(chan struct{})
+	service := newTestService(t, vault, dns, trace, nil)
+	request := validAction("zone/allowed")
+	request.OperationKey = "operation/concurrent"
+	record := cloudflaredns.DNSRecord{Type: "A", Name: "once.example.com", Content: "192.0.2.80", TTL: 60}
+	results := make(chan struct {
+		record cloudflaredns.DNSRecord
+		err    error
+	}, 2)
+	for index := 0; index < 2; index++ {
+		go func() {
+			result, err := service.Create(context.Background(), request, record)
+			results <- struct {
+				record cloudflaredns.DNSRecord
+				err    error
+			}{result, err}
+		}()
+	}
+	for index := 0; index < 2; index++ {
+		select {
+		case <-dns.inspectStarted:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent requests did not both observe the pre-claim state")
+		}
+	}
+	close(dns.inspectRelease)
+	for index := 0; index < 2; index++ {
+		result := <-results
+		if result.err != nil || result.record.ID != "record/new" {
+			t.Fatalf("concurrent result=%#v err=%v", result.record, result.err)
+		}
+	}
+	if dns.effects.Load() != 1 {
+		t.Fatalf("same operation committed %d effects", dns.effects.Load())
+	}
+
+	corruptDNS := malformedStateDNS{fakeDNS: newFakeDNS(vault)}
+	corrupt := newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{
+		Vault:      vault,
+		DNS:        corruptDNS,
+		Operations: fakeInspector{vault: vault},
+		Lease:      cloudflaredns.GenerationLeaseFunc(func() {}),
+		Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }),
+		UI:         cloudflaredns.DynamicUIFunc(func(context.Context, cloudflaredns.UIProjection) error { return nil }),
+		Auditor:    cloudflaredns.AuditorFunc(func(context.Context, cloudflaredns.AuditRecord) error { return nil }),
+		Logger:     cloudflaredns.EventLoggerFunc(func(context.Context, cloudflaredns.EventRecord) error { return nil }),
+	})
+	if _, err := corrupt.Create(context.Background(), request, record); !errors.Is(err, cloudflaredns.ErrReconcilePending) || corruptDNS.effects.Load() != 0 {
+		t.Fatalf("malformed journal state err=%v effects=%d", err, corruptDNS.effects.Load())
+	}
+}
+
 func TestCloudflareStopBoundsNoncooperativeHostAwaitsAndNoLateSuccess(t *testing.T) {
 	for _, stage := range []string{"vault", "authorizer", "dns", "ui", "audit", "log"} {
 		t.Run(stage, func(t *testing.T) {
@@ -318,7 +384,7 @@ func TestCloudflareStopBoundsNoncooperativeHostAwaitsAndNoLateSuccess(t *testing
 			if stage == "dns" {
 				dnsHandle = blockingDNS{fakeDNS: dns, block: block}
 			}
-			runtime := cloudflaredns.RuntimeAdapters{Vault: vaultHandle, DNS: dnsHandle, Operations: fakeInspector{vault: vault, dns: dns}, Lease: cloudflaredns.GenerationLeaseFunc(func() { revoked.Store(true) }), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error {
+			runtime := cloudflaredns.RuntimeAdapters{Vault: vaultHandle, DNS: dnsHandle, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() { revoked.Store(true) }), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error {
 				if stage == "authorizer" {
 					return block()
 				}
@@ -394,7 +460,7 @@ func TestCloudflareLateHostCallsRemainBoundedAfterRequestCancellation(t *testing
 	service := newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{
 		Vault:      blocked,
 		DNS:        dns,
-		Operations: fakeInspector{vault: vault, dns: dns},
+		Operations: fakeInspector{vault: vault},
 		Lease:      cloudflaredns.GenerationLeaseFunc(func() {}),
 		Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }),
 		UI:         cloudflaredns.DynamicUIFunc(func(context.Context, cloudflaredns.UIProjection) error { return nil }),
@@ -448,7 +514,7 @@ func TestCloudflarePendingOutcomePreservesAuditAndLogFailures(t *testing.T) {
 	service := newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{
 		Vault:      vault,
 		DNS:        dns,
-		Operations: fakeInspector{vault: vault, dns: dns},
+		Operations: fakeInspector{vault: vault},
 		Lease:      cloudflaredns.GenerationLeaseFunc(func() {}),
 		Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }),
 		UI:         cloudflaredns.DynamicUIFunc(func(context.Context, cloudflaredns.UIProjection) error { return nil }),
@@ -483,7 +549,7 @@ func TestCloudflareTokenMaterialIsSnapshottedBeforeLateVaultCall(t *testing.T) {
 	service := newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{
 		Vault:      capture,
 		DNS:        dns,
-		Operations: fakeInspector{vault: vault, dns: dns},
+		Operations: fakeInspector{vault: vault},
 		Lease:      cloudflaredns.GenerationLeaseFunc(func() {}),
 		Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }),
 		UI:         cloudflaredns.DynamicUIFunc(func(context.Context, cloudflaredns.UIProjection) error { return nil }),
@@ -559,6 +625,10 @@ func (vault blockingVault) Rotate(ctx context.Context, ref, version string, mate
 type blockingDNS struct {
 	fakeDNS *fakeDNS
 	block   func() error
+}
+
+func (dns blockingDNS) Inspect(ctx context.Context, operation string) (cloudflaredns.OperationOutcome, error) {
+	return dns.fakeDNS.Inspect(ctx, operation)
 }
 
 func (dns blockingDNS) ListZones(ctx context.Context, att cloudflaredns.TokenAttestation, operation string) ([]cloudflaredns.Zone, error) {
@@ -698,20 +768,21 @@ type fakeDNS struct {
 	commitBeforeError atomic.Bool
 	mu                sync.Mutex
 	operations        map[string]cloudflaredns.DNSRecord
+	inspectStarted    chan struct{}
+	inspectRelease    chan struct{}
+}
+
+type malformedStateDNS struct{ *fakeDNS }
+
+func (dns malformedStateDNS) Inspect(context.Context, string) (cloudflaredns.OperationOutcome, error) {
+	return cloudflaredns.OperationOutcome{State: cloudflaredns.OperationState("corrupt")}, nil
 }
 
 type fakeInspector struct {
 	vault *fakeVault
-	dns   *fakeDNS
 }
 
 func (inspector fakeInspector) Inspect(_ context.Context, operation string) (cloudflaredns.OperationOutcome, error) {
-	inspector.dns.mu.Lock()
-	record, dnsExists := inspector.dns.operations[operation]
-	inspector.dns.mu.Unlock()
-	if dnsExists {
-		return cloudflaredns.OperationOutcome{State: cloudflaredns.OperationCommitted, Record: record}, nil
-	}
 	inspector.vault.mu.Lock()
 	token, vaultExists := inspector.vault.operations[operation]
 	inspector.vault.mu.Unlock()
@@ -732,6 +803,20 @@ func (dns *fakeDNS) check(attestation cloudflaredns.TokenAttestation) error {
 		return errors.New("raw-cloudflare-body-token")
 	}
 	return nil
+}
+func (dns *fakeDNS) Inspect(_ context.Context, operation string) (cloudflaredns.OperationOutcome, error) {
+	dns.mu.Lock()
+	record, exists := dns.operations[operation]
+	started, release := dns.inspectStarted, dns.inspectRelease
+	dns.mu.Unlock()
+	if exists {
+		return cloudflaredns.OperationOutcome{State: cloudflaredns.OperationCommitted, Record: record}, nil
+	}
+	if started != nil {
+		started <- struct{}{}
+		<-release
+	}
+	return cloudflaredns.OperationOutcome{State: cloudflaredns.OperationAbsent}, nil
 }
 func (dns *fakeDNS) ListZones(_ context.Context, attestation cloudflaredns.TokenAttestation, _ string) ([]cloudflaredns.Zone, error) {
 	if err := dns.check(attestation); err != nil {
@@ -817,7 +902,7 @@ func newTestService(t *testing.T, vault *fakeVault, dns *fakeDNS, trace *safeTra
 	if authorize == nil {
 		authorize = func(cloudflaredns.ActionContext) error { return nil }
 	}
-	return newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault, dns: dns}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(_ context.Context, action cloudflaredns.ActionContext) error { return authorize(action) }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
+	return newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(_ context.Context, action cloudflaredns.ActionContext) error { return authorize(action) }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, projection cloudflaredns.UIProjection) error {
 		trace.addUI(projection)
 		return nil
 	}), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error { trace.addAudit(record); return nil }), Logger: cloudflaredns.EventLoggerFunc(func(_ context.Context, record cloudflaredns.EventRecord) error { trace.addLog(record); return nil })})
