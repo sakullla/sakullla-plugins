@@ -1,27 +1,30 @@
-schema_version: 1
-id: reverse-l4
-version: 0.1.0
-name: Reverse L4
-description: Brokered reverse TCP and UDP mappings using core-owned service handles
-compatibility:
-  host: ">=0.1.0"
-  agent: ">=0.1.0"
-runtime:
-  kind: rpc-service
-  abi: nre:rpc/v1
-  host_scope: agent
-  entry: artifacts/reverse-l4
-permissions:
-  - reverse-session
-  - tunnel
-  - listener
-  - traffic.read
-config_schema: config.schema.json
-failure_policy:
-  on_error: fail-closed
-  restart: bounded-backoff
-cleanup:
-  mappings: retain
-  sessions: revoke-and-drain
-metadata:
-  capability.typed-l4-handles: unavailable
+{
+  "schema_version": 1,
+  "id": "reverse-l4",
+  "version": "0.1.0",
+  "name": "Reverse L4",
+  "description": "Brokered reverse TCP and UDP mappings using core-owned service handles",
+  "compatibility": {
+    "host": ">=0.1.0",
+    "agent": ">=0.1.0"
+  },
+  "runtime": {
+    "kind": "rpc-service",
+    "abi": "nre:rpc/v1",
+    "host_scope": "agent",
+    "entry": "artifacts/reverse-l4"
+  },
+  "permissions": ["reverse-session", "tunnel", "listener", "traffic.read"],
+  "config_schema": "config.schema.json",
+  "failure_policy": {
+    "on_error": "fail-closed",
+    "restart": "bounded-backoff"
+  },
+  "cleanup": {
+    "mappings": "retain",
+    "sessions": "revoke-and-drain"
+  },
+  "metadata": {
+    "capability.typed-l4-handles": "unavailable"
+  }
+}

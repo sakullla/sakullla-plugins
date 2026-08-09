@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,7 +175,7 @@ func checkPluginWithVerifier(ctx context.Context, args []string, verify sdkVerif
 		return fmt.Errorf("SDK release gate: %w", err)
 	}
 	repositoryRoot := filepath.Dir(absoluteLock)
-	spec, err := pluginArtifactSpecFor(*pluginID)
+	spec, err := pluginArtifactSpecFor(repositoryRoot, *pluginID)
 	if err != nil {
 		return err
 	}
@@ -194,28 +195,88 @@ const (
 )
 
 type pluginArtifactSpec struct {
-	kind        pluginArtifactKind
-	sourcePath  string
-	packageName string
+	kind         pluginArtifactKind
+	sourcePath   string
+	packageName  string
+	artifactName string
+}
+
+type ciPluginManifest struct {
+	SchemaVersion int             `json:"schema_version"`
+	ID            string          `json:"id"`
+	Version       string          `json:"version"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	Compatibility json.RawMessage `json:"compatibility"`
+	Runtime       struct {
+		Kind      string `json:"kind"`
+		ABI       string `json:"abi"`
+		HostScope string `json:"host_scope"`
+		Entry     string `json:"entry"`
+	} `json:"runtime"`
+	Permissions   json.RawMessage `json:"permissions"`
+	ConfigSchema  string          `json:"config_schema"`
+	FailurePolicy json.RawMessage `json:"failure_policy"`
+	Cleanup       json.RawMessage `json:"cleanup"`
+	Metadata      json.RawMessage `json:"metadata"`
 }
 
 // pluginArtifactSpecFor is an explicit source-layout allowlist. It avoids
 // ad-hoc manifest parsing while keeping artifact kind and plugin identity
 // strict until a canonical manifest parser is published.
-func pluginArtifactSpecFor(pluginID string) (pluginArtifactSpec, error) {
+func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec, error) {
 	switch pluginID {
 	case "waf", "ip-policy", "rate-limit":
 		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
 	case "reverse-l4":
-		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/reverse-l4/cmd/reverse-l4"}, nil
+		manifestPath := filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml")
+		manifestFile, err := os.Open(manifestPath)
+		if err != nil {
+			return pluginArtifactSpec{}, err
+		}
+		defer manifestFile.Close()
+		decoder := json.NewDecoder(manifestFile)
+		decoder.DisallowUnknownFields()
+		var manifest ciPluginManifest
+		if err := decoder.Decode(&manifest); err != nil {
+			return pluginArtifactSpec{}, fmt.Errorf("parse %s as YAML-compatible JSON: %w", manifestPath, err)
+		}
+		if err := ensureJSONEOF(decoder); err != nil {
+			return pluginArtifactSpec{}, fmt.Errorf("parse %s: %w", manifestPath, err)
+		}
+		if manifest.SchemaVersion != 1 {
+			return pluginArtifactSpec{}, fmt.Errorf("plugin %q manifest schema_version must be 1", pluginID)
+		}
+		if manifest.ID != pluginID {
+			return pluginArtifactSpec{}, fmt.Errorf("plugin id %q does not match manifest id %q", pluginID, manifest.ID)
+		}
+		if manifest.Runtime.Kind != pluginsdk.RuntimeRPCService {
+			return pluginArtifactSpec{}, fmt.Errorf("plugin %q runtime kind %q is not %q", pluginID, manifest.Runtime.Kind, pluginsdk.RuntimeRPCService)
+		}
+		if manifest.Runtime.ABI != pluginsdk.RPCABIV1 {
+			return pluginArtifactSpec{}, fmt.Errorf("plugin %q ABI %q is not %q", pluginID, manifest.Runtime.ABI, pluginsdk.RPCABIV1)
+		}
+		wantEntry := filepath.ToSlash(filepath.Join("artifacts", pluginID))
+		if manifest.Runtime.Entry != wantEntry {
+			return pluginArtifactSpec{}, fmt.Errorf("plugin %q entry %q is not %q", pluginID, manifest.Runtime.Entry, wantEntry)
+		}
+		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/reverse-l4/cmd/reverse-l4", artifactName: filepath.Base(manifest.Runtime.Entry)}, nil
 	default:
 		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q has no declared artifact source", pluginID)
 	}
 }
 
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("manifest must contain exactly one document")
+	}
+	return nil
+}
+
 func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, spec pluginArtifactSpec) (string, error) {
 	if spec.kind == artifactRPCService {
-		return buildRPCArtifact(ctx, repositoryRoot, pluginID, spec.sourcePath)
+		return buildRPCArtifact(ctx, repositoryRoot, pluginID, spec.sourcePath, spec.artifactName)
 	}
 	if spec.kind != artifactWASMPolicy {
 		return "", fmt.Errorf("plugin %q has unknown artifact kind", pluginID)
@@ -252,12 +313,11 @@ func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, s
 	return outputPath, nil
 }
 
-func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath string) (string, error) {
+func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath, artifactName string) (string, error) {
 	outputDirectory := filepath.Join(repositoryRoot, "target", "nre-ci", pluginID)
 	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
 		return "", err
 	}
-	artifactName := pluginID
 	if runtime.GOOS == "windows" {
 		artifactName += ".exe"
 	}

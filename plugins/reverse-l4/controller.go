@@ -24,6 +24,7 @@ type ControllerConfig struct {
 	ArtifactDigest string
 	Clock          Clock
 	Backoff        Backoff
+	Admission      TypedHandleAdmission
 }
 
 // Controller binds the canonical RPC lifecycle to plugin-owned mappings and
@@ -37,6 +38,7 @@ type Controller struct {
 	backoff   Backoff
 	request   pluginsdk.RPCHandshakeRequest
 	lifecycle *rpcplugin.Lifecycle
+	admission TypedHandleAdmission
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -46,7 +48,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if err := config.Backoff.Validate(); err != nil {
 		return nil, err
 	}
-	controller := &Controller{store: NewMappingStore(), sessions: make(map[string]*Session), clock: config.Clock, backoff: config.Backoff}
+	if config.Admission == nil {
+		config.Admission = publicSDKHandleAdmission{}
+	}
+	controller := &Controller{store: NewMappingStore(), sessions: make(map[string]*Session), clock: config.Clock, backoff: config.Backoff, admission: config.Admission}
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
@@ -99,6 +104,9 @@ func (controller *Controller) prepare(_ context.Context, generation *rpcplugin.G
 	if document.Mappings == nil {
 		return errors.New("mapping config requires mappings")
 	}
+	if len(*document.Mappings) > MaxMappings {
+		return fmt.Errorf("mapping config has %d mappings, maximum is %d", len(*document.Mappings), MaxMappings)
+	}
 	store := NewMappingStore()
 	sessions := make(map[string]*Session)
 	seen := make(map[string]struct{}, len(*document.Mappings))
@@ -132,14 +140,34 @@ func requireJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func (controller *Controller) activate(_ context.Context, _ *rpcplugin.Generation) error {
+func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
 	controller.mu.Lock()
 	request := controller.request
+	mappings := controller.store.List()
+	controller.mu.Unlock()
+	if err := controller.admission.Admit(ctx, request, mappings); err != nil {
+		controller.revokeSessions()
+		return err
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	for _, session := range controller.sessions {
+		if err := session.BeginConnect(); err != nil {
+			for _, cleanup := range controller.sessions {
+				cleanup.Revoke()
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (controller *Controller) revokeSessions() {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
 	for _, session := range controller.sessions {
 		session.Revoke()
 	}
-	controller.mu.Unlock()
-	return AdmitRuntime(request)
 }
 
 func (controller *Controller) stop(_ context.Context, _ *rpcplugin.Generation) error {

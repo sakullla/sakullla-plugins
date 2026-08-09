@@ -94,16 +94,61 @@ func TestPluginReverseL4PostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
 }
 
 func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
-	rpc, err := pluginArtifactSpecFor("reverse-l4")
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc, err := pluginArtifactSpecFor(repositoryRoot, "reverse-l4")
 	if err != nil || rpc.kind != artifactRPCService || !strings.Contains(rpc.sourcePath, "reverse-l4/cmd/reverse-l4") {
 		t.Fatalf("reverse-l4 artifact spec = %#v err=%v", rpc, err)
 	}
-	wasm, err := pluginArtifactSpecFor("waf")
+	wasm, err := pluginArtifactSpecFor(repositoryRoot, "waf")
 	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
 		t.Fatalf("WAF artifact spec = %#v err=%v", wasm, err)
 	}
-	if _, err := pluginArtifactSpecFor("unmapped-plugin"); err == nil {
+	if _, err := pluginArtifactSpecFor(repositoryRoot, "unmapped-plugin"); err == nil {
 		t.Fatal("unknown plugin source layout was accepted")
+	}
+}
+
+func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, id, kind, abi, entry, needle string
+	}{
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/reverse-l4", needle: "manifest id"},
+		{name: "kind", id: "reverse-l4", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/reverse-l4", needle: "runtime kind"},
+		{name: "abi", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/reverse-l4", needle: "ABI"},
+		{name: "entry", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other", needle: "entry"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeRPCManifest(t, root, test.id, test.kind, test.abi, test.entry)
+			_, err := pluginArtifactSpecFor(root, "reverse-l4")
+			if err == nil || !strings.Contains(err.Error(), test.needle) {
+				t.Fatalf("manifest drift error = %v", err)
+			}
+		})
+	}
+}
+
+func writeRPCManifest(t *testing.T, root, id, kind, abi, entry string) {
+	t.Helper()
+	directory := filepath.Join(root, "plugins", "reverse-l4")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"schema_version": 1, "id": id, "version": "0.1.0", "name": "Reverse L4", "description": "fixture",
+		"compatibility": map[string]any{}, "runtime": map[string]any{"kind": kind, "abi": abi, "host_scope": "agent", "entry": entry},
+		"permissions": []string{}, "config_schema": "config.schema.json", "failure_policy": map[string]any{},
+		"cleanup": map[string]any{}, "metadata": map[string]any{},
+	}
+	wire, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plugin.yaml"), wire, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

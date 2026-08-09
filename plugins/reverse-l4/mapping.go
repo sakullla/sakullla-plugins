@@ -13,6 +13,7 @@ type Protocol string
 const (
 	ProtocolTCP Protocol = "tcp"
 	ProtocolUDP Protocol = "udp"
+	MaxMappings          = 256
 )
 
 // Mapping is plugin-owned configuration only. Listener, tunnel, relay,

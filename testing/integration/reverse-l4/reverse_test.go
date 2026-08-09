@@ -3,7 +3,11 @@ package reversel4_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -293,8 +297,17 @@ func TestReverseRuntimeFailsClosedWithoutTypedHandles(t *testing.T) {
 }
 
 func TestReverseControllerCanonicalRPCLifecycleFailsClosedAtTypedHandles(t *testing.T) {
+	gateFailure := errors.New("typed handles unavailable")
+	gateCalled := false
 	controller, err := reversel4.NewController(reversel4.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact", Clock: newFakeClock(time.Unix(30, 0)), Backoff: testBackoff(),
+		Admission: reversel4.TypedHandleAdmissionFunc(func(_ context.Context, _ pluginsdk.RPCHandshakeRequest, mappings []reversel4.Mapping) error {
+			gateCalled = true
+			if len(mappings) != 1 {
+				t.Fatalf("admission mappings = %d", len(mappings))
+			}
+			return gateFailure
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -314,12 +327,112 @@ func TestReverseControllerCanonicalRPCLifecycleFailsClosedAtTypedHandles(t *test
 		t.Fatalf("prepared session = %#v exists=%v", snapshot, exists)
 	}
 	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-	if response.Error == nil || response.Error.Code != pluginsdk.ErrorInternal {
+	if !gateCalled || response.Error == nil || response.Error.Code != pluginsdk.ErrorInternal {
 		t.Fatalf("typed-handle gate response = %#v", response)
 	}
 	if snapshot, _ := controller.Session("tcp-map"); snapshot.State != reversel4.StateRevoked || !snapshot.ReleaseRequired {
 		t.Fatalf("failed activation did not revoke model session: %#v", snapshot)
 	}
+}
+
+func TestReverseControllerTypedHandleAdmissionSuccessAdvancesSessions(t *testing.T) {
+	gateCalled := false
+	controller, err := reversel4.NewController(reversel4.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact", Clock: newFakeClock(time.Unix(31, 0)), Backoff: testBackoff(),
+		Admission: reversel4.TypedHandleAdmissionFunc(func(_ context.Context, request pluginsdk.RPCHandshakeRequest, mappings []reversel4.Mapping) error {
+			gateCalled = true
+			if request.ABI != pluginsdk.RPCABIV1 || len(mappings) != 1 || mappings[0].ID != "tcp-map" {
+				t.Fatalf("admission request=%#v mappings=%#v", request, mappings)
+			}
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshakeRequest([]string{"reverse-session"})); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`{"mappings":[{"id":"tcp-map","private_agent_id":"private-agent","public_agent_id":"public-agent","protocol":"tcp","listen_port":8443,"backend_host":"127.0.0.1","backend_port":9443,"enabled":true}]}`)
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: config}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	if !gateCalled || response.Error != nil {
+		t.Fatalf("successful admission response=%#v called=%v", response, gateCalled)
+	}
+	if snapshot, _ := controller.Session("tcp-map"); snapshot.State != reversel4.StateConnecting || snapshot.ReleaseRequired {
+		t.Fatalf("admitted session was not advanced: %#v", snapshot)
+	}
+}
+
+func TestReverseControllerMappingLimitMatchesSchemaAndRejectsBeforeAdmission(t *testing.T) {
+	schemaWire, err := os.ReadFile(filepath.Join("..", "..", "..", "plugins", "reverse-l4", "config.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			Mappings struct {
+				MaxItems int `json:"maxItems"`
+			} `json:"mappings"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schemaWire, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties.Mappings.MaxItems != reversel4.MaxMappings {
+		t.Fatalf("schema maxItems=%d controller=%d", schema.Properties.Mappings.MaxItems, reversel4.MaxMappings)
+	}
+	for _, count := range []int{reversel4.MaxMappings, reversel4.MaxMappings + 1, 4096} {
+		t.Run(fmt.Sprintf("count-%d", count), func(t *testing.T) {
+			controller, err := reversel4.NewController(reversel4.ControllerConfig{
+				PackageDigest: "package", ArtifactDigest: "artifact", Clock: newFakeClock(time.Unix(32, 0)), Backoff: testBackoff(),
+				Admission: reversel4.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []reversel4.Mapping) error {
+					t.Fatal("Prepare invoked activation admission")
+					return nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controller.Handshake(context.Background(), handshakeRequest([]string{"reverse-session"})); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			response := controller.Prepare(ctx, pluginsdk.LifecycleRequest{Generation: "generation-1", Config: mappingConfig(t, count)})
+			if count == reversel4.MaxMappings {
+				if response.Error != nil {
+					t.Fatal(response.Error)
+				}
+				if _, exists := controller.Mapping(fmt.Sprintf("map-%04d", count-1)); !exists {
+					t.Fatal("256th mapping was not prepared")
+				}
+				return
+			}
+			if response.Error == nil || !strings.Contains(response.Error.Message, "maximum is 256") {
+				t.Fatalf("mapping count %d response = %#v", count, response)
+			}
+			if _, exists := controller.Mapping("map-0000"); exists {
+				t.Fatal("over-limit config partially populated store")
+			}
+		})
+	}
+}
+
+func mappingConfig(t *testing.T, count int) []byte {
+	t.Helper()
+	mappings := make([]reversel4.Mapping, count)
+	for index := range mappings {
+		mappings[index] = testMapping(fmt.Sprintf("map-%04d", index), reversel4.ProtocolTCP)
+		mappings[index].ListenPort = uint16(index%65535 + 1)
+	}
+	wire, err := json.Marshal(map[string]any{"mappings": mappings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
 }
 
 func TestReverseEntrypointValidatesPublicRPCHandshakeOnly(t *testing.T) {
