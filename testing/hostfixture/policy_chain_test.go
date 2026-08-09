@@ -21,9 +21,27 @@ func TestPolicyChainCanonicalArtifactsFailClosedWithoutCapabilities(t *testing.T
 		}
 	}
 
-	ipStatus, _ := runWAFArtifact(t, ipArtifact, []byte(`{"default":"allow"}`), "/", nil, true)
-	rateStatus, _ := runWAFArtifact(t, rateArtifact, []byte(`{"enabled":true}`), "/", nil, true)
-	wafStatus, _ := runWAFArtifact(t, wafArtifact, []byte(`{"mode":"deny"}`), "/", nil, true)
+	var sessions []*policyArtifactSession
+	defer func() {
+		for _, session := range sessions {
+			session.Close()
+		}
+	}()
+	results := make([]PolicyArtifactInit, 0, 3)
+	for _, stage := range []struct {
+		name     string
+		artifact []byte
+		config   []byte
+	}{
+		{name: "ip-policy", artifact: ipArtifact, config: []byte(`{"default":"allow"}`)},
+		{name: "rate-limit", artifact: rateArtifact, config: []byte(`{"enabled":true}`)},
+		{name: "waf", artifact: wafArtifact, config: []byte(`{"mode":"deny"}`)},
+	} {
+		session, status := initPolicyArtifact(t, stage.artifact, stage.config, "/", nil, true)
+		sessions = append(sessions, session)
+		results = append(results, PolicyArtifactInit{Stage: stage.name, Status: status})
+	}
+	ipStatus, rateStatus, wafStatus := results[0].Status, results[1].Status, results[2].Status
 	if ipStatus != pluginsdk.PolicyStatusIncompatibleABI {
 		t.Fatalf("IP artifact without trusted-source capability status = %d", ipStatus)
 	}
@@ -33,13 +51,14 @@ func TestPolicyChainCanonicalArtifactsFailClosedWithoutCapabilities(t *testing.T
 	if wafStatus != pluginsdk.PolicyStatusOK {
 		t.Fatalf("WAF artifact canonical init status = %d", wafStatus)
 	}
-	err := GateCanonicalPolicyChain([]PolicyArtifactInit{
-		{Stage: "ip-policy", Status: ipStatus},
-		{Stage: "rate-limit", Status: rateStatus},
-		{Stage: "waf", Status: wafStatus},
-	})
+	err := GateCanonicalPolicyChain(results)
 	if !errors.Is(err, ErrCanonicalPolicyChainUnavailable) {
 		t.Fatalf("release chain did not fail closed: %v", err)
+	}
+	for index, session := range sessions {
+		if session.evaluateCount != 0 || session.eventCount != 0 || session.statePutCount != 0 {
+			t.Fatalf("stage %s ran before init gate: evaluates=%d events=%d state_puts=%d", results[index].Stage, session.evaluateCount, session.eventCount, session.statePutCount)
+		}
 	}
 }
 

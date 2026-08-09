@@ -28,6 +28,7 @@ const (
 	MaxP95Latency            = time.Millisecond
 	MaxP99Latency            = 2 * time.Millisecond
 	MaxAdditionalMemoryBytes = uint64(64 << 20)
+	WorkloadCloseTimeout     = time.Second
 )
 
 var ErrReleaseCapabilities = errors.New("real Agent release capabilities are incomplete")
@@ -250,8 +251,10 @@ func runLifecycle(ctx context.Context, corpus []Sample, factory WorkloadFactory,
 		return metrics, errors.New("factory returned a nil workload")
 	}
 	defer func() {
-		if err := workload.Close(ctx); err != nil && resultErr == nil {
-			resultErr = fmt.Errorf("close workload: %w", err)
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), WorkloadCloseTimeout)
+		defer cancel()
+		if err := workload.Close(closeCtx); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close workload: %w", err))
 		}
 	}()
 	metrics, resultErr = executeLifecycle(ctx, corpus, workload, measured)

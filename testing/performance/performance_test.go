@@ -182,6 +182,70 @@ func TestPerformanceRetainedMemoryIsMeasuredPerIsolatedLifecycle(t *testing.T) {
 	}
 }
 
+func TestPerformanceCloseUsesLiveBoundedContextAndJoinsRunError(t *testing.T) {
+	primaryErr := errors.New("workload run failed")
+	closeErr := errors.New("workload close failed")
+	ctx, cancel := context.WithCancel(context.Background())
+	closed := make(chan struct{})
+	factory := func(context.Context) (performance.Workload, error) {
+		return &performance.WorkloadFuncs{
+			RunFunc: func(context.Context, performance.Sample) error {
+				cancel()
+				return primaryErr
+			},
+			CloseFunc: func(closeCtx context.Context) error {
+				if closeCtx.Err() != nil {
+					t.Fatalf("Close received canceled context: %v", closeCtx.Err())
+				}
+				if _, ok := closeCtx.Deadline(); !ok {
+					t.Fatal("Close context is not bounded")
+				}
+				close(closed)
+				return closeErr
+			},
+		}, nil
+	}
+	_, err := performance.Run(ctx, performance.ProfileLocal, performance.CapabilityEvidence{}, factory, factory)
+	if !errors.Is(err, primaryErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("joined lifecycle error = %v", err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not complete")
+	}
+}
+
+func TestPerformanceCloseRunsAfterCancellationWithoutRunError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var runs atomic.Int32
+	var closed atomic.Int32
+	factory := func(context.Context) (performance.Workload, error) {
+		return &performance.WorkloadFuncs{
+			RunFunc: func(context.Context, performance.Sample) error {
+				if runs.Add(1) == 1 {
+					cancel()
+				}
+				return nil
+			},
+			CloseFunc: func(closeCtx context.Context) error {
+				if closeCtx.Err() != nil {
+					return errors.New("cleanup context was canceled")
+				}
+				closed.Add(1)
+				return nil
+			},
+		}, nil
+	}
+	_, err := performance.Run(ctx, performance.ProfileLocal, performance.CapabilityEvidence{}, factory, factory)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("Close calls = %d, want 1", closed.Load())
+	}
+}
+
 func passingSummary() performance.Summary {
 	rounds := make([]performance.Round, performance.MeasurementRounds)
 	for index := range rounds {

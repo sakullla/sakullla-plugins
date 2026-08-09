@@ -82,11 +82,31 @@ func buildWAFArtifact(t *testing.T) []byte {
 	return artifact
 }
 
+type policyArtifactSession struct {
+	t             *testing.T
+	ctx           context.Context
+	runtime       wazero.Runtime
+	guest         api.Module
+	evaluateCount int
+	eventCount    int
+	statePutCount int
+}
+
 func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
+	t.Helper()
+	session, status := initPolicyArtifact(t, artifact, config, path, body, complete)
+	defer session.Close()
+	if status != pluginsdk.PolicyStatusOK {
+		return status, pluginsdk.PolicyActionUnspecified
+	}
+	return status, session.Evaluate()
+}
+
+func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (*policyArtifactSession, pluginsdk.PolicyStatus) {
 	t.Helper()
 	ctx := context.Background()
 	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV1))
-	defer runtime.Close(ctx)
+	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime}
 	fields := map[string][]byte{
 		"site":                         []byte("site-a"),
 		"method":                       []byte("POST"),
@@ -124,7 +144,13 @@ func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []b
 				response, err = marshalWAFBytesResponse(body[:limit], true)
 			case pluginsdk.PolicyHostStateGet:
 				response, err = marshalWAFBytesResponse(nil, true)
-			case pluginsdk.PolicyHostStatePut, pluginsdk.PolicyHostEmitEvent, pluginsdk.PolicyHostAddMetric:
+			case pluginsdk.PolicyHostStatePut:
+				session.statePutCount++
+				response = nil
+			case pluginsdk.PolicyHostEmitEvent:
+				session.eventCount++
+				response = nil
+			case pluginsdk.PolicyHostAddMetric:
 				response = nil
 			default:
 				stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusInvalidArgument, 0)
@@ -152,7 +178,7 @@ func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []b
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer guest.Close(ctx)
+	session.guest = guest
 	initWire := marshalWAFInit(t, config)
 	initPointer := wafAllocateAndWrite(t, ctx, guest, initWire)
 	result, err := guest.ExportedFunction(pluginsdk.PolicyExportInit).Call(ctx, uint64(initPointer), uint64(len(initWire)))
@@ -160,31 +186,41 @@ func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []b
 		t.Fatalf("init call = %v, %v", result, err)
 	}
 	status := pluginsdk.PolicyStatus(uint32(result[0]))
-	if status != pluginsdk.PolicyStatusOK {
-		return status, pluginsdk.PolicyActionUnspecified
+	return session, status
+}
+
+func (session *policyArtifactSession) Close() {
+	if session.guest != nil {
+		_ = session.guest.Close(session.ctx)
 	}
-	evaluateWire := marshalWAFEvaluate(t)
-	evaluatePointer := wafAllocateAndWrite(t, ctx, guest, evaluateWire)
-	result, err = guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
+	_ = session.runtime.Close(session.ctx)
+}
+
+func (session *policyArtifactSession) Evaluate() pluginsdk.PolicyAction {
+	session.t.Helper()
+	session.evaluateCount++
+	evaluateWire := marshalWAFEvaluate(session.t)
+	evaluatePointer := wafAllocateAndWrite(session.t, session.ctx, session.guest, evaluateWire)
+	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(session.ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
 	if err != nil || len(result) != 1 {
-		t.Fatalf("evaluate call = %v, %v", result, err)
+		session.t.Fatalf("evaluate call = %v, %v", result, err)
 	}
 	outputPointer, outputLength := pluginsdk.UnpackPolicyBuffer(result[0])
-	output, ok := guest.Memory().Read(outputPointer, outputLength)
+	output, ok := session.guest.Memory().Read(outputPointer, outputLength)
 	if !ok {
-		t.Fatal("evaluate returned invalid output range")
+		session.t.Fatal("evaluate returned invalid output range")
 	}
-	message := decodeWAFPolicyMessage(t, "EvaluateResponse", output)
-	successField := wafField(t, message, "success")
+	message := decodeWAFPolicyMessage(session.t, "EvaluateResponse", output)
+	successField := wafField(session.t, message, "success")
 	if !message.ProtoReflect().Has(successField) {
-		t.Fatalf("evaluate response has no success: %v", message)
+		session.t.Fatalf("evaluate response has no success: %v", message)
 	}
 	success := message.ProtoReflect().Get(successField).Message()
 	actionField := success.Descriptor().Fields().ByName("action")
 	if actionField == nil {
-		t.Fatal("canonical EvaluateSuccess.action is missing")
+		session.t.Fatal("canonical EvaluateSuccess.action is missing")
 	}
-	return status, pluginsdk.PolicyAction(success.Get(actionField).Enum())
+	return pluginsdk.PolicyAction(success.Get(actionField).Enum())
 }
 
 func marshalWAFInit(t *testing.T, config []byte) []byte {

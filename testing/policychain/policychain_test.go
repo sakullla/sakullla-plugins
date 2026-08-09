@@ -132,6 +132,63 @@ func TestPolicyChainDeadlineIsolationDoesNotBlockUnboundOrOtherBinding(t *testin
 	}
 }
 
+func TestPolicyChainLateTransactionEffectsAreDiscarded(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	harness := NewHarness()
+	evaluators := make(map[Stage]Evaluator, len(FixedStages()))
+	for _, stage := range FixedStages() {
+		current := stage
+		evaluators[current] = func(_ context.Context, request Request, _ map[string]string, transaction *Transaction) (Decision, error) {
+			if current == StageIPPolicy && request.BindingID == "binding-a" {
+				close(started)
+				<-release
+				transaction.PutState("shared-rate", "late-write")
+				transaction.EmitEvent("late-event")
+				close(finished)
+			}
+			if current == StageWAF && request.BindingID == "binding-b" {
+				if _, exists := transaction.State("shared-rate"); exists {
+					return Decision{Action: pluginsdk.PolicyActionDeny, Reason: "observed late state"}, nil
+				}
+			}
+			return allow("ok"), nil
+		}
+	}
+	if err := harness.PutDefinition(Definition{Ref: "chain-shared", Evaluators: evaluators}); err != nil {
+		t.Fatal(err)
+	}
+	first := binding("binding-a", nil)
+	first.StageTimeout = 10 * time.Millisecond
+	if err := harness.PutBinding(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.PutBinding(binding("binding-b", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan Trace, 1)
+	go func() { result <- harness.Evaluate(context.Background(), requestFor("binding-a")) }()
+	<-started
+	if trace := <-result; !errors.Is(trace.Failure, context.DeadlineExceeded) {
+		t.Fatalf("timed-out binding result = %#v", trace)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("late evaluator was not released")
+	}
+	second := harness.Evaluate(context.Background(), requestFor("binding-b"))
+	if second.Failure != nil || second.Decision.Action != pluginsdk.PolicyActionAllow {
+		t.Fatalf("binding B observed discarded transaction: %#v", second)
+	}
+	if _, exists := harness.State("shared-rate"); exists || len(harness.Events()) != 0 {
+		t.Fatalf("late effects committed state=%v events=%v", exists, harness.Events())
+	}
+}
+
 func TestPolicyChainBudgetAndPoolFailuresAreBindingLocal(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -194,7 +251,7 @@ func configuredHarness(t *testing.T, evaluate func(Stage, Request, map[string]st
 	evaluators := make(map[Stage]Evaluator, len(FixedStages()))
 	for _, stage := range FixedStages() {
 		current := stage
-		evaluators[current] = func(_ context.Context, request Request, overlay map[string]string) (Decision, error) {
+		evaluators[current] = func(_ context.Context, request Request, overlay map[string]string, _ *Transaction) (Decision, error) {
 			return evaluate(current, request, overlay)
 		}
 	}

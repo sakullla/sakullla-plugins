@@ -51,7 +51,33 @@ type Decision struct {
 	Reason string
 }
 
-type Evaluator func(context.Context, Request, map[string]string) (Decision, error)
+type Evaluator func(context.Context, Request, map[string]string, *Transaction) (Decision, error)
+
+// Transaction owns all model state and event effects for one Evaluate call.
+// Effects are committed only after an on-time successful chain result. Direct
+// side effects captured by arbitrary evaluator closures are outside this local
+// model; real hard isolation still requires a supervised process boundary.
+type Transaction struct {
+	base   map[string]string
+	writes map[string]string
+	events []string
+}
+
+func (transaction *Transaction) State(key string) (string, bool) {
+	if value, exists := transaction.writes[key]; exists {
+		return value, true
+	}
+	value, exists := transaction.base[key]
+	return value, exists
+}
+
+func (transaction *Transaction) PutState(key, value string) {
+	transaction.writes[key] = value
+}
+
+func (transaction *Transaction) EmitEvent(event string) {
+	transaction.events = append(transaction.events, event)
+}
 
 type Definition struct {
 	Ref        string
@@ -85,10 +111,25 @@ type Harness struct {
 	mu          sync.RWMutex
 	definitions map[string]Definition
 	bindings    map[string]Binding
+	state       map[string]string
+	events      []string
 }
 
 func NewHarness() *Harness {
-	return &Harness{definitions: make(map[string]Definition), bindings: make(map[string]Binding)}
+	return &Harness{definitions: make(map[string]Definition), bindings: make(map[string]Binding), state: make(map[string]string)}
+}
+
+func (harness *Harness) State(key string) (string, bool) {
+	harness.mu.RLock()
+	defer harness.mu.RUnlock()
+	value, exists := harness.state[key]
+	return value, exists
+}
+
+func (harness *Harness) Events() []string {
+	harness.mu.RLock()
+	defer harness.mu.RUnlock()
+	return append([]string(nil), harness.events...)
 }
 
 func (harness *Harness) PutDefinition(definition Definition) error {
@@ -189,6 +230,7 @@ func (harness *Harness) Evaluate(ctx context.Context, request Request) Trace {
 	}
 
 	request.Payload = append([]byte(nil), request.Payload...)
+	transaction := harness.newTransaction()
 	for _, stage := range fixedOrder {
 		if err := ctx.Err(); err != nil {
 			trace.Failure = err
@@ -198,7 +240,7 @@ func (harness *Harness) Evaluate(ctx context.Context, request Request) Trace {
 		trace.Stages = append(trace.Stages, stage)
 		stageRequest := request
 		stageRequest.Payload = append([]byte(nil), request.Payload...)
-		decision, err := runEvaluator(ctx, binding.StageTimeout, definition.Evaluators[stage], stageRequest, cloneValues(binding.Overlay[stage]))
+		decision, err := runEvaluator(ctx, binding.StageTimeout, definition.Evaluators[stage], stageRequest, cloneValues(binding.Overlay[stage]), transaction)
 		if err != nil {
 			trace.Failure = fmt.Errorf("%s: %w", stage, err)
 			trace.Decision = Decision{Action: binding.FailureAction, Reason: trace.Failure.Error()}
@@ -210,12 +252,29 @@ func (harness *Harness) Evaluate(ctx context.Context, request Request) Trace {
 			return trace
 		}
 		if decision.Action == pluginsdk.PolicyActionDeny {
+			harness.commit(transaction)
 			trace.Decision = decision
 			return trace
 		}
 	}
+	harness.commit(transaction)
 	trace.Decision = allow("fixed chain allowed request")
 	return trace
+}
+
+func (harness *Harness) newTransaction() *Transaction {
+	harness.mu.RLock()
+	defer harness.mu.RUnlock()
+	return &Transaction{base: cloneValues(harness.state), writes: make(map[string]string)}
+}
+
+func (harness *Harness) commit(transaction *Transaction) {
+	harness.mu.Lock()
+	defer harness.mu.Unlock()
+	for key, value := range transaction.writes {
+		harness.state[key] = value
+	}
+	harness.events = append(harness.events, transaction.events...)
 }
 
 type evaluatorResult struct {
@@ -226,7 +285,7 @@ type evaluatorResult struct {
 // runEvaluator isolates lifecycle state from an evaluator that ignores its
 // context. A timed-out result is never committed; callers that install a
 // non-cooperative test evaluator remain responsible for releasing its goroutine.
-func runEvaluator(ctx context.Context, timeout time.Duration, evaluator Evaluator, request Request, overlay map[string]string) (Decision, error) {
+func runEvaluator(ctx context.Context, timeout time.Duration, evaluator Evaluator, request Request, overlay map[string]string, transaction *Transaction) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
@@ -234,7 +293,7 @@ func runEvaluator(ctx context.Context, timeout time.Duration, evaluator Evaluato
 	defer cancel()
 	result := make(chan evaluatorResult, 1)
 	go func() {
-		decision, err := evaluator(evaluatorCtx, request, overlay)
+		decision, err := evaluator(evaluatorCtx, request, overlay, transaction)
 		result <- evaluatorResult{decision: decision, err: err}
 	}()
 	select {
