@@ -39,12 +39,25 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 	if !runtime.valid() {
 		return nil, ErrTypedHandlesUnavailable
 	}
-	service := &Service{configuration: configuration, runtime: runtime}
+	rootCtx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		configuration: configuration,
+		runtime:       runtime,
+		rootCtx:       rootCtx,
+		cancel:        cancel,
+		slots:         make(chan struct{}, MaxActiveCalls),
+		hostCalls:     make(chan struct{}, MaxActiveCalls),
+	}
 	service.live.Store(true)
 	return service, nil
 }
 
 func (service *Service) TokenStatus(ctx context.Context, request ActionRequest) (TokenAttestation, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return TokenAttestation{}, err
+	}
+	defer finish()
 	operation := service.operationKey("token-status", request)
 	attestation, err := service.authorize(ctx, "token-status", request, PermissionZoneRead, operation)
 	if err != nil {
@@ -52,7 +65,7 @@ func (service *Service) TokenStatus(ctx context.Context, request ActionRequest) 
 	}
 	missing := missingPermissions(attestation)
 	projection := UIProjection{Kind: "token-status", Outcome: "succeeded", OperationKey: operation, MissingPermissions: missing, LastUsed: attestation.LastUsed, VisibleZones: append([]string(nil), attestation.ZoneIDs...)}
-	if err := service.runtime.UI.Emit(ctx, projection); err != nil {
+	if err := service.emitUI(ctx, projection); err != nil {
 		return TokenAttestation{}, service.fail(ctx, "token-status", operation, request, "ui", ErrUIUnavailable)
 	}
 	if err := service.success(ctx, "token-status", operation, request); err != nil {
@@ -62,12 +75,19 @@ func (service *Service) TokenStatus(ctx context.Context, request ActionRequest) 
 }
 
 func (service *Service) ListZones(ctx context.Context, request ActionRequest) ([]Zone, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	operation := service.operationKey("zone-list", request)
 	attestation, err := service.authorize(ctx, "zone-list", request, PermissionZoneRead, operation)
 	if err != nil {
 		return nil, err
 	}
-	zones, err := service.runtime.DNS.ListZones(ctx, attestation, operation)
+	zones, err := await(service, ctx, func(callCtx context.Context) ([]Zone, error) {
+		return service.runtime.DNS.ListZones(callCtx, attestation, operation)
+	})
 	if err != nil {
 		return nil, service.fail(ctx, "zone-list", operation, request, "dns", safeExternal(err, ErrDNSOperationFailed))
 	}
@@ -99,7 +119,7 @@ func (service *Service) ListZones(ctx context.Context, request ActionRequest) ([
 	for index := range zones {
 		visible[index] = zones[index].ID
 	}
-	if err := service.runtime.UI.Emit(ctx, UIProjection{Kind: "zone-list", Outcome: "succeeded", OperationKey: operation, VisibleZones: visible, MissingPermissions: missingPermissions(attestation), LastUsed: attestation.LastUsed}); err != nil {
+	if err := service.emitUI(ctx, UIProjection{Kind: "zone-list", Outcome: "succeeded", OperationKey: operation, VisibleZones: visible, MissingPermissions: missingPermissions(attestation), LastUsed: attestation.LastUsed}); err != nil {
 		return nil, service.fail(ctx, "zone-list", operation, request, "ui", ErrUIUnavailable)
 	}
 	if err := service.success(ctx, "zone-list", operation, request); err != nil {
@@ -109,12 +129,19 @@ func (service *Service) ListZones(ctx context.Context, request ActionRequest) ([
 }
 
 func (service *Service) ListRecords(ctx context.Context, request ActionRequest) ([]DNSRecord, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	operation := service.operationKey("dns-list", request)
 	attestation, err := service.authorize(ctx, "dns-list", request, PermissionZoneRead, operation)
 	if err != nil {
 		return nil, err
 	}
-	records, err := service.runtime.DNS.ListRecords(ctx, attestation, request.ZoneID, MaxRecords)
+	records, err := await(service, ctx, func(callCtx context.Context) ([]DNSRecord, error) {
+		return service.runtime.DNS.ListRecords(callCtx, attestation, request.ZoneID, MaxRecords)
+	})
 	if err != nil {
 		return nil, service.fail(ctx, "dns-list", operation, request, "dns", safeExternal(err, ErrDNSOperationFailed))
 	}
@@ -145,6 +172,11 @@ func (service *Service) ListRecords(ctx context.Context, request ActionRequest) 
 }
 
 func (service *Service) Create(ctx context.Context, request ActionRequest, record DNSRecord) (DNSRecord, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	defer finish()
 	record.ID, record.ZoneID = "", request.ZoneID
 	return service.mutate(ctx, "dns-create", request, record, func(ctx context.Context, attestation TokenAttestation, operation string) (DNSRecord, error) {
 		return service.runtime.DNS.Create(ctx, attestation, record, operation)
@@ -152,6 +184,11 @@ func (service *Service) Create(ctx context.Context, request ActionRequest, recor
 }
 
 func (service *Service) Update(ctx context.Context, request ActionRequest, record DNSRecord) (DNSRecord, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	defer finish()
 	if record.ID == "" {
 		return DNSRecord{}, ErrInvalidInput
 	}
@@ -170,21 +207,41 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 	if err != nil {
 		return DNSRecord{}, err
 	}
-	result, err := effect(ctx, attestation, operation)
+	if outcome, outcomeErr := service.inspect(ctx, operation); outcomeErr != nil {
+		return DNSRecord{}, ErrReconcilePending
+	} else if outcome.State == OperationCommitted {
+		return service.finishMutation(ctx, action, operation, request, outcome.Record)
+	} else if outcome.State == OperationUnknown {
+		return DNSRecord{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+	} else if outcome.State == OperationFailed {
+		return DNSRecord{}, service.fail(ctx, action, operation, request, "dns", ErrDNSOperationFailed)
+	}
+	result, err := await(service, ctx, func(callCtx context.Context) (DNSRecord, error) { return effect(callCtx, attestation, operation) })
 	if err != nil {
 		failure := safeExternal(err, ErrDNSOperationFailed)
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return DNSRecord{}, service.fail(ctx, action, operation, request, "dns", failure)
 		}
-		return DNSRecord{}, service.pending(ctx, action, operation, request, "dns", failure)
+		outcome, inspectErr := service.inspect(ctx, operation)
+		if inspectErr == nil && outcome.State == OperationCommitted {
+			return service.finishMutation(ctx, action, operation, request, outcome.Record)
+		}
+		if inspectErr == nil && outcome.State == OperationFailed {
+			return DNSRecord{}, service.fail(ctx, action, operation, request, "dns", failure)
+		}
+		return DNSRecord{}, service.pending(ctx, action, operation, request, "dns", ErrReconcilePending)
 	}
+	return service.finishMutation(ctx, action, operation, request, result)
+}
+
+func (service *Service) finishMutation(ctx context.Context, action, operation string, request ActionRequest, result DNSRecord) (DNSRecord, error) {
 	if err := service.checkLive(ctx); err != nil {
 		return DNSRecord{}, service.fail(ctx, action, operation, request, "revoked", err)
 	}
 	if result.ZoneID != request.ZoneID || !refPattern.MatchString(result.ID) || result.Validate(true) != nil {
 		return DNSRecord{}, service.fail(ctx, action, operation, request, "invalid", ErrInvalidInput)
 	}
-	if err := service.runtime.UI.Emit(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation, ZoneID: request.ZoneID, RecordID: result.ID, RecordType: result.Type, RecordName: result.Name}); err != nil {
+	if err := service.emitUI(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation, ZoneID: request.ZoneID, RecordID: result.ID, RecordType: result.Type, RecordName: result.Name}); err != nil {
 		_ = service.success(ctx, action, operation, request)
 		return DNSRecord{}, ErrReconcilePending
 	}
@@ -195,6 +252,11 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 }
 
 func (service *Service) Delete(ctx context.Context, request ActionRequest, recordID string) error {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
 	if !refPattern.MatchString(recordID) {
 		return ErrInvalidInput
 	}
@@ -203,17 +265,40 @@ func (service *Service) Delete(ctx context.Context, request ActionRequest, recor
 	if err != nil {
 		return err
 	}
-	if err := service.runtime.DNS.Delete(ctx, attestation, request.ZoneID, recordID, operation); err != nil {
-		failure := safeExternal(err, ErrDNSOperationFailed)
+	if outcome, outcomeErr := service.inspect(ctx, operation); outcomeErr != nil {
+		return ErrReconcilePending
+	} else if outcome.State == OperationCommitted {
+		return service.finishDelete(ctx, operation, request, recordID)
+	} else if outcome.State == OperationUnknown {
+		return service.pendingRecord(ctx, "dns-delete", operation, request, recordID, "operation", ErrReconcilePending)
+	} else if outcome.State == OperationFailed {
+		return service.failRecord(ctx, "dns-delete", operation, request, recordID, "dns", ErrDNSOperationFailed)
+	}
+	_, effectErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.DNS.Delete(callCtx, attestation, request.ZoneID, recordID, operation)
+	})
+	if effectErr != nil {
+		failure := safeExternal(effectErr, ErrDNSOperationFailed)
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return service.failRecord(ctx, "dns-delete", operation, request, recordID, "dns", failure)
 		}
-		return service.pendingRecord(ctx, "dns-delete", operation, request, recordID, "dns", failure)
+		outcome, inspectErr := service.inspect(ctx, operation)
+		if inspectErr == nil && outcome.State == OperationCommitted {
+			return service.finishDelete(ctx, operation, request, recordID)
+		}
+		if inspectErr == nil && outcome.State == OperationFailed {
+			return service.failRecord(ctx, "dns-delete", operation, request, recordID, "dns", failure)
+		}
+		return service.pendingRecord(ctx, "dns-delete", operation, request, recordID, "dns", ErrReconcilePending)
 	}
+	return service.finishDelete(ctx, operation, request, recordID)
+}
+
+func (service *Service) finishDelete(ctx context.Context, operation string, request ActionRequest, recordID string) error {
 	if err := service.checkLive(ctx); err != nil {
 		return service.failRecord(ctx, "dns-delete", operation, request, recordID, "revoked", err)
 	}
-	if err := service.runtime.UI.Emit(ctx, UIProjection{Kind: "dns-delete", Outcome: "succeeded", OperationKey: operation, ZoneID: request.ZoneID, RecordID: recordID}); err != nil {
+	if err := service.emitUI(ctx, UIProjection{Kind: "dns-delete", Outcome: "succeeded", OperationKey: operation, ZoneID: request.ZoneID, RecordID: recordID}); err != nil {
 		_ = service.successRecord(ctx, "dns-delete", operation, request, recordID)
 		return ErrReconcilePending
 	}
@@ -221,10 +306,22 @@ func (service *Service) Delete(ctx context.Context, request ActionRequest, recor
 }
 
 func (service *Service) EnrollToken(ctx context.Context, request ActionRequest, material []byte) (TokenMetadata, error) {
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		clear(material)
+		return TokenMetadata{}, err
+	}
+	defer finish()
 	return service.changeToken(ctx, "token-enroll", request, material, true, service.runtime.Vault.Enroll)
 }
 func (service *Service) RotateToken(ctx context.Context, request ActionRequest, material []byte) (TokenMetadata, error) {
-	return service.changeToken(ctx, "token-rotate", request, material, false, service.runtime.Vault.Rotate)
+	ctx, finish, err := service.begin(ctx)
+	if err != nil {
+		clear(material)
+		return TokenMetadata{}, err
+	}
+	defer finish()
+	return service.rotateToken(ctx, request, material)
 }
 
 func (service *Service) changeToken(ctx context.Context, action string, request ActionRequest, material []byte, bootstrap bool, effect func(context.Context, string, []byte, string) (TokenMetadata, error)) (TokenMetadata, error) {
@@ -232,7 +329,13 @@ func (service *Service) changeToken(ctx context.Context, action string, request 
 		clear(material)
 		return TokenMetadata{}, ErrInvalidInput
 	}
-	defer clear(material)
+	secret := append([]byte(nil), material...)
+	clear(material)
+	defer func() {
+		if secret != nil {
+			clear(secret)
+		}
+	}()
 	operation := service.operationKey(action, request)
 	if bootstrap {
 		if err := service.authorizeBootstrap(ctx, action, request, operation); err != nil {
@@ -243,21 +346,94 @@ func (service *Service) changeToken(ctx context.Context, action string, request 
 			return TokenMetadata{}, err
 		}
 	}
-	metadata, err := effect(ctx, service.configuration.SecretRef, material, operation)
+	if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
+		return TokenMetadata{}, ErrReconcilePending
+	} else if outcome.State == OperationCommitted {
+		return service.finishToken(ctx, action, operation, request, outcome.Token)
+	} else if outcome.State == OperationUnknown {
+		return TokenMetadata{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+	} else if outcome.State == OperationFailed {
+		return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
+	}
+	ownedSecret := secret
+	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
+		return effect(callCtx, service.configuration.SecretRef, ownedSecret, operation)
+	}, func() { clear(ownedSecret) })
+	secret = nil
 	if err != nil {
 		failure := safeExternal(err, ErrVaultOperationFailed)
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", failure)
 		}
-		return TokenMetadata{}, service.pending(ctx, action, operation, request, "vault", failure)
+		outcome, inspectErr := service.inspect(ctx, operation)
+		if inspectErr == nil && outcome.State == OperationCommitted {
+			return service.finishToken(ctx, action, operation, request, outcome.Token)
+		}
+		if inspectErr == nil && outcome.State == OperationFailed {
+			return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", failure)
+		}
+		return TokenMetadata{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
 	}
+	return service.finishToken(ctx, action, operation, request, metadata)
+}
+
+func (service *Service) rotateToken(ctx context.Context, request ActionRequest, material []byte) (TokenMetadata, error) {
+	if len(material) == 0 || len(material) > MaxTokenBytes {
+		clear(material)
+		return TokenMetadata{}, ErrInvalidInput
+	}
+	secret := append([]byte(nil), material...)
+	clear(material)
+	defer func() {
+		if secret != nil {
+			clear(secret)
+		}
+	}()
+	action := "token-rotate"
+	operation := service.operationKey(action, request)
+	attestation, err := service.authorize(ctx, action, request, "", operation)
+	if err != nil {
+		return TokenMetadata{}, err
+	}
+	if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
+		return TokenMetadata{}, ErrReconcilePending
+	} else if outcome.State == OperationCommitted {
+		return service.finishToken(ctx, action, operation, request, outcome.Token)
+	} else if outcome.State == OperationUnknown {
+		return TokenMetadata{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+	} else if outcome.State == OperationFailed {
+		return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
+	}
+	ownedSecret := secret
+	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
+		return service.runtime.Vault.Rotate(callCtx, service.configuration.SecretRef, attestation.Version, ownedSecret, operation)
+	}, func() { clear(ownedSecret) })
+	secret = nil
+	if err != nil {
+		failure := safeExternal(err, ErrVaultOperationFailed)
+		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
+			return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", failure)
+		}
+		outcome, inspectErr := service.inspect(ctx, operation)
+		if inspectErr == nil && outcome.State == OperationCommitted {
+			return service.finishToken(ctx, action, operation, request, outcome.Token)
+		}
+		if inspectErr == nil && outcome.State == OperationFailed {
+			return TokenMetadata{}, service.fail(ctx, action, operation, request, "vault", failure)
+		}
+		return TokenMetadata{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
+	}
+	return service.finishToken(ctx, action, operation, request, metadata)
+}
+
+func (service *Service) finishToken(ctx context.Context, action, operation string, request ActionRequest, metadata TokenMetadata) (TokenMetadata, error) {
 	if err := service.checkLive(ctx); err != nil {
 		return TokenMetadata{}, service.fail(ctx, action, operation, request, "revoked", err)
 	}
 	if metadata.SecretRef != service.configuration.SecretRef || !refPattern.MatchString(metadata.Version) {
 		return TokenMetadata{}, service.fail(ctx, action, operation, request, "stale", ErrTokenStale)
 	}
-	if err := service.runtime.UI.Emit(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation}); err != nil {
+	if err := service.emitUI(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation}); err != nil {
 		_ = service.success(ctx, action, operation, request)
 		return TokenMetadata{}, ErrReconcilePending
 	}
@@ -274,7 +450,22 @@ func (service *Service) authorize(ctx context.Context, action string, request Ac
 	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID}); err != nil {
 		return TokenAttestation{}, err
 	}
-	attestation, err := service.runtime.Vault.Verify(ctx, service.configuration.SecretRef)
+	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
+		return TokenAttestation{}, service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
+	}
+	authorizationPermission := permission
+	if action == "token-rotate" {
+		authorizationPermission = PermissionVaultRotate
+	}
+	coarse := ActionContext{Phase: "coarse", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Permission: authorizationPermission, OperationKey: operation}
+	if _, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Authorizer.Authorize(callCtx, coarse)
+	}); err != nil {
+		return TokenAttestation{}, service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
+	}
+	attestation, err := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
+		return service.runtime.Vault.Verify(callCtx, service.configuration.SecretRef)
+	})
 	if err != nil {
 		return TokenAttestation{}, service.fail(ctx, action, operation, request, "token", safeExternal(err, ErrTokenInvalid))
 	}
@@ -293,15 +484,10 @@ func (service *Service) authorize(ctx context.Context, action string, request Ac
 		return TokenAttestation{}, service.fail(ctx, action, operation, request, "attestation", ErrTokenStale)
 	}
 	attestation.Permissions, attestation.ZoneIDs = permissions, zones
-	authorizationPermission := permission
-	if action == "token-rotate" {
-		authorizationPermission = PermissionVaultRotate
-	}
-	authorization := ActionContext{Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Permission: authorizationPermission, SecretRef: attestation.SecretRef, SecretVersion: attestation.Version, OperationKey: operation}
-	if err := service.runtime.Authorizer.Authorize(ctx, authorization); err != nil {
-		return TokenAttestation{}, service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
-	}
-	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
+	authorization := ActionContext{Phase: "exact", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Permission: authorizationPermission, SecretRef: attestation.SecretRef, SecretVersion: attestation.Version, OperationKey: operation}
+	if _, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Authorizer.Authorize(callCtx, authorization)
+	}); err != nil {
 		return TokenAttestation{}, service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
 	}
 	if permission != "" && !attestation.hasPermission(permission) {
@@ -326,11 +512,13 @@ func (service *Service) authorizeBootstrap(ctx context.Context, action string, r
 	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef}); err != nil {
 		return err
 	}
-	authorization := ActionContext{Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, Permission: PermissionVaultEnroll, SecretRef: service.configuration.SecretRef, OperationKey: operation}
-	if err := service.runtime.Authorizer.Authorize(ctx, authorization); err != nil {
+	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
 		return service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
 	}
-	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
+	authorization := ActionContext{Phase: "coarse", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, Permission: PermissionVaultEnroll, SecretRef: service.configuration.SecretRef, OperationKey: operation}
+	if _, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Authorizer.Authorize(callCtx, authorization)
+	}); err != nil {
 		return service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
 	}
 	return service.checkLive(ctx)
@@ -352,14 +540,99 @@ func (service *Service) checkLive(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (service *Service) begin(parent context.Context) (context.Context, func(), error) {
+	if err := parent.Err(); err != nil {
+		return nil, nil, err
+	}
+	service.mu.Lock()
+	if !service.live.Load() {
+		service.mu.Unlock()
+		return nil, nil, ErrRevoked
+	}
+	service.active.Add(1)
+	service.mu.Unlock()
+	select {
+	case service.slots <- struct{}{}:
+	default:
+		service.active.Done()
+		return nil, nil, ErrBoundExceeded
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(service.rootCtx, cancel)
+	return ctx, func() { stop(); cancel(); <-service.slots; service.active.Done() }, nil
+}
+
+func await[T any](service *Service, ctx context.Context, call func(context.Context) (T, error)) (T, error) {
+	return awaitOwned(service, ctx, call, func() {})
+}
+
+func awaitOwned[T any](service *Service, ctx context.Context, call func(context.Context) (T, error), cleanup func()) (T, error) {
+	var zero T
+	if err := service.checkLive(ctx); err != nil {
+		cleanup()
+		return zero, err
+	}
+	select {
+	case service.hostCalls <- struct{}{}:
+		service.active.Add(1)
+	case <-ctx.Done():
+		cleanup()
+		return zero, ctx.Err()
+	default:
+		cleanup()
+		return zero, ErrBoundExceeded
+	}
+	if err := service.checkLive(ctx); err != nil {
+		<-service.hostCalls
+		service.active.Done()
+		cleanup()
+		return zero, err
+	}
+	result := make(chan struct {
+		value T
+		err   error
+	}, 1)
+	go func() {
+		defer func() {
+			cleanup()
+			<-service.hostCalls
+			service.active.Done()
+		}()
+		value, err := call(ctx)
+		result <- struct {
+			value T
+			err   error
+		}{value, err}
+	}()
+	select {
+	case completed := <-result:
+		if err := service.checkLive(ctx); err != nil {
+			return zero, err
+		}
+		return completed.value, completed.err
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	}
+}
 func (service *Service) success(ctx context.Context, action, operation string, request ActionRequest) error {
 	return service.successRecord(ctx, action, operation, request, "")
 }
 func (service *Service) successRecord(ctx context.Context, action, operation string, request ActionRequest, recordID string) error {
-	logErr := service.runtime.Logger.Log(ctx, EventRecord{Action: action, Outcome: "succeeded", ZoneID: request.ZoneID, RecordID: recordID})
+	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "succeeded", ZoneID: request.ZoneID, RecordID: recordID})
+	})
 	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "succeeded", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
 	if logErr != nil || auditErr != nil {
-		return ErrReconcilePending
+		var failures []error
+		failures = append(failures, ErrReconcilePending)
+		if logErr != nil {
+			failures = append(failures, safeExternal(logErr, ErrLogUnavailable))
+		}
+		if auditErr != nil {
+			failures = append(failures, ErrAuditUnavailable)
+		}
+		return errors.Join(failures...)
 	}
 	return nil
 }
@@ -367,13 +640,19 @@ func (service *Service) fail(ctx context.Context, action, operation string, requ
 	return service.failRecord(ctx, action, operation, request, "", class, failure)
 }
 func (service *Service) failRecord(ctx context.Context, action, operation string, request ActionRequest, recordID, class string, failure error) error {
-	logErr := service.runtime.Logger.Log(ctx, EventRecord{Action: action, Outcome: "failed", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
+	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "failed", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
+	})
 	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "failed", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
-	if auditErr != nil {
-		return auditErr
-	}
-	if logErr != nil {
-		return ErrLogUnavailable
+	if auditErr != nil || logErr != nil {
+		failures := []error{failure}
+		if logErr != nil {
+			failures = append(failures, safeExternal(logErr, ErrLogUnavailable))
+		}
+		if auditErr != nil {
+			failures = append(failures, ErrAuditUnavailable)
+		}
+		return errors.Join(failures...)
 	}
 	return failure
 }
@@ -381,15 +660,39 @@ func (service *Service) pending(ctx context.Context, action, operation string, r
 	return service.pendingRecord(ctx, action, operation, request, "", class, failure)
 }
 func (service *Service) pendingRecord(ctx context.Context, action, operation string, request ActionRequest, recordID, class string, failure error) error {
-	_ = service.runtime.Logger.Log(ctx, EventRecord{Action: action, Outcome: "pending", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
-	_ = service.audit(ctx, AuditRecord{Action: action, Outcome: "pending", OperationKey: operation + ":progress", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
-	return failure
+	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "pending", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
+	})
+	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "pending", OperationKey: operation + ":progress", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
+	failures := []error{ErrReconcilePending}
+	if logErr != nil {
+		failures = append(failures, safeExternal(logErr, ErrLogUnavailable))
+	}
+	if auditErr != nil {
+		failures = append(failures, ErrAuditUnavailable)
+	}
+	return errors.Join(failures...)
 }
 func (service *Service) audit(ctx context.Context, record AuditRecord) error {
-	if err := service.runtime.Auditor.Audit(ctx, record); err != nil {
-		return ErrAuditUnavailable
+	if _, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.Auditor.Audit(callCtx, record)
+	}); err != nil {
+		return safeExternal(err, ErrAuditUnavailable)
 	}
 	return nil
+}
+
+func (service *Service) emitUI(ctx context.Context, projection UIProjection) error {
+	_, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
+		return struct{}{}, service.runtime.UI.Emit(callCtx, projection)
+	})
+	return err
+}
+
+func (service *Service) inspect(ctx context.Context, operation string) (OperationOutcome, error) {
+	return await(service, ctx, func(callCtx context.Context) (OperationOutcome, error) {
+		return service.runtime.Operations.Inspect(callCtx, operation)
+	})
 }
 
 func (service *Service) Snapshot() (Configuration, TokenAttestation) {
@@ -397,11 +700,31 @@ func (service *Service) Snapshot() (Configuration, TokenAttestation) {
 	defer service.mu.Unlock()
 	return service.configuration, cloneAttestation(service.status)
 }
-func (service *Service) Close() {
-	service.live.Store(false)
+func (service *Service) Cancel() {
+	revoke := false
 	service.mu.Lock()
+	service.closeOnce.Do(func() {
+		service.live.Store(false)
+		service.cancel()
+		revoke = true
+	})
 	service.status = TokenAttestation{}
 	service.mu.Unlock()
+	if revoke {
+		service.runtime.Lease.Revoke()
+	}
+}
+
+func (service *Service) Close(ctx context.Context) error {
+	service.Cancel()
+	done := make(chan struct{})
+	go func() { service.active.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func cloneAttestation(attestation TokenAttestation) TokenAttestation {
@@ -428,6 +751,8 @@ func safeExternal(err, fallback error) error {
 		return ErrRevoked
 	case errors.Is(err, ErrTokenStale):
 		return ErrTokenStale
+	case errors.Is(err, ErrBoundExceeded):
+		return ErrBoundExceeded
 	default:
 		return fallback
 	}

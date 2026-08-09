@@ -28,6 +28,7 @@ type Controller struct {
 	epoch         *controllerEpoch
 	commit        *rpcplugin.Handle[*controllerEpoch]
 	service       *rpcplugin.Handle[*Service]
+	serviceValue  *Service
 	transaction   *rpcplugin.Handle[PreparedAdmission]
 	admission     TypedHandleAdmission
 	lifecycle     *rpcplugin.Lifecycle
@@ -114,7 +115,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		controller.mu.Lock()
 		if controller.epoch == epoch {
 			controller.configuration = Configuration{}
-			controller.epoch, controller.commit, controller.service, controller.transaction = nil, nil, nil, nil
+			controller.epoch, controller.commit, controller.service, controller.transaction, controller.serviceValue = nil, nil, nil, nil, nil
 		}
 		controller.mu.Unlock()
 	})
@@ -130,7 +131,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		}
 		controller.mu.Lock()
 		controller.configuration, controller.epoch, controller.commit = configuration, epoch, handle
-		controller.service, controller.transaction = nil, nil
+		controller.service, controller.transaction, controller.serviceValue = nil, nil, nil
 		controller.mu.Unlock()
 		return nil
 	})
@@ -176,7 +177,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			transaction.Revoke()
 			return err
 		}
-		serviceHandle, err := rpcplugin.BindHandle(generation, "cloudflare-dns", service, func(service *Service) { service.Close() })
+		serviceHandle, err := rpcplugin.BindHandle(generation, "cloudflare-dns", service, func(service *Service) { service.Cancel() })
 		if err != nil {
 			transaction.Revoke()
 			return err
@@ -196,16 +197,24 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			transaction.Revoke()
 			return rpcplugin.ErrRevoked
 		}
-		controller.service, controller.transaction = serviceHandle, transaction
+		controller.service, controller.transaction, controller.serviceValue = serviceHandle, transaction, service
 		controller.mu.Unlock()
 		return nil
 	})
 }
 
-func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
+func (controller *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
+	controller.mu.Lock()
+	service := controller.serviceValue
+	controller.mu.Unlock()
+	if service != nil {
+		if err := service.Close(ctx); err != nil {
+			return err
+		}
+	}
 	controller.mu.Lock()
 	controller.configuration = Configuration{}
-	controller.epoch, controller.commit, controller.service, controller.transaction = nil, nil, nil, nil
+	controller.epoch, controller.commit, controller.service, controller.transaction, controller.serviceValue = nil, nil, nil, nil, nil
 	controller.mu.Unlock()
 	return nil
 }

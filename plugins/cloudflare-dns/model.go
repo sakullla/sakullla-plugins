@@ -18,6 +18,7 @@ const (
 	MaxZones       = 256
 	MaxRecords     = 1024
 	MaxTokenBytes  = 8192
+	MaxActiveCalls = 64
 )
 
 const (
@@ -91,7 +92,9 @@ type Vault interface {
 	// Enroll and Rotate must be capability-backed and exactly-once for the
 	// stable operation key. A retry with the same key returns the same metadata.
 	Enroll(context.Context, string, []byte, string) (TokenMetadata, error)
-	Rotate(context.Context, string, []byte, string) (TokenMetadata, error)
+	// Rotate atomically compares expectedVersion with the current Vault
+	// version before applying the exactly-once operation.
+	Rotate(context.Context, string, string, []byte, string) (TokenMetadata, error)
 }
 
 type Zone struct{ ID, Name string }
@@ -125,8 +128,30 @@ type DNSHandle interface {
 }
 
 type ActionContext struct {
-	Actor, ResourceGroupRef, ZoneID, Permission, SecretRef, SecretVersion, OperationKey string
+	Phase, Actor, ResourceGroupRef, ZoneID, Permission, SecretRef, SecretVersion, OperationKey string
 }
+
+type OperationState string
+
+const (
+	OperationAbsent    OperationState = "absent"
+	OperationUnknown   OperationState = "unknown"
+	OperationCommitted OperationState = "committed"
+	OperationFailed    OperationState = "failed"
+)
+
+type OperationOutcome struct {
+	State  OperationState
+	Record DNSRecord
+	Token  TokenMetadata
+}
+type OperationInspector interface {
+	Inspect(context.Context, string) (OperationOutcome, error)
+}
+type GenerationLease interface{ Revoke() }
+type GenerationLeaseFunc func()
+
+func (function GenerationLeaseFunc) Revoke() { function() }
 
 type Authorizer interface {
 	Authorize(context.Context, ActionContext) error
@@ -175,6 +200,8 @@ func (function EventLoggerFunc) Log(ctx context.Context, record EventRecord) err
 type RuntimeAdapters struct {
 	Vault      Vault
 	DNS        DNSHandle
+	Operations OperationInspector
+	Lease      GenerationLease
 	Authorizer Authorizer
 	UI         DynamicUI
 	Auditor    Auditor
@@ -182,7 +209,7 @@ type RuntimeAdapters struct {
 }
 
 func (runtime RuntimeAdapters) valid() bool {
-	return runtime.Vault != nil && runtime.DNS != nil && runtime.Authorizer != nil && runtime.UI != nil && runtime.Auditor != nil && runtime.Logger != nil
+	return runtime.Vault != nil && runtime.DNS != nil && runtime.Operations != nil && runtime.Lease != nil && runtime.Authorizer != nil && runtime.UI != nil && runtime.Auditor != nil && runtime.Logger != nil
 }
 
 type PreparedAdmission interface {
@@ -227,6 +254,12 @@ type Service struct {
 	live          atomic.Bool
 	mu            sync.Mutex
 	status        TokenAttestation
+	rootCtx       context.Context
+	cancel        context.CancelFunc
+	active        sync.WaitGroup
+	slots         chan struct{}
+	hostCalls     chan struct{}
+	closeOnce     sync.Once
 }
 
 func sortedUnique(values []string, maximum int) ([]string, error) {
