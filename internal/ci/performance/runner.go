@@ -101,16 +101,49 @@ func CorpusDigest(corpus []Sample) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-type Workload func(context.Context, Sample) error
+// Workload is one isolated disabled or enabled lifecycle. A factory must
+// return a fresh instance for warmup and for every measured round.
+type Workload interface {
+	Run(context.Context, Sample) error
+	Close(context.Context) error
+	SteadyMemoryBytes() uint64
+}
+
+type WorkloadFactory func(context.Context) (Workload, error)
+
+// WorkloadFuncs is a small adapter for deterministic harnesses and tests.
+type WorkloadFuncs struct {
+	RunFunc          func(context.Context, Sample) error
+	CloseFunc        func(context.Context) error
+	SteadyMemoryFunc func() uint64
+}
+
+func (workload *WorkloadFuncs) Run(ctx context.Context, sample Sample) error {
+	return workload.RunFunc(ctx, sample)
+}
+
+func (workload *WorkloadFuncs) Close(ctx context.Context) error {
+	if workload.CloseFunc == nil {
+		return nil
+	}
+	return workload.CloseFunc(ctx)
+}
+
+func (workload *WorkloadFuncs) SteadyMemoryBytes() uint64 {
+	if workload.SteadyMemoryFunc == nil {
+		return 0
+	}
+	return workload.SteadyMemoryFunc()
+}
 
 type WorkloadMetrics struct {
-	Operations       int     `json:"operations"`
-	ElapsedNS        int64   `json:"elapsed_ns"`
-	ThroughputPerSec float64 `json:"throughput_per_sec"`
-	P95NS            int64   `json:"p95_ns"`
-	P99NS            int64   `json:"p99_ns"`
-	HeapAllocBytes   uint64  `json:"heap_alloc_bytes"`
-	RawSamplesNS     []int64 `json:"raw_samples_ns"`
+	Operations        int     `json:"operations"`
+	ElapsedNS         int64   `json:"elapsed_ns"`
+	ThroughputPerSec  float64 `json:"throughput_per_sec"`
+	P95NS             int64   `json:"p95_ns"`
+	P99NS             int64   `json:"p99_ns"`
+	SteadyMemoryBytes uint64  `json:"steady_memory_bytes"`
+	RawSamplesNS      []int64 `json:"raw_samples_ns"`
 }
 
 type Round struct {
@@ -136,7 +169,7 @@ type Summary struct {
 // disabled/candidate pairs. Local results are reproducible harness evidence,
 // never release evidence. Release rejects missing real Agent capabilities
 // before invoking either workload.
-func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disabled, enabled Workload) (Summary, error) {
+func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disabled, enabled WorkloadFactory) (Summary, error) {
 	summary := Summary{Profile: profile, Capabilities: evidence, WarmupPasses: WarmupPasses}
 	switch profile {
 	case ProfileLocal:
@@ -164,11 +197,11 @@ func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disa
 		return summary, err
 	}
 	for number := 1; number <= MeasurementRounds; number++ {
-		baseline, err := measure(ctx, corpus, disabled)
+		baseline, err := measureLifecycle(ctx, corpus, disabled)
 		if err != nil {
 			return summary, fmt.Errorf("round %d disabled baseline: %w", number, err)
 		}
-		candidate, err := measure(ctx, corpus, enabled)
+		candidate, err := measureLifecycle(ctx, corpus, enabled)
 		if err != nil {
 			return summary, fmt.Errorf("round %d enabled: %w", number, err)
 		}
@@ -177,8 +210,8 @@ func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disa
 			regression = (baseline.ThroughputPerSec - candidate.ThroughputPerSec) / baseline.ThroughputPerSec
 		}
 		additionalMemory := uint64(0)
-		if candidate.HeapAllocBytes > baseline.HeapAllocBytes {
-			additionalMemory = candidate.HeapAllocBytes - baseline.HeapAllocBytes
+		if candidate.SteadyMemoryBytes > baseline.SteadyMemoryBytes {
+			additionalMemory = candidate.SteadyMemoryBytes - baseline.SteadyMemoryBytes
 		}
 		summary.Rounds = append(summary.Rounds, Round{
 			Number: number, DisabledBaseline: baseline, Enabled: candidate,
@@ -195,21 +228,37 @@ func Run(ctx context.Context, profile Profile, evidence CapabilityEvidence, disa
 	return summary, nil
 }
 
-func executeWarmup(ctx context.Context, corpus []Sample, workloads ...Workload) error {
-	for _, workload := range workloads {
-		for _, sample := range corpus {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := workload(ctx, cloneSample(sample)); err != nil {
-				return fmt.Errorf("warmup sample %s: %w", sample.ID, err)
-			}
+func executeWarmup(ctx context.Context, corpus []Sample, factories ...WorkloadFactory) error {
+	for _, factory := range factories {
+		if _, err := runLifecycle(ctx, corpus, factory, false); err != nil {
+			return fmt.Errorf("warmup: %w", err)
 		}
 	}
 	return nil
 }
 
-func measure(ctx context.Context, corpus []Sample, workload Workload) (WorkloadMetrics, error) {
+func measureLifecycle(ctx context.Context, corpus []Sample, factory WorkloadFactory) (WorkloadMetrics, error) {
+	return runLifecycle(ctx, corpus, factory, true)
+}
+
+func runLifecycle(ctx context.Context, corpus []Sample, factory WorkloadFactory, measured bool) (metrics WorkloadMetrics, resultErr error) {
+	workload, err := factory(ctx)
+	if err != nil {
+		return metrics, fmt.Errorf("create workload: %w", err)
+	}
+	if workload == nil {
+		return metrics, errors.New("factory returned a nil workload")
+	}
+	defer func() {
+		if err := workload.Close(ctx); err != nil && resultErr == nil {
+			resultErr = fmt.Errorf("close workload: %w", err)
+		}
+	}()
+	metrics, resultErr = executeLifecycle(ctx, corpus, workload, measured)
+	return metrics, resultErr
+}
+
+func executeLifecycle(ctx context.Context, corpus []Sample, workload Workload, measured bool) (WorkloadMetrics, error) {
 	runtime.GC()
 	latencies := make([]int64, 0, len(corpus))
 	started := time.Now()
@@ -218,18 +267,19 @@ func measure(ctx context.Context, corpus []Sample, workload Workload) (WorkloadM
 			return WorkloadMetrics{}, err
 		}
 		operationStarted := time.Now()
-		if err := workload(ctx, cloneSample(sample)); err != nil {
+		if err := workload.Run(ctx, cloneSample(sample)); err != nil {
 			return WorkloadMetrics{}, fmt.Errorf("sample %s: %w", sample.ID, err)
 		}
 		latencies = append(latencies, time.Since(operationStarted).Nanoseconds())
 	}
 	elapsed := time.Since(started)
 	runtime.GC()
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
 	metrics := WorkloadMetrics{
-		Operations: len(corpus), ElapsedNS: elapsed.Nanoseconds(), HeapAllocBytes: memory.HeapAlloc,
+		Operations: len(corpus), ElapsedNS: elapsed.Nanoseconds(), SteadyMemoryBytes: workload.SteadyMemoryBytes(),
 		RawSamplesNS: append([]int64(nil), latencies...),
+	}
+	if !measured {
+		return metrics, nil
 	}
 	if elapsed > 0 {
 		metrics.ThroughputPerSec = float64(len(corpus)) / elapsed.Seconds()
@@ -278,11 +328,13 @@ func Evaluate(summary Summary) error {
 		if round.ThroughputRegression > MaxThroughputRegression {
 			violations = append(violations, fmt.Sprintf("round %d throughput regression %.4f > %.2f", round.Number, round.ThroughputRegression, MaxThroughputRegression))
 		}
-		if time.Duration(round.Enabled.P95NS) > MaxP95Latency {
-			violations = append(violations, fmt.Sprintf("round %d p95 %s > %s", round.Number, time.Duration(round.Enabled.P95NS), MaxP95Latency))
+		p95Increment := positiveDurationDelta(round.Enabled.P95NS, round.DisabledBaseline.P95NS)
+		if p95Increment > MaxP95Latency {
+			violations = append(violations, fmt.Sprintf("round %d p95 increment %s > %s", round.Number, p95Increment, MaxP95Latency))
 		}
-		if time.Duration(round.Enabled.P99NS) > MaxP99Latency {
-			violations = append(violations, fmt.Sprintf("round %d p99 %s > %s", round.Number, time.Duration(round.Enabled.P99NS), MaxP99Latency))
+		p99Increment := positiveDurationDelta(round.Enabled.P99NS, round.DisabledBaseline.P99NS)
+		if p99Increment > MaxP99Latency {
+			violations = append(violations, fmt.Sprintf("round %d p99 increment %s > %s", round.Number, p99Increment, MaxP99Latency))
 		}
 		if round.AdditionalMemoryBytes > MaxAdditionalMemoryBytes {
 			violations = append(violations, fmt.Sprintf("round %d additional memory %d > %d", round.Number, round.AdditionalMemoryBytes, MaxAdditionalMemoryBytes))
@@ -295,6 +347,13 @@ func Evaluate(summary Summary) error {
 		return &ThresholdError{Violations: violations}
 	}
 	return nil
+}
+
+func positiveDurationDelta(enabled, baseline int64) time.Duration {
+	if enabled <= baseline {
+		return 0
+	}
+	return time.Duration(enabled - baseline)
 }
 
 func MarshalSummary(summary Summary) ([]byte, error) {

@@ -27,11 +27,26 @@ func TestPerformanceFixedCorpusWarmupAndThreeRounds(t *testing.T) {
 		t.Fatalf("fixed corpus digest mismatch: %s %s %v", firstDigest, secondDigest, err)
 	}
 
-	var disabledCalls atomic.Int64
-	var enabledCalls atomic.Int64
+	var disabledCalls, enabledCalls, created, closed atomic.Int64
+	factory := func(calls *atomic.Int64) performance.WorkloadFactory {
+		return func(context.Context) (performance.Workload, error) {
+			created.Add(1)
+			var instanceCalls int
+			return &performance.WorkloadFuncs{
+				RunFunc: func(context.Context, performance.Sample) error {
+					instanceCalls++
+					if instanceCalls > len(performance.FixedCorpus()) {
+						return errors.New("lifecycle state carried over")
+					}
+					calls.Add(1)
+					return nil
+				},
+				CloseFunc: func(context.Context) error { closed.Add(1); return nil },
+			}, nil
+		}
+	}
 	summary, err := performance.Run(context.Background(), performance.ProfileLocal, performance.CapabilityEvidence{},
-		func(context.Context, performance.Sample) error { disabledCalls.Add(1); return nil },
-		func(context.Context, performance.Sample) error { enabledCalls.Add(1); return nil },
+		factory(&disabledCalls), factory(&enabledCalls),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +54,9 @@ func TestPerformanceFixedCorpusWarmupAndThreeRounds(t *testing.T) {
 	wantCalls := int64((performance.WarmupPasses + performance.MeasurementRounds) * summary.CorpusSize)
 	if disabledCalls.Load() != wantCalls || enabledCalls.Load() != wantCalls {
 		t.Fatalf("workload calls disabled=%d enabled=%d want=%d", disabledCalls.Load(), enabledCalls.Load(), wantCalls)
+	}
+	if created.Load() != 8 || closed.Load() != 8 {
+		t.Fatalf("isolated lifecycle counts created=%d closed=%d want=8", created.Load(), closed.Load())
 	}
 	if summary.WarmupPasses != 1 || len(summary.Rounds) != 3 || summary.EvidenceClass != "local-harness" || summary.Passed {
 		t.Fatalf("local summary shape = %#v", summary)
@@ -56,7 +74,10 @@ func TestPerformanceFixedCorpusWarmupAndThreeRounds(t *testing.T) {
 
 func TestPerformanceReleaseCapabilityGateFailsBeforeWorkload(t *testing.T) {
 	var calls atomic.Int32
-	workload := func(context.Context, performance.Sample) error { calls.Add(1); return nil }
+	workload := func(context.Context) (performance.Workload, error) {
+		calls.Add(1)
+		return &performance.WorkloadFuncs{RunFunc: func(context.Context, performance.Sample) error { return nil }}, nil
+	}
 	tests := []performance.CapabilityEvidence{
 		{},
 		{RealAgent: true, AtomicState: true, MonotonicClock: true},
@@ -99,8 +120,12 @@ func TestPerformanceThresholdsApplyToEveryRound(t *testing.T) {
 		needle string
 	}{
 		{"throughput", func(round *performance.Round) { round.ThroughputRegression = 0.100001 }, "throughput"},
-		{"p95", func(round *performance.Round) { round.Enabled.P95NS = int64(time.Millisecond + 1) }, "p95"},
-		{"p99", func(round *performance.Round) { round.Enabled.P99NS = int64(2*time.Millisecond + 1) }, "p99"},
+		{"p95", func(round *performance.Round) {
+			round.Enabled.P95NS = round.DisabledBaseline.P95NS + int64(time.Millisecond) + 1
+		}, "p95"},
+		{"p99", func(round *performance.Round) {
+			round.Enabled.P99NS = round.DisabledBaseline.P99NS + int64(2*time.Millisecond) + 1
+		}, "p99"},
 		{"memory", func(round *performance.Round) { round.AdditionalMemoryBytes = 64<<20 + 1 }, "memory"},
 		{"raw", func(round *performance.Round) { round.Enabled.RawSamplesNS = nil }, "raw samples"},
 	}
@@ -116,14 +141,55 @@ func TestPerformanceThresholdsApplyToEveryRound(t *testing.T) {
 	}
 }
 
+func TestPerformanceLatencyUsesPositiveBaselineIncrement(t *testing.T) {
+	summary := passingSummary()
+	summary.Rounds[0].DisabledBaseline.P95NS = int64(5 * time.Millisecond)
+	summary.Rounds[0].Enabled.P95NS = int64(6 * time.Millisecond)
+	summary.Rounds[0].DisabledBaseline.P99NS = int64(7 * time.Millisecond)
+	summary.Rounds[0].Enabled.P99NS = int64(9 * time.Millisecond)
+	summary.Rounds[1].DisabledBaseline.P95NS = int64(10 * time.Millisecond)
+	summary.Rounds[1].Enabled.P95NS = int64(2 * time.Millisecond)
+	if err := performance.Evaluate(summary); err != nil {
+		t.Fatalf("nonzero baseline boundary should pass: %v", err)
+	}
+}
+
+func TestPerformanceRetainedMemoryIsMeasuredPerIsolatedLifecycle(t *testing.T) {
+	factory := func(retained uint64) performance.WorkloadFactory {
+		return func(context.Context) (performance.Workload, error) {
+			retainedBuffer := make([]byte, int(retained))
+			for offset := 0; offset < len(retainedBuffer); offset += 4096 {
+				retainedBuffer[offset] = byte(offset)
+			}
+			return &performance.WorkloadFuncs{
+				RunFunc:          func(context.Context, performance.Sample) error { return nil },
+				CloseFunc:        func(context.Context) error { retainedBuffer = nil; return nil },
+				SteadyMemoryFunc: func() uint64 { return uint64(len(retainedBuffer)) },
+			}, nil
+		}
+	}
+	summary, err := performance.Run(context.Background(), performance.ProfileLocal, performance.CapabilityEvidence{}, factory(1<<20), factory(66<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range summary.Rounds {
+		if round.AdditionalMemoryBytes != 65<<20 {
+			t.Fatalf("round %d additional memory=%d", round.Number, round.AdditionalMemoryBytes)
+		}
+	}
+	if err := performance.Evaluate(summary); err == nil || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("retained allocation was not gated: %v", err)
+	}
+}
+
 func passingSummary() performance.Summary {
 	rounds := make([]performance.Round, performance.MeasurementRounds)
 	for index := range rounds {
 		rounds[index] = performance.Round{
 			Number:           index + 1,
-			DisabledBaseline: performance.WorkloadMetrics{ThroughputPerSec: 1000, RawSamplesNS: []int64{100}},
+			DisabledBaseline: performance.WorkloadMetrics{ThroughputPerSec: 1000, P95NS: int64(5 * time.Millisecond), P99NS: int64(7 * time.Millisecond), RawSamplesNS: []int64{100}},
 			Enabled: performance.WorkloadMetrics{
-				ThroughputPerSec: 900, P95NS: int64(time.Millisecond), P99NS: int64(2 * time.Millisecond), RawSamplesNS: []int64{200},
+				ThroughputPerSec: 900, P95NS: int64(6 * time.Millisecond), P99NS: int64(9 * time.Millisecond), RawSamplesNS: []int64{200},
 			},
 			ThroughputRegression:  0.10,
 			AdditionalMemoryBytes: 64 << 20,

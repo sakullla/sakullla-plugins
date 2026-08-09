@@ -10,19 +10,23 @@ import (
 // It is useful for runner/corpus regression only and can never produce release
 // evidence; a real Agent must supply both release workloads to Run.
 func RunLocalHarness(ctx context.Context) (Summary, error) {
-	var counters [1024]atomic.Uint64
-	disabled := func(ctx context.Context, _ Sample) error { return ctx.Err() }
-	enabled := func(ctx context.Context, sample Sample) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Fixed local harness order: source/IP projection, rate state, then WAF
-		// body inspection. Results are consumed locally to prevent optimization.
-		index := sourceBucket(sample.Source)
-		count := counters[index].Add(1)
-		blocked := bytes.Contains(sample.Body, []byte("<script"))
-		localSink.Store(uint64(index) ^ count ^ boolBit(blocked))
-		return nil
+	disabled := func(context.Context) (Workload, error) {
+		return &WorkloadFuncs{RunFunc: func(ctx context.Context, _ Sample) error { return ctx.Err() }}, nil
+	}
+	enabled := func(context.Context) (Workload, error) {
+		var counters [1024]atomic.Uint64
+		return &WorkloadFuncs{RunFunc: func(ctx context.Context, sample Sample) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// Fixed local harness order: source/IP projection, rate state, then WAF
+			// body inspection. Results are consumed locally to prevent optimization.
+			index := sourceBucket(sample.Source)
+			count := counters[index].Add(1)
+			blocked := bytes.Contains(sample.Body, []byte("<script"))
+			localSink.Store(uint64(index) ^ count ^ boolBit(blocked))
+			return nil
+		}}, nil
 	}
 	return Run(ctx, ProfileLocal, CapabilityEvidence{}, disabled, enabled)
 }

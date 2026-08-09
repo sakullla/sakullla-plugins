@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -30,7 +31,11 @@ var (
 	ErrGenerationMismatch = errors.New("policy binding generation is stale")
 	ErrGrantRevoked       = errors.New("policy binding grant is revoked")
 	ErrInvalidDefinition  = errors.New("policy chain definition is invalid")
+	ErrBudgetExceeded     = errors.New("policy evaluation budget exceeded")
+	ErrPoolSaturated      = errors.New("policy evaluator pool saturated")
 )
+
+const DefaultStageTimeout = 50 * time.Millisecond
 
 type Request struct {
 	BindingID     string
@@ -63,6 +68,7 @@ type Binding struct {
 	Granted       bool
 	FailureAction pluginsdk.PolicyAction
 	Overlay       Overlay
+	StageTimeout  time.Duration
 }
 
 type Trace struct {
@@ -109,6 +115,12 @@ func (harness *Harness) PutBinding(binding Binding) error {
 	}
 	if binding.FailureAction != pluginsdk.PolicyActionAllow && binding.FailureAction != pluginsdk.PolicyActionDeny {
 		return errors.New("binding failure action must be allow or deny")
+	}
+	if binding.StageTimeout < 0 {
+		return errors.New("binding stage timeout cannot be negative")
+	}
+	if binding.StageTimeout == 0 {
+		binding.StageTimeout = DefaultStageTimeout
 	}
 	for stage := range binding.Overlay {
 		if stage != StageIPPolicy && stage != StageRateLimit && stage != StageWAF {
@@ -186,7 +198,7 @@ func (harness *Harness) Evaluate(ctx context.Context, request Request) Trace {
 		trace.Stages = append(trace.Stages, stage)
 		stageRequest := request
 		stageRequest.Payload = append([]byte(nil), request.Payload...)
-		decision, err := definition.Evaluators[stage](ctx, stageRequest, cloneValues(binding.Overlay[stage]))
+		decision, err := runEvaluator(ctx, binding.StageTimeout, definition.Evaluators[stage], stageRequest, cloneValues(binding.Overlay[stage]))
 		if err != nil {
 			trace.Failure = fmt.Errorf("%s: %w", stage, err)
 			trace.Decision = Decision{Action: binding.FailureAction, Reason: trace.Failure.Error()}
@@ -204,6 +216,36 @@ func (harness *Harness) Evaluate(ctx context.Context, request Request) Trace {
 	}
 	trace.Decision = allow("fixed chain allowed request")
 	return trace
+}
+
+type evaluatorResult struct {
+	decision Decision
+	err      error
+}
+
+// runEvaluator isolates lifecycle state from an evaluator that ignores its
+// context. A timed-out result is never committed; callers that install a
+// non-cooperative test evaluator remain responsible for releasing its goroutine.
+func runEvaluator(ctx context.Context, timeout time.Duration, evaluator Evaluator, request Request, overlay map[string]string) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	evaluatorCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result := make(chan evaluatorResult, 1)
+	go func() {
+		decision, err := evaluator(evaluatorCtx, request, overlay)
+		result <- evaluatorResult{decision: decision, err: err}
+	}()
+	select {
+	case <-evaluatorCtx.Done():
+		return Decision{}, evaluatorCtx.Err()
+	case returned := <-result:
+		if err := evaluatorCtx.Err(); err != nil {
+			return Decision{}, err
+		}
+		return returned.decision, returned.err
+	}
 }
 
 func allow(reason string) Decision {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -85,6 +87,79 @@ func TestPolicyChainFailureIsolationAndStreamingUnbound(t *testing.T) {
 	}
 	if !unbound.Unbound || unbound.Decision.Action != pluginsdk.PolicyActionAllow || len(unbound.Stages) != 0 {
 		t.Fatalf("unbound streaming result = %#v", unbound)
+	}
+}
+
+func TestPolicyChainDeadlineIsolationDoesNotBlockUnboundOrOtherBinding(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	harness := configuredHarness(t, func(stage Stage, request Request, _ map[string]string) (Decision, error) {
+		if stage == StageIPPolicy && request.BindingID == "binding-a" {
+			once.Do(func() { close(started) })
+			<-release
+			close(finished)
+		}
+		return allow("ok"), nil
+	})
+	bound := binding("binding-a", nil)
+	bound.StageTimeout = 10 * time.Millisecond
+	if err := harness.PutBinding(bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.PutBinding(binding("binding-b", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan Trace, 1)
+	go func() { result <- harness.Evaluate(context.Background(), requestFor("binding-a")) }()
+	<-started
+	unrelated := harness.Evaluate(context.Background(), requestFor("binding-b"))
+	unbound := harness.Evaluate(context.Background(), Request{RequestID: "streaming"})
+	trace := <-result
+	if !errors.Is(trace.Failure, context.DeadlineExceeded) || trace.Decision.Action != pluginsdk.PolicyActionDeny {
+		t.Fatalf("deadline result = %#v", trace)
+	}
+	if unrelated.Failure != nil || unrelated.Decision.Action != pluginsdk.PolicyActionAllow || !unbound.Unbound {
+		t.Fatalf("parallel isolation unrelated=%#v unbound=%#v", unrelated, unbound)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("blocked evaluator goroutine was not released")
+	}
+}
+
+func TestPolicyChainBudgetAndPoolFailuresAreBindingLocal(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		failure error
+	}{
+		{name: "budget", failure: ErrBudgetExceeded},
+		{name: "pool", failure: ErrPoolSaturated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := configuredHarness(t, func(stage Stage, request Request, _ map[string]string) (Decision, error) {
+				if stage == StageRateLimit && request.BindingID == "binding-a" {
+					return Decision{}, test.failure
+				}
+				return allow("ok"), nil
+			})
+			if err := harness.PutBinding(binding("binding-b", nil)); err != nil {
+				t.Fatal(err)
+			}
+			failed := harness.Evaluate(context.Background(), requestFor("binding-a"))
+			unrelated := harness.Evaluate(context.Background(), requestFor("binding-b"))
+			unbound := harness.Evaluate(context.Background(), Request{RequestID: "streaming"})
+			if !errors.Is(failed.Failure, test.failure) || failed.Decision.Action != pluginsdk.PolicyActionDeny {
+				t.Fatalf("local failure = %#v", failed)
+			}
+			if unrelated.Failure != nil || unrelated.Decision.Action != pluginsdk.PolicyActionAllow || !unbound.Unbound {
+				t.Fatalf("failure escaped binding unrelated=%#v unbound=%#v", unrelated, unbound)
+			}
+		})
 	}
 }
 
