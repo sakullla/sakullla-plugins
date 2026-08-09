@@ -174,38 +174,109 @@ func checkPluginWithVerifier(ctx context.Context, args []string, verify sdkVerif
 		return fmt.Errorf("SDK release gate: %w", err)
 	}
 	repositoryRoot := filepath.Dir(absoluteLock)
-	cargo, err := cargoExecutable()
+	spec, err := pluginArtifactSpecFor(*pluginID)
 	if err != nil {
 		return err
 	}
-	packageName := "sakullla-" + *pluginID
-	command := exec.CommandContext(ctx, cargo, "build", "-p", packageName, "--target", "wasm32v1-none", "--release", "--locked")
-	command.Dir = repositoryRoot
-	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("build %s: %w\n%s", *pluginID, err, output)
-	}
-	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32v1-none", "release", strings.ReplaceAll(packageName, "-", "_")+".wasm")
-	artifact, err := os.ReadFile(artifactPath)
+	outputPath, err := buildPluginArtifact(ctx, repositoryRoot, *pluginID, spec)
 	if err != nil {
-		return err
-	}
-	artifact, err = ciwasm.NormalizeEmptyFunctionTable(artifact)
-	if err != nil {
-		return err
-	}
-	if err := pluginsdk.ValidatePolicyV1WASM(artifact, pluginsdk.PolicyV1MaxMemoryBytes); err != nil {
-		return err
-	}
-	outputDirectory := filepath.Join(repositoryRoot, "target", "nre-ci", *pluginID)
-	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
-		return err
-	}
-	outputPath := filepath.Join(outputDirectory, "plugin.wasm")
-	if err := os.WriteFile(outputPath, artifact, 0o644); err != nil {
 		return err
 	}
 	fmt.Println(outputPath)
 	return nil
+}
+
+type pluginArtifactKind uint8
+
+const (
+	artifactWASMPolicy pluginArtifactKind = iota + 1
+	artifactRPCService
+)
+
+type pluginArtifactSpec struct {
+	kind        pluginArtifactKind
+	sourcePath  string
+	packageName string
+}
+
+// pluginArtifactSpecFor is an explicit source-layout allowlist. It avoids
+// ad-hoc manifest parsing while keeping artifact kind and plugin identity
+// strict until a canonical manifest parser is published.
+func pluginArtifactSpecFor(pluginID string) (pluginArtifactSpec, error) {
+	switch pluginID {
+	case "waf", "ip-policy", "rate-limit":
+		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
+	case "reverse-l4":
+		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/reverse-l4/cmd/reverse-l4"}, nil
+	default:
+		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q has no declared artifact source", pluginID)
+	}
+}
+
+func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, spec pluginArtifactSpec) (string, error) {
+	if spec.kind == artifactRPCService {
+		return buildRPCArtifact(ctx, repositoryRoot, pluginID, spec.sourcePath)
+	}
+	if spec.kind != artifactWASMPolicy {
+		return "", fmt.Errorf("plugin %q has unknown artifact kind", pluginID)
+	}
+	cargo, err := cargoExecutable()
+	if err != nil {
+		return "", err
+	}
+	command := exec.CommandContext(ctx, cargo, "build", "-p", spec.packageName, "--target", "wasm32v1-none", "--release", "--locked")
+	command.Dir = repositoryRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build %s: %w\n%s", pluginID, err, output)
+	}
+	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32v1-none", "release", strings.ReplaceAll(spec.packageName, "-", "_")+".wasm")
+	artifact, err := os.ReadFile(artifactPath)
+	if err != nil {
+		return "", err
+	}
+	artifact, err = ciwasm.NormalizeEmptyFunctionTable(artifact)
+	if err != nil {
+		return "", err
+	}
+	if err := pluginsdk.ValidatePolicyV1WASM(artifact, pluginsdk.PolicyV1MaxMemoryBytes); err != nil {
+		return "", err
+	}
+	outputDirectory := filepath.Join(repositoryRoot, "target", "nre-ci", pluginID)
+	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
+		return "", err
+	}
+	outputPath := filepath.Join(outputDirectory, "plugin.wasm")
+	if err := os.WriteFile(outputPath, artifact, 0o644); err != nil {
+		return "", err
+	}
+	return outputPath, nil
+}
+
+func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath string) (string, error) {
+	outputDirectory := filepath.Join(repositoryRoot, "target", "nre-ci", pluginID)
+	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
+		return "", err
+	}
+	artifactName := pluginID
+	if runtime.GOOS == "windows" {
+		artifactName += ".exe"
+	}
+	outputPath := filepath.Join(outputDirectory, artifactName)
+	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "-o", outputPath, sourcePath)
+	command.Dir = repositoryRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build %s RPC artifact: %w\n%s", pluginID, err, output)
+	}
+	validate := exec.CommandContext(ctx, outputPath, "--nre-ci-rpc-handshake")
+	validate.Dir = repositoryRoot
+	output, err := validate.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("validate %s RPC handshake: %w\n%s", pluginID, err, output)
+	}
+	if strings.TrimSpace(string(output)) != pluginsdk.RPCABIV1 {
+		return "", fmt.Errorf("validate %s RPC handshake: got %q, want %q", pluginID, strings.TrimSpace(string(output)), pluginsdk.RPCABIV1)
+	}
+	return outputPath, nil
 }
 
 func validPluginID(value string) bool {

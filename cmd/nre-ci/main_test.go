@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,6 +62,48 @@ func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 	})
 	if !verified || !errors.Is(err, buildSentinel) || !strings.Contains(err.Error(), "SDK release gate") {
 		t.Fatalf("plugin command did not fail at the SDK capability gate before build: %v", err)
+	}
+}
+
+func TestPluginReverseL4PostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
+	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := false
+	err = checkPluginWithVerifier(context.Background(), []string{"--id", "reverse-l4", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, requireHostCapabilities bool, _ string) (sdklock.Verification, error) {
+		verified = true
+		if !requireHostCapabilities {
+			t.Fatal("RPC plugin bypassed SDK capability gate")
+		}
+		return sdklock.Verification{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verified {
+		t.Fatal("SDK verifier was not invoked")
+	}
+	name := "reverse-l4"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "reverse-l4", name)); err != nil || info.IsDir() {
+		t.Fatalf("deterministic RPC artifact output missing: %v", err)
+	}
+}
+
+func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
+	rpc, err := pluginArtifactSpecFor("reverse-l4")
+	if err != nil || rpc.kind != artifactRPCService || !strings.Contains(rpc.sourcePath, "reverse-l4/cmd/reverse-l4") {
+		t.Fatalf("reverse-l4 artifact spec = %#v err=%v", rpc, err)
+	}
+	wasm, err := pluginArtifactSpecFor("waf")
+	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
+		t.Fatalf("WAF artifact spec = %#v err=%v", wasm, err)
+	}
+	if _, err := pluginArtifactSpecFor("unmapped-plugin"); err == nil {
+		t.Fatal("unknown plugin source layout was accepted")
 	}
 }
 

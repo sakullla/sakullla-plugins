@@ -18,14 +18,14 @@ const (
 // Mapping is plugin-owned configuration only. Listener, tunnel, relay,
 // traffic, and Agent identity resources remain owned by the core host.
 type Mapping struct {
-	ID             string
-	PrivateAgentID string
-	PublicAgentID  string
-	Protocol       Protocol
-	ListenPort     uint16
-	BackendHost    string
-	BackendPort    uint16
-	Enabled        bool
+	ID             string   `json:"id"`
+	PrivateAgentID string   `json:"private_agent_id"`
+	PublicAgentID  string   `json:"public_agent_id"`
+	Protocol       Protocol `json:"protocol"`
+	ListenPort     uint16   `json:"listen_port"`
+	BackendHost    string   `json:"backend_host"`
+	BackendPort    uint16   `json:"backend_port"`
+	Enabled        bool     `json:"enabled"`
 }
 
 func (mapping Mapping) Validate() error {

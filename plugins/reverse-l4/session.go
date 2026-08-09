@@ -38,6 +38,13 @@ type SessionSnapshot struct {
 	ReconnectAt     time.Time
 	LastFailure     string
 	ReleaseRequired bool
+	ObservedAt      time.Time
+}
+
+// Clock is supplied by the Host adapter and must report a host-attested
+// monotonic instant. Session transitions never accept caller-reported time.
+type Clock interface {
+	Now() time.Time
 }
 
 // Session is a pure business state machine. Authentication and resource
@@ -48,6 +55,7 @@ type Session struct {
 	mapping    Mapping
 	generation string
 	backoff    Backoff
+	clock      Clock
 
 	state           SessionState
 	accepting       bool
@@ -58,9 +66,10 @@ type Session struct {
 	lastFailure     string
 	drainTarget     SessionState
 	releaseRequired bool
+	observedAt      time.Time
 }
 
-func NewSession(mapping Mapping, generation string, backoff Backoff) (*Session, error) {
+func NewSession(mapping Mapping, generation string, backoff Backoff, clock Clock) (*Session, error) {
 	if err := mapping.Validate(); err != nil {
 		return nil, err
 	}
@@ -73,8 +82,11 @@ func NewSession(mapping Mapping, generation string, backoff Backoff) (*Session, 
 	if err := backoff.Validate(); err != nil {
 		return nil, err
 	}
+	if clock == nil {
+		return nil, errors.New("host-attested monotonic clock is required")
+	}
 	return &Session{
-		mapping: mapping, generation: generation, backoff: backoff, state: StateDisconnected,
+		mapping: mapping, generation: generation, backoff: backoff, clock: clock, state: StateDisconnected,
 	}, nil
 }
 
@@ -92,9 +104,11 @@ func (session *Session) BeginConnect() error {
 
 // Authenticate consumes only a host-attested fact. It does not accept
 // certificates, keys, or a plugin-owned identity.
-func (session *Session) Authenticate(hostVerifiedMTLS bool, now time.Time) error {
+func (session *Session) Authenticate(hostVerifiedMTLS bool) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	now := session.clock.Now()
+	session.observedAt = now
 	if session.state != StateConnecting {
 		return fmt.Errorf("%w: authenticate from %s", ErrInvalidState, session.state)
 	}
@@ -111,9 +125,11 @@ func (session *Session) Authenticate(hostVerifiedMTLS bool, now time.Time) error
 	return nil
 }
 
-func (session *Session) Disconnect(now time.Time, reason string) error {
+func (session *Session) Disconnect(reason string) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	now := session.clock.Now()
+	session.observedAt = now
 	if session.state != StateAuthenticated && session.state != StateConnecting {
 		return fmt.Errorf("%w: disconnect from %s", ErrInvalidState, session.state)
 	}
@@ -132,13 +148,15 @@ func (session *Session) disconnectLocked(now time.Time, reason string) {
 	session.state = StateUnavailable
 	session.accepting = false
 	session.mtls = false
-	session.reconnectAt = now.Add(delay)
+	session.reconnectAt = session.clock.Now().Add(delay)
 	session.lastFailure = reason
 }
 
-func (session *Session) Retry(now time.Time) error {
+func (session *Session) Retry() error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	now := session.clock.Now()
+	session.observedAt = now
 	if session.state != StateUnavailable {
 		return fmt.Errorf("%w: retry from %s", ErrInvalidState, session.state)
 	}
@@ -160,7 +178,7 @@ func (session *Session) Admit(generation string) (*Flow, error) {
 		return nil, ErrAdmissionClosed
 	}
 	session.inflight++
-	return &Flow{session: session}, nil
+	return &Flow{release: &flowRelease{session: session}}, nil
 }
 
 func (session *Session) BeginDisable() {
@@ -174,12 +192,20 @@ func (session *Session) Revoke() {
 func (session *Session) beginDrain(target SessionState) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.state == StateDisabled || session.state == StateRevoked {
+	if session.state == StateRevoked {
+		return
+	}
+	if session.state == StateDisabled {
+		if target == StateRevoked {
+			session.state = StateRevoked
+		}
 		return
 	}
 	session.accepting = false
 	session.mtls = false
-	session.drainTarget = target
+	if target == StateRevoked || session.drainTarget != StateRevoked {
+		session.drainTarget = target
+	}
 	session.state = StateDraining
 	session.finishDrainLocked()
 }
@@ -210,22 +236,29 @@ func (session *Session) Snapshot() SessionSnapshot {
 		MappingID: session.mapping.ID, Protocol: session.mapping.Protocol, Generation: session.generation,
 		State: session.state, Accepting: session.accepting, MTLS: session.mtls, InFlight: session.inflight,
 		ReconnectAt: session.reconnectAt, LastFailure: session.lastFailure, ReleaseRequired: session.releaseRequired,
+		ObservedAt: session.observedAt,
 	}
 }
 
 type Flow struct {
+	release *flowRelease
+}
+
+type flowRelease struct {
 	once    sync.Once
 	session *Session
 }
 
 func (flow *Flow) Close() {
-	if flow == nil || flow.session == nil {
+	if flow == nil || flow.release == nil || flow.release.session == nil {
 		return
 	}
-	flow.once.Do(func() {
-		flow.session.mu.Lock()
-		flow.session.inflight--
-		flow.session.finishDrainLocked()
-		flow.session.mu.Unlock()
+	flow.release.once.Do(func() {
+		flow.release.session.mu.Lock()
+		if flow.release.session.inflight > 0 {
+			flow.release.session.inflight--
+		}
+		flow.release.session.finishDrainLocked()
+		flow.release.session.mu.Unlock()
 	})
 }
