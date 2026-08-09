@@ -105,8 +105,9 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 	if len(request.Token) == 0 {
 		return fail("token-denied", ErrInvalidToken)
 	}
+	token := append([]byte(nil), request.Token...)
 	_, tokenErr, _ := boundedHostCall(ctx, slot, nil, func() (struct{}, error) {
-		return struct{}{}, service.runtime.Tokens.Verify(ctx, service.configuration.TokenSecretRef, append([]byte(nil), request.Token...))
+		return struct{}{}, service.runtime.Tokens.Verify(ctx, service.configuration.TokenSecretRef, token)
 	})
 	if tokenErr != nil {
 		return fail("token-denied", safeRuntimeError(tokenErr, ErrInvalidToken))

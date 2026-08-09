@@ -565,6 +565,43 @@ func TestDoHHostAdapterDeadlineIsolationAndSlotRecovery(t *testing.T) {
 	}
 }
 
+func TestDoHTokenSnapshotSurvivesPostDeadlineCallerMutation(t *testing.T) {
+	configuration := testConfiguration()
+	configuration.MaxConcurrency, configuration.UpstreamTimeoutMS, configuration.RequestTimeoutMS = 1, 10, 20
+	started, release := make(chan struct{}), make(chan struct{})
+	observed := make(chan string, 1)
+	runtime := testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+		return positiveResponse(request.DNSMessage, 10), nil
+	})
+	runtime.Tokens = doh.TokenVerifierFunc(func(_ context.Context, _ string, credential []byte) error {
+		close(started)
+		<-release
+		observed <- string(credential)
+		return nil
+	})
+	service, err := doh.NewService(configuration, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := []byte("valid-token")
+	serveResult := make(chan error, 1)
+	go func() {
+		_, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "snapshot.example", 1), token))
+		serveResult <- err
+	}()
+	<-started
+	if err := <-serveResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline err=%v", err)
+	}
+	for index := range token {
+		token[index] = 'x'
+	}
+	close(release)
+	if credential := <-observed; credential != "valid-token" {
+		t.Fatalf("verifier observed caller mutation: %q", credential)
+	}
+}
+
 func TestDoHRedactedAuditLogAndBackendFailures(t *testing.T) {
 	secret := "super-secret-token-and-qname"
 	var logs []doh.QueryLog
