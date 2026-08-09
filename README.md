@@ -26,7 +26,7 @@ make clean-test
 
 `make test` runs the Go and Rust workspaces. `make ci` additionally checks
 generated drift, dependency license declarations, secret-like material, and two
-independent clean builds. On Windows, the equivalent commands can be run through
+independent clean builds of the declared `dist` output. On Windows, the equivalent commands can be run through
 `go run ./cmd/nre-ci ...` plus `cargo test --workspace --locked`.
 
 ## Packaging boundary

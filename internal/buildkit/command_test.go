@@ -24,3 +24,30 @@ func TestBuildCommandUsesIsolatedGoCache(t *testing.T) {
 		t.Fatalf("isolated build cache was not applied: %q", cache)
 	}
 }
+
+func TestBuildToolchainVersionRequiresExactToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		tool     string
+		output   string
+		expected string
+	}{
+		{"go", "go version go1.26.50 windows/amd64", "1.26.5"},
+		{"rustc", "rustc 1.97.10 (abcdef 2026-01-01)", "1.97.1"},
+		{"protoc", "libprotoc 32.0.1", "32.0"},
+	}
+	for _, test := range tests {
+		if err := verifyToolVersionOutput(test.tool, test.output, test.expected); err == nil {
+			t.Errorf("%s accepted prefix-matching version %q", test.tool, test.output)
+		}
+	}
+	for _, test := range []struct{ tool, output, expected string }{
+		{"go", "go version go1.26.5 windows/amd64", "1.26.5"},
+		{"rustc", "rustc 1.97.1 (abcdef 2026-01-01)", "1.97.1"},
+		{"protoc", "libprotoc 32.0", "32.0"},
+	} {
+		if err := verifyToolVersionOutput(test.tool, test.output, test.expected); err != nil {
+			t.Errorf("%s rejected exact version: %v", test.tool, err)
+		}
+	}
+}

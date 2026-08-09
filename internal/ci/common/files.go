@@ -65,6 +65,60 @@ func treeDigest(root string) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+func outputDigest(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode().IsRegular() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		digest := sha256.Sum256(data)
+		return hex.EncodeToString(digest[:]), nil
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("declared output %q is not a regular file or directory", path)
+	}
+	var records []string
+	err = filepath.WalkDir(path, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == path || entry.IsDir() {
+			return nil
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !entryInfo.Mode().IsRegular() {
+			return fmt.Errorf("declared output contains non-regular entry %q", current)
+		}
+		data, err := os.ReadFile(current)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(data)
+		rel, err := filepath.Rel(path, current)
+		if err != nil {
+			return err
+		}
+		records = append(records, filepath.ToSlash(rel)+"\x00"+hex.EncodeToString(digest[:]))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(records) == 0 {
+		return "", fmt.Errorf("declared output %q is empty", path)
+	}
+	sort.Strings(records)
+	digest := sha256.Sum256([]byte(strings.Join(records, "\n")))
+	return hex.EncodeToString(digest[:]), nil
+}
+
 func copyRepository(source, destination string) error {
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return err

@@ -27,23 +27,51 @@ func (toolchain Toolchain) Verify(ctx context.Context) error {
 	checks := []struct {
 		name    string
 		args    []string
-		expects string
+		version string
 	}{
-		{"go", []string{"version"}, "go" + toolchain.GoVersion},
-		{"rustc", []string{"--version"}, "rustc " + toolchain.RustVersion},
-		{"protoc", []string{"--version"}, "libprotoc " + toolchain.ProtocVersion},
+		{"go", []string{"version"}, toolchain.GoVersion},
+		{"rustc", []string{"--version"}, toolchain.RustVersion},
+		{"protoc", []string{"--version"}, toolchain.ProtocVersion},
 	}
 	for _, check := range checks {
-		if check.expects == "go" || check.expects == "rustc " || check.expects == "libprotoc " {
+		if check.version == "" {
 			return fmt.Errorf("all toolchain versions must be pinned")
 		}
 		output, err := exec.CommandContext(ctx, check.name, check.args...).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("run %s version check: %w", check.name, err)
 		}
-		if !strings.Contains(string(output), check.expects) {
-			return fmt.Errorf("%s version mismatch: expected %q, got %q", check.name, check.expects, strings.TrimSpace(string(output)))
+		if err := verifyToolVersionOutput(check.name, string(output), check.version); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func verifyToolVersionOutput(tool, output, expected string) error {
+	fields := strings.Fields(output)
+	var actual string
+	switch tool {
+	case "go":
+		if len(fields) >= 3 && fields[0] == "go" && fields[1] == "version" && strings.HasPrefix(fields[2], "go") {
+			actual = strings.TrimPrefix(fields[2], "go")
+		}
+	case "rustc":
+		if len(fields) >= 2 && fields[0] == "rustc" {
+			actual = fields[1]
+		}
+	case "protoc":
+		if len(fields) == 2 && fields[0] == "libprotoc" {
+			actual = fields[1]
+		}
+	default:
+		return fmt.Errorf("unsupported toolchain executable %q", tool)
+	}
+	if actual == "" {
+		return fmt.Errorf("cannot parse %s version output %q", tool, strings.TrimSpace(output))
+	}
+	if actual != expected {
+		return fmt.Errorf("%s version mismatch: expected %q, got %q", tool, expected, actual)
 	}
 	return nil
 }

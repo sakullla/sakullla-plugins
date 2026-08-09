@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,12 +65,44 @@ func TestLicenseCheckRejectsHostImplementationModule(t *testing.T) {
 }
 
 func TestReproducibleCommandOnCleanCopies(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("stable\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckReproducible(context.Background(), root, "go", []string{"version"}); err != nil {
+	t.Setenv("SAKULLA_REPRO_HELPER", "stable")
+	if err := CheckReproducible(context.Background(), root, "out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestReproducibleRejectsNondeterministicOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("stable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAKULLA_REPRO_HELPER", "random")
+	if err := CheckReproducible(context.Background(), root, "out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err == nil {
+		t.Fatal("nondeterministic declared output was accepted")
+	}
+}
+
+func TestReproducibleHelperProcess(t *testing.T) {
+	mode := os.Getenv("SAKULLA_REPRO_HELPER")
+	if mode == "" {
+		return
+	}
+	if err := os.MkdirAll("out", 0o755); err != nil {
+		os.Exit(2)
+	}
+	contents := []byte("stable")
+	if mode == "random" {
+		contents = make([]byte, 32)
+		if _, err := rand.Read(contents); err != nil {
+			os.Exit(2)
+		}
+	}
+	if err := os.WriteFile(filepath.Join("out", "artifact.bin"), contents, 0o644); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
 }

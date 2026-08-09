@@ -1,15 +1,19 @@
 package buildkit
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type PackageRequest struct {
@@ -43,16 +47,31 @@ type signatureDocument struct {
 }
 
 type spdxDocument struct {
-	SPDXVersion string     `json:"spdxVersion"`
-	DataLicense string     `json:"dataLicense"`
-	Name        string     `json:"name"`
-	Files       []spdxFile `json:"files"`
+	SPDXID            string           `json:"SPDXID"`
+	SPDXVersion       string           `json:"spdxVersion"`
+	DataLicense       string           `json:"dataLicense"`
+	Name              string           `json:"name"`
+	DocumentNamespace string           `json:"documentNamespace"`
+	CreationInfo      spdxCreationInfo `json:"creationInfo"`
+	DocumentDescribes []string         `json:"documentDescribes"`
+	Files             []spdxFile       `json:"files"`
+}
+
+type spdxCreationInfo struct {
+	Created  string   `json:"created"`
+	Creators []string `json:"creators"`
 }
 
 type spdxFile struct {
-	FileName string `json:"fileName"`
-	SHA256   string `json:"sha256"`
-	FileType string `json:"fileType"`
+	SPDXID    string         `json:"SPDXID"`
+	FileName  string         `json:"fileName"`
+	Checksums []spdxChecksum `json:"checksums"`
+	FileTypes []string       `json:"fileTypes"`
+}
+
+type spdxChecksum struct {
+	Algorithm     string `json:"algorithm"`
+	ChecksumValue string `json:"checksumValue"`
 }
 
 func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, error) {
@@ -98,9 +117,31 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	if err != nil {
 		return PackageResult{}, err
 	}
-	spdx := spdxDocument{SPDXVersion: "SPDX-2.3", DataLicense: "CC0-1.0", Name: "sakullla-plugin-package"}
-	for _, file := range initial {
-		spdx.Files = append(spdx.Files, spdxFile{FileName: "./" + file.Path, SHA256: file.SHA256, FileType: "BINARY"})
+	initialDigest := digestRecords(initial)
+	spdx := spdxDocument{
+		SPDXID: "SPDXRef-DOCUMENT", SPDXVersion: "SPDX-2.3", DataLicense: "CC0-1.0",
+		Name: "sakullla-plugin-package", DocumentNamespace: "https://spdx.org/spdxdocs/sakullla-plugin-" + initialDigest,
+		CreationInfo: spdxCreationInfo{Created: "1970-01-01T00:00:00Z", Creators: []string{"Tool: sakullla-nre-package-1"}},
+	}
+	for index, file := range initial {
+		id := fmt.Sprintf("SPDXRef-File-%03d", index+1)
+		fileType := "BINARY"
+		if file.Path == "NOTICE" || strings.HasSuffix(file.Path, ".yaml") || strings.HasSuffix(file.Path, ".json") {
+			fileType = "TEXT"
+		}
+		spdx.DocumentDescribes = append(spdx.DocumentDescribes, id)
+		spdx.Files = append(spdx.Files, spdxFile{
+			SPDXID: id, FileName: "./" + file.Path,
+			Checksums: []spdxChecksum{{Algorithm: "SHA256", ChecksumValue: file.SHA256}},
+			FileTypes: []string{fileType},
+		})
+	}
+	spdxJSON, err := jsonBytes(spdx)
+	if err != nil {
+		return PackageResult{}, err
+	}
+	if err := ValidateSPDX23JSON(spdxJSON); err != nil {
+		return PackageResult{}, fmt.Errorf("validate generated SPDX 2.3 document: %w", err)
 	}
 	if err := writeCanonicalJSON(filepath.Join(temporary, "sbom.spdx.json"), spdx); err != nil {
 		return PackageResult{}, err
@@ -147,6 +188,63 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 		OutputDir: request.OutputDir, PayloadDigest: payloadDigest,
 		PackageDigest: packageDigest, SignerIdentity: signature.Identity,
 	}, nil
+}
+
+func jsonBytes(value any) ([]byte, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func ValidateSPDX23JSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var document spdxDocument
+	if err := decoder.Decode(&document); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("SPDX document contains trailing JSON values")
+	}
+	if document.SPDXID != "SPDXRef-DOCUMENT" || document.SPDXVersion != "SPDX-2.3" || document.DataLicense != "CC0-1.0" {
+		return fmt.Errorf("invalid SPDX document identity, version, or data license")
+	}
+	if document.Name == "" || !strings.HasPrefix(document.DocumentNamespace, "https://spdx.org/spdxdocs/") {
+		return fmt.Errorf("SPDX name and document namespace are required")
+	}
+	if _, err := time.Parse(time.RFC3339, document.CreationInfo.Created); err != nil || len(document.CreationInfo.Creators) == 0 {
+		return fmt.Errorf("SPDX creationInfo requires an RFC3339 timestamp and creator")
+	}
+	if len(document.Files) == 0 || len(document.DocumentDescribes) != len(document.Files) {
+		return fmt.Errorf("SPDX document must describe every file")
+	}
+	described := make(map[string]bool, len(document.DocumentDescribes))
+	for _, id := range document.DocumentDescribes {
+		described[id] = true
+	}
+	seen := make(map[string]bool, len(document.Files))
+	for _, file := range document.Files {
+		if file.SPDXID == "" || seen[file.SPDXID] || !described[file.SPDXID] || !strings.HasPrefix(file.FileName, "./") {
+			return fmt.Errorf("invalid or duplicate SPDX file identity %q", file.SPDXID)
+		}
+		seen[file.SPDXID] = true
+		if len(file.Checksums) != 1 || file.Checksums[0].Algorithm != "SHA256" || len(file.Checksums[0].ChecksumValue) != 64 {
+			return fmt.Errorf("SPDX file %s requires one SHA256 checksum", file.SPDXID)
+		}
+		if file.Checksums[0].ChecksumValue != strings.ToLower(file.Checksums[0].ChecksumValue) {
+			return fmt.Errorf("SPDX file %s checksum is not lowercase hex", file.SPDXID)
+		}
+		if _, err := hex.DecodeString(file.Checksums[0].ChecksumValue); err != nil {
+			return fmt.Errorf("SPDX file %s checksum is not lowercase hex: %w", file.SPDXID, err)
+		}
+		if len(file.FileTypes) != 1 || (file.FileTypes[0] != "BINARY" && file.FileTypes[0] != "TEXT") {
+			return fmt.Errorf("SPDX file %s has an unsupported file type", file.SPDXID)
+		}
+	}
+	return nil
 }
 
 func writeNotice(destination string, sources []string) error {

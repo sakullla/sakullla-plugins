@@ -25,6 +25,13 @@ func (validator inspectingValidator) Validate(_ context.Context, packageDir stri
 			validator.t.Errorf("validator did not receive %s: %v", name, err)
 		}
 	}
+	sbom, err := os.ReadFile(filepath.Join(packageDir, "sbom.spdx.json"))
+	if err != nil {
+		return err
+	}
+	if err := ValidateSPDX23JSON(sbom); err != nil {
+		validator.t.Errorf("generated SBOM failed the SPDX 2.3 validator: %v", err)
+	}
 	return nil
 }
 
@@ -88,6 +95,22 @@ func TestPackageRefusesExistingOutput(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("BuildPackage overwrote an existing output")
+	}
+}
+
+func TestPackageSPDXValidatorRejectsNonSchemaShape(t *testing.T) {
+	t.Parallel()
+	invalid := []byte(`{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "name": "missing-required-fields",
+  "creationInfo": {"created": "1970-01-01T00:00:00Z", "creators": ["Tool: fixture"]},
+  "documentNamespace": "https://spdx.org/spdxdocs/fixture",
+  "documentDescribes": ["SPDXRef-File-001"],
+  "files": [{"SPDXID": "SPDXRef-File-001", "fileName": "./artifact", "sha256": "deadbeef"}]
+}`)
+	if err := ValidateSPDX23JSON(invalid); err == nil {
+		t.Fatal("non-schema SPDX document was accepted")
 	}
 }
 

@@ -1,5 +1,13 @@
 [workspace]
 members = ["plugins/*"]
+exclude = [
+  "plugins/accelerator-sources",
+  "plugins/cloudflare-dns",
+  "plugins/docker-app",
+  "plugins/doh",
+  "plugins/reverse-l4",
+  "plugins/shadowsocks-server",
+]
 resolver = "3"
 
 [workspace.package]

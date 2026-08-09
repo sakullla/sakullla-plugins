@@ -174,9 +174,13 @@ func CheckGenerated(ctx context.Context, root string) error {
 	return nil
 }
 
-func CheckReproducible(ctx context.Context, root string, commandName string, args []string) error {
-	if commandName == "" {
-		return fmt.Errorf("reproducibility command is required")
+func CheckReproducible(ctx context.Context, root, outputPath, commandName string, args []string) error {
+	if commandName == "" || outputPath == "" {
+		return fmt.Errorf("reproducibility command and declared output are required")
+	}
+	cleanOutput := filepath.Clean(outputPath)
+	if filepath.IsAbs(cleanOutput) || cleanOutput == ".." || strings.HasPrefix(cleanOutput, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("declared output must stay within each clean checkout")
 	}
 	temporary, err := os.MkdirTemp("", "sakullla-reproducible-")
 	if err != nil {
@@ -199,7 +203,7 @@ func CheckReproducible(ctx context.Context, root string, commandName string, arg
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("clean build %d failed: %w: %s", index+1, err, strings.TrimSpace(string(output)))
 		}
-		digests[index], err = treeDigest(checkout)
+		digests[index], err = outputDigest(filepath.Join(checkout, cleanOutput))
 		if err != nil {
 			return err
 		}
