@@ -29,6 +29,8 @@ type Lock struct {
 type Repository struct {
 	URL    string `json:"url"`
 	Commit string `json:"commit"`
+	Branch string `json:"branch,omitempty"`
+	Tag    string `json:"tag,omitempty"`
 }
 
 type SDK struct {
@@ -74,6 +76,15 @@ func (lock Lock) Validate() error {
 	if lock.SchemaVersion != 1 || lock.Repository.URL == "" || !fullOID.MatchString(lock.Repository.Commit) {
 		return fmt.Errorf("SDK lock requires schema_version 1, repository URL, and full 40-character commit OID")
 	}
+	if lock.Repository.Branch != "" && lock.Repository.Tag != "" {
+		return fmt.Errorf("SDK lock repository branch and tag are mutually exclusive")
+	}
+	if lock.Repository.Branch != "" && !validGitRefName(lock.Repository.Branch) {
+		return fmt.Errorf("SDK lock repository branch is invalid")
+	}
+	if lock.Repository.Tag != "" && !validGitRefName(lock.Repository.Tag) {
+		return fmt.Errorf("SDK lock repository tag is invalid")
+	}
 	if lock.SDK.ModulePath != "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go" || lock.SDK.ModuleDirectory != "plugin-sdk/go" {
 		return fmt.Errorf("SDK lock must reference the canonical public Go module")
 	}
@@ -116,6 +127,25 @@ func (lock Lock) Validate() error {
 		return fmt.Errorf("capability contract digest mismatch: got %s, want %s", lock.CapabilityContractSHA256, actual)
 	}
 	return nil
+}
+
+func validGitRefName(value string) bool {
+	if value == "" || value == "@" || strings.HasPrefix(value, ".") || strings.HasPrefix(value, "-") || strings.HasPrefix(value, "/") ||
+		strings.HasSuffix(value, ".") || strings.HasSuffix(value, "/") || strings.Contains(value, "..") ||
+		strings.Contains(value, "//") || strings.Contains(value, "@{") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	for _, current := range value {
+		if current <= ' ' || current == 0x7f || strings.ContainsRune(`~^:?*[\`, current) {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalRepositoryPath(value string) bool {

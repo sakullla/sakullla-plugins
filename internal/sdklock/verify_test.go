@@ -49,6 +49,70 @@ func TestSDKVerificationUsesCleanCheckoutAndCapabilityGate(t *testing.T) {
 	}
 }
 
+func TestSDKVerificationSupportsPinnedBranchAndTagSelectors(t *testing.T) {
+	repository := t.TempDir()
+	workspace := t.TempDir()
+	writeSDKFixture(t, repository)
+	writeProjectionFixture(t, workspace, "locked-projection")
+	runGitTest(t, repository, "init", "--quiet")
+	runGitTest(t, repository, "config", "user.email", "sdk-fixture@example.invalid")
+	runGitTest(t, repository, "config", "user.name", "SDK Fixture")
+	runGitTest(t, repository, "add", ".")
+	runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
+	runGitTest(t, repository, "branch", "sdk-candidate")
+	runGitTest(t, repository, "tag", "-a", "sdk-v1", "-m", "SDK v1")
+
+	for name, selectRef := range map[string]func(*Repository){
+		"branch": func(repository *Repository) { repository.Branch = "sdk-candidate" },
+		"tag":    func(repository *Repository) { repository.Tag = "sdk-v1" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			lock := fixtureLock(t, repository)
+			selectRef(&lock.Repository)
+			if _, err := Verify(context.Background(), lock, false, workspace); err != nil {
+				t.Fatalf("verify pinned %s selector: %v", name, err)
+			}
+		})
+	}
+
+	locked := fixtureLock(t, repository)
+	if err := os.WriteFile(filepath.Join(repository, "drift.txt"), []byte("drift"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repository, "add", "drift.txt")
+	runGitTest(t, repository, "commit", "--quiet", "-m", "move branch")
+	runGitTest(t, repository, "branch", "drifted")
+	locked.Repository.Branch = "drifted"
+	if _, err := Verify(context.Background(), locked, false, workspace); err == nil || !strings.Contains(err.Error(), "does not resolve to locked commit") {
+		t.Fatalf("moving branch did not fail closed: %v", err)
+	}
+}
+
+func TestSDKLockRejectsAmbiguousOrInvalidRepositorySelectors(t *testing.T) {
+	base := Lock{
+		SchemaVersion:        1,
+		Repository:           Repository{URL: "https://example.invalid/repository.git", Commit: strings.Repeat("a", 40)},
+		SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ModuleDirectory: "plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
+		Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
+		RequiredCapabilities: []Capability{{ID: "policy.trusted-source", MissingReason: "fixture unavailable"}},
+	}
+	base.CapabilityContractSHA256 = CapabilityDigest(base.RequiredCapabilities)
+	for name, repository := range map[string]Repository{
+		"both":          {URL: base.Repository.URL, Commit: base.Repository.Commit, Branch: "main", Tag: "v1"},
+		"branch escape": {URL: base.Repository.URL, Commit: base.Repository.Commit, Branch: "../main"},
+		"tag option":    {URL: base.Repository.URL, Commit: base.Repository.Commit, Tag: "--upload-pack=bad"},
+		"tag reflog":    {URL: base.Repository.URL, Commit: base.Repository.Commit, Tag: "v1@{1}"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lock := base
+			lock.Repository = repository
+			if err := lock.Validate(); err == nil {
+				t.Fatal("invalid repository selector was accepted")
+			}
+		})
+	}
+}
+
 func TestSDKCapabilityEvidenceFailsClosed(t *testing.T) {
 	t.Parallel()
 	for name, contracts := range map[string]string{

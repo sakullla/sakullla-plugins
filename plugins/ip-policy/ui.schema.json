@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "title": "IP policy settings",
+  "description": "Host-rendered shared, overlay, and managed GeoIP policy configuration",
+  "components": [
+    {
+      "type": "section",
+      "id": "general",
+      "label": "Policy",
+      "children": [
+        {
+          "type": "select",
+          "id": "default_action",
+          "label": "Default action",
+          "binding": "/default_action",
+          "options": [
+            {"value": "allow", "label": "Allow"},
+            {"value": "deny", "label": "Deny"}
+          ]
+        },
+        {
+          "type": "select",
+          "id": "geo_failure",
+          "label": "Geo data failure action",
+          "binding": "/geo/failure_policy",
+          "options": [
+            {"value": "allow", "label": "Allow"},
+            {"value": "deny", "label": "Deny"}
+          ]
+        },
+        {
+          "type": "text",
+          "id": "mmdb_handle",
+          "label": "Host MMDB handle",
+          "binding": "/geo/mmdb_handle"
+        }
+      ]
+    },
+    {
+      "type": "notice",
+      "id": "trusted_source_gate",
+      "label": "Trusted source required",
+      "description": "Installation remains blocked until the Host authenticates socket, PROXY protocol, and Relay source provenance.",
+      "tone": "warning"
+    }
+  ],
+  "actions": [
+    {"type": "submit", "id": "save", "label": "Save"},
+    {"type": "reset", "id": "reset", "label": "Reset", "confirm": "Reset IP policy settings?"}
+  ]
+}

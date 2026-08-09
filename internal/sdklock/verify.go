@@ -32,15 +32,30 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 	if err := os.Mkdir(checkout, 0o755); err != nil {
 		return Verification{}, err
 	}
+	fetchTarget := lock.Repository.Commit
+	selector := "commit"
+	if lock.Repository.Branch != "" {
+		fetchTarget = "refs/heads/" + lock.Repository.Branch
+		selector = "branch " + lock.Repository.Branch
+	} else if lock.Repository.Tag != "" {
+		fetchTarget = "refs/tags/" + lock.Repository.Tag
+		selector = "tag " + lock.Repository.Tag
+	}
 	for _, args := range [][]string{
 		{"init", "--quiet"},
 		{"remote", "add", "origin", lock.Repository.URL},
-		{"fetch", "--quiet", "--depth=1", "origin", lock.Repository.Commit},
-		{"checkout", "--quiet", "--detach", "FETCH_HEAD"},
+		{"fetch", "--quiet", "--depth=1", "origin", fetchTarget},
 	} {
 		if _, err := run(ctx, checkout, "git", args...); err != nil {
 			return Verification{}, fmt.Errorf("establish clean SDK checkout at %s: %w", lock.Repository.Commit, err)
 		}
+	}
+	resolved, err := run(ctx, checkout, "git", "rev-parse", "FETCH_HEAD^{commit}")
+	if err != nil || normalizeGitOutput(resolved) != lock.Repository.Commit {
+		return Verification{}, fmt.Errorf("repository %s does not resolve to locked commit %s", selector, lock.Repository.Commit)
+	}
+	if _, err := run(ctx, checkout, "git", "checkout", "--quiet", "--detach", lock.Repository.Commit); err != nil {
+		return Verification{}, fmt.Errorf("establish clean SDK checkout at %s: %w", lock.Repository.Commit, err)
 	}
 	head, err := run(ctx, checkout, "git", "rev-parse", "HEAD")
 	if err != nil || normalizeGitOutput(head) != lock.Repository.Commit {

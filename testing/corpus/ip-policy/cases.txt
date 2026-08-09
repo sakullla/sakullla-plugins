@@ -1,0 +1,6 @@
+# id|address|provenance|expected_action|expected_reason
+shared-ipv4-deny|203.0.113.7|socket|deny|shared-deny
+overlay-ipv6-deny|2001:db8:7::1|proxy|deny|overlay-deny
+forged-xff|198.51.100.9|xff|deny|unauthenticated-source
+relay-default-allow|192.0.2.4|relay|allow|default-allow
+geo-expired|192.0.2.8|socket|deny|geo-expired

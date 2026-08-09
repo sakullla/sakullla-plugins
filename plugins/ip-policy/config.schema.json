@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["default_action", "shared_allow", "shared_deny", "overlay_allow", "overlay_deny", "geo"],
+  "properties": {
+    "default_action": {"type": "string", "enum": ["allow", "deny"]},
+    "shared_allow": {"type": "array", "maxItems": 1024, "items": {"type": "string", "minLength": 3, "maxLength": 64}},
+    "shared_deny": {"type": "array", "maxItems": 1024, "items": {"type": "string", "minLength": 3, "maxLength": 64}},
+    "overlay_allow": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 3, "maxLength": 64}},
+    "overlay_deny": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 3, "maxLength": 64}},
+    "geo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mmdb_handle", "failure_policy", "allow_countries", "deny_countries"],
+      "properties": {
+        "mmdb_handle": {"type": "string", "maxLength": 190},
+        "failure_policy": {"type": "string", "enum": ["allow", "deny"]},
+        "allow_countries": {"type": "array", "maxItems": 249, "items": {"type": "string", "minLength": 2, "maxLength": 2}},
+        "deny_countries": {"type": "array", "maxItems": 249, "items": {"type": "string", "minLength": 2, "maxLength": 2}}
+      }
+    }
+  }
+}
