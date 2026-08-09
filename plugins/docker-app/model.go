@@ -29,20 +29,23 @@ type App struct {
 	Image      string   `json:"image"`
 	RuleRef    string   `json:"rule_ref"`
 	Generation string   `json:"generation"`
-	Secrets    []string `json:"secrets,omitempty"`
+	SecretRefs []string `json:"secret_refs,omitempty"`
 }
 
 func (app App) Validate() error {
 	if !validID(app.ID) || !boundedText(app.Image, 512) || !boundedText(app.RuleRef, 128) || !boundedText(app.Generation, 128) {
 		return errors.New("app id, image, rule_ref, or generation is invalid")
 	}
-	if len(app.Secrets) > 32 {
-		return fmt.Errorf("%w: secrets", ErrBoundExceeded)
+	if len(app.SecretRefs) > 32 {
+		return fmt.Errorf("%w: secret refs", ErrBoundExceeded)
 	}
-	for _, secret := range app.Secrets {
-		if secret == "" || len(secret) > 4096 {
-			return errors.New("secret is invalid")
+	for _, reference := range app.SecretRefs {
+		if !boundedText(reference, 128) {
+			return errors.New("secret reference is invalid")
 		}
+	}
+	if _, err := sortedUnique(app.SecretRefs, 32); err != nil {
+		return err
 	}
 	return nil
 }

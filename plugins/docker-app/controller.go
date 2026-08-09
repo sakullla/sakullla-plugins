@@ -18,17 +18,19 @@ import (
 const MaxConfigBytes = 1 << 20
 
 type TypedHandleAdmission interface {
-	Admit(context.Context, pluginsdk.RPCHandshakeRequest, []App) error
+	// Admit may acquire resources only by binding them to generation before
+	// use. Any host-visible commit must happen through a bound handle's Use.
+	Admit(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error
 }
-type TypedHandleAdmissionFunc func(context.Context, pluginsdk.RPCHandshakeRequest, []App) error
+type TypedHandleAdmissionFunc func(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error
 
-func (function TypedHandleAdmissionFunc) Admit(ctx context.Context, request pluginsdk.RPCHandshakeRequest, apps []App) error {
-	return function(ctx, request, apps)
+func (function TypedHandleAdmissionFunc) Admit(ctx context.Context, generation *rpcplugin.Generation, request pluginsdk.RPCHandshakeRequest, apps []App) error {
+	return function(ctx, generation, request, apps)
 }
 
 type unavailableAdmission struct{}
 
-func (unavailableAdmission) Admit(context.Context, pluginsdk.RPCHandshakeRequest, []App) error {
+func (unavailableAdmission) Admit(context.Context, *rpcplugin.Generation, pluginsdk.RPCHandshakeRequest, []App) error {
 	return ErrTypedHandlesUnavailable
 }
 
@@ -142,14 +144,6 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			return err
 		}
 	}
-	for appIndex := range configuration.Apps {
-		for secretIndex, material := range configuration.Apps[appIndex].Secrets {
-			reference := fmt.Sprintf("app-%d-secret-%d", appIndex, secretIndex)
-			if _, err := generation.Secret(reference, []byte(material)); err != nil {
-				return err
-			}
-		}
-	}
 	epoch := &commitEpoch{generation: generation.ID()}
 	epoch.live.Store(true)
 	handle, err := rpcplugin.BindHandle(generation, "docker-compose", epoch, func(epoch *commitEpoch) {
@@ -179,15 +173,12 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	})
 }
 
-func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
+func (controller *Controller) activate(ctx context.Context, generation *rpcplugin.Generation) error {
 	controller.mu.Lock()
 	request, apps, handle, epoch := controller.request, cloneApps(controller.apps), controller.commit, controller.epoch
 	controller.mu.Unlock()
 	if handle == nil || epoch == nil {
 		return rpcplugin.ErrRevoked
-	}
-	if err := controller.admission.Admit(ctx, request, apps); err != nil {
-		return err
 	}
 	return handle.Use(ctx, func(ctx context.Context, value *commitEpoch) error {
 		if err := ctx.Err(); err != nil {
@@ -196,7 +187,7 @@ func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generat
 		if value != epoch || !value.live.Load() {
 			return rpcplugin.ErrRevoked
 		}
-		return nil
+		return controller.admission.Admit(ctx, generation, request, apps)
 	})
 }
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
@@ -211,7 +202,7 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 func cloneApps(apps []App) []App {
 	result := append([]App(nil), apps...)
 	for index := range result {
-		result[index].Secrets = append([]string(nil), result[index].Secrets...)
+		result[index].SecretRefs = append([]string(nil), result[index].SecretRefs...)
 	}
 	return result
 }

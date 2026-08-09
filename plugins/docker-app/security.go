@@ -14,6 +14,7 @@ var (
 	ErrInvalidPreview   = errors.New("preview does not match trusted inventory")
 	ErrOperationFailed  = errors.New("broker operation failed")
 	ErrReconcilePending = errors.New("reconciliation is pending")
+	ErrStateConflict    = errors.New("deployment state version conflict")
 )
 
 // SafeError retains only a non-sensitive class and redacted message. It never
@@ -27,11 +28,11 @@ type SafeError struct {
 func (failure *SafeError) Error() string { return failure.Message }
 func (failure *SafeError) Unwrap() error { return failure.Class }
 
-func safeFailure(class error, err error, secrets []string) error {
+func safeFailure(class error, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &SafeError{Class: class, Message: redactText(err.Error(), secrets)}
+	return &SafeError{Class: class, Message: class.Error()}
 }
 
 func canonicalDigest(value any) (string, error) {
