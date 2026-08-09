@@ -27,6 +27,8 @@ type testRuntime struct {
 	vaultVersion      string
 	rotations         int
 	listeners         int
+	aborts            int
+	finishes          int
 }
 type testReservation struct {
 	runtime *testRuntime
@@ -67,16 +69,24 @@ func (r *testReservation) Finish(context.Context) error {
 		<-r.runtime.blockFinish
 	}
 	r.runtime.mu.Lock()
+	defer r.runtime.mu.Unlock()
+	if r.done {
+		return ErrRevoked
+	}
 	r.done = true
+	r.runtime.finishes++
 	delete(r.runtime.pending, r.id)
-	r.runtime.mu.Unlock()
 	return nil
 }
 func (r *testReservation) Abort(context.Context) error {
 	r.runtime.mu.Lock()
+	defer r.runtime.mu.Unlock()
+	if r.done {
+		return nil
+	}
 	r.done = true
+	r.runtime.aborts++
 	delete(r.runtime.pending, r.id)
-	r.runtime.mu.Unlock()
 	return nil
 }
 func (r *testRuntime) Verify(_ context.Context, ref, version string, material []byte) error {
@@ -512,7 +522,9 @@ func TestRotateWaitsForOldEngineAdmissionAndDoesNotAffectOtherUser(t *testing.T)
 func TestDrainTracksBlockedTrafficConsumeAndPreventsLateMutation(t *testing.T) {
 	consumeBlock := make(chan struct{})
 	r := &testRuntime{now: 1, used: map[string]uint64{}, refs: map[string]string{"secret/alice": "a"}, replay: map[string]bool{}, blockConsume: consumeBlock, consumeStarted: make(chan struct{}, 1)}
-	s, _ := NewService(testConfig(), adapters(r))
+	configuration := testConfig()
+	configuration.MaxSessions = 1
+	s, _ := NewService(configuration, adapters(r))
 	flow, err := s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: "alice", Credential: []byte("a"), ReplayToken: []byte("consume")})
 	if err != nil {
 		t.Fatal(err)
@@ -535,12 +547,17 @@ func TestDrainTracksBlockedTrafficConsumeAndPreventsLateMutation(t *testing.T) {
 	if r.used["alice"] != 0 {
 		t.Fatalf("late consume mutated ledger: %d", r.used["alice"])
 	}
+	if r.aborts != 1 {
+		t.Fatalf("terminal aborts=%d", r.aborts)
+	}
 }
 
 func TestDrainTracksBlockedTrafficFinish(t *testing.T) {
 	finishBlock := make(chan struct{})
 	r := &testRuntime{now: 1, used: map[string]uint64{}, refs: map[string]string{"secret/alice": "a"}, replay: map[string]bool{}, blockFinish: finishBlock, finishStarted: make(chan struct{}, 1)}
-	s, _ := NewService(testConfig(), adapters(r))
+	configuration := testConfig()
+	configuration.MaxSessions = 1
+	s, _ := NewService(configuration, adapters(r))
 	flow, err := s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: "alice", Credential: []byte("a"), ReplayToken: []byte("finish")})
 	if err != nil {
 		t.Fatal(err)
@@ -566,5 +583,8 @@ func TestDrainTracksBlockedTrafficFinish(t *testing.T) {
 	}
 	if r.used["alice"] != before {
 		t.Fatalf("late finish changed ledger: before=%d after=%d", before, r.used["alice"])
+	}
+	if r.aborts != 1 || r.finishes != 0 {
+		t.Fatalf("aborts=%d finishes=%d", r.aborts, r.finishes)
 	}
 }

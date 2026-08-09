@@ -34,8 +34,12 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 		stop = context.AfterFunc(s.root, cancel)
 	}
 	defer func() { stop(); cancel() }()
+	callSlots := s.hostSlots
+	if cleanup {
+		callSlots = s.cleanupSlots
+	}
 	select {
-	case s.hostSlots <- struct{}{}:
+	case callSlots <- struct{}{}:
 	case <-callCtx.Done():
 		s.hostCalls.Done()
 		return zero, callCtx.Err()
@@ -44,7 +48,7 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 	go func() {
 		value, err := f(callCtx)
 		result <- callResult[T]{value, err}
-		<-s.hostSlots
+		<-callSlots
 		s.hostCalls.Done()
 	}()
 	select {
@@ -65,7 +69,11 @@ func NewService(c Configuration, r RuntimeAdapters) (*Service, error) {
 		return nil, ErrTypedHandlesUnavailable
 	}
 	root, cancel := context.WithCancel(context.Background())
-	s := &Service{configuration: clone(c), runtime: r, slots: make(chan struct{}, c.MaxSessions), hostSlots: make(chan struct{}, c.MaxSessions), hostOpen: true, root: root, cancel: cancel, secrets: map[*SecretOnce]struct{}{}, engines: map[string]*ProtocolEngine{}}
+	s := &Service{
+		configuration: clone(c), runtime: r,
+		slots: make(chan struct{}, c.MaxSessions), hostSlots: make(chan struct{}, c.MaxSessions), cleanupSlots: make(chan struct{}, c.MaxSessions*2),
+		hostOpen: true, root: root, cancel: cancel, secrets: map[*SecretOnce]struct{}{}, engines: map[string]*ProtocolEngine{},
+	}
 	s.live.Store(true)
 	return s, nil
 }

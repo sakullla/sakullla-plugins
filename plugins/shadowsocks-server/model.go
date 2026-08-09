@@ -210,6 +210,7 @@ type Service struct {
 	sessions      sync.WaitGroup
 	slots         chan struct{}
 	hostSlots     chan struct{}
+	cleanupSlots  chan struct{}
 	hostMu        sync.Mutex
 	hostOpen      bool
 	hostCalls     sync.WaitGroup
