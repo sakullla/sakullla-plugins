@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -110,6 +111,15 @@ func TestShadowsocksOfficialRustTCPUDPFixtures(t *testing.T) {
 				if _, err = engine.OpenUDPResponse(mustHex(t, fixture.udpResponse), now, fixture.sessionID+1); !errors.Is(err, ss.ErrReplay) {
 					t.Fatalf("udp response binding=%v", err)
 				}
+			}
+			responseSalt := mustHex(t, fixture.udpResponse)[:engine.SaltSize()]
+			if fixture.serverSessionID != 0 {
+				responseSalt = make([]byte, 8)
+				binary.BigEndian.PutUint64(responseSalt, fixture.serverSessionID)
+			}
+			sealedUDP, err := engine.SealUDPResponse(responseSalt, fixture.responsePacket, fixture.sessionID, "example.org:53", []byte("fixture-response"), now, nil)
+			if err != nil || !bytes.Equal(sealedUDP, mustHex(t, fixture.udpResponse)) {
+				t.Fatalf("udp response match=%v err=%v", bytes.Equal(sealedUDP, mustHex(t, fixture.udpResponse)), err)
 			}
 			for protocol, wire := range map[string][]byte{"tcp": mustHex(t, fixture.tcp), "udp": mustHex(t, fixture.udp)} {
 				var request ss.ProxyRequest
