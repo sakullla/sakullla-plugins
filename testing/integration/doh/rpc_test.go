@@ -231,15 +231,15 @@ func TestDoHRPCTerminalSinkLateNilAfterStopNeverReturns200(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatalf("Stop blocked behind %s", sink)
 			}
-			close(release)
 			select {
 			case outcome := <-serveResult:
 				if outcome.response.Status == "200" || outcome.err == nil {
 					t.Fatalf("late %s outcome=%#v err=%v", sink, outcome.response, outcome.err)
 				}
 			case <-time.After(time.Second):
-				t.Fatalf("request remained blocked after releasing %s", sink)
+				t.Fatalf("request remained blocked behind %s after its deadline", sink)
 			}
+			close(release)
 		})
 	}
 }

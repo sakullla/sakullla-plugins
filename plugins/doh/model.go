@@ -274,6 +274,9 @@ type Service struct {
 	requestMu     sync.Mutex
 	requestCount  uint64
 	requestZero   chan struct{}
+	effectMu      sync.Mutex
+	effectCount   uint64
+	effectZero    chan struct{}
 	leaseMu       sync.RWMutex
 	requestLease  func(context.Context, HTTPRequest) (HTTPResponse, error)
 	closeOnce     sync.Once

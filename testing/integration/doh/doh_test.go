@@ -461,6 +461,89 @@ func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
 	}
 }
 
+func TestDoHHostAdapterDeadlineIsolationAndSlotRecovery(t *testing.T) {
+	for _, adapter := range []string{"audit", "token", "policy", "clock", "cache-get", "cache-put", "logger"} {
+		t.Run(adapter, func(t *testing.T) {
+			configuration := testConfiguration()
+			configuration.MaxConcurrency, configuration.UpstreamTimeoutMS, configuration.RequestTimeoutMS = 1, 10, 30
+			started, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			block := func() {
+				once.Do(func() { close(started) })
+				<-release
+			}
+			memory := doh.NewMemoryCache(8, 1<<20)
+			runtime := testRuntime(memory, func(request doh.ResolveRequest) ([]byte, error) {
+				return positiveResponse(request.DNSMessage, 10), nil
+			})
+			switch adapter {
+			case "audit":
+				runtime.Auditor = doh.AuditorFunc(func(context.Context, doh.AuditRecord) error { block(); return nil })
+			case "token":
+				runtime.Tokens = doh.TokenVerifierFunc(func(context.Context, string, []byte) error { block(); return nil })
+			case "policy":
+				runtime.Policy = doh.IPPolicyEvaluatorFunc(func(context.Context, string, doh.SourceIdentity) error { block(); return nil })
+			case "clock":
+				runtime.Clock = doh.MonotonicClockFunc(func(context.Context) (uint64, error) { block(); return uint64(time.Second), nil })
+			case "cache-get":
+				runtime.Cache = &functionalCache{Cache: memory, get: func(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
+					block()
+					return doh.CacheEntry{}, false, nil
+				}}
+			case "cache-put":
+				runtime.Cache = &functionalCache{Cache: memory, put: func(ctx context.Context, key string, entry doh.CacheEntry) error {
+					block()
+					return memory.Put(ctx, key, entry)
+				}}
+			case "logger":
+				runtime.Logger = doh.QueryLoggerFunc(func(context.Context, doh.QueryLog) error { block(); return nil })
+			}
+			service, err := doh.NewService(configuration, runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serveResult := make(chan error, 1)
+			go func() {
+				_, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, adapter+".example", 1), []byte("valid-token")))
+				serveResult <- err
+			}()
+			<-started
+			select {
+			case err := <-serveResult:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("deadline err=%v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Serve remained blocked behind host adapter")
+			}
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "bounded.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrConcurrencyExhausted) {
+				t.Fatalf("transferred slot err=%v", err)
+			}
+			close(release)
+			deadline := time.Now().Add(time.Second)
+			for {
+				_, err = service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(3, "recovered.example", 1), []byte("valid-token")))
+				if !errors.Is(err, doh.ErrConcurrencyExhausted) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("concurrency slot did not recover after adapter completion")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err != nil {
+				t.Fatalf("recovered request err=%v", err)
+			}
+			if err := service.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if entries, bytes := memory.Stats(); entries != 0 || bytes != 0 {
+				t.Fatalf("late cache effect survived Reset: entries=%d bytes=%d", entries, bytes)
+			}
+		})
+	}
+}
+
 func TestDoHRedactedAuditLogAndBackendFailures(t *testing.T) {
 	secret := "super-secret-token-and-qname"
 	var logs []doh.QueryLog
@@ -513,6 +596,26 @@ type countingCache struct {
 }
 
 type fixedHitCache struct{ entry doh.CacheEntry }
+
+type functionalCache struct {
+	doh.Cache
+	get func(context.Context, string, uint64) (doh.CacheEntry, bool, error)
+	put func(context.Context, string, doh.CacheEntry) error
+}
+
+func (cache *functionalCache) Get(ctx context.Context, key string, now uint64) (doh.CacheEntry, bool, error) {
+	if cache.get != nil {
+		return cache.get(ctx, key, now)
+	}
+	return cache.Cache.Get(ctx, key, now)
+}
+
+func (cache *functionalCache) Put(ctx context.Context, key string, entry doh.CacheEntry) error {
+	if cache.put != nil {
+		return cache.put(ctx, key, entry)
+	}
+	return cache.Cache.Put(ctx, key, entry)
+}
 
 func (cache *fixedHitCache) Get(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
 	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), StoredAt: cache.entry.StoredAt, ExpiresAt: cache.entry.ExpiresAt}, true, nil
