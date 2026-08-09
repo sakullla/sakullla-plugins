@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "go_modules": {
+    "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go": "GPL-3.0-only"
+  },
+  "rust_crates": {}
+}

@@ -31,6 +31,22 @@ func TestSecretCheckAcceptsOrdinarySource(t *testing.T) {
 	}
 }
 
+func TestSecretCheckRejectsNULPEMAndBinaryKeyExtension(t *testing.T) {
+	t.Parallel()
+	for name, contents := range map[string][]byte{
+		"hidden.bin": append([]byte{0}, []byte("-----BEGIN "+"PRIVATE KEY-----\nfixture")...),
+		"bundle.pfx": {0, 1, 2, 3, 0, 255},
+	} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckSecrets(root); err == nil {
+			t.Errorf("secret fixture %s was not rejected", name)
+		}
+	}
+}
+
 func TestLicenseCheckRequiresReviewedDependencies(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -40,6 +56,7 @@ func TestLicenseCheckRequiresReviewedDependencies(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26\n\nrequire example.com/dependency v1.0.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCargoLock(t, root, "")
 	if err := CheckLicenses(root, LicensePolicy{}); err == nil {
 		t.Fatal("unreviewed dependency license was accepted")
 	}
@@ -59,8 +76,33 @@ func TestLicenseCheckRejectsHostImplementationModule(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCargoLock(t, root, "")
 	if err := CheckLicenses(root, LicensePolicy{Modules: map[string]string{module: "GPL-3.0-only"}}); err == nil {
 		t.Fatal("host implementation module was accepted")
+	}
+}
+
+func TestLicenseCheckRequiresReviewedLockedRustCrates(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("GNU GENERAL PUBLIC LICENSE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCargoLock(t, root, `
+[[package]]
+name = "serde"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fixture"
+`)
+	if err := CheckLicenses(root, LicensePolicy{}); err == nil {
+		t.Fatal("unreviewed locked Rust crate was accepted")
+	}
+	if err := CheckLicenses(root, LicensePolicy{Crates: map[string]string{"serde@1.2.3": "MIT OR Apache-2.0"}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -105,4 +147,12 @@ func TestReproducibleHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func writeCargoLock(t *testing.T, root, packages string) {
+	t.Helper()
+	contents := "# generated fixture\nversion = 4\n" + packages
+	if err := os.WriteFile(filepath.Join(root, "Cargo.lock"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

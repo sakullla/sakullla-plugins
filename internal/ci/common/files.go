@@ -1,20 +1,63 @@
 package common
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
+type repositoryFile struct {
+	path string
+	rel  string
+}
+
 var skippedDirectories = map[string]bool{
 	".git": true, ".idea": true, ".vscode": true, ".cache": true,
 	"dist": true, "target": true, "coverage": true, "runtime-data": true,
+}
+
+func repositoryFiles(root string) ([]repositoryFile, error) {
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	output, gitErr := command.Output()
+	if gitErr == nil {
+		seen := make(map[string]bool)
+		var files []repositoryFile
+		for _, item := range bytes.Split(output, []byte{0}) {
+			if len(item) == 0 {
+				continue
+			}
+			rel := filepath.ToSlash(filepath.Clean(string(item)))
+			if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") || seen[rel] {
+				return nil, fmt.Errorf("git returned invalid repository path %q", rel)
+			}
+			path := filepath.Join(root, filepath.FromSlash(rel))
+			info, err := os.Lstat(path)
+			if err != nil {
+				return nil, err
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("repository entry %q is not a regular file", rel)
+			}
+			seen[rel] = true
+			files = append(files, repositoryFile{path: path, rel: rel})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+		return files, nil
+	}
+	var files []repositoryFile
+	err := walkFiles(root, func(path, rel string) error {
+		files = append(files, repositoryFile{path: path, rel: rel})
+		return nil
+	})
+	return files, err
 }
 
 func walkFiles(root string, visit func(string, string) error) error {

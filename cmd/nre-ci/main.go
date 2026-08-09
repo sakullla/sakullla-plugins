@@ -9,8 +9,6 @@ import (
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
 )
 
-const canonicalSDK = "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "nre-ci:", err)
@@ -83,7 +81,9 @@ func rootFlag(name string, args []string) (string, error) {
 }
 
 func checkLicenses(root string) error {
-	return common.CheckLicenses(root, common.LicensePolicy{Modules: map[string]string{
-		canonicalSDK: "GPL-3.0-only",
-	}})
+	policy, err := common.DefaultLicensePolicy()
+	if err != nil {
+		return err
+	}
+	return common.CheckLicenses(root, policy)
 }

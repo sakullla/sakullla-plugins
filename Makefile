@@ -17,7 +17,7 @@ artifacts:
 	$(GO) build -trimpath -buildvcs=false -ldflags='-buildid=' -o dist/bin/nre-package ./cmd/nre-package
 	$(GO) build -trimpath -buildvcs=false -ldflags='-buildid=' -o dist/bin/nre-market ./cmd/nre-market
 
-ci: test
+ci: test clean-test
 	$(GO) run ./cmd/nre-ci repository --root .
 
 clean-test:
