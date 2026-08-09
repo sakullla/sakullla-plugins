@@ -1,7 +1,7 @@
 use nre_policy_guest::PolicyAction;
 use sakullla_waf::{
     BodyWindow, ConfigError, CustomRule, DecisionReason, Exclusion, NormalizedRequest, Target,
-    TrustedSource, WafConfig, WafEngine, WafMode, prepare_config,
+    TrustedSource, WafConfig, WafEngine, WafMode, decode_config, prepare_config,
 };
 
 fn request<'a>(path: &'a [u8], query: &'a [u8], body: BodyWindow<'a>) -> NormalizedRequest<'a> {
@@ -16,6 +16,35 @@ fn request<'a>(path: &'a [u8], query: &'a [u8], body: BodyWindow<'a>) -> Normali
             address: b"192.0.2.10",
         },
         body,
+    }
+}
+
+#[test]
+fn artifact_config_decoder_is_exact_and_prepares_rules() {
+    let config = decode_config(
+        br#"{"mode":"deny","custom_rules":[{"id":"observe-probe","target":"path","needle":"observe"}],"exclusions":[{"rule_id":"observe-probe","path_prefix":"/allowed"}]}"#,
+    )
+    .unwrap();
+    let engine = WafEngine::new(&config);
+    assert_eq!(
+        engine
+            .evaluate(request(b"/observe", b"", BodyWindow::Complete(b"")))
+            .action,
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        engine
+            .evaluate(request(b"/allowed/observe", b"", BodyWindow::Complete(b"")))
+            .action,
+        PolicyAction::Allow
+    );
+    for invalid in [
+        br#"{"mode":"deny","unknown":true}"#.as_slice(),
+        br#"{"mode":"deny","mode":"observe"}"#.as_slice(),
+        br#"{"custom_rules":[]}"#.as_slice(),
+        br#"{"mode":"deny","custom_rules":[{"id":"x","target":"path"}]}"#.as_slice(),
+    ] {
+        assert!(decode_config(invalid).is_err(), "accepted {invalid:?}");
     }
 }
 

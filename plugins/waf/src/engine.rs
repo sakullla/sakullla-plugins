@@ -125,7 +125,10 @@ pub fn prepare_config(config: WafConfig<'_>) -> Result<PreparedConfig, ConfigErr
                 return Err(ConfigError::DuplicateRuleId);
             }
         }
-        prepared.custom[index] = Some(PreparedRule {
+        *prepared
+            .custom
+            .get_mut(index)
+            .ok_or(ConfigError::TooManyRules)? = Some(PreparedRule {
             id: FixedBytes::new(rule.id.as_bytes()).ok_or(ConfigError::InvalidRuleId)?,
             target: rule.target,
             needle: FixedBytes::new(rule.needle).ok_or(ConfigError::InvalidNeedle)?,
@@ -141,7 +144,10 @@ pub fn prepare_config(config: WafConfig<'_>) -> Result<PreparedConfig, ConfigErr
         if !known_rule(config.custom_rules, exclusion.rule_id) {
             return Err(ConfigError::UnknownExcludedRule);
         }
-        prepared.exclusions[index] = Some(PreparedExclusion {
+        *prepared
+            .exclusions
+            .get_mut(index)
+            .ok_or(ConfigError::TooManyExclusions)? = Some(PreparedExclusion {
             rule_id: FixedBytes::new(exclusion.rule_id.as_bytes())
                 .ok_or(ConfigError::InvalidRuleId)?,
             path_prefix: FixedBytes::new(exclusion.path_prefix)

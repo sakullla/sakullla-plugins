@@ -1,8 +1,10 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod config_json;
 mod engine;
 
+pub use config_json::{ConfigDecodeError, decode_config};
 pub use engine::{
     BodyWindow, ConfigError, CustomRule, DecisionReason, Evaluation, Exclusion, NormalizedRequest,
     PreparedConfig, Target, TrustedSource, WafConfig, WafEngine, WafMode, prepare_config,
@@ -25,11 +27,15 @@ mod wasm {
         encode_evaluate_success, pack_policy_buffer,
     };
 
-    use crate::{BodyWindow, NormalizedRequest, PreparedConfig, TrustedSource, WafEngine, WafMode};
+    use crate::{
+        BodyWindow, NormalizedRequest, PreparedConfig, TrustedSource, WafEngine, WafMode,
+        decode_config,
+    };
 
     const ARENA_BYTES: usize = 132 * 1024;
     const OUTPUT_BYTES: usize = 4096;
     const FIELD_BYTES: usize = 4096;
+    const BODY_WINDOW_BYTES: usize = 4088;
 
     struct Shared<T>(UnsafeCell<T>);
 
@@ -131,14 +137,13 @@ mod wasm {
                 Err(error) => return error.status as u32,
             }
         }
-        let mode = if contains_ascii_fold(request.config, b"observe") {
-            WafMode::Observe
-        } else {
-            WafMode::Deny
+        let config = match decode_config(request.config) {
+            Ok(config) => config,
+            Err(_) => return AbiStatus::InvalidArgument as u32,
         };
         // SAFETY: the host serializes calls into one policy instance.
         let runtime = unsafe { &mut *RUNTIME.0.get() };
-        runtime.config = PreparedConfig::managed_only(mode);
+        runtime.config = config;
         runtime.initialized = true;
         AbiStatus::Ok as u32
     }
@@ -208,9 +213,9 @@ mod wasm {
             &mut authenticated,
         )?;
         read_field(&mut host, "body_window_complete", &mut complete)?;
-        let mut body = Field::<FIELD_BYTES>::EMPTY;
+        let mut body = Field::<BODY_WINDOW_BYTES>::EMPTY;
         let response = host
-            .read_body_window(0, FIELD_BYTES as u32)
+            .read_body_window(0, BODY_WINDOW_BYTES as u32)
             .map_err(|error| error.status)?;
         body.set(response.value, response.found)?;
 
@@ -315,26 +320,5 @@ mod wasm {
             AbiStatus::IncompatibleAbi => RuntimeErrorCode::IncompatibleAbi,
             AbiStatus::Internal | AbiStatus::Ok => RuntimeErrorCode::Internal,
         }
-    }
-
-    fn contains_ascii_fold(haystack: &[u8], needle: &[u8]) -> bool {
-        if needle.is_empty() || needle.len() > haystack.len() {
-            return false;
-        }
-        let mut offset = 0;
-        while offset <= haystack.len() - needle.len() {
-            let Some(window) = haystack.get(offset..offset + needle.len()) else {
-                return false;
-            };
-            if window
-                .iter()
-                .zip(needle)
-                .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
-            {
-                return true;
-            }
-            offset += 1;
-        }
-        false
     }
 }
