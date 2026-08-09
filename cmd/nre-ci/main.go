@@ -108,6 +108,12 @@ func run(ctx context.Context, args []string) error {
 }
 
 func checkPlugin(ctx context.Context, args []string) error {
+	return checkPluginWithVerifier(ctx, args, sdklock.Verify)
+}
+
+type sdkVerifier func(context.Context, sdklock.Lock, bool, string) (sdklock.Verification, error)
+
+func checkPluginWithVerifier(ctx context.Context, args []string, verify sdkVerifier) error {
 	flags := flag.NewFlagSet("plugin", flag.ContinueOnError)
 	pluginID := flags.String("id", "", "plugin identifier")
 	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
@@ -128,7 +134,7 @@ func checkPlugin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := sdklock.Verify(ctx, lock, false, filepath.Dir(absoluteLock)); err != nil {
+	if _, err := verify(ctx, lock, true, filepath.Dir(absoluteLock)); err != nil {
 		return fmt.Errorf("SDK release gate: %w", err)
 	}
 	repositoryRoot := filepath.Dir(absoluteLock)
