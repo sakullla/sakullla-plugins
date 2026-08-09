@@ -442,22 +442,43 @@ func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := make(chan error, 1)
+	type serveOutcome struct {
+		response doh.HTTPResponse
+		err      error
+	}
+	result := make(chan serveOutcome, 1)
 	go func() {
-		_, err := blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "slow.example", 1), []byte("valid-token")))
-		result <- err
+		response, err := blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "slow.example", 1), []byte("valid-token")))
+		result <- serveOutcome{response: response, err: err}
 	}()
 	<-started
-	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("timeout err=%v", err)
+	if outcome := <-result; outcome.err != nil || outcome.response.Status != "200" {
+		t.Fatalf("failover outcome=%#v err=%v", outcome.response, outcome.err)
 	}
 	if _, err := blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "parallel.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrConcurrencyExhausted) {
 		t.Fatalf("pool saturation err=%v", err)
 	}
+	if statuses := blocking.Statuses(); statuses[0].Result != "timeout" || statuses[1].Result != "healthy" {
+		t.Fatalf("timeout failover statuses=%#v", statuses)
+	}
 	close(release)
 	time.Sleep(20 * time.Millisecond)
-	if statuses := blocking.Statuses(); statuses[0].Result != "timeout" {
+	if statuses := blocking.Statuses(); statuses[0].Result != "timeout" || statuses[1].Result != "healthy" {
 		t.Fatalf("late result corrupted status=%#v", statuses)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err = blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(3, "recovered.example", 1), []byte("valid-token")))
+		if !errors.Is(err, doh.ErrConcurrencyExhausted) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slot did not recover after timed-out upstream exited")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("recovered request err=%v", err)
 	}
 }
 

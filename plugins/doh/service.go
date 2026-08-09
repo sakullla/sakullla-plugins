@@ -180,7 +180,10 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		attemptCancel()
 		if timedOut {
 			service.updateStatus(upstream.ID, "timeout", true)
-			return fail("upstream-timeout", context.DeadlineExceeded)
+			if err := ctx.Err(); err != nil {
+				return fail("upstream-timeout", err)
+			}
+			continue
 		}
 		if resolveErr != nil {
 			service.updateStatus(upstream.ID, "failed", true)
