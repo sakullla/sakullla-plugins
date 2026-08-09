@@ -138,13 +138,15 @@ type controllerEpoch struct {
 }
 
 type activationAuditState struct {
-	mu           sync.Mutex
-	auditor      Auditor
-	operationKey string
-	started      bool
-	terminal     AuditRecord
-	terminalSet  bool
-	committed    bool
+	mu                sync.Mutex
+	auditor           Auditor
+	operationKey      string
+	started           AuditRecord
+	startedSet        bool
+	startedCommitted  bool
+	terminal          AuditRecord
+	terminalSet       bool
+	terminalCommitted bool
 }
 
 func (state *activationAuditState) write(ctx context.Context, outcome string) error {
@@ -155,16 +157,22 @@ func (state *activationAuditState) write(ctx context.Context, outcome string) er
 	defer state.mu.Unlock()
 
 	if outcome == "started" {
-		if state.started {
+		if !state.startedSet {
+			// Select the idempotent record before delivery. The sink may commit
+			// it even when the call returns an ambiguous error.
+			state.started = AuditRecord{Action: "activate", Outcome: outcome, OperationKey: state.operationKey + ":started"}
+			state.startedSet = true
+		}
+		if state.startedCommitted {
 			return nil
 		}
-		if err := state.auditor.Audit(ctx, AuditRecord{Action: "activate", Outcome: outcome, OperationKey: state.operationKey + ":started"}); err != nil {
+		if err := state.auditor.Audit(ctx, state.started); err != nil {
 			return ErrAuditUnavailable
 		}
-		state.started = true
+		state.startedCommitted = true
 		return nil
 	}
-	if !state.started {
+	if !state.startedSet {
 		return nil
 	}
 	if !state.terminalSet {
@@ -174,13 +182,20 @@ func (state *activationAuditState) write(ctx context.Context, outcome string) er
 		state.terminal = AuditRecord{Action: "activate", Outcome: outcome, OperationKey: state.operationKey + ":terminal"}
 		state.terminalSet = true
 	}
-	if state.committed {
+	if state.terminalCommitted {
 		return nil
+	}
+	if !state.startedCommitted {
+		// Retry the exact selected started record, but never let an ambiguous
+		// retry suppress the terminal record required by failure/revoke.
+		if err := state.auditor.Audit(ctx, state.started); err == nil {
+			state.startedCommitted = true
+		}
 	}
 	if err := state.auditor.Audit(ctx, state.terminal); err != nil {
 		return ErrAuditUnavailable
 	}
-	state.committed = true
+	state.terminalCommitted = true
 	return nil
 }
 

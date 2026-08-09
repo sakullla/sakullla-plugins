@@ -313,6 +313,50 @@ func TestActivationAmbiguousSucceededAuditRetriesIdempotentRecord(t *testing.T) 
 	assertSingleTerminalRecord(t, attempts, committed, "succeeded", schedulerOperationKey+":terminal")
 }
 
+func TestActivationAmbiguousStartedAuditStillWritesFailedTerminal(t *testing.T) {
+	auditor := newActivationAuditFixture(false, nil)
+	auditor.failFirstStarted = true
+	var admissionCalls atomic.Int32
+	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
+		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
+			admissionCalls.Add(1)
+			return acceleratorsources.PreparedAdmissionFuncs{}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	if response.Error == nil || strings.Contains(response.Error.Error(), "raw") || admissionCalls.Load() != 0 || len(controller.Sources()) != 0 {
+		t.Fatalf("ambiguous started response=%#v admission=%d sources=%v", response, admissionCalls.Load(), controller.Sources())
+	}
+	attempts, committed := auditor.snapshot()
+	var started, failed []acceleratorsources.AuditRecord
+	for _, record := range attempts {
+		switch record.Outcome {
+		case "started":
+			started = append(started, record)
+		case "failed":
+			failed = append(failed, record)
+		case "succeeded":
+			t.Fatalf("ambiguous started wrote opposite terminal: %#v", attempts)
+		}
+	}
+	if len(started) != 2 || started[0] != started[1] || len(failed) != 1 || started[0].OperationKey == "" || failed[0].OperationKey == "" {
+		t.Fatalf("ambiguous started attempts=%#v", attempts)
+	}
+	if committed[started[0].OperationKey] != started[0] || committed[failed[0].OperationKey] != failed[0] {
+		t.Fatalf("ambiguous started logical records=%#v", committed)
+	}
+}
+
 func TestActivationConcurrentFailureAndRevokeKeepOneTerminalOutcome(t *testing.T) {
 	release := make(chan struct{})
 	auditor := newActivationAuditFixture(true, release)
@@ -357,6 +401,8 @@ type activationAuditFixture struct {
 	mu                  sync.Mutex
 	attempts            []acceleratorsources.AuditRecord
 	committed           map[string]acceleratorsources.AuditRecord
+	failFirstStarted    bool
+	failedStartedOnce   bool
 	failFirstTerminal   bool
 	failedTerminalOnce  bool
 	terminalEntered     chan struct{}
@@ -377,7 +423,14 @@ func (fixture *activationAuditFixture) Audit(ctx context.Context, record acceler
 	fixture.attempts = append(fixture.attempts, record)
 	fixture.committed[record.OperationKey] = record
 	if record.Outcome == "started" {
+		shouldFail := fixture.failFirstStarted && !fixture.failedStartedOnce
+		if shouldFail {
+			fixture.failedStartedOnce = true
+		}
 		fixture.mu.Unlock()
+		if shouldFail {
+			return errors.New("raw started audit secret")
+		}
 		return nil
 	}
 	shouldFail := fixture.failFirstTerminal && !fixture.failedTerminalOnce
