@@ -17,7 +17,7 @@ import (
 	"strings"
 )
 
-const canonicalSDKModule = "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+const canonicalSDKModule = "github.com/sakullla/nginx-reverse-emby/plugin-sdk"
 
 var secretPatterns = []struct {
 	name    string
@@ -148,7 +148,8 @@ func checkGoImportBoundary(root string) error {
 				value != canonicalSDKModule && !strings.HasPrefix(value, canonicalSDKModule+"/") {
 				return fmt.Errorf("%s imports forbidden host implementation %q", rel, value)
 			}
-			if strings.HasPrefix(value, canonicalSDKModule+"/internal/") {
+			sdkRelative := strings.TrimPrefix(value, canonicalSDKModule+"/")
+			if value != sdkRelative && (strings.HasPrefix(sdkRelative, "internal/") || strings.Contains(sdkRelative, "/internal/")) {
 				return fmt.Errorf("%s imports non-public SDK implementation %q", rel, value)
 			}
 		}

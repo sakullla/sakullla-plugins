@@ -1,0 +1,10 @@
+* text=auto eol=lf
+Cargo.lock linguist-generated=true sakullla-review=generated
+go.sum linguist-generated=true sakullla-review=generated
+sdk.lock.json linguist-generated=true sakullla-review=generated
+crates/nre-policy-guest/src/abi_generated.rs linguist-generated=true sakullla-review=generated
+market.yaml linguist-generated=true sakullla-review=generated
+release/** linguist-generated=true sakullla-review=generated
+NOTICE linguist-generated=true sakullla-review=generated
+THIRD_PARTY_LICENSES.json linguist-generated=true sakullla-review=generated
+SBOM.spdx.json linguist-generated=true sakullla-review=generated

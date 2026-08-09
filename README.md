@@ -31,6 +31,11 @@ independent clean builds of the declared `dist` output. On Windows, the equivale
 
 ## Packaging boundary
 
+During development, `go.mod` replaces the canonical `plugin-sdk` module root
+with `../nginx-reverse-emby/plugin-sdk`; production code imports only its public
+`plugin-sdk/go` packages. Release candidates remove the local replacement and
+pin the committed upstream pseudo-version.
+
 `nre-package` assembles a closed package tree, emits deterministic file metadata,
 SPDX JSON and NOTICE data, asks an external signer provider to sign the payload
 digest, and invokes the pinned validator. Official signing is command-provider

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
+	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
 
 func main() {
@@ -18,9 +20,33 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("expected repository, generated, license, secret, or reproducible")
+		return fmt.Errorf("expected repository, generated, license, secret, reproducible, or sdk")
 	}
 	switch args[0] {
+	case "sdk":
+		flags := flag.NewFlagSet("sdk", flag.ContinueOnError)
+		lockPath := flags.String("lock", "sdk.lock.json", "canonical SDK lock")
+		requireCapabilities := flags.Bool("require-host-capabilities", false, "fail when any required host capability is unavailable")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return fmt.Errorf("unexpected sdk arguments: %v", flags.Args())
+		}
+		lock, err := sdklock.Load(*lockPath)
+		if err != nil {
+			return err
+		}
+		verification, err := sdklock.Verify(ctx, lock, *requireCapabilities)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.MarshalIndent(verification, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
 	case "repository":
 		root, err := rootFlag("repository", args[1:])
 		if err != nil {

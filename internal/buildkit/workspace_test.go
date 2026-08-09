@@ -22,6 +22,8 @@ func TestBuildRustWorkspaceAllowsGoPluginDirectory(t *testing.T) {
 	}
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "Cargo.toml"), manifest)
+	writeTestFile(t, filepath.Join(root, "crates", "fixture", "Cargo.toml"), []byte("[package]\nname='fixture-sdk-crate'\nversion='0.0.0'\nedition.workspace=true\nlicense.workspace=true\nrust-version.workspace=true\n"))
+	writeTestFile(t, filepath.Join(root, "crates", "fixture", "src", "lib.rs"), []byte("pub const READY: bool = true;\n"))
 	writeTestFile(t, filepath.Join(root, "plugins", "_workspace", "Cargo.toml"), []byte("[package]\nname='workspace-anchor'\nversion='0.0.0'\nedition.workspace=true\nlicense.workspace=true\nrust-version.workspace=true\n"))
 	writeTestFile(t, filepath.Join(root, "plugins", "_workspace", "src", "lib.rs"), []byte("pub const READY: bool = true;\n"))
 	writeTestFile(t, filepath.Join(root, "plugins", "waf", "Cargo.toml"), []byte("[package]\nname='fixture-waf'\nversion='0.0.0'\nedition.workspace=true\nlicense.workspace=true\nrust-version.workspace=true\n"))

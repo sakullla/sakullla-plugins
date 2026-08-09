@@ -1,0 +1,16 @@
+[package]
+name = "nre-policy-guest"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "GPL-3.0-only"
+description = "Bounded no_std guest support for the canonical nre:policy/v1 ABI"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+

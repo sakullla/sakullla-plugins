@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "repository": {
+    "url": "https://github.com/sakullla/nginx-reverse-emby.git",
+    "commit": "850508f16e630c61425c68b02427e0ef13378d00"
+  },
+  "sdk": {
+    "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
+    "module_directory": "plugin-sdk/go",
+    "contract_tree_oid": "99b63bab379f1555e540c071f5601ecd41b4d9a4"
+  },
+  "artifacts": {
+    "descriptor_set_sha256": "175157e6c2f6f337ba9e5c10de136a458272f0b74a563f00db2b402c6f80b7ec",
+    "policy_proto_sha256": "c76c948cc064aedc157bea2f98bae80c87892b6568628da39a1373a905c5f994",
+    "rpc_proto_sha256": "b2693d50c3bb037bf6e4f456cb956eb5c66b2922c823470ef621abc652eeb990",
+    "canonical_guest_sha256": "fc89d8d018d749de23b6979774e917f71b22883dd302d931b3791e37f50ea7ec",
+    "validator_tree_oid": "8950e15a0b6baa6a9f20008153a42e9b042a0063"
+  },
+  "required_capabilities": [
+    {
+      "id": "policy.atomic-state",
+      "available": false,
+      "missing_reason": "public policy SDK exposes StateGet/StatePut but no generation-local atomic mutation contract"
+    },
+    {
+      "id": "policy.body-window",
+      "available": true,
+      "evidence_path": "plugin-sdk/go/contracts.go",
+      "symbols": ["PolicyHostReadBodyWindow"]
+    },
+    {
+      "id": "policy.event-metric",
+      "available": true,
+      "evidence_path": "plugin-sdk/go/contracts.go",
+      "symbols": ["PolicyHostEmitEvent", "PolicyHostAddMetric"]
+    },
+    {
+      "id": "policy.monotonic-clock",
+      "available": false,
+      "missing_reason": "public policy SDK has no monotonic time Host call"
+    },
+    {
+      "id": "policy.trusted-source",
+      "available": false,
+      "missing_reason": "ReadField does not authenticate socket, PROXY, or Relay source provenance"
+    },
+    {
+      "id": "rpc.lifecycle",
+      "available": true,
+      "evidence_path": "plugin-sdk/go/contracts.go",
+      "symbols": ["RPCHandshakeRequest", "LifecycleRequest", "LifecycleResponse"]
+    },
+    {
+      "id": "service.revocable-resource-handle",
+      "available": false,
+      "missing_reason": "public RPC SDK has no typed resource handle or revoke contract"
+    },
+    {
+      "id": "ui.dynamic-actions",
+      "available": false,
+      "missing_reason": "public SDK has no typed dynamic collection/action/log or one-time-secret schema"
+    }
+  ],
+  "capability_contract_sha256": "6e6f82ac81dbd60f6a46d1545d4962dc6ae0fa6d0b70c74ace45d399320df1a8"
+}

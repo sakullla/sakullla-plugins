@@ -1,7 +1,10 @@
 {
   "schema_version": 1,
   "go_modules": {
-    "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go": "GPL-3.0-only"
+    "github.com/sakullla/nginx-reverse-emby/plugin-sdk": "GPL-3.0-only",
+    "github.com/tetratelabs/wazero": "Apache-2.0",
+    "golang.org/x/sys": "BSD-3-Clause",
+    "google.golang.org/protobuf": "BSD-3-Clause"
   },
   "rust_crates": {}
 }
