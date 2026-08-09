@@ -120,3 +120,11 @@ func safeBaseName(path string) (string, error) {
 	}
 	return base, nil
 }
+
+func safePackagePath(value string) bool {
+	if value == "" || strings.Contains(value, `\`) || filepath.IsAbs(filepath.FromSlash(value)) {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(value)))
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
+}

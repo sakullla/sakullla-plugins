@@ -18,6 +18,12 @@ type inspectingValidator struct {
 	t *testing.T
 }
 
+type validatorFunc func(context.Context, string) error
+
+func (function validatorFunc) Validate(ctx context.Context, packageDir string) error {
+	return function(ctx, packageDir)
+}
+
 func (validator inspectingValidator) Validate(_ context.Context, packageDir string) error {
 	validator.t.Helper()
 	for _, name := range []string{"plugin.yaml", "NOTICE", "sbom.spdx.json", "package.files.json", "signature.json", "artifact/plugin.wasm"} {
@@ -95,6 +101,39 @@ func TestPackageRefusesExistingOutput(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("BuildPackage overwrote an existing output")
+	}
+}
+
+func TestPackageUsesManifestArtifactPathAndIncludesSchemas(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	manifest := writeFixture(t, root, "plugin.yaml", "schema_version: 1\n")
+	artifact := writeFixture(t, root, "plugin.exe", "binary")
+	schema := writeFixture(t, root, "config.schema.json", `{}`)
+	license := writeFixture(t, root, "LICENSE", "license")
+	output := filepath.Join(root, "package")
+	validator := validatorFunc(func(_ context.Context, packageDir string) error {
+		for _, name := range []string{"artifacts/plugin", "config.schema.json"} {
+			if _, err := os.Stat(filepath.Join(packageDir, filepath.FromSlash(name))); err != nil {
+				t.Fatalf("package lacks %s: %v", name, err)
+			}
+		}
+		return nil
+	})
+	_, err := BuildPackage(context.Background(), PackageRequest{
+		ManifestPath: manifest, ArtifactPath: artifact, ArtifactDestination: "artifacts/plugin",
+		ExtraFiles: map[string]string{"config.schema.json": schema}, NoticePaths: []string{license},
+		OutputDir: output, Signer: deterministicSigner{}, Validator: validator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildPackage(context.Background(), PackageRequest{
+		ManifestPath: manifest, ArtifactPath: artifact, ArtifactDestination: "../escape",
+		NoticePaths: []string{license}, OutputDir: filepath.Join(root, "escape"),
+		Signer: deterministicSigner{}, Validator: validator,
+	}); err == nil {
+		t.Fatal("package accepted an artifact path escape")
 	}
 }
 

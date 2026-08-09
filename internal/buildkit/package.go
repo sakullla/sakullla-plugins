@@ -17,12 +17,14 @@ import (
 )
 
 type PackageRequest struct {
-	ManifestPath string
-	ArtifactPath string
-	NoticePaths  []string
-	OutputDir    string
-	Signer       Signer
-	Validator    Validator
+	ManifestPath        string
+	ArtifactPath        string
+	ArtifactDestination string
+	ExtraFiles          map[string]string
+	NoticePaths         []string
+	OutputDir           string
+	Signer              Signer
+	Validator           Validator
 }
 
 type PackageResult struct {
@@ -100,15 +102,31 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	}
 	defer os.RemoveAll(temporary)
 
-	artifactName, err := safeBaseName(request.ArtifactPath)
-	if err != nil {
-		return PackageResult{}, err
+	artifactDestination := request.ArtifactDestination
+	if artifactDestination == "" {
+		artifactName, err := safeBaseName(request.ArtifactPath)
+		if err != nil {
+			return PackageResult{}, err
+		}
+		artifactDestination = filepath.ToSlash(filepath.Join("artifact", artifactName))
+	}
+	if !safePackagePath(artifactDestination) || artifactDestination == "plugin.yaml" {
+		return PackageResult{}, fmt.Errorf("artifact destination %q is invalid", artifactDestination)
 	}
 	if err := copyRegularFile(request.ManifestPath, filepath.Join(temporary, "plugin.yaml")); err != nil {
 		return PackageResult{}, fmt.Errorf("copy manifest: %w", err)
 	}
-	if err := copyRegularFile(request.ArtifactPath, filepath.Join(temporary, "artifact", artifactName)); err != nil {
+	if err := copyRegularFile(request.ArtifactPath, filepath.Join(temporary, filepath.FromSlash(artifactDestination))); err != nil {
 		return PackageResult{}, fmt.Errorf("copy artifact: %w", err)
+	}
+	for destination, source := range request.ExtraFiles {
+		if !safePackagePath(destination) || destination == "plugin.yaml" || destination == artifactDestination ||
+			destination == "NOTICE" || destination == "sbom.spdx.json" || destination == "package.files.json" || destination == "signature.json" {
+			return PackageResult{}, fmt.Errorf("extra file destination %q is invalid or reserved", destination)
+		}
+		if err := copyRegularFile(source, filepath.Join(temporary, filepath.FromSlash(destination))); err != nil {
+			return PackageResult{}, fmt.Errorf("copy extra file %s: %w", destination, err)
+		}
 	}
 	if err := writeNotice(filepath.Join(temporary, "NOTICE"), request.NoticePaths); err != nil {
 		return PackageResult{}, err
@@ -278,4 +296,17 @@ func writeNotice(destination string, sources []string) error {
 func DigestBytes(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
+}
+
+// DigestTree returns the deterministic package-tree digest used by
+// BuildPackage after rejecting non-regular entries.
+func DigestTree(root string) (string, error) {
+	records, err := recordsForTree(root, nil)
+	if err != nil {
+		return "", err
+	}
+	if len(records) == 0 {
+		return "", fmt.Errorf("package tree %q is empty", root)
+	}
+	return digestRecords(records), nil
 }

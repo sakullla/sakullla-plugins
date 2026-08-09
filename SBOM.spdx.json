@@ -1,0 +1,90 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "name": "sakullla-official-plugins-source",
+  "documentNamespace": "https://github.com/sakullla/sakullla-plugins/sbom/source-v1",
+  "creationInfo": {
+    "created": "2026-08-10T00:00:00Z",
+    "creators": [
+      "Tool: sakullla-release"
+    ]
+  },
+  "documentDescribes": [
+    "SPDXRef-Package-sakullla-plugins"
+  ],
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-sakullla-plugins",
+      "name": "github.com/sakullla/sakullla-plugins",
+      "versionInfo": "0.1.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-3.0-only",
+      "licenseDeclared": "GPL-3.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-plugin-sdk",
+      "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+      "versionInfo": "v0.1.0",
+      "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-3.0-only",
+      "licenseDeclared": "GPL-3.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-wazero",
+      "name": "github.com/tetratelabs/wazero",
+      "versionInfo": "v1.12.0",
+      "downloadLocation": "https://github.com/tetratelabs/wazero",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-sys",
+      "name": "golang.org/x/sys",
+      "versionInfo": "v0.44.0",
+      "downloadLocation": "https://go.googlesource.com/sys",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-protobuf",
+      "name": "google.golang.org/protobuf",
+      "versionInfo": "v1.34.2",
+      "downloadLocation": "https://github.com/protocolbuffers/protobuf-go",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-plugin-sdk"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-wazero"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-sys"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-protobuf"
+    }
+  ]
+}

@@ -11,11 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"github.com/sakullla/sakullla-plugins/internal/buildkit"
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
 	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
+	cirelease "github.com/sakullla/sakullla-plugins/internal/ci/release"
 	ciwasm "github.com/sakullla/sakullla-plugins/internal/ci/wasm"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
@@ -62,6 +65,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "plugin":
 		return checkPlugin(ctx, args[1:])
+	case "all":
+		return checkAll(ctx, args[1:])
+	case "release":
+		return checkRelease(ctx, args[1:])
 	case "performance":
 		return checkPerformance(ctx, args[1:])
 	case "repository":
@@ -109,6 +116,245 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
+}
+
+type verifiedPlugin struct {
+	id, version, runtime, abi, entry string
+	manifest, artifact               string
+}
+
+func checkAll(ctx context.Context, args []string) error {
+	_, _, err := buildAll(ctx, args, sdklock.Verify)
+	return err
+}
+
+func buildAll(ctx context.Context, args []string, verify sdkVerifier) (sdklock.Lock, []verifiedPlugin, error) {
+	flags := flag.NewFlagSet("all", flag.ContinueOnError)
+	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
+	if err := flags.Parse(args); err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	if flags.NArg() != 0 {
+		return sdklock.Lock{}, nil, fmt.Errorf("unexpected all arguments: %v", flags.Args())
+	}
+	absoluteLock, err := filepath.Abs(*lockPath)
+	if err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	lock, err := sdklock.Load(absoluteLock)
+	if err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	root := filepath.Dir(absoluteLock)
+	if _, err := verify(ctx, lock, true, root); err != nil {
+		return sdklock.Lock{}, nil, fmt.Errorf("SDK release gate: %w", err)
+	}
+	if err := common.CheckGenerated(ctx, root); err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	if err := checkLicenses(root); err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	if err := cirelease.ValidateLegalInventory(root); err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	if err := common.CheckSecrets(root); err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "plugins"))
+	if err != nil {
+		return sdklock.Lock{}, nil, err
+	}
+	var ids []string
+	for _, entry := range entries {
+		if !entry.IsDir() || !validPluginID(entry.Name()) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, "plugins", entry.Name(), "plugin.yaml")); err == nil {
+			ids = append(ids, entry.Name())
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return sdklock.Lock{}, nil, fmt.Errorf("no plugin manifests found")
+	}
+	plugins := make([]verifiedPlugin, 0, len(ids))
+	for _, id := range ids {
+		spec, err := pluginArtifactSpecFor(root, id)
+		if err != nil {
+			return sdklock.Lock{}, nil, err
+		}
+		artifact, err := buildPluginArtifact(ctx, root, id, spec)
+		if err != nil {
+			return sdklock.Lock{}, nil, err
+		}
+		manifest := filepath.Join(root, "plugins", id, "plugin.yaml")
+		metadata, err := releaseManifest(manifest, id, spec)
+		if err != nil {
+			return sdklock.Lock{}, nil, err
+		}
+		metadata.manifest, metadata.artifact = manifest, artifact
+		plugins = append(plugins, metadata)
+	}
+	return lock, plugins, nil
+}
+
+func checkRelease(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("release", flag.ContinueOnError)
+	verifyReproducible := flags.Bool("verify-reproducible", false, "rebuild the candidate in two isolated source copies")
+	signerSpec := flags.String("signer", "", "external official signer provider, as env:NAME")
+	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
+	output := flags.String("output", filepath.ToSlash(filepath.Join("dist", "release-candidate")), "candidate output directory")
+	commit := flags.String("commit", "", "full repository commit for isolated rebuilds")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *signerSpec == "" {
+		return fmt.Errorf("release requires --signer env:NAME and no positional arguments")
+	}
+	absoluteLock, err := filepath.Abs(*lockPath)
+	if err != nil {
+		return err
+	}
+	root := filepath.Dir(absoluteLock)
+	repositoryCommit := *commit
+	if repositoryCommit == "" {
+		command := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "HEAD")
+		value, err := command.Output()
+		if err != nil {
+			return fmt.Errorf("resolve release repository commit: %w", err)
+		}
+		repositoryCommit = strings.TrimSpace(string(value))
+	}
+	if *verifyReproducible {
+		relativeLock, err := filepath.Rel(root, absoluteLock)
+		if err != nil {
+			return err
+		}
+		reproArgs := []string{"run", "./cmd/nre-ci", "release", "--signer", *signerSpec, "--sdk-lock", filepath.ToSlash(relativeLock), "--output", *output, "--commit", repositoryCommit}
+		if err := common.CheckReproducible(ctx, root, *output, "go", reproArgs); err != nil {
+			return err
+		}
+	}
+	lock, plugins, err := buildAll(ctx, []string{"--sdk-lock", absoluteLock}, sdklock.Verify)
+	if err != nil {
+		return err
+	}
+	signer, validator, err := cirelease.LoadProvider(*signerSpec)
+	if err != nil {
+		return err
+	}
+	absoluteOutput := *output
+	if !filepath.IsAbs(absoluteOutput) {
+		absoluteOutput = filepath.Join(root, filepath.FromSlash(absoluteOutput))
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(absoluteOutput), ".release-packages-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	packages := make([]cirelease.Package, 0, len(plugins))
+	for _, plugin := range plugins {
+		extraFiles := make(map[string]string)
+		pluginRoot := filepath.Dir(plugin.manifest)
+		for _, name := range []string{"config.schema.json", "ui.schema.json"} {
+			path := filepath.Join(pluginRoot, name)
+			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+				extraFiles[name] = path
+			}
+		}
+		packageDirectory := filepath.Join(staging, plugin.id, plugin.version)
+		result, err := buildkit.BuildPackage(ctx, buildkit.PackageRequest{
+			ManifestPath: plugin.manifest, ArtifactPath: plugin.artifact, ArtifactDestination: plugin.entry,
+			ExtraFiles: extraFiles, NoticePaths: []string{filepath.Join(root, "NOTICE"), filepath.Join(root, "THIRD_PARTY_LICENSES.json")},
+			OutputDir: packageDirectory, Signer: signer, Validator: validator,
+		})
+		if err != nil {
+			return fmt.Errorf("package %s: %w", plugin.id, err)
+		}
+		packages = append(packages, cirelease.Package{
+			ID: plugin.id, Version: plugin.version, Runtime: plugin.runtime, ABI: plugin.abi,
+			Directory: packageDirectory, PackageSHA256: result.PackageDigest, SignerIdentity: result.SignerIdentity,
+		})
+	}
+	result, err := cirelease.Assemble(cirelease.Input{
+		OutputDir: absoluteOutput, RepositoryCommit: repositoryCommit,
+		SDKRepositoryCommit: lock.Repository.Commit, SDKDescriptorSHA256: lock.Artifacts.DescriptorSetSHA256,
+		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity,
+		NoticePath: filepath.Join(root, "NOTICE"), ThirdPartyLicensesPath: filepath.Join(root, "THIRD_PARTY_LICENSES.json"),
+		SBOMPath: filepath.Join(root, "SBOM.spdx.json"), Packages: packages,
+	})
+	if err != nil {
+		return err
+	}
+	if err := cirelease.PromoteMarket(result.OutputDir, filepath.Join(root, "market.yaml")); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(result.Provenance, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func releaseManifest(path, expectedID string, spec pluginArtifactSpec) (verifiedPlugin, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return verifiedPlugin{}, err
+	}
+	metadata := verifiedPlugin{id: expectedID}
+	var document map[string]any
+	if json.Unmarshal(data, &document) == nil {
+		metadata.version, _ = document["version"].(string)
+		if id, _ := document["id"].(string); id != expectedID {
+			return verifiedPlugin{}, fmt.Errorf("manifest %s id is %q, want %q", path, id, expectedID)
+		}
+		if runtimeDocument, ok := document["runtime"].(map[string]any); ok {
+			metadata.runtime, _ = runtimeDocument["kind"].(string)
+			metadata.abi, _ = runtimeDocument["abi"].(string)
+			metadata.entry, _ = runtimeDocument["entry"].(string)
+		}
+	} else {
+		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+			trimmed := strings.TrimSpace(line)
+			key, value, ok := strings.Cut(trimmed, ":")
+			if !ok {
+				continue
+			}
+			value = strings.Trim(strings.TrimSpace(value), `"'`)
+			switch key {
+			case "id":
+				if value != expectedID {
+					return verifiedPlugin{}, fmt.Errorf("manifest %s id is %q, want %q", path, value, expectedID)
+				}
+			case "version":
+				metadata.version = value
+			case "kind", "runtime":
+				if value != "" {
+					metadata.runtime = value
+				}
+			case "abi":
+				metadata.abi = value
+			case "entry", "artifact":
+				if metadata.entry == "" {
+					metadata.entry = value
+				}
+			}
+		}
+	}
+	if spec.kind == artifactWASMPolicy {
+		metadata.runtime, metadata.abi = pluginsdk.RuntimeWASMPolicy, pluginsdk.PolicyABIV1
+		if metadata.entry == "" {
+			metadata.entry = filepath.ToSlash(filepath.Join("artifacts", expectedID+".wasm"))
+		}
+	} else {
+		metadata.runtime, metadata.abi = pluginsdk.RuntimeRPCService, pluginsdk.RPCABIV1
+	}
+	if metadata.version == "" || metadata.entry == "" {
+		return verifiedPlugin{}, fmt.Errorf("manifest %s lacks release version or artifact entry", path)
+	}
+	return metadata, nil
 }
 
 func checkPerformance(ctx context.Context, args []string) error {

@@ -36,6 +36,7 @@ type Repository struct {
 type SDK struct {
 	ModulePath      string `json:"module_path"`
 	ModuleDirectory string `json:"module_directory"`
+	PackagePath     string `json:"package_path"`
 	ContractTreeOID string `json:"contract_tree_oid"`
 }
 
@@ -85,7 +86,9 @@ func (lock Lock) Validate() error {
 	if lock.Repository.Tag != "" && !validGitRefName(lock.Repository.Tag) {
 		return fmt.Errorf("SDK lock repository tag is invalid")
 	}
-	if lock.SDK.ModulePath != "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go" || lock.SDK.ModuleDirectory != "plugin-sdk/go" {
+	if lock.SDK.ModulePath != "github.com/sakullla/nginx-reverse-emby/plugin-sdk" ||
+		lock.SDK.ModuleDirectory != "plugin-sdk" ||
+		lock.SDK.PackagePath != "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go" {
 		return fmt.Errorf("SDK lock must reference the canonical public Go module")
 	}
 	if !fullOID.MatchString(lock.SDK.ContractTreeOID) || !fullOID.MatchString(lock.Artifacts.ValidatorTreeOID) {

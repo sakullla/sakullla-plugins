@@ -43,6 +43,8 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 	}
 	for _, args := range [][]string{
 		{"init", "--quiet"},
+		{"config", "core.autocrlf", "false"},
+		{"config", "core.eol", "lf"},
 		{"remote", "add", "origin", lock.Repository.URL},
 		{"fetch", "--quiet", "--depth=1", "origin", fetchTarget},
 	} {
@@ -86,11 +88,16 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 	if output, err := run(ctx, sdkRoot, "go", "test", "./..."); err != nil {
 		return Verification{}, fmt.Errorf("canonical SDK tests failed: %w: %s", err, output)
 	}
-	descriptorDigest, err := descriptorSetDigest(ctx, root, sdkRoot, lock.SDK.ModulePath)
+	descriptorDigest, err := descriptorSetDigest(ctx, root, sdkRoot, lock.SDK.ModulePath, lock.SDK.PackagePath)
 	if err != nil || descriptorDigest != lock.Artifacts.DescriptorSetSHA256 {
 		return Verification{}, fmt.Errorf("canonical descriptor set digest mismatch: %v", err)
 	}
-	guestHex, err := run(ctx, sdkRoot, "go", "run", "./compatfixture/cmd/generate")
+	packageDirectory, err := packageDirectory(lock.SDK.ModulePath, lock.SDK.PackagePath)
+	if err != nil {
+		return Verification{}, err
+	}
+	guestGenerator := "./" + filepath.ToSlash(filepath.Join(packageDirectory, "compatfixture", "cmd", "generate"))
+	guestHex, err := run(ctx, sdkRoot, "go", "run", guestGenerator)
 	if err != nil {
 		return Verification{}, fmt.Errorf("canonical compatibility guest generation failed: %w", err)
 	}
@@ -110,7 +117,7 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 		if !capability.Available {
 			continue
 		}
-		if err := verifyCapability(ctx, root, checkout, sdkRoot, lock.SDK.ModulePath, capability); err != nil {
+		if err := verifyCapability(ctx, root, checkout, sdkRoot, lock.SDK.ModulePath, lock.SDK.PackagePath, capability); err != nil {
 			return Verification{}, err
 		}
 	}
@@ -190,7 +197,7 @@ func copyGoSources(source, target string) error {
 	return nil
 }
 
-func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, modulePath string, capability Capability) error {
+func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, modulePath, packagePath string, capability Capability) error {
 	data, err := gitRegularBlob(ctx, checkout, capability.EvidencePath)
 	if err != nil {
 		return fmt.Errorf("read capability %s evidence: %w", capability.ID, err)
@@ -222,7 +229,7 @@ func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, mod
 			return fmt.Errorf("capability %s evidence declaration %q is missing", capability.ID, symbol)
 		}
 	}
-	probe, ok := capabilityProbe(capability.ID, modulePath)
+	probe, ok := capabilityProbe(capability.ID, packagePath)
 	if !ok {
 		return fmt.Errorf("available capability %s has no typed public-contract probe", capability.ID)
 	}
@@ -237,19 +244,19 @@ func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, mod
 	if err := os.WriteFile(filepath.Join(probeRoot, "main.go"), []byte(probe), 0o644); err != nil {
 		return err
 	}
-	if output, err := run(ctx, probeRoot, "go", "run", "."); err != nil {
+	if output, err := run(ctx, probeRoot, "go", "run", "-mod=mod", "."); err != nil {
 		return fmt.Errorf("capability %s typed public-contract probe failed: %w: %s", capability.ID, err, output)
 	}
 	return nil
 }
 
-func capabilityProbe(id, modulePath string) (string, bool) {
-	quotedImport := fmt.Sprintf("sdk %q", modulePath)
+func capabilityProbe(id, packagePath string) (string, bool) {
+	quotedImport := fmt.Sprintf("sdk %q", packagePath)
 	switch id {
 	case "policy.body-window":
 		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\nvar _ required = (sdk.PolicyHost)(nil)\nconst _ string = sdk.PolicyHostReadBodyWindow\nfunc main() {}\n", quotedImport), true
 	case "policy.event-metric":
-		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, string, []byte) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
+		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, sdk.PolicySecurityEvent) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
 	case "rpc.lifecycle":
 		return fmt.Sprintf("package main\nimport %s\nconst _ string = sdk.RPCABIV1\nvar _ = sdk.RPCHandshakeRequest{ABI: \"\", PluginID: \"\", PluginVersion: \"\", PackageDigest: \"\", ArtifactDigest: \"\", GrantedScopes: []string{}, Generation: \"\"}\nvar _ = sdk.RPCHandshakeResponse{ABI: \"\", Capabilities: []string{}}\nvar _ = sdk.LifecycleRequest{Generation: \"\", Config: []byte{}}\nvar _ = sdk.LifecycleResponse{Success: &sdk.LifecycleSuccess{Ready: true}}\nvar _ = sdk.LifecycleResponse.Validate\nfunc main() {}\n", quotedImport), true
 	default:
@@ -257,20 +264,20 @@ func capabilityProbe(id, modulePath string) (string, bool) {
 	}
 }
 
-func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath string) (string, error) {
+func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath, packagePath string) (string, error) {
 	probe := filepath.Join(temporaryRoot, "descriptor-probe")
 	if err := os.Mkdir(probe, 0o755); err != nil {
 		return "", err
 	}
 	module := fmt.Sprintf("module sdkprobe\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
-	program := fmt.Sprintf("package main\nimport (\"crypto/sha256\"; \"fmt\"; \"%s/protoschema\")\nfunc main(){ b,e:=protoschema.DescriptorSetBytes(); if e!=nil { panic(e) }; fmt.Printf(\"%%x\\n\", sha256.Sum256(b)) }\n", modulePath)
+	program := fmt.Sprintf("package main\nimport (\"crypto/sha256\"; \"fmt\"; \"%s/protoschema\")\nfunc main(){ b,e:=protoschema.DescriptorSetBytes(); if e!=nil { panic(e) }; fmt.Printf(\"%%x\\n\", sha256.Sum256(b)) }\n", packagePath)
 	if err := os.WriteFile(filepath.Join(probe, "go.mod"), []byte(module), 0o644); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(filepath.Join(probe, "main.go"), []byte(program), 0o644); err != nil {
 		return "", err
 	}
-	output, err := run(ctx, probe, "go", "run", ".")
+	output, err := run(ctx, probe, "go", "run", "-mod=mod", ".")
 	if err != nil {
 		return "", err
 	}
@@ -306,6 +313,21 @@ func goModulePath(goMod []byte) string {
 		}
 	}
 	return ""
+}
+
+func packageDirectory(modulePath, packagePath string) (string, error) {
+	if packagePath == modulePath {
+		return ".", nil
+	}
+	prefix := modulePath + "/"
+	if !strings.HasPrefix(packagePath, prefix) {
+		return "", fmt.Errorf("SDK package path must be inside the locked module")
+	}
+	directory := strings.TrimPrefix(packagePath, prefix)
+	if !canonicalRepositoryPath(directory) {
+		return "", fmt.Errorf("SDK package path has an invalid module-relative directory")
+	}
+	return directory, nil
 }
 
 func run(ctx context.Context, dir, name string, args ...string) ([]byte, error) {

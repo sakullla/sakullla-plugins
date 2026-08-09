@@ -134,9 +134,7 @@ fn retain_canonical_imports(operation: u32) {
         3 => {
             let _ = host.state_put("generation", b"anchor");
         }
-        4 => {
-            let _ = host.emit_event("rate-limit.anchor", b"");
-        }
+        4 => {}
         _ => {
             let _ = host.add_metric("rate_limit_anchor", 0);
         }

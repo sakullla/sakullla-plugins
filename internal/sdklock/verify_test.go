@@ -92,7 +92,7 @@ func TestSDKLockRejectsAmbiguousOrInvalidRepositorySelectors(t *testing.T) {
 	base := Lock{
 		SchemaVersion:        1,
 		Repository:           Repository{URL: "https://example.invalid/repository.git", Commit: strings.Repeat("a", 40)},
-		SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ModuleDirectory: "plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
+		SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk", ModuleDirectory: "plugin-sdk", PackagePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
 		Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
 		RequiredCapabilities: []Capability{{ID: "policy.trusted-source", MissingReason: "fixture unavailable"}},
 	}
@@ -145,7 +145,7 @@ func TestSDKLockRejectsCapabilityEvidencePathEscapes(t *testing.T) {
 		lock := Lock{
 			SchemaVersion:        1,
 			Repository:           Repository{URL: "https://example.invalid/repository.git", Commit: strings.Repeat("a", 40)},
-			SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ModuleDirectory: "plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
+			SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk", ModuleDirectory: "plugin-sdk", PackagePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
 			Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
 			RequiredCapabilities: []Capability{{ID: "policy.body-window", Available: true, EvidencePath: evidence, Symbols: []string{"PolicyHostReadBodyWindow"}}},
 		}
@@ -190,7 +190,7 @@ func TestSDKCleanGoProbeIgnoresExternalModuleOverrides(t *testing.T) {
 
 func TestSDKGoModulePathAcceptsCheckoutLineEndings(t *testing.T) {
 	t.Parallel()
-	const want = "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	const want = "github.com/sakullla/nginx-reverse-emby/plugin-sdk"
 	for _, goMod := range []string{
 		"module " + want + "\n\ngo 1.26.5\n",
 		"module \"" + want + "\"\r\n\r\ngo 1.26.5\r\n",
@@ -204,7 +204,7 @@ func TestSDKGoModulePathAcceptsCheckoutLineEndings(t *testing.T) {
 func writeSDKFixture(t *testing.T, root string) {
 	t.Helper()
 	files := map[string]string{
-		"plugin-sdk/go/go.mod":                                        "module github.com/sakullla/nginx-reverse-emby/plugin-sdk/go\n\ngo 1.26.5\n",
+		"plugin-sdk/go.mod":                                           "module github.com/sakullla/nginx-reverse-emby/plugin-sdk\n\ngo 1.26.5\n",
 		"plugin-sdk/go/contracts.go":                                  "package pluginsdk\nimport \"context\"\nconst PolicyHostReadBodyWindow = \"fixture\"\nconst Projection = \"locked-projection\"\ntype PolicyHost interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\n",
 		"plugin-sdk/go/protoschema/schema.go":                         "package protoschema\nfunc DescriptorSetBytes() ([]byte,error) { return []byte(\"fixture-descriptor\"),nil }\n",
 		"plugin-sdk/go/compatfixture/cmd/generate/main.go":            "package main\nimport \"fmt\"\nfunc main(){ fmt.Print(\"666978747572652d6775657374\\n\") }\n",
@@ -259,9 +259,10 @@ func fixtureLock(t *testing.T, repository string) Lock {
 		SchemaVersion: 1,
 		Repository:    Repository{URL: repository, Commit: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD"))},
 		SDK: SDK{
-			ModulePath:      "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-			ModuleDirectory: "plugin-sdk/go",
-			ContractTreeOID: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD:plugin-sdk/go")),
+			ModulePath:      "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+			ModuleDirectory: "plugin-sdk",
+			PackagePath:     "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
+			ContractTreeOID: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD:plugin-sdk")),
 		},
 		Artifacts: Artifacts{
 			DescriptorSetSHA256:  hex.EncodeToString(descriptor[:]),

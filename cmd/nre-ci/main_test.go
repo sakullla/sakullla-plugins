@@ -22,8 +22,9 @@ func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 			Commit: strings.Repeat("a", 40),
 		},
 		SDK: sdklock.SDK{
-			ModulePath:      "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-			ModuleDirectory: "plugin-sdk/go",
+			ModulePath:      "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+			ModuleDirectory: "plugin-sdk",
+			PackagePath:     "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
 			ContractTreeOID: strings.Repeat("b", 40),
 		},
 		Artifacts: sdklock.Artifacts{

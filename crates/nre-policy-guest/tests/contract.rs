@@ -1,9 +1,9 @@
 use nre_policy_guest::{
     ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, EvaluateRequest, FrameWriter,
     HostClient, HostImport, HostLimits, HostTransport, InitRequest, POLICY_ABI_V1, PolicyAction,
-    PolicyResourceBudget, ReasonCode, RuntimeErrorCode, WireCursor, WireLimits,
-    encode_evaluate_error, encode_evaluate_success, pack_host_result, pack_policy_buffer,
-    unpack_policy_buffer,
+    PolicyResourceBudget, ReasonCode, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
+    WireCursor, WireLimits, encode_evaluate_error, encode_evaluate_success, pack_host_result,
+    pack_policy_buffer, unpack_policy_buffer,
 };
 
 #[test]
@@ -12,7 +12,7 @@ fn generated_contract_identity_and_values_match_canonical_sdk() {
     assert_eq!(ABI_MAJOR_VERSION, 1);
     assert_eq!(
         CANONICAL_DESCRIPTOR_SET_SHA256,
-        "175157e6c2f6f337ba9e5c10de136a458272f0b74a563f00db2b402c6f80b7ec"
+        "f5a79c6246f603bac7a24cb824337783e14e43d4b6569148370efad9bd454755"
     );
     assert_eq!(AbiStatus::ResourceExhausted as u32, 3);
     assert_eq!(RuntimeErrorCode::IncompatibleAbi as u32, 6);
@@ -175,7 +175,10 @@ fn side_effecting_imports_are_not_retried_after_exhaustion() {
     let mut events =
         HostClient::<_, 64, 32>::new(ExecutedThenExhaustedHost::default(), limits).unwrap();
     assert_eq!(
-        events.emit_event("match", b"bounded").unwrap_err().reason,
+        events
+            .emit_event(SecurityEventCode::WafRuleMatch, SecurityEventAction::Deny)
+            .unwrap_err()
+            .reason,
         ReasonCode::HostResourceExhausted
     );
     assert_eq!(events.calls_used(), 1);

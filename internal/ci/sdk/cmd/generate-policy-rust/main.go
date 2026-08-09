@@ -27,6 +27,8 @@ type templateData struct {
 	ABIStatuses      []enumValue
 	RuntimeErrors    []enumValue
 	PolicyActions    []enumValue
+	SecurityCodes    []enumValue
+	SecurityActions  []enumValue
 }
 
 type messageProjection struct {
@@ -104,6 +106,15 @@ func generate() ([]byte, error) {
 			{"Deny", uint32(pluginsdk.PolicyActionDeny)},
 			{"Observe", uint32(pluginsdk.PolicyActionObserve)},
 		},
+		SecurityCodes: []enumValue{
+			{"Unspecified", uint32(pluginsdk.PolicySecurityEventCodeUnspecified)},
+			{"WafRuleMatch", uint32(pluginsdk.PolicySecurityEventCodeWAFRuleMatch)},
+		},
+		SecurityActions: []enumValue{
+			{"Unspecified", uint32(pluginsdk.PolicySecurityEventActionUnspecified)},
+			{"Observe", uint32(pluginsdk.PolicySecurityEventActionObserve)},
+			{"Deny", uint32(pluginsdk.PolicySecurityEventActionDeny)},
+		},
 	}
 	if err := verifyDescriptorEnums(data); err != nil {
 		return nil, err
@@ -126,7 +137,7 @@ func projectFields() (string, error) {
 		{"read_body_window_request", "nre.plugin.policy.v1.ReadBodyWindowRequest", [][2]string{{"OFFSET", "offset"}, {"LENGTH", "length"}}},
 		{"state_get_request", "nre.plugin.policy.v1.StateGetRequest", [][2]string{{"KEY", "key"}}},
 		{"state_put_request", "nre.plugin.policy.v1.StatePutRequest", [][2]string{{"KEY", "key"}, {"VALUE", "value"}}},
-		{"emit_event_request", "nre.plugin.policy.v1.EmitEventRequest", [][2]string{{"KIND", "kind"}, {"PAYLOAD", "payload"}}},
+		{"emit_event_request", "nre.plugin.policy.v1.EmitEventRequest", [][2]string{{"CODE", "code"}, {"ACTION", "action"}}},
 		{"add_metric_request", "nre.plugin.policy.v1.AddMetricRequest", [][2]string{{"NAME", "name"}, {"DELTA", "delta"}}},
 		{"bytes_response", "nre.plugin.policy.v1.BytesResponse", [][2]string{{"VALUE", "value"}, {"FOUND", "found"}}},
 	}
@@ -157,6 +168,8 @@ func verifyDescriptorEnums(data templateData) error {
 	}{
 		{"nre.plugin.policy.v1.RuntimeError", "code", data.RuntimeErrors},
 		{"nre.plugin.policy.v1.EvaluateSuccess", "action", data.PolicyActions},
+		{"nre.plugin.policy.v1.EmitEventRequest", "code", data.SecurityCodes},
+		{"nre.plugin.policy.v1.EmitEventRequest", "action", data.SecurityActions},
 	}
 	for _, check := range checks {
 		message, err := protoschema.Message(check.Message)
@@ -279,6 +292,8 @@ impl RuntimeErrorCode {
 impl PolicyAction {
     pub const fn is_decision(self) -> bool { !matches!(self, Self::Unspecified) }
 }
+{{template "enum" (map "Name" "SecurityEventCode" "Values" .SecurityCodes)}}
+{{template "enum" (map "Name" "SecurityEventAction" "Values" .SecurityActions)}}
 
 pub mod field {
 {{.Fields}}}

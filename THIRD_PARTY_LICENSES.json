@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "code_dependencies": [
+    {
+      "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+      "version": "v0.1.0",
+      "license": "GPL-3.0-only"
+    },
+    {
+      "name": "github.com/tetratelabs/wazero",
+      "version": "v1.12.0",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "golang.org/x/sys",
+      "version": "v0.44.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "google.golang.org/protobuf",
+      "version": "v1.34.2",
+      "license": "BSD-3-Clause"
+    }
+  ],
+  "data_dependencies": []
+}

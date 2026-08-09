@@ -15,7 +15,7 @@ type FakePolicyHost struct {
 	ReadBodyWindowFunc func(context.Context, uint32, uint32) ([]byte, error)
 	StateGetFunc       func(context.Context, string) ([]byte, bool, error)
 	StatePutFunc       func(context.Context, string, []byte) error
-	EmitEventFunc      func(context.Context, string, []byte) error
+	EmitEventFunc      func(context.Context, pluginsdk.PolicySecurityEvent) error
 	AddMetricFunc      func(context.Context, string, int64) error
 }
 
@@ -49,11 +49,11 @@ func (host *FakePolicyHost) StatePut(ctx context.Context, key string, value []by
 	return host.StatePutFunc(ctx, key, value)
 }
 
-func (host *FakePolicyHost) EmitEvent(ctx context.Context, name string, payload []byte) error {
+func (host *FakePolicyHost) EmitEvent(ctx context.Context, event pluginsdk.PolicySecurityEvent) error {
 	if host.EmitEventFunc == nil {
 		return nil
 	}
-	return host.EmitEventFunc(ctx, name, payload)
+	return host.EmitEventFunc(ctx, event)
 }
 
 func (host *FakePolicyHost) AddMetric(ctx context.Context, name string, delta int64) error {

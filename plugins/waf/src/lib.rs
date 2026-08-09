@@ -263,12 +263,20 @@ mod wasm {
         output.set(response.value, response.found)
     }
 
-    fn emit_observability(action: PolicyAction, event: &[u8]) -> Result<(), AbiStatus> {
+    fn emit_observability(action: PolicyAction, _event: &[u8]) -> Result<(), AbiStatus> {
         let mut host: HostClient<WasmHost, 512, 64> =
             HostClient::new(WasmHost, HostLimits::new(2, 64)).map_err(|error| error.status)?;
         if action != PolicyAction::Allow {
-            host.emit_event("waf.decision", event)
-                .map_err(|error| error.status)?;
+            let event_action = if action == PolicyAction::Deny {
+                nre_policy_guest::SecurityEventAction::Deny
+            } else {
+                nre_policy_guest::SecurityEventAction::Observe
+            };
+            host.emit_event(
+                nre_policy_guest::SecurityEventCode::WafRuleMatch,
+                event_action,
+            )
+            .map_err(|error| error.status)?;
         }
         host.add_metric("waf.evaluations", 1)
             .map_err(|error| error.status)

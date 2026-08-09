@@ -1,6 +1,7 @@
 use crate::abi_generated::{self, field};
 use crate::{
-    AbiStatus, BytesResponse, FrameWriter, GuestError, ReasonCode, WireLimits, unpack_host_result,
+    AbiStatus, BytesResponse, FrameWriter, GuestError, ReasonCode, SecurityEventAction,
+    SecurityEventCode, WireLimits, unpack_host_result,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,10 +207,14 @@ where
         self.invoke_empty(HostImport::StatePut, request_length)
     }
 
-    pub fn emit_event(&mut self, kind: &str, payload: &[u8]) -> Result<(), GuestError> {
+    pub fn emit_event(
+        &mut self,
+        code: SecurityEventCode,
+        action: SecurityEventAction,
+    ) -> Result<(), GuestError> {
         let mut writer = FrameWriter::new(&mut self.request);
-        writer.write_string_field(field::emit_event_request::KIND, kind)?;
-        writer.write_bytes_field(field::emit_event_request::PAYLOAD, payload)?;
+        writer.write_varint_field(field::emit_event_request::CODE, code as u64)?;
+        writer.write_varint_field(field::emit_event_request::ACTION, action as u64)?;
         let request_length = writer.len();
         self.invoke_empty(HostImport::EmitEvent, request_length)
     }

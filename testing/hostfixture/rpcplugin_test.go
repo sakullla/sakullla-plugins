@@ -24,7 +24,7 @@ func TestSDKPolicyHostABI(t *testing.T) {
 		},
 		StateGetFunc:  func(context.Context, string) ([]byte, bool, error) { return []byte("state"), true, nil },
 		StatePutFunc:  func(context.Context, string, []byte) error { return nil },
-		EmitEventFunc: func(context.Context, string, []byte) error { return nil },
+		EmitEventFunc: func(context.Context, pluginsdk.PolicySecurityEvent) error { return nil },
 		AddMetricFunc: func(context.Context, string, int64) error { return nil },
 	}
 	var public pluginsdk.PolicyHost = host

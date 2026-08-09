@@ -17,7 +17,7 @@ mod wire;
 pub use abi_generated::{
     ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, EXPORT_ALLOCATE,
     EXPORT_EVALUATE, EXPORT_FREE, EXPORT_INIT, EXPORT_MEMORY, EXPORT_RESET, EXPORT_VERSION,
-    POLICY_ABI_V1, PolicyAction, RuntimeErrorCode,
+    POLICY_ABI_V1, PolicyAction, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
 };
 pub use budget::{BudgetDimension, PolicyResourceBudget, WireLimits};
 #[cfg(target_arch = "wasm32")]
