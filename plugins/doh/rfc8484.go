@@ -292,6 +292,7 @@ func validateDNSResponse(query parsedQuery, wire []byte) (responseMetadata, []by
 type resourceRecord struct {
 	rrType, class        uint16
 	ttl                  uint32
+	ttlOffset            int
 	rdataStart, rdataEnd int
 }
 
@@ -309,9 +310,48 @@ func parseResourceRecord(wire []byte, offset int) (resourceRecord, error) {
 		rrType:     binary.BigEndian.Uint16(wire[next : next+2]),
 		class:      binary.BigEndian.Uint16(wire[next+2 : next+4]),
 		ttl:        binary.BigEndian.Uint32(wire[next+4 : next+8]),
+		ttlOffset:  next + 4,
 		rdataStart: rdataStart,
 		rdataEnd:   rdataEnd,
 	}, nil
+}
+
+func clampDNSResponseTTLs(wire []byte, limit uint32) ([]byte, error) {
+	if len(wire) < 17 {
+		return nil, ErrInvalidDNSMessage
+	}
+	questionEnd, _, err := parseQuestionName(wire, 12)
+	if err != nil || questionEnd+4 > len(wire) {
+		return nil, ErrInvalidDNSMessage
+	}
+	answerCount := int(binary.BigEndian.Uint16(wire[6:8]))
+	authorityCount := int(binary.BigEndian.Uint16(wire[8:10]))
+	additionalCount := int(binary.BigEndian.Uint16(wire[10:12]))
+	result := append([]byte(nil), wire...)
+	offset := questionEnd + 4
+	for index := 0; index < answerCount+authorityCount+additionalCount; index++ {
+		record, recordErr := parseResourceRecord(result, offset)
+		if recordErr != nil {
+			return nil, recordErr
+		}
+		if record.rrType != 41 && record.ttl > limit {
+			binary.BigEndian.PutUint32(result[record.ttlOffset:record.ttlOffset+4], limit)
+		}
+		if index >= answerCount && index < answerCount+authorityCount && record.rrType == 6 {
+			minimum, soaErr := parseSOAMinimum(result, record.rdataStart, record.rdataEnd)
+			if soaErr != nil {
+				return nil, soaErr
+			}
+			if minimum > limit {
+				binary.BigEndian.PutUint32(result[record.rdataEnd-4:record.rdataEnd], limit)
+			}
+		}
+		offset = record.rdataEnd
+	}
+	if offset != len(result) {
+		return nil, ErrInvalidDNSMessage
+	}
+	return result, nil
 }
 
 func parseSOAMinimum(wire []byte, start, end int) (uint32, error) {

@@ -341,6 +341,72 @@ func TestDoHCacheHitPayloadValidation(t *testing.T) {
 	}
 }
 
+func TestDoHCacheHitRemainingTTLAndExpiryBinding(t *testing.T) {
+	query := dnsQuery(9, "cache-ttl.example", 1)
+	normalize := func(wire []byte) []byte {
+		wire = append([]byte(nil), wire...)
+		binary.BigEndian.PutUint16(wire[:2], 0)
+		return wire
+	}
+	t.Run("late-positive-hit", func(t *testing.T) {
+		cache := &fixedHitCache{entry: doh.CacheEntry{Response: normalize(positiveResponse(query, 30)), StoredAt: uint64(time.Second), ExpiresAt: uint64(31 * time.Second)}}
+		runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) { return nil, errors.New("unexpected resolver") })
+		runtime.Clock = &fakeClock{now: uint64(26 * time.Second)}
+		service, err := doh.NewService(testConfiguration(), runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token")))
+		if err != nil || !response.CacheHit || firstAnswerTTL(response.Body) != 5 {
+			t.Fatalf("late hit response=%#v TTL=%d err=%v", response, firstAnswerTTL(response.Body), err)
+		}
+	})
+	t.Run("negative-SOA-hit", func(t *testing.T) {
+		cache := &fixedHitCache{entry: doh.CacheEntry{Response: normalize(negativeResponse(query, 60, 30)), StoredAt: uint64(time.Second), ExpiresAt: uint64(31 * time.Second)}}
+		runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) { return nil, errors.New("unexpected resolver") })
+		runtime.Clock = &fakeClock{now: uint64(21 * time.Second)}
+		service, err := doh.NewService(testConfiguration(), runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token")))
+		soaTTL, minimum := negativeSOATTLs(response.Body)
+		if err != nil || !response.CacheHit || soaTTL != 10 || minimum != 10 {
+			t.Fatalf("negative hit response=%#v SOA=%d minimum=%d err=%v", response, soaTTL, minimum, err)
+		}
+	})
+	for name, entry := range map[string]doh.CacheEntry{
+		"zero-TTL":      {Response: normalize(positiveResponse(query, 0)), StoredAt: uint64(time.Second), ExpiresAt: uint64(2 * time.Second)},
+		"forged-expiry": {Response: normalize(positiveResponse(query, 5)), StoredAt: uint64(time.Second), ExpiresAt: uint64(20 * time.Second)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runtime := testRuntime(&fixedHitCache{entry: entry}, func(request doh.ResolveRequest) ([]byte, error) { return nil, errors.New("unexpected resolver") })
+			runtime.Clock = &fakeClock{now: uint64(time.Second)}
+			service, err := doh.NewService(testConfiguration(), runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) {
+				t.Fatalf("cache binding err=%v", err)
+			}
+		})
+	}
+	t.Run("below-configured-minimum", func(t *testing.T) {
+		configuration := testConfiguration()
+		configuration.MinTTLSeconds = 10
+		entry := doh.CacheEntry{Response: normalize(positiveResponse(query, 5)), StoredAt: uint64(time.Second), ExpiresAt: uint64(6 * time.Second)}
+		runtime := testRuntime(&fixedHitCache{entry: entry}, func(request doh.ResolveRequest) ([]byte, error) { return nil, errors.New("unexpected resolver") })
+		runtime.Clock = &fakeClock{now: uint64(time.Second)}
+		service, err := doh.NewService(configuration, runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) {
+			t.Fatalf("minimum binding err=%v", err)
+		}
+	})
+}
+
 func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
 	configuration := testConfiguration()
 	configuration.Upstreams = []doh.Upstream{{ID: "first", EndpointRef: "upstream/first", Priority: 0, Enabled: true}, {ID: "second", EndpointRef: "upstream/second", Priority: 1, Enabled: true}}
@@ -449,7 +515,7 @@ type countingCache struct {
 type fixedHitCache struct{ entry doh.CacheEntry }
 
 func (cache *fixedHitCache) Get(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
-	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), ExpiresAt: cache.entry.ExpiresAt}, true, nil
+	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), StoredAt: cache.entry.StoredAt, ExpiresAt: cache.entry.ExpiresAt}, true, nil
 }
 func (*fixedHitCache) Put(context.Context, string, doh.CacheEntry) error { return nil }
 func (*fixedHitCache) Reset(context.Context, string) error               { return nil }
@@ -569,4 +635,16 @@ func dnsQuestionEnd(query []byte) int {
 		offset += int(query[offset]) + 1
 	}
 	return offset + 5
+}
+
+func firstAnswerTTL(response []byte) uint32 {
+	offset := dnsQuestionEnd(response)
+	return binary.BigEndian.Uint32(response[offset+6 : offset+10])
+}
+
+func negativeSOATTLs(response []byte) (uint32, uint32) {
+	offset := dnsQuestionEnd(response)
+	ttl := binary.BigEndian.Uint32(response[offset+6 : offset+10])
+	rdataLength := int(binary.BigEndian.Uint16(response[offset+10 : offset+12]))
+	return ttl, binary.BigEndian.Uint32(response[offset+12+rdataLength-4 : offset+12+rdataLength])
 }

@@ -160,6 +160,7 @@ func (function MonotonicClockFunc) Now(ctx context.Context) (uint64, error) { re
 
 type CacheEntry struct {
 	Response  []byte
+	StoredAt  uint64
 	ExpiresAt uint64
 }
 
@@ -275,7 +276,6 @@ type Service struct {
 	requestZero   chan struct{}
 	leaseMu       sync.RWMutex
 	requestLease  func(context.Context, HTTPRequest) (HTTPResponse, error)
-	commitMu      sync.Mutex
 	closeOnce     sync.Once
 	closeDone     chan struct{}
 	closeMu       sync.Mutex

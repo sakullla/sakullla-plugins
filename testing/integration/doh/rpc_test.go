@@ -187,6 +187,63 @@ func TestDoHRPCStopPropagatesRedactedCacheCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestDoHRPCTerminalSinkLateNilAfterStopNeverReturns200(t *testing.T) {
+	for _, sink := range []string{"logger", "auditor"} {
+		t.Run(sink, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			block := func() {
+				once.Do(func() { close(started) })
+				<-release
+			}
+			runtime := testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
+			switch sink {
+			case "logger":
+				runtime.Logger = doh.QueryLoggerFunc(func(context.Context, doh.QueryLog) error { block(); return nil })
+			case "auditor":
+				runtime.Auditor = doh.AuditorFunc(func(_ context.Context, record doh.AuditRecord) error {
+					if record.Outcome == "succeeded" {
+						block()
+					}
+					return nil
+				})
+			}
+			controller, published := activatedController(t, runtime, 20*time.Millisecond)
+			type serveOutcome struct {
+				response doh.HTTPResponse
+				err      error
+			}
+			serveResult := make(chan serveOutcome, 1)
+			go func() {
+				response, err := published.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, sink+".example", 1), []byte("valid-token")))
+				serveResult <- serveOutcome{response: response, err: err}
+			}()
+			<-started
+			stopResult := make(chan pluginsdk.LifecycleResponse, 1)
+			go func() {
+				stopResult <- controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+			}()
+			select {
+			case response := <-stopResult:
+				if response.Error == nil {
+					t.Fatalf("non-cooperative %s allowed successful Stop", sink)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("Stop blocked behind %s", sink)
+			}
+			close(release)
+			select {
+			case outcome := <-serveResult:
+				if outcome.response.Status == "200" || outcome.err == nil {
+					t.Fatalf("late %s outcome=%#v err=%v", sink, outcome.response, outcome.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("request remained blocked after releasing %s", sink)
+			}
+		})
+	}
+}
+
 func TestDoHRPCLateCommitDeadlineRevokesAndCannotPublish(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var lasting, aborts atomic.Int32

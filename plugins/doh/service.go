@@ -134,12 +134,22 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		return HTTPResponse{}, err
 	}
 	if hit {
-		maxLifetime := uint64(service.configuration.MaxTTLSeconds) * uint64(time.Second)
-		if entry.ExpiresAt <= now || maxLifetime == 0 || entry.ExpiresAt-now > maxLifetime {
+		candidate := responseWithID(entry.Response, query.id)
+		metadata, _, validateErr := validateDNSResponse(query, candidate)
+		if validateErr != nil || !metadata.cacheable || metadata.ttl < service.configuration.MinTTLSeconds {
 			return fail("cache-invalid", ErrCacheUnavailable)
 		}
-		candidate := responseWithID(entry.Response, query.id)
-		if _, _, validateErr := validateDNSResponse(query, candidate); validateErr != nil {
+		effectiveTTL := metadata.ttl
+		if effectiveTTL > service.configuration.MaxTTLSeconds {
+			effectiveTTL = service.configuration.MaxTTLSeconds
+		}
+		maxLifetime := uint64(effectiveTTL) * uint64(time.Second)
+		maxExpiry := entry.StoredAt + maxLifetime
+		if maxLifetime == 0 || maxExpiry < entry.StoredAt || entry.StoredAt > now || entry.ExpiresAt <= now || entry.ExpiresAt <= entry.StoredAt || entry.ExpiresAt > maxExpiry {
+			return fail("cache-invalid", ErrCacheUnavailable)
+		}
+		candidate, err = clampDNSResponseTTLs(candidate, uint32((entry.ExpiresAt-now)/uint64(time.Second)))
+		if err != nil {
 			return fail("cache-invalid", ErrCacheUnavailable)
 		}
 		if err := service.ensureLive(ctx); err != nil {
@@ -196,7 +206,7 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 			if expires < cacheNow {
 				return fail("clock-failed", ErrClockUnavailable)
 			}
-			if err := service.runtime.Cache.Put(ctx, cacheKey, CacheEntry{Response: normalized, ExpiresAt: expires}); err != nil {
+			if err := service.runtime.Cache.Put(ctx, cacheKey, CacheEntry{Response: normalized, StoredAt: cacheNow, ExpiresAt: expires}); err != nil {
 				return fail("cache-failed", ErrCacheUnavailable)
 			}
 			if err := service.ensureLive(ctx); err != nil {
@@ -217,8 +227,6 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 }
 
 func (service *Service) finish(ctx context.Context, operationKey string, query parsedQuery, record QueryLog) error {
-	service.commitMu.Lock()
-	defer service.commitMu.Unlock()
 	if err := service.ensureLive(ctx); err != nil {
 		return err
 	}
@@ -234,7 +242,7 @@ func (service *Service) finish(ctx context.Context, operationKey string, query p
 	if err := service.audit(ctx, AuditRecord{Action: "query", Outcome: "succeeded", OperationKey: operationKey + ":terminal", QueryDigest: query.digest}); err != nil {
 		return err
 	}
-	return nil
+	return service.ensureLive(ctx)
 }
 
 func (service *Service) audit(ctx context.Context, record AuditRecord) error {
@@ -378,9 +386,7 @@ func (service *Service) Statuses() []UpstreamStatus {
 
 func (service *Service) Close(ctx context.Context) error {
 	service.closeOnce.Do(func() {
-		service.commitMu.Lock()
 		service.live.Store(false)
-		service.commitMu.Unlock()
 		service.requestCancel()
 		service.statusMu.Lock()
 		for index := range service.statuses {

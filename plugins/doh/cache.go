@@ -59,7 +59,7 @@ func (cache *MemoryCache) Put(ctx context.Context, key string, entry CacheEntry)
 		delete(cache.entries, key)
 	}
 	cache.order++
-	record := memoryCacheRecord{entry: CacheEntry{Response: append([]byte(nil), entry.Response...), ExpiresAt: entry.ExpiresAt}, size: len(key) + len(entry.Response), order: cache.order}
+	record := memoryCacheRecord{entry: CacheEntry{Response: append([]byte(nil), entry.Response...), StoredAt: entry.StoredAt, ExpiresAt: entry.ExpiresAt}, size: len(key) + len(entry.Response), order: cache.order}
 	for len(cache.entries) >= cache.maxEntries || cache.bytes+record.size > cache.maxBytes {
 		var oldestKey string
 		var oldest uint64
