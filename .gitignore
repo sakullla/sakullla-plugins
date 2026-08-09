@@ -1,1 +1,19 @@
 .idea/
+.vscode/
+
+# Rebuildable artifacts and tool caches.
+dist/*
+!dist/.gitignore
+.cache/
+target/
+coverage/
+
+# Signing material and local runtime data must never enter Git.
+*.key
+*.pem
+*.p12
+*.pfx
+*.mmdb
+.env
+.env.*
+runtime-data/
