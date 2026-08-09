@@ -262,6 +262,126 @@ fn monotonic_regression_fails_closed() {
 }
 
 #[test]
+fn monotonic_observation_advances_on_denial_before_any_state_change() {
+    let mut source_limited = LocalLimiter::<4>::new();
+    assert_eq!(
+        admit(
+            &mut source_limited,
+            AdmissionKind::L4NewConnection,
+            100,
+            SOURCE,
+            spec(100, 1),
+            None
+        )
+        .action,
+        PolicyAction::Allow
+    );
+    assert_eq!(
+        admit(
+            &mut source_limited,
+            AdmissionKind::L4NewConnection,
+            150,
+            SOURCE,
+            spec(100, 1),
+            None
+        )
+        .reason,
+        DecisionReason::SourceLimited
+    );
+    assert_eq!(
+        admit(
+            &mut source_limited,
+            AdmissionKind::L4NewConnection,
+            140,
+            SOURCE,
+            spec(100, 1),
+            None
+        )
+        .reason,
+        DecisionReason::ClockRegressed
+    );
+
+    let mut global_limited = LocalLimiter::<8>::new();
+    assert_eq!(
+        admit(
+            &mut global_limited,
+            AdmissionKind::Http,
+            100,
+            StableId(10),
+            spec(1, 10),
+            Some(spec(100, 1))
+        )
+        .action,
+        PolicyAction::Allow
+    );
+    assert_eq!(
+        admit(
+            &mut global_limited,
+            AdmissionKind::Http,
+            150,
+            StableId(11),
+            spec(1, 10),
+            Some(spec(100, 1))
+        )
+        .reason,
+        DecisionReason::RuleGlobalLimited
+    );
+    assert_eq!(
+        admit(
+            &mut global_limited,
+            AdmissionKind::Http,
+            140,
+            StableId(11),
+            spec(1, 10),
+            Some(spec(100, 1))
+        )
+        .reason,
+        DecisionReason::ClockRegressed
+    );
+
+    let mut capacity_limited = LocalLimiter::<1>::new();
+    assert_eq!(
+        admit(
+            &mut capacity_limited,
+            AdmissionKind::L4NewConnection,
+            100,
+            StableId(10),
+            spec(1, 1),
+            None
+        )
+        .action,
+        PolicyAction::Allow
+    );
+    assert_eq!(
+        admit(
+            &mut capacity_limited,
+            AdmissionKind::L4NewConnection,
+            150,
+            StableId(11),
+            spec(1, 1),
+            None
+        )
+        .reason,
+        DecisionReason::StateCapacityExhausted
+    );
+    assert_eq!(capacity_limited.reset_generation(GENERATION), 1);
+    assert_eq!(capacity_limited.key_count(), 0);
+    assert_eq!(
+        admit(
+            &mut capacity_limited,
+            AdmissionKind::L4NewConnection,
+            140,
+            StableId(11),
+            spec(1, 1),
+            None
+        )
+        .reason,
+        DecisionReason::ClockRegressed
+    );
+    assert_eq!(capacity_limited.key_count(), 0);
+}
+
+#[test]
 fn concurrent_callers_share_one_atomic_process_boundary() {
     let limiter = Arc::new(Mutex::new(LocalLimiter::<8>::new()));
     let mut threads = Vec::new();

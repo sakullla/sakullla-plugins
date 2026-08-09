@@ -131,8 +131,8 @@ impl<const MAX_KEYS: usize> LocalLimiter<MAX_KEYS> {
         if self.last_now.is_some_and(|last| now < last) {
             return deny(DecisionReason::ClockRegressed, 0, kind);
         }
+        self.last_now = Some(now);
         if matches!(kind, AdmissionKind::L4ExistingSession) {
-            self.last_now = Some(now);
             return allow(DecisionReason::ExistingSession);
         }
         let source_key = match kind {
@@ -189,7 +189,6 @@ impl<const MAX_KEYS: usize> LocalLimiter<MAX_KEYS> {
         {
             self.install_and_commit(index, key, preview);
         }
-        self.last_now = Some(now);
         allow(DecisionReason::Allowed)
     }
 
