@@ -29,6 +29,7 @@ type Controller struct {
 	epoch         *controllerEpoch
 	commit        *rpcplugin.Handle[*controllerEpoch]
 	service       *rpcplugin.Handle[*Service]
+	published     *Service
 	transaction   *rpcplugin.Handle[PreparedAdmission]
 	admission     TypedHandleAdmission
 	lifecycle     *rpcplugin.Lifecycle
@@ -94,10 +95,10 @@ func (controller *Controller) Serve(ctx context.Context, request HTTPRequest) (H
 	var response HTTPResponse
 	err := service.Use(ctx, func(ctx context.Context, current *Service) error {
 		var err error
-		response, err = current.Serve(ctx, request)
+		response, err = current.serve(ctx, request)
 		return err
 	})
-	return response, err
+	return response, safeServeError(err)
 }
 
 func (controller *Controller) Statuses() []UpstreamStatus {
@@ -139,7 +140,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		controller.mu.Lock()
 		if controller.epoch == epoch {
 			controller.configuration = Configuration{}
-			controller.epoch, controller.commit, controller.service, controller.transaction = nil, nil, nil, nil
+			controller.epoch, controller.commit, controller.service, controller.published, controller.transaction = nil, nil, nil, nil, nil
 		}
 		controller.mu.Unlock()
 	})
@@ -155,7 +156,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		}
 		controller.mu.Lock()
 		controller.configuration, controller.epoch, controller.commit = cloneConfiguration(configuration), epoch, handle
-		controller.service, controller.transaction = nil, nil
+		controller.service, controller.published, controller.transaction = nil, nil, nil
 		controller.mu.Unlock()
 		return nil
 	})
@@ -206,14 +207,25 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			return err
 		}
 		serviceHandle, err := rpcplugin.BindHandle(generation, "listener", service, func(service *Service) {
-			closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			_ = service.Close(closeCtx)
-			cancel()
+			go func() {
+				closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = service.Close(closeCtx)
+			}()
 		})
 		if err != nil {
 			transaction.Revoke()
 			return err
 		}
+		service.bindRequestLease(func(ctx context.Context, request HTTPRequest) (HTTPResponse, error) {
+			var response HTTPResponse
+			err := serviceHandle.Use(ctx, func(ctx context.Context, current *Service) error {
+				var err error
+				response, err = current.serve(ctx, request)
+				return err
+			})
+			return response, safeServeError(err)
+		})
 		if err = serviceHandle.Use(ctx, func(ctx context.Context, service *Service) error {
 			return runtime.Listener.Register(ctx, configuration.ListenerRef, service)
 		}); err != nil {
@@ -236,18 +248,35 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			transaction.Revoke()
 			return rpcplugin.ErrRevoked
 		}
-		controller.service, controller.transaction = serviceHandle, transaction
+		controller.service, controller.published, controller.transaction = serviceHandle, service, transaction
 		controller.mu.Unlock()
 		return nil
 	})
 }
 
-func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
+func (controller *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
+	controller.mu.Lock()
+	service := controller.published
+	controller.service, controller.published = nil, nil
+	controller.mu.Unlock()
+	var closeErr error
+	if service != nil {
+		closeErr = service.Close(ctx)
+	}
 	controller.mu.Lock()
 	controller.configuration = Configuration{}
-	controller.epoch, controller.commit, controller.service, controller.transaction = nil, nil, nil, nil
+	controller.epoch, controller.commit, controller.transaction = nil, nil, nil
 	controller.mu.Unlock()
-	return nil
+	return closeErr
+}
+
+func safeServeError(err error) error {
+	switch {
+	case errors.Is(err, rpcplugin.ErrDraining), errors.Is(err, rpcplugin.ErrRevoked):
+		return ErrRevoked
+	default:
+		return err
+	}
 }
 
 func safeControllerError(err error) error {

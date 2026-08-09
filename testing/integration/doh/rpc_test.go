@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,6 +100,93 @@ func TestDoHRPCPreparedAdmissionServeStopRevokeAndCleanup(t *testing.T) {
 	}
 }
 
+func TestDoHRPCStopCancelsAndDrainsPublishedRequests(t *testing.T) {
+	for _, stage := range []string{"policy", "cache", "resolver"} {
+		t.Run(stage, func(t *testing.T) {
+			started, canceled := make(chan struct{}), make(chan struct{})
+			var startOnce, cancelOnce sync.Once
+			block := func(ctx context.Context) error {
+				startOnce.Do(func() { close(started) })
+				<-ctx.Done()
+				cancelOnce.Do(func() { close(canceled) })
+				return ctx.Err()
+			}
+			cache := doh.Cache(doh.NewMemoryCache(8, 1<<20))
+			if stage == "cache" {
+				cache = &blockingGetCache{Cache: cache, block: block}
+			}
+			runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
+			switch stage {
+			case "policy":
+				runtime.Policy = doh.IPPolicyEvaluatorFunc(func(ctx context.Context, _ string, _ doh.SourceIdentity) error { return block(ctx) })
+			case "resolver":
+				runtime.Resolver = doh.ResolverFunc(func(ctx context.Context, _ doh.ResolveRequest) ([]byte, error) { return nil, block(ctx) })
+			}
+			controller, published := activatedController(t, runtime, time.Second)
+			serveResult := make(chan error, 1)
+			go func() {
+				_, err := published.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "drain.example", 1), []byte("valid-token")))
+				serveResult <- err
+			}()
+			<-started
+			stopResult := make(chan pluginsdk.LifecycleResponse, 1)
+			go func() {
+				stopResult <- controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+			}()
+			<-canceled
+			if _, err := published.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "new.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrRevoked) {
+				t.Fatalf("new request during drain err=%v", err)
+			}
+			if err := <-serveResult; !errors.Is(err, doh.ErrRevoked) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("drained request err=%v", err)
+			}
+			if response := <-stopResult; response.Error != nil {
+				t.Fatalf("Stop=%#v", response)
+			}
+		})
+	}
+}
+
+func TestDoHRPCStopOrdersLatePutBeforeResetAndRejectsResponse(t *testing.T) {
+	cache := newBlockingPutCache()
+	runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
+	controller, published := activatedController(t, runtime, time.Second)
+	serveResult := make(chan error, 1)
+	go func() {
+		_, err := published.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "put.example", 1), []byte("valid-token")))
+		serveResult <- err
+	}()
+	<-cache.putStarted
+	stopResult := make(chan pluginsdk.LifecycleResponse, 1)
+	go func() {
+		stopResult <- controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	}()
+	<-cache.putCanceled
+	if _, err := published.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "new.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrRevoked) {
+		t.Fatalf("new request during drain err=%v", err)
+	}
+	close(cache.releasePut)
+	if err := <-serveResult; !errors.Is(err, doh.ErrRevoked) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("late Put returned success err=%v", err)
+	}
+	if response := <-stopResult; response.Error != nil {
+		t.Fatalf("Stop=%#v", response)
+	}
+	if events := cache.Events(); len(events) != 2 || events[0] != "put" || events[1] != "reset" {
+		t.Fatalf("cleanup order=%v", events)
+	}
+}
+
+func TestDoHRPCStopPropagatesRedactedCacheCleanupFailure(t *testing.T) {
+	cache := &resetFailureCache{Cache: doh.NewMemoryCache(8, 1<<20)}
+	runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
+	controller, _ := activatedController(t, runtime, time.Second)
+	response := controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	if response.Error == nil || response.Error.Message != doh.ErrCacheUnavailable.Error() || strings.Contains(response.Error.Message, "raw backend secret") {
+		t.Fatalf("cleanup response=%#v", response)
+	}
+}
+
 func TestDoHRPCLateCommitDeadlineRevokesAndCannotPublish(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var lasting, aborts atomic.Int32
@@ -173,9 +261,97 @@ type resetCache struct {
 	resets *atomic.Int32
 }
 
+type blockingGetCache struct {
+	doh.Cache
+	block func(context.Context) error
+}
+
+func (cache *blockingGetCache) Get(ctx context.Context, _ string, _ uint64) (doh.CacheEntry, bool, error) {
+	return doh.CacheEntry{}, false, cache.block(ctx)
+}
+
+type blockingPutCache struct {
+	*doh.MemoryCache
+	putStarted  chan struct{}
+	putCanceled chan struct{}
+	releasePut  chan struct{}
+	once        sync.Once
+	mu          sync.Mutex
+	events      []string
+}
+
+func newBlockingPutCache() *blockingPutCache {
+	return &blockingPutCache{MemoryCache: doh.NewMemoryCache(8, 1<<20), putStarted: make(chan struct{}), putCanceled: make(chan struct{}), releasePut: make(chan struct{})}
+}
+
+func (cache *blockingPutCache) Put(ctx context.Context, key string, entry doh.CacheEntry) error {
+	cache.once.Do(func() {
+		close(cache.putStarted)
+		go func() {
+			<-ctx.Done()
+			close(cache.putCanceled)
+		}()
+	})
+	<-cache.releasePut
+	cache.mu.Lock()
+	cache.events = append(cache.events, "put")
+	cache.mu.Unlock()
+	return cache.MemoryCache.Put(context.Background(), key, entry)
+}
+
+func (cache *blockingPutCache) Reset(ctx context.Context, generation string) error {
+	cache.mu.Lock()
+	cache.events = append(cache.events, "reset")
+	cache.mu.Unlock()
+	return cache.MemoryCache.Reset(ctx, generation)
+}
+
+func (cache *blockingPutCache) Events() []string {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return append([]string(nil), cache.events...)
+}
+
+type resetFailureCache struct{ doh.Cache }
+
+func (cache *resetFailureCache) Reset(context.Context, string) error {
+	return errors.New("raw backend secret")
+}
+
 func (cache *resetCache) Reset(ctx context.Context, generation string) error {
 	cache.resets.Add(1)
 	return cache.Cache.Reset(ctx, generation)
+}
+
+func activatedController(t *testing.T, runtime doh.RuntimeAdapters, stopTimeout time.Duration) (*doh.Controller, *doh.Service) {
+	t.Helper()
+	var published *doh.Service
+	runtime.Listener = doh.ListenerFunc(func(_ context.Context, _ string, service *doh.Service) error {
+		published = service
+		return nil
+	})
+	controller, err := doh.NewController(doh.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact", StopTimeout: stopTimeout, DrainTimeout: stopTimeout,
+		Admission: doh.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, doh.Configuration) (doh.PreparedAdmission, error) {
+			return doh.PreparedAdmissionFuncs{CommitFunc: func(context.Context) (doh.RuntimeAdapters, error) { return runtime, nil }}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), rpcHandshake("generation-1", requiredRPCGrants())); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationJSON(t, testConfiguration())}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if published == nil {
+		t.Fatal("listener did not publish service")
+	}
+	return controller, published
 }
 
 func requiredRPCGrants() []string {

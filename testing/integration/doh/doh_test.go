@@ -28,13 +28,39 @@ func TestDoHRFC8484GETPOSTAndStrictGrammar(t *testing.T) {
 			}
 		})
 	}
+	for name, accept := range map[string]string{
+		"omitted":              "",
+		"wildcard":             "*/*",
+		"application-wildcard": "application/*",
+		"media-list":           "application/json, application/dns-message; q=0.5",
+	} {
+		t.Run("accept-"+name, func(t *testing.T) {
+			service, calls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
+			request := validHTTPRequest("POST", query, []byte("valid-token"))
+			request.Accept = accept
+			if response, err := service.Serve(context.Background(), request); err != nil || response.Status != "200" || calls.Load() != 1 {
+				t.Fatalf("Accept %q response=%#v calls=%d err=%v", accept, response, calls.Load(), err)
+			}
+		})
+	}
+	for _, method := range []string{"GET", "POST"} {
+		t.Run(method+"-edns-do-padding", func(t *testing.T) {
+			ednsQuery := withEDNS(query, true, 12, []byte{0, 0, 0, 0})
+			service, calls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
+			request := validHTTPRequest(method, ednsQuery, []byte("valid-token"))
+			request.Accept = ""
+			if response, err := service.Serve(context.Background(), request); err != nil || response.Status != "200" || calls.Load() != 1 {
+				t.Fatalf("EDNS response=%#v calls=%d err=%v", response, calls.Load(), err)
+			}
+		})
+	}
 
 	invalid := []doh.HTTPRequest{
 		{Method: "PUT", Accept: "application/dns-message", Token: []byte("valid-token")},
 		{Method: "GET", Query: "dns=" + base64.RawURLEncoding.EncodeToString(query) + "&x=1", Accept: "application/dns-message", Token: []byte("valid-token")},
 		{Method: "GET", Query: "dns=bad=padding", Accept: "application/dns-message", Token: []byte("valid-token")},
 		{Method: "POST", ContentType: "application/json", Accept: "application/dns-message", Body: query, Token: []byte("valid-token")},
-		{Method: "POST", ContentType: "application/dns-message", Accept: "*/*", Body: query, Token: []byte("valid-token")},
+		{Method: "POST", ContentType: "application/dns-message", Accept: "application/json", Body: query, Token: []byte("valid-token")},
 		{Method: "POST", ContentType: "application/dns-message", Accept: "application/dns-message", Body: make([]byte, doh.MaxDNSRequestBytes+1), Token: []byte("valid-token")},
 	}
 	for index, request := range invalid {
@@ -157,6 +183,69 @@ func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
 		t.Fatalf("poisoning err=%v", err)
 	}
 
+	for name, ttls := range map[string][]uint32{
+		"zero-first": {0, 30},
+		"zero-last":  {30, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int32
+			runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+				calls.Add(1)
+				return multiAnswerResponse(request.DNSMessage, ttls...), nil
+			})
+			zeroService, err := doh.NewService(testConfiguration(), runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := validHTTPRequest("POST", dnsQuery(1, name+".example", 1), []byte("valid-token"))
+			for range 2 {
+				if response, err := zeroService.Serve(context.Background(), request); err != nil || response.CacheHit {
+					t.Fatalf("TTL zero response=%#v err=%v", response, err)
+				}
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("TTL zero cached calls=%d", calls.Load())
+			}
+		})
+	}
+
+	t.Run("zero-negative-SOA-is-valid-not-cacheable", func(t *testing.T) {
+		var calls atomic.Int32
+		runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+			calls.Add(1)
+			return negativeResponse(request.DNSMessage, 0, 0), nil
+		})
+		zeroNegative, err := doh.NewService(testConfiguration(), runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := validHTTPRequest("POST", dnsQuery(1, "zero-negative.example", 1), []byte("valid-token"))
+		for range 2 {
+			if response, err := zeroNegative.Serve(context.Background(), request); err != nil || response.CacheHit {
+				t.Fatalf("zero negative response=%#v err=%v", response, err)
+			}
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("zero negative cached calls=%d", calls.Load())
+		}
+	})
+
+	t.Run("malformed-negative-SOA-fails-closed", func(t *testing.T) {
+		runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+			response := negativeResponse(request.DNSMessage, 30, 10)
+			response[len(response)-22] = 0xc0
+			response[len(response)-21] = 0xff
+			return response, nil
+		})
+		malformed, err := doh.NewService(testConfiguration(), runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := malformed.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "malformed-soa.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrNoHealthyUpstream) {
+			t.Fatalf("malformed SOA err=%v", err)
+		}
+	})
+
 	bounded := doh.NewMemoryCache(1, doh.MaxDNSResponseBytes+128)
 	capacityRuntime := testRuntime(bounded, func(request doh.ResolveRequest) ([]byte, error) {
 		resolverCalls.Add(1)
@@ -220,6 +309,36 @@ func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
 			t.Fatalf("monotonic regression err=%v", err)
 		}
 	})
+}
+
+func TestDoHCacheHitPayloadValidation(t *testing.T) {
+	query := dnsQuery(9, "cache-validation.example", 1)
+	wrongQuestion := positiveResponse(dnsQuery(0, "other.example", 1), 30)
+	binary.BigEndian.PutUint16(wrongQuestion[:2], 0)
+	malformed := make([]byte, 17)
+	for name, payload := range map[string][]byte{
+		"empty":          {},
+		"one-byte":       {0},
+		"oversize":       make([]byte, doh.MaxDNSResponseBytes+1),
+		"wrong-question": wrongQuestion,
+		"malformed":      malformed,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cache := &fixedHitCache{entry: doh.CacheEntry{Response: payload, ExpiresAt: uint64(time.Hour)}}
+			var resolverCalls atomic.Int32
+			runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) {
+				resolverCalls.Add(1)
+				return positiveResponse(request.DNSMessage, 30), nil
+			})
+			service, err := doh.NewService(testConfiguration(), runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) || resolverCalls.Load() != 0 {
+				t.Fatalf("cache payload err=%v resolver=%d", err, resolverCalls.Load())
+			}
+		})
+	}
 }
 
 func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
@@ -327,6 +446,14 @@ type countingCache struct {
 	gets atomic.Int32
 }
 
+type fixedHitCache struct{ entry doh.CacheEntry }
+
+func (cache *fixedHitCache) Get(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
+	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), ExpiresAt: cache.entry.ExpiresAt}, true, nil
+}
+func (*fixedHitCache) Put(context.Context, string, doh.CacheEntry) error { return nil }
+func (*fixedHitCache) Reset(context.Context, string) error               { return nil }
+
 func (cache *countingCache) Get(ctx context.Context, key string, now uint64) (doh.CacheEntry, bool, error) {
 	cache.gets.Add(1)
 	return cache.Cache.Get(ctx, key, now)
@@ -394,16 +521,37 @@ func dnsQuery(id uint16, name string, qtype uint16) []byte {
 	return wire
 }
 
+func withEDNS(query []byte, dnssecOK bool, optionCode uint16, option []byte) []byte {
+	wire := append([]byte(nil), query...)
+	binary.BigEndian.PutUint16(wire[10:12], 1)
+	flags := uint32(0)
+	if dnssecOK {
+		flags = 0x8000
+	}
+	wire = append(wire, 0, 0, 41, 0x04, 0xd0, byte(flags>>24), byte(flags>>16), byte(flags>>8), byte(flags))
+	wire = append(wire, 0, byte(len(option)+4), byte(optionCode>>8), byte(optionCode), byte(len(option)>>8), byte(len(option)))
+	return append(wire, option...)
+}
+
 func positiveResponse(query []byte, ttl uint32) []byte {
-	response := append([]byte(nil), query...)
+	return multiAnswerResponse(query, ttl)
+}
+
+func multiAnswerResponse(query []byte, ttls ...uint32) []byte {
+	questionEnd := dnsQuestionEnd(query)
+	response := append([]byte(nil), query[:questionEnd]...)
 	binary.BigEndian.PutUint16(response[2:4], 0x8180)
-	binary.BigEndian.PutUint16(response[6:8], 1)
-	response = append(response, 0xc0, 0x0c, 0, 1, 0, 1, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl), 0, 4, 192, 0, 2, 1)
+	binary.BigEndian.PutUint16(response[6:8], uint16(len(ttls)))
+	for _, ttl := range ttls {
+		response = append(response, 0xc0, 0x0c, 0, 1, 0, 1, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl), 0, 4, 192, 0, 2, 1)
+	}
+	response = append(response, query[questionEnd:]...)
 	return response
 }
 
 func negativeResponse(query []byte, ttl, minimum uint32) []byte {
-	response := append([]byte(nil), query...)
+	questionEnd := dnsQuestionEnd(query)
+	response := append([]byte(nil), query[:questionEnd]...)
 	binary.BigEndian.PutUint16(response[2:4], 0x8183)
 	binary.BigEndian.PutUint16(response[8:10], 1)
 	rdata := []byte{0, 0}
@@ -411,5 +559,14 @@ func negativeResponse(query []byte, ttl, minimum uint32) []byte {
 		rdata = append(rdata, byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 	}
 	response = append(response, 0xc0, 0x0c, 0, 6, 0, 1, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl), 0, byte(len(rdata)))
-	return append(response, rdata...)
+	response = append(response, rdata...)
+	return append(response, query[questionEnd:]...)
+}
+
+func dnsQuestionEnd(query []byte) int {
+	offset := 12
+	for query[offset] != 0 {
+		offset += int(query[offset]) + 1
+	}
+	return offset + 5
 }

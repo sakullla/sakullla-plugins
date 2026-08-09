@@ -15,7 +15,18 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 	if !runtime.valid() {
 		return nil, ErrTypedHandlesUnavailable
 	}
-	service := &Service{configuration: cloneConfiguration(configuration), runtime: runtime, semaphore: make(chan struct{}, configuration.MaxConcurrency)}
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+	requestZero := make(chan struct{})
+	close(requestZero)
+	service := &Service{
+		configuration: cloneConfiguration(configuration),
+		runtime:       runtime,
+		semaphore:     make(chan struct{}, configuration.MaxConcurrency),
+		requestCtx:    requestCtx,
+		requestCancel: requestCancel,
+		requestZero:   requestZero,
+		closeDone:     make(chan struct{}),
+	}
 	for _, upstream := range configuration.orderedUpstreams() {
 		service.statuses = append(service.statuses, UpstreamStatus{ID: upstream.ID, Result: "unknown"})
 	}
@@ -24,12 +35,30 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 }
 
 func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTPResponse, error) {
+	service.leaseMu.RLock()
+	lease := service.requestLease
+	service.leaseMu.RUnlock()
+	if lease != nil {
+		return lease(parent, request)
+	}
+	return service.serve(parent, request)
+}
+
+func (service *Service) bindRequestLease(lease func(context.Context, HTTPRequest) (HTTPResponse, error)) {
+	service.leaseMu.Lock()
+	service.requestLease = lease
+	service.leaseMu.Unlock()
+}
+
+func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTPResponse, error) {
 	if err := parent.Err(); err != nil {
 		return HTTPResponse{}, err
 	}
-	if !service.live.Load() {
-		return HTTPResponse{}, ErrRevoked
+	requestCtx, releaseRequest, err := service.beginRequest(parent)
+	if err != nil {
+		return HTTPResponse{}, err
 	}
+	defer releaseRequest()
 	query, err := parseHTTPRequest(request)
 	if err != nil {
 		return HTTPResponse{}, err
@@ -46,7 +75,7 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(parent, requestTimeout(service.configuration))
+	ctx, cancel := context.WithTimeout(requestCtx, requestTimeout(service.configuration))
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return HTTPResponse{}, err
@@ -55,8 +84,17 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 	if err := service.audit(ctx, AuditRecord{Action: "query", Outcome: "started", OperationKey: operationKey, QueryDigest: query.digest}); err != nil {
 		return HTTPResponse{}, err
 	}
+	if err := service.ensureLive(ctx); err != nil {
+		return HTTPResponse{}, err
+	}
 	fail := func(result string, failure error) (HTTPResponse, error) {
+		if err := service.ensureLive(ctx); err != nil {
+			return HTTPResponse{}, err
+		}
 		logErr := service.runtime.Logger.Log(ctx, QueryLog{QueryDigest: query.digest, QType: query.qtype, Result: result})
+		if err := service.ensureLive(ctx); err != nil {
+			return HTTPResponse{}, err
+		}
 		if auditErr := service.audit(ctx, AuditRecord{Action: "query", Outcome: "failed", OperationKey: operationKey + ":terminal", QueryDigest: query.digest}); auditErr != nil {
 			return HTTPResponse{}, auditErr
 		}
@@ -71,26 +109,43 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 	if err := service.runtime.Tokens.Verify(ctx, service.configuration.TokenSecretRef, request.Token); err != nil {
 		return fail("token-denied", safeRuntimeError(err, ErrInvalidToken))
 	}
-	if err := ctx.Err(); err != nil || !service.live.Load() {
-		if err != nil {
-			return fail("canceled", err)
-		}
-		return fail("revoked", ErrRevoked)
+	if err := service.ensureLive(ctx); err != nil {
+		return HTTPResponse{}, err
 	}
 	if err := service.runtime.Policy.Allow(ctx, service.configuration.IPPolicyRef, request.Source); err != nil {
 		return fail("policy-denied", safeRuntimeError(err, ErrIPPolicyDenied))
 	}
+	if err := service.ensureLive(ctx); err != nil {
+		return HTTPResponse{}, err
+	}
 	now, err := service.now(ctx)
 	if err != nil {
 		return fail("clock-failed", ErrClockUnavailable)
+	}
+	if err := service.ensureLive(ctx); err != nil {
+		return HTTPResponse{}, err
 	}
 	cacheKey := service.configuration.Generation + ":" + query.key
 	entry, hit, err := service.runtime.Cache.Get(ctx, cacheKey, now)
 	if err != nil {
 		return fail("cache-failed", ErrCacheUnavailable)
 	}
+	if err := service.ensureLive(ctx); err != nil {
+		return HTTPResponse{}, err
+	}
 	if hit {
-		response := HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: responseWithID(entry.Response, query.id), CacheHit: true}
+		maxLifetime := uint64(service.configuration.MaxTTLSeconds) * uint64(time.Second)
+		if entry.ExpiresAt <= now || maxLifetime == 0 || entry.ExpiresAt-now > maxLifetime {
+			return fail("cache-invalid", ErrCacheUnavailable)
+		}
+		candidate := responseWithID(entry.Response, query.id)
+		if _, _, validateErr := validateDNSResponse(query, candidate); validateErr != nil {
+			return fail("cache-invalid", ErrCacheUnavailable)
+		}
+		if err := service.ensureLive(ctx); err != nil {
+			return HTTPResponse{}, err
+		}
+		response := HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: candidate, CacheHit: true}
 		if err := service.finish(ctx, operationKey, query, QueryLog{QueryDigest: query.digest, QType: query.qtype, Result: "cache-hit", CacheHit: true}); err != nil {
 			return HTTPResponse{}, err
 		}
@@ -125,7 +180,7 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 			return fail("revoked", ErrRevoked)
 		}
 		service.updateStatus(upstream.ID, "healthy", false)
-		if metadata.cacheable && metadata.ttl >= service.configuration.MinTTLSeconds {
+		if metadata.cacheable && metadata.ttl >= service.configuration.MinTTLSeconds && service.configuration.MaxTTLSeconds > 0 {
 			ttl := metadata.ttl
 			if ttl > service.configuration.MaxTTLSeconds {
 				ttl = service.configuration.MaxTTLSeconds
@@ -134,12 +189,18 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 			if clockErr != nil {
 				return fail("clock-failed", ErrClockUnavailable)
 			}
+			if err := service.ensureLive(ctx); err != nil {
+				return HTTPResponse{}, err
+			}
 			expires := cacheNow + uint64(ttl)*uint64(time.Second)
 			if expires < cacheNow {
 				return fail("clock-failed", ErrClockUnavailable)
 			}
 			if err := service.runtime.Cache.Put(ctx, cacheKey, CacheEntry{Response: normalized, ExpiresAt: expires}); err != nil {
 				return fail("cache-failed", ErrCacheUnavailable)
+			}
+			if err := service.ensureLive(ctx); err != nil {
+				return HTTPResponse{}, err
 			}
 		}
 		result := "positive"
@@ -156,11 +217,24 @@ func (service *Service) Serve(parent context.Context, request HTTPRequest) (HTTP
 }
 
 func (service *Service) finish(ctx context.Context, operationKey string, query parsedQuery, record QueryLog) error {
+	service.commitMu.Lock()
+	defer service.commitMu.Unlock()
+	if err := service.ensureLive(ctx); err != nil {
+		return err
+	}
 	if err := service.runtime.Logger.Log(ctx, record); err != nil {
-		_ = service.audit(ctx, AuditRecord{Action: "query", Outcome: "failed", OperationKey: operationKey + ":terminal", QueryDigest: query.digest})
+		if service.ensureLive(ctx) == nil {
+			_ = service.audit(ctx, AuditRecord{Action: "query", Outcome: "failed", OperationKey: operationKey + ":terminal", QueryDigest: query.digest})
+		}
 		return ErrLogUnavailable
 	}
-	return service.audit(ctx, AuditRecord{Action: "query", Outcome: "succeeded", OperationKey: operationKey + ":terminal", QueryDigest: query.digest})
+	if err := service.ensureLive(ctx); err != nil {
+		return err
+	}
+	if err := service.audit(ctx, AuditRecord{Action: "query", Outcome: "succeeded", OperationKey: operationKey + ":terminal", QueryDigest: query.digest}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (service *Service) audit(ctx context.Context, record AuditRecord) error {
@@ -182,6 +256,51 @@ func (service *Service) now(ctx context.Context) (uint64, error) {
 	}
 	service.clockSet, service.lastNow = true, now
 	return now, nil
+}
+
+func (service *Service) ensureLive(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !service.live.Load() {
+		return ErrRevoked
+	}
+	return nil
+}
+
+func (service *Service) beginRequest(parent context.Context) (context.Context, func(), error) {
+	service.requestMu.Lock()
+	if !service.live.Load() {
+		service.requestMu.Unlock()
+		return nil, nil, ErrRevoked
+	}
+	if service.requestCount == 0 {
+		service.requestZero = make(chan struct{})
+	}
+	service.requestCount++
+	root := service.requestCtx
+	service.requestMu.Unlock()
+
+	ctx, cancel := context.WithCancel(parent)
+	stopRootCancel := context.AfterFunc(root, cancel)
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			stopRootCancel()
+			cancel()
+			service.requestMu.Lock()
+			service.requestCount--
+			if service.requestCount == 0 {
+				close(service.requestZero)
+			}
+			service.requestMu.Unlock()
+		})
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, nil, err
+	}
+	return ctx, release, nil
 }
 
 type resolverCall struct {
@@ -258,16 +377,47 @@ func (service *Service) Statuses() []UpstreamStatus {
 }
 
 func (service *Service) Close(ctx context.Context) error {
-	service.live.Store(false)
-	service.statusMu.Lock()
-	for index := range service.statuses {
-		service.statuses[index].Result = "revoked"
+	service.closeOnce.Do(func() {
+		service.commitMu.Lock()
+		service.live.Store(false)
+		service.commitMu.Unlock()
+		service.requestCancel()
+		service.statusMu.Lock()
+		for index := range service.statuses {
+			service.statuses[index].Result = "revoked"
+		}
+		service.statusMu.Unlock()
+
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		go func() {
+			defer cleanupCancel()
+			service.requestMu.Lock()
+			zero := service.requestZero
+			service.requestMu.Unlock()
+			var cleanupErr error
+			select {
+			case <-zero:
+				if err := service.runtime.Cache.Reset(cleanupCtx, service.configuration.Generation); err != nil {
+					cleanupErr = ErrCacheUnavailable
+				}
+			case <-cleanupCtx.Done():
+				cleanupErr = cleanupCtx.Err()
+			}
+			service.closeMu.Lock()
+			service.closeErr = cleanupErr
+			service.closeMu.Unlock()
+			close(service.closeDone)
+		}()
+	})
+	select {
+	case <-service.closeDone:
+		service.closeMu.Lock()
+		err := service.closeErr
+		service.closeMu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	service.statusMu.Unlock()
-	if err := service.runtime.Cache.Reset(ctx, service.configuration.Generation); err != nil {
-		return ErrCacheUnavailable
-	}
-	return nil
 }
 
 func safeRuntimeError(err, fallback error) error {

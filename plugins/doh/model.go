@@ -268,6 +268,18 @@ type Service struct {
 	semaphore     chan struct{}
 	live          atomic.Bool
 	operation     atomic.Uint64
+	requestCtx    context.Context
+	requestCancel context.CancelFunc
+	requestMu     sync.Mutex
+	requestCount  uint64
+	requestZero   chan struct{}
+	leaseMu       sync.RWMutex
+	requestLease  func(context.Context, HTTPRequest) (HTTPResponse, error)
+	commitMu      sync.Mutex
+	closeOnce     sync.Once
+	closeDone     chan struct{}
+	closeMu       sync.Mutex
+	closeErr      error
 	statusMu      sync.Mutex
 	statuses      []UpstreamStatus
 	clockMu       sync.Mutex
