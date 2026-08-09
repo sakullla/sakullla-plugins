@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,11 +43,22 @@ func TestProbeControllerRPCGrantsGenerationRevokeAndDefaultFailClosed(t *testing
 
 func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T) {
 	var commits, aborts, schedules, audits atomic.Int32
+	var activationOperationKey string
 	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
 			if record.Action != "activate" {
 				t.Fatalf("activation audit=%#v", record)
+			}
+			if record.Outcome == "started" {
+				activationOperationKey = strings.TrimSuffix(record.OperationKey, ":started")
+			}
+			wantKey := activationOperationKey + ":terminal"
+			if record.Outcome == "started" {
+				wantKey = activationOperationKey + ":started"
+			}
+			if activationOperationKey == "" || record.OperationKey != wantKey {
+				t.Fatalf("unstable activation operation key: %#v", record)
 			}
 			audits.Add(1)
 			return nil
@@ -63,7 +75,7 @@ func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T)
 							return acceleratorsources.ProbeObservation{}, nil
 						}),
 						Scheduler: acceleratorsources.SchedulerFunc(func(_ context.Context, registration acceleratorsources.SchedulerRegistration) error {
-							if registration.Generation != "generation-1" || registration.Interval != time.Minute || registration.MaxConcurrency != 2 || registration.OperationKey != "activate:generation-1" {
+							if registration.Generation != "generation-1" || registration.Interval != time.Minute || registration.MaxConcurrency != 2 || registration.OperationKey != activationOperationKey {
 								t.Fatalf("scheduler registration=%#v", registration)
 							}
 							schedules.Add(1)
@@ -189,16 +201,17 @@ func TestTerminalActivationAuditSequenceSuccessAndFailures(t *testing.T) {
 		{name: "success", want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded"}},
 		{name: "admission-failure", admissionFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "audit:activate:failed"}},
 		{name: "scheduler-failure", scheduleFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "admission:abort", "audit:activate:failed"}},
-		{name: "terminal-audit-failure-compensates", successAuditFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded", "admission:abort", "audit:activate:failed"}},
+		{name: "ambiguous-terminal-audit-compensates", successAuditFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded", "admission:abort", "audit:activate:succeeded"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			trace := &eventTrace{}
 			var lasting atomic.Int32
+			var auditFailed atomic.Bool
 			controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
 				PackageDigest: "package", ArtifactDigest: "artifact",
 				ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
 					trace.add("audit:" + record.Action + ":" + record.Outcome)
-					if test.successAuditFail && record.Outcome == "succeeded" {
+					if test.successAuditFail && record.Outcome == "succeeded" && auditFailed.CompareAndSwap(false, true) {
 						return errors.New("raw audit secret")
 					}
 					return nil
@@ -256,6 +269,175 @@ func TestTerminalActivationAuditSequenceSuccessAndFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestActivationAmbiguousSucceededAuditRetriesIdempotentRecord(t *testing.T) {
+	auditor := newActivationAuditFixture(true, nil)
+	var lasting, aborts atomic.Int32
+	var schedulerOperationKey string
+	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
+		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
+			return acceleratorsources.PreparedAdmissionFuncs{
+				CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
+					lasting.Store(1)
+					runtime := validRuntimeAdapters()
+					runtime.Scheduler = acceleratorsources.SchedulerFunc(func(_ context.Context, registration acceleratorsources.SchedulerRegistration) error {
+						schedulerOperationKey = registration.OperationKey
+						return nil
+					})
+					return runtime, nil
+				},
+				AbortFunc: func() { lasting.Store(0); aborts.Add(1) },
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	if response.Error == nil || strings.Contains(response.Error.Error(), "raw audit secret") {
+		t.Fatalf("ambiguous activation response=%#v", response)
+	}
+	if lasting.Load() != 0 || aborts.Load() != 1 || len(controller.Sources()) != 0 {
+		t.Fatalf("compensation lasting=%d aborts=%d sources=%v", lasting.Load(), aborts.Load(), controller.Sources())
+	}
+	attempts, committed := auditor.snapshot()
+	assertSingleTerminalRecord(t, attempts, committed, "succeeded", schedulerOperationKey+":terminal")
+}
+
+func TestActivationConcurrentFailureAndRevokeKeepOneTerminalOutcome(t *testing.T) {
+	release := make(chan struct{})
+	auditor := newActivationAuditFixture(true, release)
+	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
+		ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond,
+		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
+			return nil, errors.New("raw admission secret")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	result := make(chan pluginsdk.LifecycleResponse, 1)
+	go func() {
+		result <- controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+	}()
+	select {
+	case <-auditor.terminalEntered:
+	case <-time.After(time.Second):
+		t.Fatal("terminal audit was not entered")
+	}
+	// Let the lifecycle deadline race generation revoke/close with the hook's
+	// in-flight terminal write, then allow both to finish deterministically.
+	time.Sleep(40 * time.Millisecond)
+	close(release)
+	response := <-result
+	if response.Error == nil || strings.Contains(response.Error.Error(), "raw") || len(controller.Sources()) != 0 {
+		t.Fatalf("concurrent failure response=%#v sources=%v", response, controller.Sources())
+	}
+	attempts, committed := auditor.snapshot()
+	assertSingleTerminalRecord(t, attempts, committed, "failed", "")
+}
+
+type activationAuditFixture struct {
+	mu                  sync.Mutex
+	attempts            []acceleratorsources.AuditRecord
+	committed           map[string]acceleratorsources.AuditRecord
+	failFirstTerminal   bool
+	failedTerminalOnce  bool
+	terminalEntered     chan struct{}
+	terminalEnteredOnce sync.Once
+	terminalRelease     <-chan struct{}
+}
+
+func newActivationAuditFixture(failFirstTerminal bool, release <-chan struct{}) *activationAuditFixture {
+	return &activationAuditFixture{committed: make(map[string]acceleratorsources.AuditRecord), failFirstTerminal: failFirstTerminal, terminalEntered: make(chan struct{}), terminalRelease: release}
+}
+
+func (fixture *activationAuditFixture) Audit(ctx context.Context, record acceleratorsources.AuditRecord) error {
+	fixture.mu.Lock()
+	if previous, exists := fixture.committed[record.OperationKey]; exists && previous != record {
+		fixture.mu.Unlock()
+		return errors.New("raw conflicting terminal record")
+	}
+	fixture.attempts = append(fixture.attempts, record)
+	fixture.committed[record.OperationKey] = record
+	if record.Outcome == "started" {
+		fixture.mu.Unlock()
+		return nil
+	}
+	shouldFail := fixture.failFirstTerminal && !fixture.failedTerminalOnce
+	if shouldFail {
+		fixture.failedTerminalOnce = true
+	}
+	release := fixture.terminalRelease
+	fixture.mu.Unlock()
+	fixture.terminalEnteredOnce.Do(func() { close(fixture.terminalEntered) })
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if shouldFail {
+		return errors.New("raw audit secret")
+	}
+	return nil
+}
+
+func (fixture *activationAuditFixture) snapshot() ([]acceleratorsources.AuditRecord, map[string]acceleratorsources.AuditRecord) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	attempts := append([]acceleratorsources.AuditRecord(nil), fixture.attempts...)
+	committed := make(map[string]acceleratorsources.AuditRecord, len(fixture.committed))
+	for key, record := range fixture.committed {
+		committed[key] = record
+	}
+	return attempts, committed
+}
+
+func assertSingleTerminalRecord(t *testing.T, attempts []acceleratorsources.AuditRecord, committed map[string]acceleratorsources.AuditRecord, outcome, operationKey string) {
+	t.Helper()
+	var terminal []acceleratorsources.AuditRecord
+	for _, record := range attempts {
+		if record.Action != "activate" || record.OperationKey == "" {
+			t.Fatalf("unsafe audit record=%#v", record)
+		}
+		if record.Outcome != "started" {
+			if operationKey == "" {
+				operationKey = record.OperationKey
+			}
+			if record.OperationKey != operationKey {
+				t.Fatalf("unstable terminal operation keys: want %q, record=%#v", operationKey, record)
+			}
+			terminal = append(terminal, record)
+		}
+	}
+	if len(terminal) != 2 || terminal[0] != terminal[1] || terminal[0].Outcome != outcome {
+		t.Fatalf("terminal attempts=%#v", terminal)
+	}
+	if committed[operationKey] != terminal[0] {
+		t.Fatalf("logical terminals=%#v operation=%q", committed, operationKey)
+	}
+	for key, record := range committed {
+		if record.Outcome != "started" && key != operationKey {
+			t.Fatalf("conflicting terminal record=%#v", record)
+		}
 	}
 }
 

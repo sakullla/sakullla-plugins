@@ -3,8 +3,10 @@ package acceleratorsources
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -136,33 +138,56 @@ type controllerEpoch struct {
 }
 
 type activationAuditState struct {
-	auditor  Auditor
-	started  atomic.Bool
-	terminal atomic.Bool
+	mu           sync.Mutex
+	auditor      Auditor
+	operationKey string
+	started      bool
+	terminal     AuditRecord
+	terminalSet  bool
+	committed    bool
 }
 
 func (state *activationAuditState) write(ctx context.Context, outcome string) error {
 	if state == nil || state.auditor == nil {
 		return ErrAuditRequired
 	}
-	if outcome != "started" && state.terminal.Load() {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if outcome == "started" {
+		if state.started {
+			return nil
+		}
+		if err := state.auditor.Audit(ctx, AuditRecord{Action: "activate", Outcome: outcome, OperationKey: state.operationKey + ":started"}); err != nil {
+			return ErrAuditUnavailable
+		}
+		state.started = true
 		return nil
 	}
-	if err := state.auditor.Audit(ctx, AuditRecord{Action: "activate", Outcome: outcome}); err != nil {
+	if !state.started {
+		return nil
+	}
+	if !state.terminalSet {
+		// Choosing the terminal record precedes the external call. An error may
+		// mean the sink committed before returning, so all later attempts must
+		// replay this exact idempotent record and can never choose its opposite.
+		state.terminal = AuditRecord{Action: "activate", Outcome: outcome, OperationKey: state.operationKey + ":terminal"}
+		state.terminalSet = true
+	}
+	if state.committed {
+		return nil
+	}
+	if err := state.auditor.Audit(ctx, state.terminal); err != nil {
 		return ErrAuditUnavailable
 	}
-	if outcome == "started" {
-		state.started.Store(true)
-	} else {
-		state.terminal.Store(true)
-	}
+	state.committed = true
 	return nil
 }
 
 // close is the bounded generation-revoke fallback when an activation hook
 // cannot return to its ordinary terminal-audit path.
 func (state *activationAuditState) close() {
-	if state == nil || !state.started.Load() || state.terminal.Load() {
+	if state == nil {
 		return
 	}
 	done := make(chan error, 1)
@@ -293,7 +318,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	}
 	var activationAudit *rpcplugin.Handle[*activationAuditState]
 	if controller.bootstrapAuditor != nil {
-		state := &activationAuditState{auditor: controller.bootstrapAuditor}
+		state := &activationAuditState{auditor: controller.bootstrapAuditor, operationKey: activationOperationKey(generation.ID())}
 		activationAudit, err = rpcplugin.BindHandle(generation, "audit", state, func(state *activationAuditState) { state.close() })
 		if err != nil {
 			handle.Revoke()
@@ -396,7 +421,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			return fail(err)
 		}
 		if err = bound.scheduler.Use(ctx, func(ctx context.Context, scheduler Scheduler) error {
-			return scheduler.Register(ctx, SchedulerRegistration{Generation: generation.ID(), Interval: time.Duration(configuration.ScheduleSeconds) * time.Second, MaxConcurrency: configuration.Probe.Concurrency, OperationKey: "activate:" + generation.ID()})
+			return scheduler.Register(ctx, SchedulerRegistration{Generation: generation.ID(), Interval: time.Duration(configuration.ScheduleSeconds) * time.Second, MaxConcurrency: configuration.Probe.Concurrency, OperationKey: activationOperationKey(generation.ID())})
 		}); err != nil {
 			transaction.Revoke()
 			return fail(safeAdapterFailure(err))
@@ -426,9 +451,12 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 				controller.runtime = nil
 			}
 			controller.mu.Unlock()
-			failedCtx, failedCancel := context.WithTimeout(context.Background(), time.Second)
-			_ = controller.writeActivationAudit(failedCtx, activationAudit, "failed")
-			failedCancel()
+			// The succeeded outcome was selected before the ambiguous sink error.
+			// Compensation makes activation fail closed, while this retry may only
+			// replay that exact succeeded record under its stable operation key.
+			retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Second)
+			_ = controller.writeActivationAudit(retryCtx, activationAudit, "succeeded")
+			retryCancel()
 			return err
 		}
 		return nil
@@ -478,6 +506,11 @@ func safeAdapterFailure(err error) error {
 	default:
 		return ErrAdapterOperationFailed
 	}
+}
+
+func activationOperationKey(generation string) string {
+	digest := sha256.Sum256([]byte(PluginID + "\x00" + generation))
+	return fmt.Sprintf("activation:%x", digest)
 }
 
 func cloneConfiguration(configuration Configuration) Configuration {

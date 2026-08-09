@@ -109,6 +109,7 @@ type SourceRecord struct {
 type AuditRecord struct {
 	Action, Outcome, SourceID string
 	Operation                 uint64
+	OperationKey              string
 }
 
 type Auditor interface {
