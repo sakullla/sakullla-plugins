@@ -3,12 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
+	ciwasm "github.com/sakullla/sakullla-plugins/internal/ci/wasm"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
 
@@ -21,7 +27,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("expected repository, generated, license, secret, reproducible, or sdk")
+		return fmt.Errorf("expected repository, generated, license, secret, reproducible, sdk, or plugin")
 	}
 	switch args[0] {
 	case "sdk":
@@ -52,6 +58,8 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Println(string(encoded))
 		return nil
+	case "plugin":
+		return checkPlugin(ctx, args[1:])
 	case "repository":
 		root, err := rootFlag("repository", args[1:])
 		if err != nil {
@@ -97,6 +105,95 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
+}
+
+func checkPlugin(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("plugin", flag.ContinueOnError)
+	pluginID := flags.String("id", "", "plugin identifier")
+	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected plugin arguments: %v", flags.Args())
+	}
+	if !validPluginID(*pluginID) {
+		return fmt.Errorf("plugin id %q is invalid", *pluginID)
+	}
+	absoluteLock, err := filepath.Abs(*lockPath)
+	if err != nil {
+		return err
+	}
+	lock, err := sdklock.Load(absoluteLock)
+	if err != nil {
+		return err
+	}
+	if _, err := sdklock.Verify(ctx, lock, false, filepath.Dir(absoluteLock)); err != nil {
+		return fmt.Errorf("SDK release gate: %w", err)
+	}
+	repositoryRoot := filepath.Dir(absoluteLock)
+	cargo, err := cargoExecutable()
+	if err != nil {
+		return err
+	}
+	packageName := "sakullla-" + *pluginID
+	command := exec.CommandContext(ctx, cargo, "build", "-p", packageName, "--target", "wasm32v1-none", "--release", "--locked")
+	command.Dir = repositoryRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("build %s: %w\n%s", *pluginID, err, output)
+	}
+	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32v1-none", "release", strings.ReplaceAll(packageName, "-", "_")+".wasm")
+	artifact, err := os.ReadFile(artifactPath)
+	if err != nil {
+		return err
+	}
+	artifact, err = ciwasm.NormalizeEmptyFunctionTable(artifact)
+	if err != nil {
+		return err
+	}
+	if err := pluginsdk.ValidatePolicyV1WASM(artifact, pluginsdk.PolicyV1MaxMemoryBytes); err != nil {
+		return err
+	}
+	outputDirectory := filepath.Join(repositoryRoot, "target", "nre-ci", *pluginID)
+	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
+		return err
+	}
+	outputPath := filepath.Join(outputDirectory, "plugin.wasm")
+	if err := os.WriteFile(outputPath, artifact, 0o644); err != nil {
+		return err
+	}
+	fmt.Println(outputPath)
+	return nil
+}
+
+func validPluginID(value string) bool {
+	if value == "" || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") {
+		return false
+	}
+	for _, current := range value {
+		if (current < 'a' || current > 'z') && (current < '0' || current > '9') && current != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func cargoExecutable() (string, error) {
+	if cargo, err := exec.LookPath("cargo"); err == nil {
+		return cargo, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", errors.New("cargo is required")
+	}
+	cargo := filepath.Join(home, ".cargo", "bin", "cargo")
+	if runtime.GOOS == "windows" {
+		cargo += ".exe"
+	}
+	if _, err := os.Stat(cargo); err != nil {
+		return "", errors.New("cargo is required")
+	}
+	return cargo, nil
 }
 
 func rootFlag(name string, args []string) (string, error) {

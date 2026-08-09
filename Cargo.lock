@@ -7,5 +7,19 @@ name = "nre-policy-guest"
 version = "0.1.0"
 
 [[package]]
+name = "sakullla-ip-policy"
+version = "0.1.0"
+dependencies = [
+ "nre-policy-guest",
+]
+
+[[package]]
+name = "sakullla-waf"
+version = "0.1.0"
+dependencies = [
+ "nre-policy-guest",
+]
+
+[[package]]
 name = "sakullla-workspace-anchor"
 version = "0.0.0"

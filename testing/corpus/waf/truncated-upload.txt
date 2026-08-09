@@ -1,0 +1,4 @@
+POST /upload
+body-window-complete: false
+
+bounded-prefix-only

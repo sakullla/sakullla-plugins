@@ -127,7 +127,8 @@ impl<'a> WireCursor<'a> {
     fn read_array<const N: usize>(&mut self) -> Result<[u8; N], GuestError> {
         let bytes = self.read_slice(N)?;
         let mut value = [0; N];
-        value.copy_from_slice(bytes);
+        // SAFETY: read_slice returned exactly N bytes and the arrays do not overlap.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr(), N) };
         Ok(value)
     }
 }
@@ -152,7 +153,9 @@ impl<'a> FrameWriter<'a> {
     }
 
     pub fn finish(self) -> &'a [u8] {
-        &self.buffer[..self.length]
+        // SAFETY: every writer operation increments length only after a
+        // successful bounds-checked write.
+        unsafe { self.buffer.get_unchecked(..self.length) }
     }
 
     pub fn write_varint_field(&mut self, number: u32, value: u64) -> Result<(), GuestError> {
@@ -219,7 +222,8 @@ impl<'a> FrameWriter<'a> {
             .buffer
             .get_mut(self.length..end)
             .ok_or_else(output_exhausted)?;
-        target.copy_from_slice(value);
+        // SAFETY: target was bounds checked and has value.len() bytes.
+        unsafe { core::ptr::copy_nonoverlapping(value.as_ptr(), target.as_mut_ptr(), value.len()) };
         self.length = end;
         Ok(())
     }

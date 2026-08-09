@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode"],
+  "properties": {
+    "mode": {"enum": ["deny", "observe"]},
+    "custom_rules": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "target", "needle"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
+          "target": {"enum": ["path", "query", "headers", "body"]},
+          "needle": {"type": "string", "minLength": 2, "maxLength": 64}
+        }
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "path_prefix"],
+        "properties": {
+          "rule_id": {"type": "string", "maxLength": 32},
+          "path_prefix": {"type": "string", "minLength": 1, "maxLength": 96}
+        }
+      }
+    }
+  }
+}
+

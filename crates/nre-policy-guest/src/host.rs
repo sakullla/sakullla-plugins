@@ -164,7 +164,11 @@ where
     pub fn read_field(&mut self, name: &str) -> Result<BytesResponse<'_>, GuestError> {
         let length = encode_one_string(&mut self.request, field::read_field_request::NAME, name)?;
         let response_length = self.invoke(HostImport::ReadField, length)?;
-        BytesResponse::decode(&self.response[..response_length], self.limits.response_wire)
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        BytesResponse::decode(response, self.limits.response_wire)
     }
 
     pub fn read_body_window(
@@ -177,13 +181,21 @@ where
         writer.write_varint_field(field::read_body_window_request::LENGTH, length as u64)?;
         let request_length = writer.len();
         let response_length = self.invoke(HostImport::ReadBodyWindow, request_length)?;
-        BytesResponse::decode(&self.response[..response_length], self.limits.response_wire)
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        BytesResponse::decode(response, self.limits.response_wire)
     }
 
     pub fn state_get(&mut self, key: &str) -> Result<BytesResponse<'_>, GuestError> {
         let length = encode_one_string(&mut self.request, field::state_get_request::KEY, key)?;
         let response_length = self.invoke(HostImport::StateGet, length)?;
-        BytesResponse::decode(&self.response[..response_length], self.limits.response_wire)
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        BytesResponse::decode(response, self.limits.response_wire)
     }
 
     pub fn state_put(&mut self, key: &str, value: &[u8]) -> Result<(), GuestError> {
@@ -267,11 +279,15 @@ where
             ));
         }
         self.calls += 1;
-        let packed = self.transport.call(
-            import,
-            &self.request[..request_length],
-            &mut self.response[..response_capacity],
-        );
+        let request = self
+            .request
+            .get(..request_length)
+            .ok_or_else(response_exhausted)?;
+        let response = self
+            .response
+            .get_mut(..response_capacity)
+            .ok_or_else(response_exhausted)?;
+        let packed = self.transport.call(import, request, response);
         let (status, length) = unpack_host_result(packed)?;
         if status == AbiStatus::Ok && length as usize > response_capacity {
             return Err(GuestError::new(
@@ -301,4 +317,11 @@ const fn host_status_error(status: AbiStatus) -> GuestError {
         AbiStatus::Internal => ReasonCode::HostInternal,
     };
     GuestError::new(status, reason)
+}
+
+const fn response_exhausted() -> GuestError {
+    GuestError::new(
+        AbiStatus::ResourceExhausted,
+        ReasonCode::HostResponseBudgetExceeded,
+    )
 }

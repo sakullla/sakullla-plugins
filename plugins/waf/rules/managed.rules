@@ -1,0 +1,6 @@
+# Supported deterministic substring rules. This is intentionally not CRS/PCRE.
+managed-path-traversal|Path|../
+managed-sqli-union|Query|union select
+managed-xss-script|Body|<script
+managed-shell-user-agent|Headers|() {
+

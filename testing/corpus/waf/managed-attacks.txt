@@ -1,0 +1,4 @@
+PATH /../../etc/passwd
+QUERY q=UNION SELECT password
+HEADER user-agent: curl; /bin/sh
+BODY <script>alert(1)</script>

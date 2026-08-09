@@ -1,0 +1,20 @@
+schema_version: 1
+id: waf
+name: Sakullla WAF
+version: 0.1.0
+runtime: wasm-policy
+abi: nre:policy/v1
+artifact: artifact/plugin.wasm
+permissions:
+  - policy.read-normalized-http
+  - policy.read-body-window
+  - policy.emit-event
+  - policy.add-metric
+resources:
+  timeout_ms: 2
+  memory_bytes: 16777216
+  concurrency: 64
+  input_frame_bytes: 131072
+  output_frame_bytes: 4096
+cleanup: retain-audit-only
+
