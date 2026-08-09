@@ -818,6 +818,92 @@ func TestDockerRollbackStoreCleanupContextsAndCASFailures(t *testing.T) {
 	})
 }
 
+func TestDockerDesiredMetadataSurvivesCrashAndFinalCAS(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	assertDesired := func(t *testing.T, got dockerapp.Deployment) {
+		t.Helper()
+		if got.AppID != "media" || got.InstanceID != "new" || got.Image != "image:new" || got.Generation != "generation-new" || got.RuleRef != "rule-new" || got.RuleTarget != "new" || got.Phase != dockerapp.PhaseActive {
+			t.Fatalf("incomplete desired deployment: %#v", got)
+		}
+		if got.PriorImage != "" || got.PriorGeneration != "" || got.PriorRuleRef != "" || got.PriorInstance != "" || got.PendingInstance != "" {
+			t.Fatalf("active deployment retained recovery metadata: %#v", got)
+		}
+	}
+	t.Run("first-install-final-cas", func(t *testing.T) {
+		now := time.Unix(3000, 0)
+		base := dockerapp.NewDeploymentStore()
+		store := &faultStore{base: base, failPhase: dockerapp.PhaseActive, failRemaining: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+		app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new", RuleRef: "rule-new"}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("final CAS err=%v", err)
+		}
+		intent, ok := base.Get(app.ID)
+		if !ok || intent.Image != app.Image || intent.Generation != app.Generation || intent.RuleRef != app.RuleRef || intent.Phase != dockerapp.PhaseDraining {
+			t.Fatalf("desired intent not durable: %#v", intent)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		final, ok := base.Get(app.ID)
+		if !ok {
+			t.Fatal("first-install record was deleted")
+		}
+		assertDesired(t, final)
+		if !contains(host.cutoverRefs, "rule-new") || !contains(host.inspectRefs, "rule-new") {
+			t.Fatalf("wrong first-install refs: cutover=%v inspect=%v", host.cutoverRefs, host.inspectRefs)
+		}
+	})
+	for _, failedPhase := range []dockerapp.RolloutPhase{dockerapp.PhaseDraining, dockerapp.PhaseActive} {
+		t.Run("changed-metadata-"+string(failedPhase), func(t *testing.T) {
+			now := time.Unix(4000, 0)
+			base := dockerapp.NewDeploymentStore()
+			base.Put(dockerapp.Deployment{AppID: "media", InstanceID: "old", Image: "image:old", Generation: "generation-old", RuleRef: "rule-old", RuleTarget: "old", Phase: dockerapp.PhaseActive})
+			store := &faultStore{base: base, failPhase: failedPhase, failRemaining: 1}
+			host := &rolloutFake{}
+			app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new", RuleRef: "rule-new"}
+			rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+			if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+				t.Fatalf("crash err=%v", err)
+			}
+			now = now.Add(2 * time.Second)
+			if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+				t.Fatal(err)
+			}
+			final, _ := base.Get(app.ID)
+			assertDesired(t, final)
+			if !contains(host.cutoverRefs, "rule-new") || !contains(host.inspectRefs, "rule-new") {
+				t.Fatalf("wrong changed refs: cutover=%v inspect=%v", host.cutoverRefs, host.inspectRefs)
+			}
+		})
+	}
+	t.Run("start-crash-restores-prior-metadata", func(t *testing.T) {
+		now := time.Unix(5000, 0)
+		base := dockerapp.NewDeploymentStore()
+		base.Put(dockerapp.Deployment{AppID: "media", InstanceID: "old", Image: "image:old", Generation: "generation-old", RuleRef: "rule-old", RuleTarget: "old", Phase: dockerapp.PhaseActive})
+		store := &faultStore{base: base, failPhase: dockerapp.PhaseReadiness, failRemaining: 1}
+		host := &rolloutFake{}
+		app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new", RuleRef: "rule-new"}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatal(err)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		final, _ := base.Get(app.ID)
+		if final.InstanceID != "old" || final.Image != "image:old" || final.Generation != "generation-old" || final.RuleRef != "rule-old" || final.RuleTarget != "old" || final.Phase != dockerapp.PhaseActive {
+			t.Fatalf("prior metadata not restored: %#v", final)
+		}
+		if !contains(host.inspectRefs, "rule-old") {
+			t.Fatalf("start-crash inspected wrong rule: %v", host.inspectRefs)
+		}
+	})
+}
+
 func testApp(_ string) dockerapp.App {
 	return dockerapp.App{ID: "media", Image: "registry/media:new", RuleRef: "rule-media", Generation: "generation-1", SecretRefs: []string{"registry-credential"}}
 }
@@ -848,6 +934,7 @@ type rolloutFake struct {
 	inspectErr                           error
 	maxFence                             uint64
 	mu                                   sync.Mutex
+	inspectRefs, cutoverRefs             []string
 }
 
 func (fake *rolloutFake) acceptFence(fence uint64) error {
@@ -899,11 +986,12 @@ func (fake *rolloutFake) Ready(_ context.Context, fence uint64, _ string) error 
 	}
 	return fake.step("ready")
 }
-func (fake *rolloutFake) Cutover(_ context.Context, fence uint64, _ string, target string) error {
+func (fake *rolloutFake) Cutover(_ context.Context, fence uint64, ruleRef string, target string) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}
 	fake.calls = append(fake.calls, "cutover:"+target)
+	fake.cutoverRefs = append(fake.cutoverRefs, ruleRef)
 	if (target == "new" && fake.fail == "cutover") || (target == "old" && fake.failRestore) {
 		return &secretCause{message: "cutover cleanup failed " + fake.secret}
 	}
@@ -936,11 +1024,12 @@ func (fake *rolloutFake) Remove(ctx context.Context, fence uint64, target string
 	}
 	return nil
 }
-func (fake *rolloutFake) Inspect(_ context.Context, fence uint64, _, _ string) (dockerapp.RuntimeState, error) {
+func (fake *rolloutFake) Inspect(_ context.Context, fence uint64, _ string, ruleRef string) (dockerapp.RuntimeState, error) {
 	if err := fake.acceptFence(fence); err != nil {
 		return dockerapp.RuntimeState{}, err
 	}
 	fake.calls = append(fake.calls, "inspect")
+	fake.inspectRefs = append(fake.inspectRefs, ruleRef)
 	if fake.inspectErr != nil {
 		return dockerapp.RuntimeState{}, fake.inspectErr
 	}

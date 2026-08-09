@@ -13,6 +13,7 @@ type Deployment struct {
 	AppID, InstanceID, Image, RuleRef, RuleTarget, Generation string
 	Phase                                                     RolloutPhase
 	PendingInstance, DesiredRuleTarget, PriorRuleTarget       string
+	PriorImage, PriorGeneration, PriorRuleRef, PriorInstance  string
 	LastFailure, Lease                                        string
 	LeaseUntil                                                time.Time
 	FencingToken                                              uint64
@@ -158,7 +159,9 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 		return ErrReconcilePending
 	}
 	base := prior.Value
-	base.AppID, base.PriorAbsent, base.PriorRuleTarget = app.ID, !existed, prior.Value.RuleTarget
+	base.AppID, base.PriorAbsent = app.ID, !existed
+	base.PriorImage, base.PriorGeneration, base.PriorRuleRef, base.PriorRuleTarget, base.PriorInstance = prior.Value.Image, prior.Value.Generation, prior.Value.RuleRef, prior.Value.RuleTarget, prior.Value.InstanceID
+	base.Image, base.Generation, base.RuleRef = app.Image, app.Generation, app.RuleRef
 	record, err := r.Store.AcquireLease(ctx, app.ID, prior.Version, base, r.now().Add(r.leaseDuration()))
 	if err != nil {
 		return ErrReconcilePending
@@ -265,8 +268,16 @@ func (r Rollout) Reconcile(ctx context.Context, appID string) error {
 
 func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	v, fence := record.Value, record.Value.FencingToken
+	priorInstance := v.PriorInstance
+	if priorInstance == "" {
+		priorInstance = v.InstanceID
+	}
+	inspectRef := v.RuleRef
+	if v.Phase != PhaseCutover && v.Phase != PhaseDraining && v.Phase != PhaseRouteReconcile && !v.PriorAbsent {
+		inspectRef = v.PriorRuleRef
+	}
 	ctx, cancel := r.cleanupContext()
-	state, inspectErr := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+	state, inspectErr := r.Executor.Inspect(ctx, fence, v.AppID, inspectRef)
 	cancel()
 	if inspectErr != nil {
 		return r.release(record, safeFailure(ErrOperationFailed, inspectErr))
@@ -285,7 +296,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 			return err
 		}
 	}
-	priorExists := !v.PriorAbsent && v.InstanceID != "" && state.Instances[v.InstanceID]
+	priorExists := !v.PriorAbsent && priorInstance != "" && state.Instances[priorInstance]
 	newExists := pending != "" && state.Instances[pending]
 	unrelated := state.RuleTarget != "" && state.RuleTarget != v.PriorRuleTarget && state.RuleTarget != pending
 	if unrelated {
@@ -295,7 +306,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	if finishNew {
 		if priorExists {
 			ctx, cancel = r.cleanupContext()
-			err := r.Executor.Drain(ctx, fence, v.InstanceID)
+			err := r.Executor.Drain(ctx, fence, priorInstance)
 			cancel()
 			if err != nil {
 				return r.release(record, safeFailure(ErrOperationFailed, err))
@@ -322,7 +333,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		}
 		if state.RuleTarget != v.PriorRuleTarget {
 			ctx, cancel = r.cleanupContext()
-			err := r.Executor.Cutover(ctx, fence, v.RuleRef, v.PriorRuleTarget)
+			err := r.Executor.Cutover(ctx, fence, v.PriorRuleRef, v.PriorRuleTarget)
 			cancel()
 			if err != nil {
 				return r.release(record, safeFailure(ErrOperationFailed, err))
@@ -348,7 +359,11 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		}
 	}
 	ctx, cancel = r.cleanupContext()
-	post, err := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+	postRef := v.RuleRef
+	if !v.PriorAbsent {
+		postRef = v.PriorRuleRef
+	}
+	post, err := r.Executor.Inspect(ctx, fence, v.AppID, postRef)
 	cancel()
 	if err != nil || (pending != "" && post.Instances[pending]) {
 		return r.release(record, ErrReconcilePending)
@@ -362,11 +377,13 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		cancel()
 		return err
 	}
-	if !post.Instances[v.InstanceID] || post.RuleTarget != v.PriorRuleTarget {
+	if !post.Instances[priorInstance] || post.RuleTarget != v.PriorRuleTarget {
 		return r.release(record, ErrReconcilePending)
 	}
 	prior := v
+	prior.InstanceID, prior.Image, prior.Generation, prior.RuleRef = priorInstance, v.PriorImage, v.PriorGeneration, v.PriorRuleRef
 	prior.Phase, prior.RuleTarget, prior.PendingInstance, prior.DesiredRuleTarget, prior.PriorRuleTarget, prior.LastFailure, prior.Lease, prior.LeaseUntil, prior.PriorAbsent = PhaseActive, v.PriorRuleTarget, "", "", "", "", "", time.Time{}, false
+	prior.PriorImage, prior.PriorGeneration, prior.PriorRuleRef, prior.PriorInstance = "", "", "", ""
 	ctx, cancel = r.cleanupContext()
 	_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, prior)
 	cancel()
