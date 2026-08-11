@@ -129,11 +129,13 @@ func generate() ([]byte, error) {
 func projectFields() (string, error) {
 	projections := []messageProjection{
 		{"init_request", "nre.plugin.policy.v1.InitRequest", [][2]string{{"CONFIG", "config"}, {"GRANTED_SCOPES", "granted_scopes"}, {"GENERATION", "generation"}}},
-		{"evaluate_request", "nre.plugin.policy.v1.EvaluateRequest", [][2]string{{"EXTENSION_POINT", "extension_point"}, {"REQUEST_ID", "request_id"}, {"PAYLOAD", "payload"}}},
+		{"evaluate_request", "nre.plugin.policy.v1.EvaluateRequest", [][2]string{{"EXTENSION_POINT", "extension_point"}, {"REQUEST_ID", "request_id"}, {"PAYLOAD", "payload"}, {"NORMALIZED_HTTP", "normalized_http"}}},
 		{"evaluate_response", "nre.plugin.policy.v1.EvaluateResponse", [][2]string{{"SUCCESS", "success"}, {"ERROR", "error"}}},
 		{"evaluate_success", "nre.plugin.policy.v1.EvaluateSuccess", [][2]string{{"ACTION", "action"}, {"PAYLOAD", "payload"}}},
 		{"runtime_error", "nre.plugin.policy.v1.RuntimeError", [][2]string{{"CODE", "code"}, {"MESSAGE", "message"}, {"RETRYABLE", "retryable"}}},
 		{"read_field_request", "nre.plugin.policy.v1.ReadFieldRequest", [][2]string{{"NAME", "name"}}},
+		{"read_normalized_http_request", "nre.plugin.policy.v1.ReadNormalizedHTTPRequest", [][2]string{}},
+		{"normalized_http_response", "nre.plugin.policy.v1.NormalizedHTTPResponse", [][2]string{{"PATH", "path"}, {"QUERY", "query"}, {"HEADERS", "headers"}, {"TRUSTED_SOURCE", "trusted_source"}, {"TRUSTED_SOURCE_AUTHENTICATED", "trusted_source_authenticated"}, {"BODY_WINDOW_COMPLETE", "body_window_complete"}, {"BODY_WINDOW_LENGTH", "body_window_length"}}},
 		{"read_body_window_request", "nre.plugin.policy.v1.ReadBodyWindowRequest", [][2]string{{"OFFSET", "offset"}, {"LENGTH", "length"}}},
 		{"state_get_request", "nre.plugin.policy.v1.StateGetRequest", [][2]string{{"KEY", "key"}}},
 		{"state_put_request", "nre.plugin.policy.v1.StatePutRequest", [][2]string{{"KEY", "key"}, {"VALUE", "value"}}},
@@ -242,6 +244,7 @@ pub const EXPORT_MEMORY: &str = "` + pluginsdk.PolicyExportMemory + `";
 
 pub const HOST_MODULE: &str = "` + pluginsdk.PolicyHostModule + `";
 pub const HOST_READ_FIELD: &str = "` + pluginsdk.PolicyHostReadField + `";
+pub const HOST_READ_NORMALIZED_HTTP: &str = "` + pluginsdk.PolicyHostReadNormalizedHTTP + `";
 pub const HOST_READ_BODY_WINDOW: &str = "` + pluginsdk.PolicyHostReadBodyWindow + `";
 pub const HOST_STATE_GET: &str = "` + pluginsdk.PolicyHostStateGet + `";
 pub const HOST_STATE_PUT: &str = "` + pluginsdk.PolicyHostStatePut + `";
@@ -302,6 +305,7 @@ pub mod field {
 #[link(wasm_import_module = "` + pluginsdk.PolicyHostModule + `")]
 unsafe extern "C" {
     pub(crate) fn ` + pluginsdk.PolicyHostReadField + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
+    pub(crate) fn ` + pluginsdk.PolicyHostReadNormalizedHTTP + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
     pub(crate) fn ` + pluginsdk.PolicyHostReadBodyWindow + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
     pub(crate) fn ` + pluginsdk.PolicyHostStateGet + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
     pub(crate) fn ` + pluginsdk.PolicyHostStatePut + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;

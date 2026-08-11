@@ -10,6 +10,7 @@ pub struct EvaluateRequest<'a> {
     pub extension_point: &'a str,
     pub request_id: &'a str,
     pub payload: &'a [u8],
+    pub normalized_http: &'a [u8],
 }
 
 impl<'a> EvaluateRequest<'a> {
@@ -18,6 +19,7 @@ impl<'a> EvaluateRequest<'a> {
         let mut extension_point = None;
         let mut request_id = None;
         let mut payload = None;
+        let mut normalized_http = None;
         while let Some(current) = cursor.next_field()? {
             match current.number {
                 field::evaluate_request::EXTENSION_POINT => {
@@ -29,6 +31,9 @@ impl<'a> EvaluateRequest<'a> {
                 field::evaluate_request::PAYLOAD => {
                     set_once(&mut payload, as_bytes(current.value)?)?
                 }
+                field::evaluate_request::NORMALIZED_HTTP => {
+                    set_once(&mut normalized_http, as_bytes(current.value)?)?
+                }
                 _ => {}
             }
         }
@@ -36,6 +41,7 @@ impl<'a> EvaluateRequest<'a> {
             extension_point: extension_point.unwrap_or(""),
             request_id: request_id.unwrap_or(""),
             payload: payload.unwrap_or(&[]),
+            normalized_http: normalized_http.unwrap_or(&[]),
         })
     }
 }
@@ -160,6 +166,67 @@ impl<'a> BytesResponse<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedHttpResponse<'a> {
+    pub path: &'a [u8],
+    pub query: &'a [u8],
+    pub headers: &'a [u8],
+    pub trusted_source: &'a [u8],
+    pub trusted_source_authenticated: bool,
+    pub body_window_complete: bool,
+    pub body_window_length: u32,
+}
+
+impl<'a> NormalizedHttpResponse<'a> {
+    pub fn decode(frame: &'a [u8], limits: WireLimits) -> Result<Self, GuestError> {
+        let mut cursor = WireCursor::new(frame, limits)?;
+        let mut path = None;
+        let mut query = None;
+        let mut headers = None;
+        let mut trusted_source = None;
+        let mut trusted_source_authenticated = None;
+        let mut body_window_complete = None;
+        let mut body_window_length = None;
+        while let Some(current) = cursor.next_field()? {
+            match current.number {
+                field::normalized_http_response::PATH => {
+                    set_once(&mut path, as_bytes(current.value)?)?
+                }
+                field::normalized_http_response::QUERY => {
+                    set_once(&mut query, as_bytes(current.value)?)?
+                }
+                field::normalized_http_response::HEADERS => {
+                    set_once(&mut headers, as_bytes(current.value)?)?
+                }
+                field::normalized_http_response::TRUSTED_SOURCE => {
+                    set_once(&mut trusted_source, as_bytes(current.value)?)?
+                }
+                field::normalized_http_response::TRUSTED_SOURCE_AUTHENTICATED => {
+                    set_once(&mut trusted_source_authenticated, as_bool(current.value)?)?
+                }
+                field::normalized_http_response::BODY_WINDOW_COMPLETE => {
+                    set_once(&mut body_window_complete, as_bool(current.value)?)?
+                }
+                field::normalized_http_response::BODY_WINDOW_LENGTH => {
+                    let raw = as_varint(current.value)?;
+                    let length = u32::try_from(raw).map_err(|_| invalid_wire())?;
+                    set_once(&mut body_window_length, length)?
+                }
+                _ => {}
+            }
+        }
+        Ok(Self {
+            path: path.unwrap_or(&[]),
+            query: query.unwrap_or(&[]),
+            headers: headers.unwrap_or(&[]),
+            trusted_source: trusted_source.unwrap_or(&[]),
+            trusted_source_authenticated: trusted_source_authenticated.unwrap_or(false),
+            body_window_complete: body_window_complete.unwrap_or(false),
+            body_window_length: body_window_length.unwrap_or(0),
+        })
+    }
+}
+
 pub fn encode_evaluate_success<'a>(
     output: &'a mut [u8],
     action: PolicyAction,
@@ -231,4 +298,12 @@ fn as_varint(value: FieldValue<'_>) -> Result<u64, GuestError> {
         FieldValue::Varint(value) => Ok(value),
         _ => Err(invalid_wire()),
     }
+}
+
+fn as_bool(value: FieldValue<'_>) -> Result<bool, GuestError> {
+    let raw = as_varint(value)?;
+    if raw > 1 {
+        return Err(invalid_wire());
+    }
+    Ok(raw == 1)
 }

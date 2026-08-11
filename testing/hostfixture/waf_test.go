@@ -94,8 +94,25 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 		if len(session.lastPayload) != 0 {
 			t.Fatalf("ALLOW payload = %q, want empty", session.lastPayload)
 		}
-		if calls := session.TotalHostCalls(); calls != 8 {
-			t.Fatalf("ALLOW host calls = %d, want 8", calls)
+		if calls := session.HostCalls(pluginsdk.PolicyHostReadNormalizedHTTP); calls != 0 {
+			t.Fatalf("normalized HTTP calls = %d, want 0", calls)
+		}
+		if calls := session.TotalHostCalls(); calls != 0 {
+			t.Fatalf("ALLOW host calls = %d, want 0", calls)
+		}
+	})
+
+	t.Run("snapshot import fallback", func(t *testing.T) {
+		session, status := initPolicyArtifact(t, artifact, []byte(`{"mode":"deny"}`), "/safe", nil, true)
+		defer session.Close()
+		if status != pluginsdk.PolicyStatusOK || session.EvaluateWithImportFallback() != pluginsdk.PolicyActionAllow {
+			t.Fatalf("fallback evaluation status = %d", status)
+		}
+		if calls := session.HostCalls(pluginsdk.PolicyHostReadNormalizedHTTP); calls != 1 {
+			t.Fatalf("normalized HTTP fallback calls = %d, want 1", calls)
+		}
+		if calls := session.TotalHostCalls(); calls != 1 {
+			t.Fatalf("fallback host calls = %d, want 1", calls)
 		}
 	})
 
@@ -112,8 +129,8 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 		if calls := session.FieldCalls("body_window_complete"); calls != 0 {
 			t.Fatalf("body_window_complete calls = %d, want 0", calls)
 		}
-		if calls := session.TotalHostCalls(); calls != 8 {
-			t.Fatalf("path match host calls = %d, want 8", calls)
+		if calls := session.TotalHostCalls(); calls != 2 {
+			t.Fatalf("path match host calls = %d, want 2", calls)
 		}
 	})
 
@@ -127,8 +144,8 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 		if calls := session.HostCalls(pluginsdk.PolicyHostReadBodyWindow); calls != 0 {
 			t.Fatalf("read_body_window calls = %d, want 0", calls)
 		}
-		if calls := session.TotalHostCalls(); calls != 6 {
-			t.Fatalf("excluded body host calls = %d, want 6", calls)
+		if calls := session.TotalHostCalls(); calls != 0 {
+			t.Fatalf("excluded body host calls = %d, want 0", calls)
 		}
 	})
 }
@@ -141,7 +158,7 @@ func buildWAFArtifact(t *testing.T) []byte {
 	defer cancel()
 	for _, args := range [][]string{
 		{"test", "-p", "sakullla-waf", "--locked"},
-		{"build", "-p", "sakullla-waf", "--target", "wasm32v1-none", "--release", "--locked"},
+		{"build", "-p", "sakullla-waf", "--target", "wasm32-unknown-unknown", "--release", "--locked"},
 	} {
 		command := exec.CommandContext(ctx, cargo, args...)
 		command.Dir = repositoryRoot
@@ -149,7 +166,7 @@ func buildWAFArtifact(t *testing.T) []byte {
 			t.Fatalf("cargo %v failed: %v\n%s", args, err, output)
 		}
 	}
-	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32v1-none", "release", "sakullla_waf.wasm")
+	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32-unknown-unknown", "release", "sakullla_waf.wasm")
 	artifact, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatal(err)
@@ -162,16 +179,17 @@ func buildWAFArtifact(t *testing.T) []byte {
 }
 
 type policyArtifactSession struct {
-	t             *testing.T
-	ctx           context.Context
-	runtime       wazero.Runtime
-	guest         api.Module
-	evaluateCount int
-	eventCount    int
-	statePutCount int
-	hostCalls     map[string]int
-	fieldCalls    map[string]int
-	lastPayload   []byte
+	t              *testing.T
+	ctx            context.Context
+	runtime        wazero.Runtime
+	guest          api.Module
+	evaluateCount  int
+	eventCount     int
+	statePutCount  int
+	hostCalls      map[string]int
+	fieldCalls     map[string]int
+	lastPayload    []byte
+	normalizedHTTP []byte
 }
 
 func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
@@ -187,7 +205,7 @@ func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []b
 func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (*policyArtifactSession, pluginsdk.PolicyStatus) {
 	t.Helper()
 	ctx := context.Background()
-	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV1))
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2))
 	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int)}
 	fields := map[string][]byte{
 		"site":                         []byte("site-a"),
@@ -220,6 +238,8 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 				session.fieldCalls[field]++
 				value, found := fields[field]
 				response, err = marshalWAFBytesResponse(value, found)
+			case pluginsdk.PolicyHostReadNormalizedHTTP:
+				response, err = marshalWAFNormalizedHTTPResponse(path, fields["headers"], fields["trusted_source"], len(body), complete)
 			case pluginsdk.PolicyHostReadBodyWindow:
 				message := decodeWAFPolicyMessage(t, "ReadBodyWindowRequest", request)
 				limit := int(wafMessageUint(t, message, "length"))
@@ -264,6 +284,12 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 		t.Fatal(err)
 	}
 	session.guest = guest
+	session.normalizedHTTP, err = marshalWAFNormalizedHTTPResponse(
+		path, fields["headers"], fields["trusted_source"], len(body), complete,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	initWire := marshalWAFInit(t, config)
 	initPointer := wafAllocateAndWrite(t, ctx, guest, initWire)
 	result, err := guest.ExportedFunction(pluginsdk.PolicyExportInit).Call(ctx, uint64(initPointer), uint64(len(initWire)))
@@ -282,9 +308,17 @@ func (session *policyArtifactSession) Close() {
 }
 
 func (session *policyArtifactSession) Evaluate() pluginsdk.PolicyAction {
+	return session.evaluate(session.normalizedHTTP)
+}
+
+func (session *policyArtifactSession) EvaluateWithImportFallback() pluginsdk.PolicyAction {
+	return session.evaluate(nil)
+}
+
+func (session *policyArtifactSession) evaluate(normalizedHTTP []byte) pluginsdk.PolicyAction {
 	session.t.Helper()
 	session.evaluateCount++
-	evaluateWire := marshalWAFEvaluate(session.t)
+	evaluateWire := marshalWAFEvaluate(session.t, normalizedHTTP)
 	evaluatePointer := wafAllocateAndWrite(session.t, session.ctx, session.guest, evaluateWire)
 	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(session.ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
 	if err != nil || len(result) != 1 {
@@ -351,10 +385,16 @@ func marshalWAFInit(t *testing.T, config []byte) []byte {
 	return marshalWAFMessage(t, message)
 }
 
-func marshalWAFEvaluate(t *testing.T) []byte {
+func marshalWAFEvaluate(t *testing.T, normalizedHTTP []byte) []byte {
 	message := newWAFPolicyMessage(t, "EvaluateRequest")
 	message.ProtoReflect().Set(wafField(t, message, "extension_point"), protoreflect.ValueOfString("http.request"))
 	message.ProtoReflect().Set(wafField(t, message, "request_id"), protoreflect.ValueOfString("waf-request-1"))
+	if len(normalizedHTTP) != 0 {
+		message.ProtoReflect().Set(
+			wafField(t, message, "normalized_http"),
+			protoreflect.ValueOfBytes(normalizedHTTP),
+		)
+	}
 	return marshalWAFMessage(t, message)
 }
 
@@ -366,6 +406,21 @@ func marshalWAFBytesResponse(value []byte, found bool) ([]byte, error) {
 	message := dynamicpb.NewMessage(descriptor)
 	message.Set(descriptor.Fields().ByName("value"), protoreflect.ValueOfBytes(value))
 	message.Set(descriptor.Fields().ByName("found"), protoreflect.ValueOfBool(found))
+	return (proto.MarshalOptions{Deterministic: true}).Marshal(message)
+}
+
+func marshalWAFNormalizedHTTPResponse(path string, headers, source []byte, bodyLength int, complete bool) ([]byte, error) {
+	descriptor, err := protoschema.Message("nre.plugin.policy.v1.NormalizedHTTPResponse")
+	if err != nil {
+		return nil, err
+	}
+	message := dynamicpb.NewMessage(descriptor)
+	message.Set(descriptor.Fields().ByName("path"), protoreflect.ValueOfBytes([]byte(path)))
+	message.Set(descriptor.Fields().ByName("headers"), protoreflect.ValueOfBytes(headers))
+	message.Set(descriptor.Fields().ByName("trusted_source"), protoreflect.ValueOfBytes(source))
+	message.Set(descriptor.Fields().ByName("trusted_source_authenticated"), protoreflect.ValueOfBool(true))
+	message.Set(descriptor.Fields().ByName("body_window_complete"), protoreflect.ValueOfBool(complete))
+	message.Set(descriptor.Fields().ByName("body_window_length"), protoreflect.ValueOfUint32(uint32(bodyLength)))
 	return (proto.MarshalOptions{Deterministic: true}).Marshal(message)
 }
 

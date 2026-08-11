@@ -66,6 +66,24 @@ func TestOfficialLockEvidenceBindsSDKCommitABIAndMarket(t *testing.T) {
 	}
 }
 
+func TestReleaseCandidateIncludesRepositoryGuideWhenProvided(t *testing.T) {
+	root := t.TempDir()
+	legal := writeLegal(t, root)
+	guide := filepath.Join(root, "AGENTS.md")
+	if err := os.WriteFile(guide, []byte("# Repository Guidelines\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input := fixtureInput(filepath.Join(root, "candidate"), legal, []Package{writePackage(t, root, "plugin")})
+	input.GuidePath = guide
+	if _, err := Assemble(input); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(input.OutputDir, "AGENTS.md"))
+	if err != nil || string(data) != "# Repository Guidelines\n" {
+		t.Fatalf("candidate guide = %q, %v", data, err)
+	}
+}
+
 func TestProvenanceSignatureCoversExactPersistedBytesAsRawDigest(t *testing.T) {
 	root := t.TempDir()
 	legal := writeLegal(t, root)

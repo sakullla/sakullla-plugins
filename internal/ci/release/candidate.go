@@ -46,6 +46,7 @@ type Input struct {
 	NoticePath             string
 	ThirdPartyLicensesPath string
 	SBOMPath               string
+	GuidePath              string
 	Packages               []Package
 }
 
@@ -181,6 +182,11 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 		{input.NoticePath, "NOTICE"}, {input.ThirdPartyLicensesPath, "THIRD_PARTY_LICENSES.json"}, {input.SBOMPath, "SBOM.spdx.json"},
 	} {
 		if err := copyRegularFile(item.source, filepath.Join(temporary, item.destination)); err != nil {
+			return Result{}, err
+		}
+	}
+	if input.GuidePath != "" {
+		if err := copyRegularFile(input.GuidePath, filepath.Join(temporary, "AGENTS.md")); err != nil {
 			return Result{}, err
 		}
 	}

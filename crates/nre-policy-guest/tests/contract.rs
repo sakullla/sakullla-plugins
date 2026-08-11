@@ -1,9 +1,9 @@
 use nre_policy_guest::{
     ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, EvaluateRequest, FrameWriter,
-    HostClient, HostImport, HostLimits, HostTransport, InitRequest, POLICY_ABI_V1, PolicyAction,
-    PolicyResourceBudget, ReasonCode, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
-    WireCursor, WireLimits, encode_evaluate_error, encode_evaluate_success, pack_host_result,
-    pack_policy_buffer, unpack_policy_buffer,
+    HostClient, HostImport, HostLimits, HostTransport, InitRequest, NormalizedHttpResponse,
+    POLICY_ABI_V1, PolicyAction, PolicyResourceBudget, ReasonCode, RuntimeErrorCode,
+    SecurityEventAction, SecurityEventCode, WireCursor, WireLimits, encode_evaluate_error,
+    encode_evaluate_success, pack_host_result, pack_policy_buffer, unpack_policy_buffer,
 };
 
 #[test]
@@ -12,7 +12,7 @@ fn generated_contract_identity_and_values_match_canonical_sdk() {
     assert_eq!(ABI_MAJOR_VERSION, 1);
     assert_eq!(
         CANONICAL_DESCRIPTOR_SET_SHA256,
-        "5cbab7e002914f3da5e80a762594c2b61fe8c44b7f320146e70d6789c3c6cd86"
+        "9bd720a647d0da83d8427c47df9d89bebf2463a4304fa5fee83cbc59dd7578ee"
     );
     assert_eq!(AbiStatus::ResourceExhausted as u32, 3);
     assert_eq!(RuntimeErrorCode::IncompatibleAbi as u32, 6);
@@ -71,12 +71,30 @@ fn request_views_borrow_the_frame_without_allocation() {
 
     let frame = [
         0x0a, 0x0c, b'h', b't', b't', b'p', b'.', b'r', b'e', b'q', b'u', b'e', b's', b't', 0x12,
-        0x02, b'r', b'1', 0x1a, 0x01, 0xff,
+        0x02, b'r', b'1', 0x1a, 0x01, 0xff, 0x22, 0x03, 0x0a, 0x01, b'/',
     ];
     let request = EvaluateRequest::decode(&frame, WireLimits::new(frame.len(), 6)).unwrap();
     assert_eq!(request.extension_point, "http.request");
     assert_eq!(request.request_id, "r1");
     assert_eq!(request.payload, &[0xff]);
+    assert_eq!(request.normalized_http, &[0x0a, 0x01, b'/']);
+}
+
+#[test]
+fn normalized_http_snapshot_decodes_fixed_fields_without_allocation() {
+    let frame = [
+        0x0a, 0x05, b'/', b's', b'a', b'f', b'e', 0x12, 0x03, b'q', b'=', b'1', 0x1a, 0x02, b'x',
+        b':', 0x22, 0x07, b'1', b'.', b'2', b'.', b'3', b'.', b'4', 0x28, 0x01, 0x30, 0x01, 0x38,
+        0x11,
+    ];
+    let snapshot = NormalizedHttpResponse::decode(&frame, WireLimits::new(frame.len(), 8)).unwrap();
+    assert_eq!(snapshot.path, b"/safe");
+    assert_eq!(snapshot.query, b"q=1");
+    assert_eq!(snapshot.headers, b"x:");
+    assert_eq!(snapshot.trusted_source, b"1.2.3.4");
+    assert!(snapshot.trusted_source_authenticated);
+    assert!(snapshot.body_window_complete);
+    assert_eq!(snapshot.body_window_length, 17);
 }
 
 #[test]

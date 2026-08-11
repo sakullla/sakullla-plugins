@@ -257,6 +257,8 @@ func capabilityProbe(id, packagePath string) (string, bool) {
 	switch id {
 	case "policy.body-window":
 		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\nvar _ required = (sdk.PolicyHost)(nil)\nconst _ string = sdk.PolicyHostReadBodyWindow\nfunc main() {}\n", quotedImport), true
+	case "policy.normalized-http-snapshot":
+		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { ReadNormalizedHTTP(context.Context) (sdk.PolicyNormalizedHTTP, error) }\nvar _ required = (sdk.PolicyNormalizedHTTPHost)(nil)\nconst _ string = sdk.PolicyHostReadNormalizedHTTP\nvar _ = sdk.PolicyNormalizedHTTP{Path: []byte{}, Headers: []byte{}, TrustedSourceAuthenticated: true}\nfunc main() {}\n", quotedImport), true
 	case "policy.event-metric":
 		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, sdk.PolicySecurityEvent) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
 	case "rpc.lifecycle":

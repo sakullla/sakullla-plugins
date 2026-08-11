@@ -23,8 +23,8 @@ mod wasm {
 
     use nre_policy_guest::{
         ABI_MAJOR_VERSION, AbiStatus, EvaluateRequest, HostClient, HostLimits, InitRequest,
-        PolicyAction, RuntimeErrorCode, WasmHost, WireLimits, encode_evaluate_error,
-        encode_evaluate_success, pack_policy_buffer,
+        NormalizedHttpResponse, PolicyAction, RuntimeErrorCode, WasmHost, WireLimits,
+        encode_evaluate_error, encode_evaluate_success, pack_policy_buffer,
     };
 
     use crate::{
@@ -36,6 +36,8 @@ mod wasm {
     const OUTPUT_BYTES: usize = 4096;
     const FIELD_BYTES: usize = 4096;
     const BODY_WINDOW_BYTES: usize = 4088;
+
+    type WafHost = HostClient<WasmHost, 512, FIELD_BYTES>;
 
     struct Shared<T>(UnsafeCell<T>);
 
@@ -86,6 +88,37 @@ mod wasm {
 
         fn as_slice(&self) -> &[u8] {
             self.bytes.get(..self.len).unwrap_or(&[])
+        }
+    }
+
+    struct SnapshotFields {
+        path: Field<1024>,
+        query: Field<1024>,
+        headers: Field<2048>,
+        source: Field<64>,
+        source_authenticated: bool,
+        body_window_complete: bool,
+        body_window_length: usize,
+    }
+
+    impl SnapshotFields {
+        fn copy_from(snapshot: NormalizedHttpResponse<'_>) -> Result<Self, AbiStatus> {
+            let mut fields = Self {
+                path: Field::EMPTY,
+                query: Field::EMPTY,
+                headers: Field::EMPTY,
+                source: Field::EMPTY,
+                source_authenticated: snapshot.trusted_source_authenticated,
+                body_window_complete: snapshot.body_window_complete,
+                body_window_length: snapshot.body_window_length as usize,
+            };
+            fields.path.set(snapshot.path, true)?;
+            fields.query.set(snapshot.query, true)?;
+            fields.headers.set(snapshot.headers, true)?;
+            fields
+                .source
+                .set(snapshot.trusted_source, !snapshot.trusted_source.is_empty())?;
+            Ok(fields)
         }
     }
 
@@ -154,30 +187,64 @@ mod wasm {
             Some(input) => input,
             None => return error_response(RuntimeErrorCode::InvalidArgument, "invalid input"),
         };
-        if EvaluateRequest::decode(input, WireLimits::POLICY_INPUT).is_err() {
-            return error_response(RuntimeErrorCode::InvalidArgument, "invalid request");
-        }
+        let request = match EvaluateRequest::decode(input, WireLimits::POLICY_INPUT) {
+            Ok(request) => request,
+            Err(_) => return error_response(RuntimeErrorCode::InvalidArgument, "invalid request"),
+        };
         // SAFETY: the host serializes calls into one policy instance.
         let runtime = unsafe { &mut *RUNTIME.0.get() };
         if !runtime.initialized {
             return error_response(RuntimeErrorCode::Unavailable, "policy not initialized");
         }
 
-        let mut host: HostClient<WasmHost, 512, FIELD_BYTES> =
-            match HostClient::new(WasmHost, HostLimits::new(16, 256)) {
+        let mut host = None;
+        let snapshot = if request.normalized_http.is_empty() {
+            let current = match ensure_host(&mut host) {
                 Ok(host) => host,
-                Err(error) => {
-                    return error_response(runtime_error(error.status), "host unavailable");
+                Err(status) => {
+                    return error_response(runtime_error(status), "host unavailable");
                 }
             };
-        match evaluate_with_host(&runtime.config, &mut host) {
+            let response = match current.read_normalized_http() {
+                Ok(response) => response,
+                Err(error) => {
+                    return error_response(runtime_error(error.status), "host read failed");
+                }
+            };
+            match SnapshotFields::copy_from(response) {
+                Ok(snapshot) => snapshot,
+                Err(status) => return error_response(runtime_error(status), "host read failed"),
+            }
+        } else {
+            let response = match NormalizedHttpResponse::decode(
+                request.normalized_http,
+                WireLimits::POLICY_OUTPUT,
+            ) {
+                Ok(response) => response,
+                Err(error) => {
+                    return error_response(runtime_error(error.status), "invalid snapshot");
+                }
+            };
+            match SnapshotFields::copy_from(response) {
+                Ok(snapshot) => snapshot,
+                Err(status) => return error_response(runtime_error(status), "invalid snapshot"),
+            }
+        };
+        match evaluate_snapshot(&runtime.config, &snapshot, &mut host) {
             Ok((action, event, event_len)) => {
                 let Some(event) = event.get(..event_len) else {
                     return error_response(RuntimeErrorCode::Internal, "invalid event");
                 };
-                let host_result = emit_observability(&mut host, action);
-                if let Err(status) = host_result {
-                    return error_response(runtime_error(status), "host operation failed");
+                if action != PolicyAction::Allow {
+                    let current = match ensure_host(&mut host) {
+                        Ok(host) => host,
+                        Err(status) => {
+                            return error_response(runtime_error(status), "host unavailable");
+                        }
+                    };
+                    if let Err(status) = emit_observability(current, action) {
+                        return error_response(runtime_error(status), "host operation failed");
+                    }
                 }
                 success_response(action, event)
             }
@@ -195,55 +262,54 @@ mod wasm {
         AbiStatus::Ok as u32
     }
 
-    fn evaluate_with_host(
+    fn evaluate_snapshot(
         config: &PreparedConfig,
-        host: &mut HostClient<WasmHost, 512, FIELD_BYTES>,
+        snapshot: &SnapshotFields,
+        host: &mut Option<WafHost>,
     ) -> Result<(PolicyAction, [u8; 256], usize), AbiStatus> {
-        let mut path = Field::<1024>::EMPTY;
-        let mut query = Field::<1024>::EMPTY;
-        let mut headers = Field::<2048>::EMPTY;
-        let mut source = Field::<64>::EMPTY;
-        let mut authenticated = Field::<8>::EMPTY;
-        read_field(host, "path", &mut path)?;
-        read_field(host, "query", &mut query)?;
-        read_field(host, "headers", &mut headers)?;
-        read_field(host, "trusted_source", &mut source)?;
-        read_field(host, "trusted_source_authenticated", &mut authenticated)?;
-
         let engine = WafEngine::new(config);
         let request = NormalizedRequest {
-            path: path.as_slice(),
-            query: query.as_slice(),
-            headers: headers.as_slice(),
+            path: snapshot.path.as_slice(),
+            query: snapshot.query.as_slice(),
+            headers: snapshot.headers.as_slice(),
             trusted_source: TrustedSource {
-                authenticated: authenticated.as_slice() == b"true" && source.found,
-                address: source.as_slice(),
+                authenticated: snapshot.source_authenticated && snapshot.source.found,
+                address: snapshot.source.as_slice(),
             },
             body: BodyWindow::Unavailable,
         };
         let mut evaluation = engine.evaluate(request);
         if evaluation.reason == crate::DecisionReason::BodyWindowSkipped {
-            let mut complete = Field::<8>::EMPTY;
-            read_field(host, "body_window_complete", &mut complete)?;
             let mut body = Field::<BODY_WINDOW_BYTES>::EMPTY;
-            let response = host
-                .read_body_window(0, BODY_WINDOW_BYTES as u32)
-                .map_err(|error| error.status)?;
-            body.set(response.value, response.found)?;
-            let body_window = if !body.found {
-                BodyWindow::Unavailable
-            } else if complete.as_slice() == b"true" {
-                BodyWindow::Complete(body.as_slice())
+            let body_window = if snapshot.body_window_length == 0 {
+                if snapshot.body_window_complete {
+                    BodyWindow::Complete(&[])
+                } else {
+                    BodyWindow::Truncated(&[])
+                }
             } else {
-                BodyWindow::Truncated(body.as_slice())
+                let requested = core::cmp::min(snapshot.body_window_length, BODY_WINDOW_BYTES);
+                let response = ensure_host(host)?
+                    .read_body_window(0, requested as u32)
+                    .map_err(|error| error.status)?;
+                body.set(response.value, response.found)?;
+                if !body.found {
+                    BodyWindow::Unavailable
+                } else if snapshot.body_window_complete
+                    && snapshot.body_window_length <= BODY_WINDOW_BYTES
+                {
+                    BodyWindow::Complete(body.as_slice())
+                } else {
+                    BodyWindow::Truncated(body.as_slice())
+                }
             };
             evaluation = engine.evaluate(NormalizedRequest {
-                path: path.as_slice(),
-                query: query.as_slice(),
-                headers: headers.as_slice(),
+                path: snapshot.path.as_slice(),
+                query: snapshot.query.as_slice(),
+                headers: snapshot.headers.as_slice(),
                 trusted_source: TrustedSource {
-                    authenticated: authenticated.as_slice() == b"true" && source.found,
-                    address: source.as_slice(),
+                    authenticated: snapshot.source_authenticated && snapshot.source.found,
+                    address: snapshot.source.as_slice(),
                 },
                 body: body_window,
             });
@@ -253,7 +319,7 @@ mod wasm {
             return Ok((evaluation.action, event, 0));
         }
         let mut site = Field::<96>::EMPTY;
-        read_field(host, "site", &mut site)?;
+        read_field(ensure_host(host)?, "site", &mut site)?;
         let site_text = core::str::from_utf8(site.as_slice()).unwrap_or("unknown");
         let event_len = evaluation
             .write_event(site_text, &mut event)
@@ -262,7 +328,7 @@ mod wasm {
     }
 
     fn read_field<const N: usize>(
-        host: &mut HostClient<WasmHost, 512, FIELD_BYTES>,
+        host: &mut WafHost,
         name: &str,
         output: &mut Field<N>,
     ) -> Result<(), AbiStatus> {
@@ -270,10 +336,7 @@ mod wasm {
         output.set(response.value, response.found)
     }
 
-    fn emit_observability(
-        host: &mut HostClient<WasmHost, 512, FIELD_BYTES>,
-        action: PolicyAction,
-    ) -> Result<(), AbiStatus> {
+    fn emit_observability(host: &mut WafHost, action: PolicyAction) -> Result<(), AbiStatus> {
         if action != PolicyAction::Allow {
             let event_action = if action == PolicyAction::Deny {
                 nre_policy_guest::SecurityEventAction::Deny
@@ -286,8 +349,16 @@ mod wasm {
             )
             .map_err(|error| error.status)?;
         }
-        host.add_metric("waf.evaluations", 1)
-            .map_err(|error| error.status)
+        Ok(())
+    }
+
+    fn ensure_host(host: &mut Option<WafHost>) -> Result<&mut WafHost, AbiStatus> {
+        if host.is_none() {
+            let current = HostClient::new(WasmHost, HostLimits::new(16, 256))
+                .map_err(|error| error.status)?;
+            *host = Some(current);
+        }
+        host.as_mut().ok_or(AbiStatus::Internal)
     }
 
     fn success_response(action: PolicyAction, payload: &[u8]) -> u64 {

@@ -24,8 +24,8 @@ pub use budget::{BudgetDimension, PolicyResourceBudget, WireLimits};
 pub use host::WasmHost;
 pub use host::{HostClient, HostImport, HostLimits, HostTransport};
 pub use message::{
-    BytesResponse, EvaluateRequest, GrantedScopes, InitRequest, encode_evaluate_error,
-    encode_evaluate_success,
+    BytesResponse, EvaluateRequest, GrantedScopes, InitRequest, NormalizedHttpResponse,
+    encode_evaluate_error, encode_evaluate_success,
 };
 pub use reason::{GuestError, ReasonCode};
 pub use wire::{Field, FieldValue, FrameWriter, WireCursor, WireType};

@@ -2,72 +2,106 @@
   "schema_version": 1,
   "repository": {
     "url": "https://github.com/sakullla/nginx-reverse-emby.git",
-    "commit": "9e2d915cabd0d442d9aa2528e10bff81d7557cc5",
-    "tag": "plugin-sdk/v0.3.0"
+    "commit": "a193fae6ea8151758a7896f64f606837f5ae312f",
+    "tag": "plugin-sdk/v0.3.3"
   },
   "sdk": {
     "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
     "module_directory": "plugin-sdk",
     "package_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-    "contract_tree_oid": "4cbd14f0312cf3140300514ca787d8ad7876ccc8"
+    "contract_tree_oid": "54a5fafe6e5190723df61d5c850b7c7f25aeafb1"
   },
   "artifacts": {
-    "descriptor_set_sha256": "5cbab7e002914f3da5e80a762594c2b61fe8c44b7f320146e70d6789c3c6cd86",
+    "descriptor_set_sha256": "9bd720a647d0da83d8427c47df9d89bebf2463a4304fa5fee83cbc59dd7578ee",
     "plugin_manifest_schema_sha256": "1cdbe4f9ebd4b6d2957ab70059342189380e2b98f36f72f3ebccfb68ee2ba215",
-    "policy_proto_sha256": "0c46cac6ac35bcf5c9f6faebb9e115131dab23b724e00d85650a843b8d16b528",
+    "policy_proto_sha256": "45f856c7fdda40b8d28584153aa71f8621af469f30542b227b11907427c19ded",
     "rpc_proto_sha256": "7139a3be681eac2faf4e6fc4351db836c4ecd779fe383ec65fb4d8d4dd13f5d4",
     "canonical_guest_sha256": "fc89d8d018d749de23b6979774e917f71b22883dd302d931b3791e37f50ea7ec",
-    "validator_tree_oid": "2013342d389853abb53e73b6f9241352bdc6d218"
+    "validator_tree_oid": "44ea28dfcfc462462ef1655725d12fa258e7f210"
   },
   "required_capabilities": [
     {
       "id": "policy.atomic-state",
       "available": true,
       "evidence_path": "plugin-sdk/go/host_capabilities.go",
-      "symbols": ["CapabilityPolicyAtomicState", "HostCapabilityCall"]
+      "symbols": [
+        "CapabilityPolicyAtomicState",
+        "HostCapabilityCall"
+      ]
     },
     {
       "id": "policy.body-window",
       "available": true,
       "evidence_path": "plugin-sdk/go/contracts.go",
-      "symbols": ["PolicyHostReadBodyWindow"]
+      "symbols": [
+        "PolicyHostReadBodyWindow"
+      ]
     },
     {
       "id": "policy.event-metric",
       "available": true,
       "evidence_path": "plugin-sdk/go/contracts.go",
-      "symbols": ["PolicyHostEmitEvent", "PolicyHostAddMetric"]
+      "symbols": [
+        "PolicyHostEmitEvent",
+        "PolicyHostAddMetric"
+      ]
     },
     {
       "id": "policy.monotonic-clock",
       "available": true,
       "evidence_path": "plugin-sdk/go/host_capabilities.go",
-      "symbols": ["CapabilityPolicyMonotonicClock", "HostCapabilityCall"]
+      "symbols": [
+        "CapabilityPolicyMonotonicClock",
+        "HostCapabilityCall"
+      ]
+    },
+    {
+      "id": "policy.normalized-http-snapshot",
+      "available": true,
+      "evidence_path": "plugin-sdk/go/contracts.go",
+      "symbols": [
+        "PolicyHostReadNormalizedHTTP",
+        "PolicyNormalizedHTTPHost"
+      ]
     },
     {
       "id": "policy.trusted-source",
       "available": true,
       "evidence_path": "plugin-sdk/go/host_capabilities.go",
-      "symbols": ["CapabilityPolicyTrustedSource", "HostCapabilityCall"]
+      "symbols": [
+        "CapabilityPolicyTrustedSource",
+        "HostCapabilityCall"
+      ]
     },
     {
       "id": "rpc.lifecycle",
       "available": true,
       "evidence_path": "plugin-sdk/go/contracts.go",
-      "symbols": ["RPCHandshakeRequest", "LifecycleRequest", "LifecycleResponse"]
+      "symbols": [
+        "RPCHandshakeRequest",
+        "LifecycleRequest",
+        "LifecycleResponse"
+      ]
     },
     {
       "id": "service.revocable-resource-handle",
       "available": true,
       "evidence_path": "plugin-sdk/go/host_capabilities.go",
-      "symbols": ["CapabilityServiceRevocableResourceHandle", "HostCapabilityCall"]
+      "symbols": [
+        "CapabilityServiceRevocableResourceHandle",
+        "HostCapabilityCall"
+      ]
     },
     {
       "id": "ui.dynamic-actions",
       "available": true,
       "evidence_path": "plugin-sdk/go/host_capabilities.go",
-      "symbols": ["CapabilityUIDynamicActions", "DynamicAction", "HostCapabilityCall"]
+      "symbols": [
+        "CapabilityUIDynamicActions",
+        "DynamicAction",
+        "HostCapabilityCall"
+      ]
     }
   ],
-  "capability_contract_sha256": "00e54c56c222cd7a51dfd6fd329d73123923c148beeae8ea6019b4a2ac3c6f9b"
+  "capability_contract_sha256": "6350d6d60e33d723d0645f4870f690d7533098a9ca88a18c1fd3d6ebb87a3b47"
 }

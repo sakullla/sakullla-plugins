@@ -285,6 +285,43 @@ func fixtureLock(t *testing.T, repository string) Lock {
 	return lock
 }
 
+func TestRefreshRecalculatesStaleDerivedLockAndWritesAtomically(t *testing.T) {
+	repository := t.TempDir()
+	writeSDKFixture(t, repository)
+	runGitTest(t, repository, "init", "--quiet")
+	runGitTest(t, repository, "config", "user.name", "fixture")
+	runGitTest(t, repository, "config", "user.email", "fixture@example.test")
+	runGitTest(t, repository, "add", ".")
+	runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
+	want := fixtureLock(t, repository)
+	stale := want
+	stale.SDK.ContractTreeOID = strings.Repeat("a", 40)
+	stale.Artifacts = Artifacts{
+		DescriptorSetSHA256: strings.Repeat("a", 64), PluginSchemaSHA256: strings.Repeat("b", 64),
+		PolicyProtoSHA256: strings.Repeat("c", 64), RPCProtoSHA256: strings.Repeat("d", 64),
+		CanonicalGuestSHA256: strings.Repeat("e", 64), ValidatorTreeOID: strings.Repeat("f", 40),
+	}
+	stale.CapabilityContractSHA256 = strings.Repeat("0", 64)
+	refreshed, err := Refresh(t.Context(), stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.SDK.ContractTreeOID != want.SDK.ContractTreeOID || refreshed.Artifacts != want.Artifacts || refreshed.CapabilityContractSHA256 != want.CapabilityContractSHA256 {
+		t.Fatalf("refreshed lock differs from canonical fixture:\n got=%+v\nwant=%+v", refreshed, want)
+	}
+	path := filepath.Join(t.TempDir(), "sdk.lock.json")
+	if err := Write(path, stale); err == nil {
+		t.Fatal("Write accepted a stale invalid lock")
+	}
+	if err := Write(path, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil || loaded.Repository.Commit != want.Repository.Commit {
+		t.Fatalf("Load() = %+v, %v", loaded, err)
+	}
+}
+
 func runGitTest(t *testing.T, root string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", root}, args...)
@@ -310,6 +347,7 @@ func TestCapabilityProbeCoversCanonicalLockCatalog(t *testing.T) {
 		"policy.body-window",
 		"policy.event-metric",
 		"policy.monotonic-clock",
+		"policy.normalized-http-snapshot",
 		"policy.trusted-source",
 		"rpc.lifecycle",
 		"service.revocable-resource-handle",

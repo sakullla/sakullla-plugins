@@ -39,17 +39,23 @@ func run(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("sdk", flag.ContinueOnError)
 		lockPath := flags.String("lock", "sdk.lock.json", "canonical SDK lock")
 		requireCapabilities := flags.Bool("require-host-capabilities", false, "fail when any required host capability is unavailable")
+		update := flags.Bool("update", false, "resolve the configured SDK selector and atomically refresh lock, module, and Rust projection")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
 			return fmt.Errorf("unexpected sdk arguments: %v", flags.Args())
 		}
-		lock, err := sdklock.Load(*lockPath)
+		absoluteLock, err := filepath.Abs(*lockPath)
 		if err != nil {
 			return err
 		}
-		absoluteLock, err := filepath.Abs(*lockPath)
+		if *update {
+			if err := updateSDKLock(ctx, absoluteLock); err != nil {
+				return err
+			}
+		}
+		lock, err := sdklock.Load(absoluteLock)
 		if err != nil {
 			return err
 		}
@@ -116,6 +122,34 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
+}
+
+func updateSDKLock(ctx context.Context, lockPath string) error {
+	lock, err := sdklock.Read(lockPath)
+	if err != nil {
+		return err
+	}
+	refreshed, err := sdklock.Refresh(ctx, lock)
+	if err != nil {
+		return err
+	}
+	repositoryRoot := filepath.Dir(lockPath)
+	if refreshed.Repository.Tag == "" || !strings.HasPrefix(refreshed.Repository.Tag, "plugin-sdk/v") {
+		return fmt.Errorf("SDK update requires a canonical plugin-sdk/v* tag")
+	}
+	version := strings.TrimPrefix(refreshed.Repository.Tag, "plugin-sdk/")
+	for _, invocation := range [][]string{
+		{"mod", "edit", "-require=" + refreshed.SDK.ModulePath + "@" + version},
+		{"mod", "download", refreshed.SDK.ModulePath + "@" + version},
+		{"run", "./internal/ci/sdk/cmd/generate-policy-rust", "--output", "crates/nre-policy-guest/src/abi_generated.rs"},
+	} {
+		command := exec.CommandContext(ctx, "go", invocation...)
+		command.Dir = repositoryRoot
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("refresh SDK repository projection with go %s: %w: %s", strings.Join(invocation, " "), err, output)
+		}
+	}
+	return sdklock.Write(lockPath, refreshed)
 }
 
 type verifiedPlugin struct {
@@ -287,7 +321,7 @@ func checkRelease(ctx context.Context, args []string) error {
 		SDKRepositoryCommit: lock.Repository.Commit, SDKDescriptorSHA256: lock.Artifacts.DescriptorSetSHA256,
 		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity, Signer: signer,
 		NoticePath: filepath.Join(root, "NOTICE"), ThirdPartyLicensesPath: filepath.Join(root, "THIRD_PARTY_LICENSES.json"),
-		SBOMPath: filepath.Join(root, "SBOM.spdx.json"), Packages: packages,
+		SBOMPath: filepath.Join(root, "SBOM.spdx.json"), GuidePath: filepath.Join(root, "AGENTS.md"), Packages: packages,
 	})
 	if err != nil {
 		return err
@@ -506,12 +540,12 @@ func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, s
 	if err != nil {
 		return "", err
 	}
-	command := exec.CommandContext(ctx, cargo, "build", "-p", spec.packageName, "--target", "wasm32v1-none", "--release", "--locked")
+	command := exec.CommandContext(ctx, cargo, "build", "-p", spec.packageName, "--target", "wasm32-unknown-unknown", "--release", "--locked")
 	command.Dir = repositoryRoot
 	if output, err := command.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build %s: %w\n%s", pluginID, err, output)
 	}
-	artifactPath := filepath.Join(cargoTargetDirectory(repositoryRoot), "wasm32v1-none", "release", strings.ReplaceAll(spec.packageName, "-", "_")+".wasm")
+	artifactPath := filepath.Join(cargoTargetDirectory(repositoryRoot), "wasm32-unknown-unknown", "release", strings.ReplaceAll(spec.packageName, "-", "_")+".wasm")
 	artifact, err := os.ReadFile(artifactPath)
 	if err != nil {
 		return "", err

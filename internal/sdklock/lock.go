@@ -58,6 +58,19 @@ type Capability struct {
 }
 
 func Load(path string) (Lock, error) {
+	lock, err := Read(path)
+	if err != nil {
+		return Lock{}, err
+	}
+	if err := lock.Validate(); err != nil {
+		return Lock{}, err
+	}
+	return lock, nil
+}
+
+// Read decodes a lock without validating derived digests. Maintenance tools
+// use it to refresh a stale lock; release and verification paths use Load.
+func Read(path string) (Lock, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Lock{}, err
@@ -67,9 +80,6 @@ func Load(path string) (Lock, error) {
 	var lock Lock
 	if err := decoder.Decode(&lock); err != nil {
 		return Lock{}, fmt.Errorf("decode SDK lock: %w", err)
-	}
-	if err := lock.Validate(); err != nil {
-		return Lock{}, err
 	}
 	return lock, nil
 }

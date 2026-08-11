@@ -1,12 +1,13 @@
 use crate::abi_generated::{self, field};
 use crate::{
-    AbiStatus, BytesResponse, FrameWriter, GuestError, ReasonCode, SecurityEventAction,
-    SecurityEventCode, WireLimits, unpack_host_result,
+    AbiStatus, BytesResponse, FrameWriter, GuestError, NormalizedHttpResponse, ReasonCode,
+    SecurityEventAction, SecurityEventCode, WireLimits, unpack_host_result,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostImport {
     ReadField,
+    ReadNormalizedHttp,
     ReadBodyWindow,
     StateGet,
     StatePut,
@@ -22,6 +23,7 @@ impl HostImport {
     pub const fn name(self) -> &'static str {
         match self {
             Self::ReadField => abi_generated::HOST_READ_FIELD,
+            Self::ReadNormalizedHttp => abi_generated::HOST_READ_NORMALIZED_HTTP,
             Self::ReadBodyWindow => abi_generated::HOST_READ_BODY_WINDOW,
             Self::StateGet => abi_generated::HOST_STATE_GET,
             Self::StatePut => abi_generated::HOST_STATE_PUT,
@@ -33,7 +35,7 @@ impl HostImport {
     const fn permits_response_growth_retry(self) -> bool {
         matches!(
             self,
-            Self::ReadField | Self::ReadBodyWindow | Self::StateGet
+            Self::ReadField | Self::ReadNormalizedHttp | Self::ReadBodyWindow | Self::StateGet
         )
     }
 }
@@ -59,6 +61,12 @@ impl HostTransport for WasmHost {
         unsafe {
             match import {
                 HostImport::ReadField => abi_generated::nre_host_read_field(
+                    request_ptr,
+                    request_len,
+                    response_ptr,
+                    response_capacity,
+                ),
+                HostImport::ReadNormalizedHttp => abi_generated::nre_host_read_normalized_http(
                     request_ptr,
                     request_len,
                     response_ptr,
@@ -170,6 +178,15 @@ where
             .get(..response_length)
             .ok_or_else(response_exhausted)?;
         BytesResponse::decode(response, self.limits.response_wire)
+    }
+
+    pub fn read_normalized_http(&mut self) -> Result<NormalizedHttpResponse<'_>, GuestError> {
+        let response_length = self.invoke(HostImport::ReadNormalizedHttp, 0)?;
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        NormalizedHttpResponse::decode(response, self.limits.response_wire)
     }
 
     pub fn read_body_window(
