@@ -48,3 +48,9 @@ force-publishes only the verified candidate tree to the generated
 `official-market` branch. Consumers track that branch; its provenance retains
 the immutable source `main` commit. The release workflow is not triggered by
 updates to `official-market`, so publication cannot recurse.
+
+The candidate root contains `provenance.signature.json`. Candidate assembly
+finishes and persists `provenance.json`, hashes those exact bytes with SHA-256,
+and asks the official signer to sign the decoded 32-byte digest. The detached
+signature document is written afterward and is not included in the provenance
+digest.

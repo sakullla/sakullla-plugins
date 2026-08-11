@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +63,46 @@ func TestOfficialLockEvidenceBindsSDKCommitABIAndMarket(t *testing.T) {
 		result.Provenance.SDKDescriptorSHA256 != strings.Repeat("c", 64) ||
 		result.Provenance.MarketSHA256 != result.MarketSHA256 || len(result.Provenance.SDKABIs) != 2 {
 		t.Fatalf("incomplete official-lock evidence: %#v", result.Provenance)
+	}
+}
+
+func TestProvenanceSignatureCoversExactPersistedBytesAsRawDigest(t *testing.T) {
+	root := t.TempDir()
+	legal := writeLegal(t, root)
+	candidate := filepath.Join(root, "candidate")
+	if _, err := Assemble(fixtureInput(candidate, legal, []Package{writePackage(t, root, "plugin")})); err != nil {
+		t.Fatal(err)
+	}
+	provenanceBytes, err := os.ReadFile(filepath.Join(candidate, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureBytes, err := os.ReadFile(filepath.Join(candidate, "provenance.signature.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document provenanceSignature
+	if err := json.Unmarshal(signatureBytes, &document); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(provenanceBytes)
+	if document.SchemaVersion != 1 || document.Algorithm != "ed25519" || document.Identity != "sakullla-official-root-2026" ||
+		document.PayloadSHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("invalid provenance signature document: %#v", document)
+	}
+	signature, err := base64.StdEncoding.Strict().DecodeString(document.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	if !ed25519.Verify(privateKey.Public().(ed25519.PublicKey), digest[:], signature) {
+		t.Fatal("signature does not cover the raw 32-byte provenance digest")
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "provenance.json"), append(provenanceBytes, ' '), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(candidate); err == nil || !strings.Contains(err.Error(), "payload digest mismatch") {
+		t.Fatalf("exact-byte provenance tampering was accepted: %v", err)
 	}
 }
 
@@ -213,6 +255,7 @@ func fixtureInput(output string, legal legalPaths, packages []Package) Input {
 	return Input{
 		OutputDir: output, RepositoryCommit: strings.Repeat("a", 40), SDKRepositoryCommit: strings.Repeat("b", 40),
 		SDKDescriptorSHA256: strings.Repeat("c", 64), SDKABIs: []string{"nre:rpc/v1", "nre:policy/v1"}, SignerIdentity: "sakullla-official-root-2026",
+		Signer:     candidateFixtureSigner{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))},
 		NoticePath: legal.notice, ThirdPartyLicensesPath: legal.thirdParty, SBOMPath: legal.sbom, Packages: packages,
 	}
 }

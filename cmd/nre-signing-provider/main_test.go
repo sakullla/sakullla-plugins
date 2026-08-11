@@ -78,6 +78,13 @@ func TestSignUsesPKCS8SecretWithoutEmittingIt(t *testing.T) {
 	if bytes.Contains(output.Bytes(), []byte(os.Getenv("NRE_TEST_SIGNING_KEY"))) {
 		t.Fatal("provider emitted private key material")
 	}
+	hexTextRequest, _ := json.Marshal(map[string]string{
+		"digest_sha256": base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(digest))),
+		"identity":      "sakullla-official-root-2026",
+	})
+	if err := run([]string{"sign", "--key-env", "NRE_TEST_SIGNING_KEY"}, bytes.NewReader(hexTextRequest), &bytes.Buffer{}); err == nil {
+		t.Fatal("provider accepted a 64-byte hex digest instead of 32 raw digest bytes")
+	}
 }
 
 func TestPublicKeyFileIsCanonical(t *testing.T) {

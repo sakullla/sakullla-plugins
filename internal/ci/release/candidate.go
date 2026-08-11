@@ -3,7 +3,10 @@ package release
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -39,10 +42,19 @@ type Input struct {
 	SDKDescriptorSHA256    string
 	SDKABIs                []string
 	SignerIdentity         string
+	Signer                 buildkit.Signer
 	NoticePath             string
 	ThirdPartyLicensesPath string
 	SBOMPath               string
 	Packages               []Package
+}
+
+type provenanceSignature struct {
+	SchemaVersion int    `json:"schema_version"`
+	Algorithm     string `json:"algorithm"`
+	Identity      string `json:"identity"`
+	PayloadSHA256 string `json:"payload_sha256"`
+	Signature     string `json:"signature"`
 }
 
 type packageEvidence struct {
@@ -92,11 +104,18 @@ type repositorySBOM struct {
 }
 
 func Assemble(input Input) (Result, error) {
+	return AssembleContext(context.Background(), input)
+}
+
+func AssembleContext(ctx context.Context, input Input) (Result, error) {
+	if ctx == nil {
+		return Result{}, fmt.Errorf("release candidate context is required")
+	}
 	if input.OutputDir == "" || !fullOID.MatchString(input.RepositoryCommit) ||
 		!fullOID.MatchString(input.SDKRepositoryCommit) || !isSHA256(input.SDKDescriptorSHA256) {
 		return Result{}, fmt.Errorf("release candidate requires output, full repository OIDs, and SDK descriptor digest")
 	}
-	if input.SignerIdentity == "" || len(input.SDKABIs) == 0 || len(input.Packages) == 0 {
+	if input.SignerIdentity == "" || input.Signer == nil || len(input.SDKABIs) == 0 || len(input.Packages) == 0 {
 		return Result{}, fmt.Errorf("release candidate requires signer, SDK ABIs, and packages")
 	}
 	if _, err := os.Lstat(input.OutputDir); !os.IsNotExist(err) {
@@ -168,6 +187,12 @@ func Assemble(input Input) (Result, error) {
 	if err := os.WriteFile(filepath.Join(temporary, "market.yaml"), marketBytes, 0o644); err != nil {
 		return Result{}, err
 	}
+	for _, pkg := range packages {
+		destination := filepath.Join(temporary, "packages", pkg.ID, pkg.Version)
+		if err := copyTree(pkg.Directory, destination); err != nil {
+			return Result{}, err
+		}
+	}
 	provenanceBytes, err := canonicalJSON(provenance)
 	if err != nil {
 		return Result{}, err
@@ -175,11 +200,24 @@ func Assemble(input Input) (Result, error) {
 	if err := os.WriteFile(filepath.Join(temporary, "provenance.json"), provenanceBytes, 0o644); err != nil {
 		return Result{}, err
 	}
-	for _, pkg := range packages {
-		destination := filepath.Join(temporary, "packages", pkg.ID, pkg.Version)
-		if err := copyTree(pkg.Directory, destination); err != nil {
-			return Result{}, err
-		}
+	provenanceDigest := sha256.Sum256(provenanceBytes)
+	signature, err := input.Signer.Sign(ctx, provenanceDigest[:])
+	if err != nil {
+		return Result{}, fmt.Errorf("sign release provenance: %w", err)
+	}
+	if signature.Algorithm != "ed25519" || signature.Identity != input.SignerIdentity || len(signature.Value) != ed25519.SignatureSize {
+		return Result{}, fmt.Errorf("provenance signer returned an invalid Ed25519 signature")
+	}
+	signatureDocument := provenanceSignature{
+		SchemaVersion: 1, Algorithm: signature.Algorithm, Identity: signature.Identity,
+		PayloadSHA256: hex.EncodeToString(provenanceDigest[:]), Signature: base64.StdEncoding.EncodeToString(signature.Value),
+	}
+	signatureBytes, err := canonicalJSON(signatureDocument)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := os.WriteFile(filepath.Join(temporary, "provenance.signature.json"), signatureBytes, 0o644); err != nil {
+		return Result{}, err
 	}
 	if err := Verify(temporary); err != nil {
 		return Result{}, err
@@ -217,6 +255,9 @@ func Verify(candidate string) error {
 		!fullOID.MatchString(provenance.SDKRepositoryCommit) || !isSHA256(provenance.SDKDescriptorSHA256) ||
 		provenance.SignerIdentity == "" || len(provenance.SDKABIs) == 0 || len(provenance.Packages) == 0 {
 		return fmt.Errorf("release provenance is incomplete")
+	}
+	if err := verifyProvenanceSignature(candidate, data, provenance.SignerIdentity); err != nil {
+		return err
 	}
 	marketABIs := strings.Split(marketDocument.SDKABI, ",")
 	sort.Strings(marketABIs)
@@ -257,6 +298,33 @@ func Verify(candidate string) error {
 		ThirdPartyLicensesPath: filepath.Join(candidate, "THIRD_PARTY_LICENSES.json"),
 		SBOMPath:               filepath.Join(candidate, "SBOM.spdx.json"),
 	})
+}
+
+func verifyProvenanceSignature(candidate string, provenanceBytes []byte, identity string) error {
+	data, err := os.ReadFile(filepath.Join(candidate, "provenance.signature.json"))
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var document provenanceSignature
+	if err := decoder.Decode(&document); err != nil {
+		return fmt.Errorf("decode provenance signature: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("provenance signature contains trailing JSON")
+	}
+	digest := sha256.Sum256(provenanceBytes)
+	if document.SchemaVersion != 1 || document.Algorithm != "ed25519" || document.Identity != identity ||
+		document.PayloadSHA256 != hex.EncodeToString(digest[:]) {
+		return fmt.Errorf("provenance signature identity, algorithm, or payload digest mismatch")
+	}
+	signature, err := base64.StdEncoding.Strict().DecodeString(document.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return fmt.Errorf("provenance signature is not canonical Ed25519 base64")
+	}
+	return nil
 }
 
 func PromoteMarket(candidate, destination string) error {

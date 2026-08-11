@@ -54,6 +54,24 @@ func TestWAFArtifactInitEvaluateConfigAndBodyWindowBoundaries(t *testing.T) {
 	}
 }
 
+func TestWAFArtifactResetPreservesInitializedGenerationConfig(t *testing.T) {
+	artifact := buildWAFArtifact(t)
+	observeWithCustomRule := []byte(`{"mode":"observe","custom_rules":[{"id":"reset-probe","target":"path","needle":"reset-probe"}]}`)
+	session, status := initPolicyArtifact(t, artifact, observeWithCustomRule, "/reset-probe", nil, true)
+	defer session.Close()
+	if status != pluginsdk.PolicyStatusOK {
+		t.Fatalf("init status = %d", status)
+	}
+	for evaluation := 1; evaluation <= 3; evaluation++ {
+		if action := session.Evaluate(); action != pluginsdk.PolicyActionObserve {
+			t.Fatalf("evaluation %d after one init = action %d, want observe", evaluation, action)
+		}
+		if evaluation < 3 {
+			session.Reset()
+		}
+	}
+}
+
 func buildWAFArtifact(t *testing.T) []byte {
 	t.Helper()
 	repositoryRoot := filepath.Clean(filepath.Join(testSourceDirectory(t), "..", ".."))
@@ -221,6 +239,17 @@ func (session *policyArtifactSession) Evaluate() pluginsdk.PolicyAction {
 		session.t.Fatal("canonical EvaluateSuccess.action is missing")
 	}
 	return pluginsdk.PolicyAction(success.Get(actionField).Enum())
+}
+
+func (session *policyArtifactSession) Reset() {
+	session.t.Helper()
+	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportReset).Call(session.ctx)
+	if err != nil || len(result) != 1 {
+		session.t.Fatalf("reset call = %v, %v", result, err)
+	}
+	if status := pluginsdk.PolicyStatus(uint32(result[0])); status != pluginsdk.PolicyStatusOK {
+		session.t.Fatalf("reset status = %d", status)
+	}
 }
 
 func marshalWAFInit(t *testing.T, config []byte) []byte {

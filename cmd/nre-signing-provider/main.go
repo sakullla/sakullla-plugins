@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -121,8 +122,8 @@ func signRequest(stdin io.Reader, stdout io.Writer, keyEnvironment string) error
 		return errors.New("signing identity is not canonical")
 	}
 	digest, err := base64.StdEncoding.Strict().DecodeString(request.Digest)
-	if err != nil || len(digest) == 0 {
-		return errors.New("signing digest is not canonical base64")
+	if err != nil || len(digest) != sha256.Size {
+		return errors.New("signing digest must be canonical base64 for 32 raw SHA-256 bytes")
 	}
 	response := struct {
 		Algorithm string `json:"algorithm"`

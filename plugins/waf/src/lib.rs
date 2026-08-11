@@ -183,8 +183,8 @@ mod wasm {
         // SAFETY: the host serializes calls into one policy instance.
         let runtime = unsafe { &mut *RUNTIME.0.get() };
         runtime.cursor = 0;
-        runtime.config = PreparedConfig::managed_only(WafMode::Deny);
-        runtime.initialized = false;
+        // Clear only per-request allocation/output state. The parsed config and
+        // initialized generation remain reusable across requests.
         AbiStatus::Ok as u32
     }
 

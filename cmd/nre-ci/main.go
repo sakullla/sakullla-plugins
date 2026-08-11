@@ -274,10 +274,10 @@ func checkRelease(ctx context.Context, args []string) error {
 			Directory: packageDirectory, PackageSHA256: result.PackageDigest, SignerIdentity: result.SignerIdentity,
 		})
 	}
-	result, err := cirelease.Assemble(cirelease.Input{
+	result, err := cirelease.AssembleContext(ctx, cirelease.Input{
 		OutputDir: absoluteOutput, RepositoryCommit: repositoryCommit,
 		SDKRepositoryCommit: lock.Repository.Commit, SDKDescriptorSHA256: lock.Artifacts.DescriptorSetSHA256,
-		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity,
+		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity, Signer: signer,
 		NoticePath: filepath.Join(root, "NOTICE"), ThirdPartyLicensesPath: filepath.Join(root, "THIRD_PARTY_LICENSES.json"),
 		SBOMPath: filepath.Join(root, "SBOM.spdx.json"), Packages: packages,
 	})
