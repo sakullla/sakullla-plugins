@@ -536,7 +536,7 @@ func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, s
 	if output, err := command.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build %s: %w\n%s", pluginID, err, output)
 	}
-	artifactPath := filepath.Join(repositoryRoot, "target", "wasm32v1-none", "release", strings.ReplaceAll(spec.packageName, "-", "_")+".wasm")
+	artifactPath := filepath.Join(cargoTargetDirectory(repositoryRoot), "wasm32v1-none", "release", strings.ReplaceAll(spec.packageName, "-", "_")+".wasm")
 	artifact, err := os.ReadFile(artifactPath)
 	if err != nil {
 		return "", err
@@ -557,6 +557,17 @@ func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, s
 		return "", err
 	}
 	return outputPath, nil
+}
+
+func cargoTargetDirectory(repositoryRoot string) string {
+	target := strings.TrimSpace(os.Getenv("CARGO_TARGET_DIR"))
+	if target == "" {
+		return filepath.Join(repositoryRoot, "target")
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return filepath.Join(repositoryRoot, target)
 }
 
 func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath, artifactName string) (string, error) {

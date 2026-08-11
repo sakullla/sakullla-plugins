@@ -352,6 +352,23 @@ func TestPluginShadowsocksManifestDriftFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCargoTargetDirectoryFollowsCargoEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CARGO_TARGET_DIR", "")
+	if got, want := cargoTargetDirectory(root), filepath.Join(root, "target"); got != want {
+		t.Fatalf("default Cargo target = %q, want %q", got, want)
+	}
+	absolute := filepath.Join(t.TempDir(), "cargo-output")
+	t.Setenv("CARGO_TARGET_DIR", absolute)
+	if got := cargoTargetDirectory(root); got != absolute {
+		t.Fatalf("absolute Cargo target = %q, want %q", got, absolute)
+	}
+	t.Setenv("CARGO_TARGET_DIR", "cache/cargo")
+	if got, want := cargoTargetDirectory(root), filepath.Join(root, "cache", "cargo"); got != want {
+		t.Fatalf("relative Cargo target = %q, want %q", got, want)
+	}
+}
+
 func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string) {
 	t.Helper()
 	directory := filepath.Join(root, "plugins", pluginID)
