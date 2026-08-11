@@ -30,7 +30,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.97.1"
-          target: wasm32-unknown-unknown
+          target: wasm32-unknown-unknown,wasm32v1-none
       - name: Build repository-owned signing provider
         run: go build -trimpath -o "${{ runner.temp }}/nre-signing-provider" ./cmd/nre-signing-provider
       - name: Configure official signer routing
