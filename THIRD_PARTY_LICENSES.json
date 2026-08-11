@@ -3,7 +3,7 @@
   "code_dependencies": [
     {
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "version": "v0.1.0",
+      "version": "v0.2.0",
       "license": "GPL-3.0-only"
     },
     {

@@ -259,9 +259,23 @@ func capabilityProbe(id, packagePath string) (string, bool) {
 		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, sdk.PolicySecurityEvent) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
 	case "rpc.lifecycle":
 		return fmt.Sprintf("package main\nimport %s\nconst _ string = sdk.RPCABIV1\nvar _ = sdk.RPCHandshakeRequest{ABI: \"\", PluginID: \"\", PluginVersion: \"\", PackageDigest: \"\", ArtifactDigest: \"\", GrantedScopes: []string{}, Generation: \"\"}\nvar _ = sdk.RPCHandshakeResponse{ABI: \"\", Capabilities: []string{}}\nvar _ = sdk.LifecycleRequest{Generation: \"\", Config: []byte{}}\nvar _ = sdk.LifecycleResponse{Success: &sdk.LifecycleSuccess{Ready: true}}\nvar _ = sdk.LifecycleResponse.Validate\nfunc main() {}\n", quotedImport), true
+	case "policy.atomic-state":
+		return hostCapabilityProbe(quotedImport, "CapabilityPolicyAtomicState"), true
+	case "policy.monotonic-clock":
+		return hostCapabilityProbe(quotedImport, "CapabilityPolicyMonotonicClock"), true
+	case "policy.trusted-source":
+		return hostCapabilityProbe(quotedImport, "CapabilityPolicyTrustedSource"), true
+	case "service.revocable-resource-handle":
+		return fmt.Sprintf("package main\nimport %s\nconst (_ sdk.HostCapability = sdk.CapabilityServiceRevocableResourceHandle; _ string = sdk.RPCFeatureDurableActionsV1; _ = sdk.RPCResourcePayloadMaxBytes)\nvar _ = sdk.HostCapabilityCall{Capability: sdk.CapabilityServiceRevocableResourceHandle}\nvar _ = sdk.RPCActionRequest{ResourceHandle: \"handle\", ResourceResults: []sdk.RPCResourceResult{}}\nvar _ = sdk.RPCResourceCall{RequestID: \"request\", ResourceHandle: \"handle\", Operation: sdk.RPCResourceInspect, Input: []byte{}}\nvar _ = sdk.RPCResourceResult{RequestID: \"request\", Value: []byte{}}\nvar _ = sdk.RequiredRPCFeatures\nvar _ = sdk.ValidateRPCFeatures\nfunc main() {}\n", quotedImport), true
+	case "ui.dynamic-actions":
+		return fmt.Sprintf("package main\nimport %s\nconst (_ sdk.HostCapability = sdk.CapabilityUIDynamicActions; _ string = sdk.RPCFeatureDurableActionsV1)\nvar _ = sdk.HostCapabilityCall{Capability: sdk.CapabilityUIDynamicActions}\nvar _ = sdk.DynamicAction{ID: \"action\", Label: \"Action\", Capability: sdk.CapabilityPolicyTrustedSource, TargetKind: \"resource\", Confirm: \"Continue?\"}\nvar _ = sdk.RPCActionRequest{ActionID: \"action\", TargetKind: \"resource\", TargetID: \"target\", OperationID: \"operation\"}\nvar _ = sdk.RequiredRPCFeatures\nvar _ = sdk.ValidateRPCFeatures\nfunc main() {}\n", quotedImport), true
 	default:
 		return "", false
 	}
+}
+
+func hostCapabilityProbe(quotedImport, symbol string) string {
+	return fmt.Sprintf("package main\nimport %s\nconst _ sdk.HostCapability = sdk.%s\nvar _ = sdk.HostCapabilityCall{PluginID: \"plugin\", InstanceID: \"instance\", Generation: \"generation\", Capability: sdk.%s, Actor: sdk.HostActor{}, Target: sdk.HostTarget{}}\nvar _ = sdk.HostCapability.Validate\nvar _ = sdk.HostCapabilityCall.Validate\nfunc main() {}\n", quotedImport, symbol, symbol)
 }
 
 func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath, packagePath string) (string, error) {

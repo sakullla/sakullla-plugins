@@ -301,3 +301,21 @@ func mustGitBlobSHA(t *testing.T, root, path string) string {
 	}
 	return digest
 }
+
+func TestCapabilityProbeCoversCanonicalLockCatalog(t *testing.T) {
+	for _, id := range []string{
+		"policy.atomic-state",
+		"policy.body-window",
+		"policy.event-metric",
+		"policy.monotonic-clock",
+		"policy.trusted-source",
+		"rpc.lifecycle",
+		"service.revocable-resource-handle",
+		"ui.dynamic-actions",
+	} {
+		probe, ok := capabilityProbe(id, "example.invalid/sdk")
+		if !ok || probe == "" {
+			t.Fatalf("canonical capability %q has no typed probe", id)
+		}
+	}
+}

@@ -2,27 +2,28 @@
   "schema_version": 1,
   "repository": {
     "url": "https://github.com/sakullla/nginx-reverse-emby.git",
-    "commit": "b8a19c6c804b6110ce9891840ab05fb0badb36ff",
-    "tag": "plugin-sdk/v0.1.0"
+    "commit": "f35b0ec16ff4292149fb8a9622d9d218dcc64a61",
+    "tag": "plugin-sdk/v0.2.0"
   },
   "sdk": {
     "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
     "module_directory": "plugin-sdk",
     "package_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-    "contract_tree_oid": "e1def7c9fdc5613fbddae2d1c3ccc9e481db8aa4"
+    "contract_tree_oid": "5714fd3be8727a382a8f9d7524c604f7c3053057"
   },
   "artifacts": {
-    "descriptor_set_sha256": "f5a79c6246f603bac7a24cb824337783e14e43d4b6569148370efad9bd454755",
+    "descriptor_set_sha256": "5cbab7e002914f3da5e80a762594c2b61fe8c44b7f320146e70d6789c3c6cd86",
     "policy_proto_sha256": "0c46cac6ac35bcf5c9f6faebb9e115131dab23b724e00d85650a843b8d16b528",
-    "rpc_proto_sha256": "b2693d50c3bb037bf6e4f456cb956eb5c66b2922c823470ef621abc652eeb990",
+    "rpc_proto_sha256": "7139a3be681eac2faf4e6fc4351db836c4ecd779fe383ec65fb4d8d4dd13f5d4",
     "canonical_guest_sha256": "fc89d8d018d749de23b6979774e917f71b22883dd302d931b3791e37f50ea7ec",
-    "validator_tree_oid": "46c52f5c6e677c2bdd294ae7b2b6264eb698eb98"
+    "validator_tree_oid": "b3a5baf405f5beeb949e00e792359201e348d865"
   },
   "required_capabilities": [
     {
       "id": "policy.atomic-state",
-      "available": false,
-      "missing_reason": "public policy SDK exposes StateGet/StatePut but no generation-local atomic mutation contract"
+      "available": true,
+      "evidence_path": "plugin-sdk/go/host_capabilities.go",
+      "symbols": ["CapabilityPolicyAtomicState", "HostCapabilityCall"]
     },
     {
       "id": "policy.body-window",
@@ -38,13 +39,15 @@
     },
     {
       "id": "policy.monotonic-clock",
-      "available": false,
-      "missing_reason": "public policy SDK has no monotonic time Host call"
+      "available": true,
+      "evidence_path": "plugin-sdk/go/host_capabilities.go",
+      "symbols": ["CapabilityPolicyMonotonicClock", "HostCapabilityCall"]
     },
     {
       "id": "policy.trusted-source",
-      "available": false,
-      "missing_reason": "ReadField does not authenticate socket, PROXY, or Relay source provenance"
+      "available": true,
+      "evidence_path": "plugin-sdk/go/host_capabilities.go",
+      "symbols": ["CapabilityPolicyTrustedSource", "HostCapabilityCall"]
     },
     {
       "id": "rpc.lifecycle",
@@ -54,14 +57,16 @@
     },
     {
       "id": "service.revocable-resource-handle",
-      "available": false,
-      "missing_reason": "public RPC SDK has no typed resource handle or revoke contract"
+      "available": true,
+      "evidence_path": "plugin-sdk/go/host_capabilities.go",
+      "symbols": ["CapabilityServiceRevocableResourceHandle", "HostCapabilityCall"]
     },
     {
       "id": "ui.dynamic-actions",
-      "available": false,
-      "missing_reason": "public SDK has no typed dynamic collection/action/log or one-time-secret schema"
+      "available": true,
+      "evidence_path": "plugin-sdk/go/host_capabilities.go",
+      "symbols": ["CapabilityUIDynamicActions", "DynamicAction", "HostCapabilityCall"]
     }
   ],
-  "capability_contract_sha256": "6e6f82ac81dbd60f6a46d1545d4962dc6ae0fa6d0b70c74ace45d399320df1a8"
+  "capability_contract_sha256": "00e54c56c222cd7a51dfd6fd329d73123923c148beeae8ea6019b4a2ac3c6f9b"
 }

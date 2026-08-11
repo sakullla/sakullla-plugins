@@ -47,5 +47,5 @@ cleanup:
   shared_refs: retain
   audit_events: retain
 metadata:
-  capability.policy.trusted-source: unavailable
+  capability.policy.trusted-source: available
   geo_data_owner: host-mmdb-handle

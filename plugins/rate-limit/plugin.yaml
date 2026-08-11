@@ -47,7 +47,7 @@ cleanup:
   shared_refs: retain
   audit_events: retain
 metadata:
-  capability.policy.monotonic-clock: unavailable
-  capability.policy.atomic-state: unavailable
+  capability.policy.monotonic-clock: available
+  capability.policy.atomic-state: available
   counter_scope: single-agent-local
   quota_boundary: not-user-resource-bandwidth-or-traffic-quota

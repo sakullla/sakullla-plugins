@@ -13,13 +13,12 @@ jobs:
     environment: official-release
     env:
       GOTOOLCHAIN: local
-      PROTOC_VERSION: "32.0"
       NRE_OFFICIAL_SIGNER: ${{ secrets.NRE_OFFICIAL_SIGNER }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -27,9 +26,6 @@ jobs:
         with:
           toolchain: "1.97.1"
           target: wasm32-unknown-unknown
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
       - name: Build and verify official candidate
         run: go run ./cmd/nre-ci release --verify-reproducible --signer env:NRE_OFFICIAL_SIGNER
       - name: Upload immutable candidate evidence

@@ -13,10 +13,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GOTOOLCHAIN: local
-      PROTOC_VERSION: "32.0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -25,9 +24,6 @@ jobs:
           toolchain: "1.97.1"
           target: wasm32-unknown-unknown
           components: clippy,rustfmt
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: ${{ env.PROTOC_VERSION }}
       - name: Verify generated files, licenses, and secrets
         run: go run ./cmd/nre-ci repository --root .
       - name: Test Go workspace
