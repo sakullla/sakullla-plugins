@@ -1,20 +1,48 @@
 schema_version: 1
 id: waf
-name: Sakullla WAF
 version: 0.1.0
-runtime: wasm-policy
-abi: nre:policy/v1
-artifact: artifact/plugin.wasm
+name: Sakullla WAF
+description: Deterministic bounded HTTP request inspection with managed and custom rules
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: wasm-policy
+  abi: nre:policy/v1
+  host_scope: agent
+  entry: artifacts/waf.wasm
+  policy_kind: waf
+artifacts:
+  - path: artifacts/waf.wasm
+    sha256: 542813ead5c465c5a853b05f8339b6417d97baa8552dcf64849f43b9ad362194
+    size: 169215
+    mode: wasm
+extension_points:
+  - http.request
 permissions:
-  - policy.read-normalized-http
-  - policy.read-body-window
-  - policy.emit-event
-  - policy.add-metric
-resources:
+  - name: http.inspect
+  - name: http.respond
+  - name: event.emit
+config_schema: config.schema.json
+resource_budget:
   timeout_ms: 2
   memory_bytes: 16777216
   concurrency: 64
-  input_frame_bytes: 131072
-  output_frame_bytes: 4096
-cleanup: retain-audit-only
-
+  input_bytes: 131072
+  output_bytes: 4096
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: never
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

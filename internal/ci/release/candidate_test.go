@@ -1,6 +1,12 @@
 package release
 
 import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +40,7 @@ func TestPackageMarketProvenanceIsDeterministicAndTamperEvident(t *testing.T) {
 	if err != nil || strings.Index(string(market), `id: "alpha"`) > strings.Index(string(market), `id: "zeta"`) {
 		t.Fatalf("market projection is not sorted: %v\n%s", err, market)
 	}
-	if err := os.WriteFile(filepath.Join(first, "packages", "alpha", "0.1.0", "artifact.bin"), []byte("tampered"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(first, "packages", "alpha", "0.1.0", "artifacts", "linux-amd64", "alpha"), []byte("tampered"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := Verify(first); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
@@ -138,27 +144,75 @@ func writeLegal(t *testing.T, root string) legalPaths {
 
 func writePackage(t *testing.T, root, id string) Package {
 	t.Helper()
-	directory := filepath.Join(root, "source-"+id)
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	source := filepath.Join(root, "source-"+id)
+	if err := os.Mkdir(source, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "artifact.bin"), []byte(id), 0o644); err != nil {
+	artifactData := []byte(id)
+	artifact := filepath.Join(source, id)
+	if err := os.WriteFile(artifact, artifactData, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(directory, "artifact.bin"), 0o755); err != nil {
+	digest := sha256.Sum256(artifactData)
+	manifest := filepath.Join(source, "plugin.yaml")
+	manifestData := fmt.Sprintf(`schema_version: 1
+id: %s
+version: 0.1.0
+name: Fixture
+description: Fixture package
+compatibility: {host: "*", agent: "*"}
+runtime: {kind: rpc-service, abi: "nre:rpc/v1", host_scope: agent, entry: %s}
+artifacts:
+  - {path: artifacts/linux-amd64/%s, sha256: %s, size: %d, mode: executable, goos: linux, goarch: amd64}
+extension_points: [dns.provider]
+permissions: [{name: secret.use}]
+config_schema: config.schema.json
+resource_budget: {timeout_ms: 1000, memory_bytes: 65536, concurrency: 1, input_bytes: 1, output_bytes: 1, cpu_millis: 1, restarts: 0}
+failure_policy: {on_error: fail-closed, on_budget: fail-closed, restart: on-failure, core_fallback: preserve}
+signature: {algorithm: ed25519, key_id: sakullla-official-root-2026, file: signature.json}
+cleanup: {instances: delete, config: delete, owned_data: delete, grants: delete, shared_refs: retain, audit_events: retain}
+`, id, id, id, hex.EncodeToString(digest[:]), len(artifactData))
+	if err := os.WriteFile(manifest, []byte(manifestData), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := buildkit.DigestTree(directory)
+	config := filepath.Join(source, "config.schema.json")
+	if err := os.WriteFile(config, []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	license := filepath.Join(source, "LICENSE")
+	if err := os.WriteFile(license, []byte("fixture license"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "package-"+id)
+	seed := bytes.Repeat([]byte{0x31}, ed25519.SeedSize)
+	signer := candidateFixtureSigner{key: ed25519.NewKeyFromSeed(seed)}
+	result, err := buildkit.BuildPackage(context.Background(), buildkit.PackageRequest{
+		ManifestPath: manifest, ArtifactPath: artifact, ArtifactDestination: "artifacts/linux-amd64/" + id, ArtifactMode: "executable",
+		ExtraFiles: map[string]string{"config.schema.json": config}, NoticePaths: []string{license}, OutputDir: directory,
+		Signer: signer, Validator: candidateFixtureValidator{publicKey: signer.key.Public().(ed25519.PublicKey)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Package{ID: id, Version: "0.1.0", Runtime: "rpc-service", ABI: "nre:rpc/v1", Directory: directory, PackageSHA256: digest, SignerIdentity: "official"}
+	return Package{ID: id, Version: "0.1.0", Runtime: "rpc-service", ABI: "nre:rpc/v1", Directory: directory, PackageSHA256: result.PackageDigest, SignerIdentity: "sakullla-official-root-2026"}
+}
+
+type candidateFixtureSigner struct{ key ed25519.PrivateKey }
+
+func (signer candidateFixtureSigner) Sign(_ context.Context, digest []byte) (buildkit.Signature, error) {
+	return buildkit.Signature{Algorithm: "ed25519", Identity: "sakullla-official-root-2026", Value: ed25519.Sign(signer.key, digest)}, nil
+}
+
+type candidateFixtureValidator struct{ publicKey ed25519.PublicKey }
+
+func (validator candidateFixtureValidator) Validate(_ context.Context, packageDir string) error {
+	return buildkit.VerifyPackageEnvelope(packageDir, "sakullla-official-root-2026", validator.publicKey)
 }
 
 func fixtureInput(output string, legal legalPaths, packages []Package) Input {
 	return Input{
 		OutputDir: output, RepositoryCommit: strings.Repeat("a", 40), SDKRepositoryCommit: strings.Repeat("b", 40),
-		SDKDescriptorSHA256: strings.Repeat("c", 64), SDKABIs: []string{"nre:rpc/v1", "nre:policy/v1"}, SignerIdentity: "official",
+		SDKDescriptorSHA256: strings.Repeat("c", 64), SDKABIs: []string{"nre:rpc/v1", "nre:policy/v1"}, SignerIdentity: "sakullla-official-root-2026",
 		NoticePath: legal.notice, ThirdPartyLicensesPath: legal.thirdParty, SBOMPath: legal.sbom, Packages: packages,
 	}
 }

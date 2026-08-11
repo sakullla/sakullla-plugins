@@ -1,30 +1,53 @@
-{
-  "schema_version": 1,
-  "id": "reverse-l4",
-  "version": "0.1.0",
-  "name": "Reverse L4",
-  "description": "Brokered reverse TCP and UDP mappings using core-owned service handles",
-  "compatibility": {
-    "host": ">=0.1.0",
-    "agent": ">=0.1.0"
-  },
-  "runtime": {
-    "kind": "rpc-service",
-    "abi": "nre:rpc/v1",
-    "host_scope": "agent",
-    "entry": "artifacts/reverse-l4"
-  },
-  "permissions": ["reverse-session", "tunnel", "listener", "traffic.read"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {
-    "on_error": "fail-closed",
-    "restart": "bounded-backoff"
-  },
-  "cleanup": {
-    "mappings": "retain",
-    "sessions": "revoke-and-drain"
-  },
-  "metadata": {
-    "capability.typed-l4-handles": "unavailable"
-  }
-}
+schema_version: 1
+id: reverse-l4
+version: 0.1.0
+name: Reverse L4
+description: Brokered reverse TCP and UDP mappings using core-owned service handles
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: agent
+  entry: reverse-l4
+artifacts:
+  - path: artifacts/linux-amd64/reverse-l4
+    sha256: 04c2332181409e0f178ac79d6763a74cc8af206bad1794f089534bcbc4bbf0d8
+    size: 7726071
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - l4.accept
+  - tunnel.provider
+permissions:
+  - name: l4.inspect
+  - name: l4.respond
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

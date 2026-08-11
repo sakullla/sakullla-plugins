@@ -4,24 +4,27 @@ version: 0.1.0
 name: Rate Limit
 description: Node-local bounded GCRA admission for HTTP sources, HTTP rules, and new L4 flows
 compatibility:
-  host: ">=0.1.0"
-  agent: ">=0.1.0"
+  host: "*"
+  agent: "*"
 runtime:
   kind: wasm-policy
   abi: nre:policy/v1
   host_scope: agent
   entry: artifacts/rate-limit.wasm
+  policy_kind: rate
 artifacts:
   - path: artifacts/rate-limit.wasm
-    sha256: d2263ece45973d92f01395aa08731b60b944d57e66f566c6dae0f64c254763c6
-    size: 9364
+    sha256: 92eb3d35b16dbbff8e98d72bb2c27f24dcef95b135d8d8a60718135496ba2f48
+    size: 9117
     mode: wasm
 extension_points:
   - http.request
   - l4.accept
 permissions:
-  - policy.read
-  - event.emit
+  - name: policy.read
+  - name: event.emit
+  - name: policy.atomic-state
+  - name: policy.monotonic-clock
 config_schema: config.schema.json
 ui_schema: ui.schema.json
 resource_budget:
@@ -38,7 +41,7 @@ failure_policy:
 signature:
   algorithm: ed25519
   key_id: sakullla-official-root-2026
-  file: package.sig
+  file: signature.json
 cleanup:
   instances: delete
   config: delete
@@ -46,8 +49,3 @@ cleanup:
   grants: delete
   shared_refs: retain
   audit_events: retain
-metadata:
-  capability.policy.monotonic-clock: available
-  capability.policy.atomic-state: available
-  counter_scope: single-agent-local
-  quota_boundary: not-user-resource-bandwidth-or-traffic-quota

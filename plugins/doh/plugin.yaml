@@ -1,14 +1,54 @@
-{
-  "schema_version": 1,
-  "id": "doh",
-  "version": "0.1.0",
-  "name": "DNS over HTTPS",
-  "description": "Brokered RFC 8484 forwarding with token and shared IP-policy admission",
-  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
-  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "agent", "entry": "artifacts/doh"},
-  "permissions": ["audit", "cache", "ip-policy", "listener", "log", "monotonic-clock", "network", "secret"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
-  "cleanup": {"cache": "delete-generation", "listener": "release", "ip_policy": "shared-reference-only", "secrets": "never-store"},
-  "metadata": {"capability.typed-doh-handles": "unavailable"}
-}
+schema_version: 1
+id: doh
+version: 0.1.0
+name: DNS over HTTPS
+description: Brokered RFC 8484 forwarding with token and shared IP-policy admission
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: agent
+  entry: doh
+artifacts:
+  - path: artifacts/linux-amd64/doh
+    sha256: bd3459a8a97e81acaa1ab92fe41aed2705ae2527e411b3e0acb0d7c438202b44
+    size: 8109587
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - dns.provider
+permissions:
+  - name: policy.read
+  - name: secret.use
+  - name: storage.read
+  - name: storage.write
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

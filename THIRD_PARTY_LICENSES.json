@@ -20,6 +20,11 @@
       "name": "google.golang.org/protobuf",
       "version": "v1.34.2",
       "license": "BSD-3-Clause"
+    },
+    {
+      "name": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "license": "MIT AND Apache-2.0"
     }
   ],
   "data_dependencies": []

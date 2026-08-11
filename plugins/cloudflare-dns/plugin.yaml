@@ -1,14 +1,52 @@
-{
-  "schema_version": 1,
-  "id": "cloudflare-dns",
-  "version": "0.1.0",
-  "name": "Cloudflare DNS",
-  "description": "Vault-backed, zone-scoped Cloudflare DNS control plane",
-  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
-  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "artifacts/cloudflare-dns"},
-  "permissions": ["audit", "authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
-  "cleanup": {"secret": "retain-host-owned", "dns_records": "never-delete-implicitly", "status": "delete-generation"},
-  "metadata": {"capability.typed-cloudflare-handles": "unavailable"}
-}
+schema_version: 1
+id: cloudflare-dns
+version: 0.1.0
+name: Cloudflare DNS
+description: Vault-backed, zone-scoped Cloudflare DNS control plane
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: control-plane
+  entry: cloudflare-dns
+artifacts:
+  - path: artifacts/linux-amd64/cloudflare-dns
+    sha256: bdfc300f1030be2ff10b60072a1eeaf58ac8eac1214769a3bf4bfa083881133a
+    size: 8135698
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - dns.provider
+permissions:
+  - name: dns.manage
+  - name: secret.use
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -46,11 +47,7 @@ func copyRegularFile(source, destination string) error {
 		return err
 	}
 	defer in.Close()
-	mode := fs.FileMode(0o644)
-	if info.Mode()&0o111 != 0 {
-		mode = 0o755
-	}
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
@@ -60,6 +57,10 @@ func copyRegularFile(source, destination string) error {
 }
 
 func recordsForTree(root string, excluded map[string]bool) ([]FileRecord, error) {
+	return recordsForTreeWithModes(root, excluded, nil)
+}
+
+func recordsForTreeWithModes(root string, excluded map[string]bool, modeOverrides map[string]string) ([]FileRecord, error) {
 	var records []FileRecord
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -91,6 +92,15 @@ func recordsForTree(root string, excluded map[string]bool) ([]FileRecord, error)
 		mode := "0644"
 		if info.Mode()&0o111 != 0 {
 			mode = "0755"
+		}
+		if declared, ok := modeOverrides[rel]; ok {
+			if declared != "0644" && declared != "0755" {
+				return fmt.Errorf("package mode override for %q is invalid", rel)
+			}
+			if runtime.GOOS != "windows" && mode != declared {
+				return fmt.Errorf("package file %q mode is %s, want %s", rel, mode, declared)
+			}
+			mode = declared
 		}
 		records = append(records, FileRecord{
 			Path: rel, Mode: mode, SHA256: hex.EncodeToString(digest[:]), Size: info.Size(),

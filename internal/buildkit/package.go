@@ -20,6 +20,7 @@ type PackageRequest struct {
 	ManifestPath        string
 	ArtifactPath        string
 	ArtifactDestination string
+	ArtifactMode        string
 	ExtraFiles          map[string]string
 	NoticePaths         []string
 	OutputDir           string
@@ -119,6 +120,22 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	if err := copyRegularFile(request.ArtifactPath, filepath.Join(temporary, filepath.FromSlash(artifactDestination))); err != nil {
 		return PackageResult{}, fmt.Errorf("copy artifact: %w", err)
 	}
+	artifactMode := os.FileMode(0o644)
+	switch request.ArtifactMode {
+	case "", "wasm":
+	case "executable":
+		artifactMode = 0o755
+	default:
+		return PackageResult{}, fmt.Errorf("artifact mode %q is invalid", request.ArtifactMode)
+	}
+	if err := os.Chmod(filepath.Join(temporary, filepath.FromSlash(artifactDestination)), artifactMode); err != nil {
+		return PackageResult{}, fmt.Errorf("set artifact mode: %w", err)
+	}
+	artifactRecordMode := "0644"
+	if request.ArtifactMode == "executable" {
+		artifactRecordMode = "0755"
+	}
+	modeOverrides := map[string]string{artifactDestination: artifactRecordMode}
 	for destination, source := range request.ExtraFiles {
 		if !safePackagePath(destination) || destination == "plugin.yaml" || destination == artifactDestination ||
 			destination == "NOTICE" || destination == "sbom.spdx.json" || destination == "package.files.json" || destination == "signature.json" {
@@ -131,7 +148,7 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	if err := writeNotice(filepath.Join(temporary, "NOTICE"), request.NoticePaths); err != nil {
 		return PackageResult{}, err
 	}
-	initial, err := recordsForTree(temporary, nil)
+	initial, err := recordsForTreeWithModes(temporary, nil, modeOverrides)
 	if err != nil {
 		return PackageResult{}, err
 	}
@@ -164,7 +181,7 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	if err := writeCanonicalJSON(filepath.Join(temporary, "sbom.spdx.json"), spdx); err != nil {
 		return PackageResult{}, err
 	}
-	payloadFiles, err := recordsForTree(temporary, map[string]bool{"package.files.json": true, "signature.json": true})
+	payloadFiles, err := recordsForTreeWithModes(temporary, map[string]bool{"package.files.json": true, "signature.json": true}, modeOverrides)
 	if err != nil {
 		return PackageResult{}, err
 	}
@@ -194,7 +211,7 @@ func BuildPackage(ctx context.Context, request PackageRequest) (PackageResult, e
 	if err := request.Validator.Validate(ctx, temporary); err != nil {
 		return PackageResult{}, err
 	}
-	allFiles, err := recordsForTree(temporary, nil)
+	allFiles, err := recordsForTreeWithModes(temporary, nil, modeOverrides)
 	if err != nil {
 		return PackageResult{}, err
 	}
@@ -301,7 +318,28 @@ func DigestBytes(data []byte) string {
 // DigestTree returns the deterministic package-tree digest used by
 // BuildPackage after rejecting non-regular entries.
 func DigestTree(root string) (string, error) {
-	records, err := recordsForTree(root, nil)
+	modeOverrides := map[string]string(nil)
+	if data, err := os.ReadFile(filepath.Join(root, "package.files.json")); err == nil {
+		var manifest packageFileManifest
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&manifest); err != nil {
+			return "", fmt.Errorf("decode package.files.json for tree digest: %w", err)
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return "", fmt.Errorf("package.files.json contains trailing JSON")
+		}
+		modeOverrides = make(map[string]string, len(manifest.Files)+2)
+		for _, record := range manifest.Files {
+			modeOverrides[record.Path] = record.Mode
+		}
+		modeOverrides["package.files.json"] = "0644"
+		modeOverrides["signature.json"] = "0644"
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	records, err := recordsForTreeWithModes(root, nil, modeOverrides)
 	if err != nil {
 		return "", err
 	}

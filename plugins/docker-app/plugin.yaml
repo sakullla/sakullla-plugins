@@ -1,14 +1,52 @@
-{
-  "schema_version": 1,
-  "id": "docker-app",
-  "version": "0.1.0",
-  "name": "Docker App",
-  "description": "Brokered Docker and Compose application lifecycle with core-owned HTTP rules",
-  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
-  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "agent", "entry": "artifacts/docker-app"},
-  "permissions": ["docker-compose", "http-rule", "dynamic-ui"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
-  "cleanup": {"instances": "delete-owned", "shared_refs": "retain", "core_rules": "release"},
-  "metadata": {"capability.typed-docker-handles": "unavailable"}
-}
+schema_version: 1
+id: docker-app
+version: 0.1.0
+name: Docker App
+description: Brokered Docker and Compose application lifecycle with core-owned HTTP rules
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: agent
+  entry: docker-app
+artifacts:
+  - path: artifacts/linux-amd64/docker-app
+    sha256: e78d9515a63ce0ed63f7fcb000e055a5e7c104c1feba604d1e3da129f0b4bdd8
+    size: 7734141
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - container.provider
+permissions:
+  - name: container.read
+  - name: container.manage
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

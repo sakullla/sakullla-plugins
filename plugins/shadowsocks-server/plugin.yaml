@@ -1,14 +1,53 @@
-{
-  "schema_version": 1,
-  "id": "shadowsocks-server",
-  "version": "0.1.0",
-  "name": "Shadowsocks Server",
-  "description": "Brokered TCP and UDP Shadowsocks service with generation-owned credentials and accounting",
-  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
-  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "agent", "entry": "artifacts/shadowsocks-server"},
-  "permissions": ["audit", "listener", "monotonic-clock", "replay", "secret", "traffic"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
-  "cleanup": {"listener": "drain-generation", "secrets": "revoke-generation", "traffic": "flush-bounded"},
-  "metadata": {"capability.typed-shadowsocks-handles": "unavailable", "protocol.engine": "repository-local-go", "protocol.ss2022": "aes-128-gcm,aes-256-gcm", "egress.provider": "false"}
-}
+schema_version: 1
+id: shadowsocks-server
+version: 0.1.0
+name: Shadowsocks Server
+description: Brokered TCP and UDP Shadowsocks service with generation-owned credentials and accounting
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: agent
+  entry: shadowsocks-server
+artifacts:
+  - path: artifacts/linux-amd64/shadowsocks-server
+    sha256: c3d1412fe848e99c5da8b2080408bdc64174c80714b5fdda31f3015c092da774
+    size: 8311107
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - tunnel.provider
+permissions:
+  - name: secret.use
+  - name: storage.read
+  - name: storage.write
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

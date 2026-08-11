@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,7 @@ import (
 	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
 	cirelease "github.com/sakullla/sakullla-plugins/internal/ci/release"
 	ciwasm "github.com/sakullla/sakullla-plugins/internal/ci/wasm"
+	"github.com/sakullla/sakullla-plugins/internal/pluginmanifest"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
 
@@ -119,8 +119,9 @@ func run(ctx context.Context, args []string) error {
 }
 
 type verifiedPlugin struct {
-	id, version, runtime, abi, entry string
-	manifest, artifact               string
+	id, version, runtime, abi, entry, artifactMode string
+	manifest, artifact                             string
+	extraFiles                                     map[string]string
 }
 
 func checkAll(ctx context.Context, args []string) error {
@@ -189,7 +190,7 @@ func buildAll(ctx context.Context, args []string, verify sdkVerifier) (sdklock.L
 			return sdklock.Lock{}, nil, err
 		}
 		manifest := filepath.Join(root, "plugins", id, "plugin.yaml")
-		metadata, err := releaseManifest(manifest, id, spec)
+		metadata, err := releaseManifest(manifest, id, spec, artifact)
 		if err != nil {
 			return sdklock.Lock{}, nil, err
 		}
@@ -255,19 +256,12 @@ func checkRelease(ctx context.Context, args []string) error {
 	defer os.RemoveAll(staging)
 	packages := make([]cirelease.Package, 0, len(plugins))
 	for _, plugin := range plugins {
-		extraFiles := make(map[string]string)
-		pluginRoot := filepath.Dir(plugin.manifest)
-		for _, name := range []string{"config.schema.json", "ui.schema.json"} {
-			path := filepath.Join(pluginRoot, name)
-			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-				extraFiles[name] = path
-			}
-		}
 		packageDirectory := filepath.Join(staging, plugin.id, plugin.version)
 		result, err := buildkit.BuildPackage(ctx, buildkit.PackageRequest{
 			ManifestPath: plugin.manifest, ArtifactPath: plugin.artifact, ArtifactDestination: plugin.entry,
-			ExtraFiles: extraFiles, NoticePaths: []string{filepath.Join(root, "NOTICE"), filepath.Join(root, "THIRD_PARTY_LICENSES.json")},
-			OutputDir: packageDirectory, Signer: signer, Validator: validator,
+			ArtifactMode: plugin.artifactMode, ExtraFiles: plugin.extraFiles,
+			NoticePaths: []string{filepath.Join(root, "NOTICE"), filepath.Join(root, "THIRD_PARTY_LICENSES.json")},
+			OutputDir:   packageDirectory, Signer: signer, Validator: strictPackageValidator{envelope: validator},
 		})
 		if err != nil {
 			return fmt.Errorf("package %s: %w", plugin.id, err)
@@ -306,63 +300,42 @@ func makeReleaseStaging(absoluteOutput string) (string, error) {
 	return os.MkdirTemp(parent, ".release-packages-")
 }
 
-func releaseManifest(path, expectedID string, spec pluginArtifactSpec) (verifiedPlugin, error) {
-	data, err := os.ReadFile(path)
+func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactFile string) (verifiedPlugin, error) {
+	manifest, err := pluginmanifest.Load(path)
 	if err != nil {
 		return verifiedPlugin{}, err
 	}
-	metadata := verifiedPlugin{id: expectedID}
-	var document map[string]any
-	if json.Unmarshal(data, &document) == nil {
-		metadata.version, _ = document["version"].(string)
-		if id, _ := document["id"].(string); id != expectedID {
-			return verifiedPlugin{}, fmt.Errorf("manifest %s id is %q, want %q", path, id, expectedID)
-		}
-		if runtimeDocument, ok := document["runtime"].(map[string]any); ok {
-			metadata.runtime, _ = runtimeDocument["kind"].(string)
-			metadata.abi, _ = runtimeDocument["abi"].(string)
-			metadata.entry, _ = runtimeDocument["entry"].(string)
-		}
-	} else {
-		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-			trimmed := strings.TrimSpace(line)
-			key, value, ok := strings.Cut(trimmed, ":")
-			if !ok {
-				continue
-			}
-			value = strings.Trim(strings.TrimSpace(value), `"'`)
-			switch key {
-			case "id":
-				if value != expectedID {
-					return verifiedPlugin{}, fmt.Errorf("manifest %s id is %q, want %q", path, value, expectedID)
-				}
-			case "version":
-				metadata.version = value
-			case "kind", "runtime":
-				if value != "" {
-					metadata.runtime = value
-				}
-			case "abi":
-				metadata.abi = value
-			case "entry", "artifact":
-				if metadata.entry == "" {
-					metadata.entry = value
-				}
-			}
-		}
+	if err := pluginmanifest.ValidateSource(manifest, filepath.Dir(path), expectedID, artifactFile); err != nil {
+		return verifiedPlugin{}, fmt.Errorf("validate %s: %w", path, err)
 	}
+	wantKind := pluginmanifest.RuntimeRPCService
 	if spec.kind == artifactWASMPolicy {
-		metadata.runtime, metadata.abi = pluginsdk.RuntimeWASMPolicy, pluginsdk.PolicyABIV1
-		if metadata.entry == "" {
-			metadata.entry = filepath.ToSlash(filepath.Join("artifacts", expectedID+".wasm"))
-		}
-	} else {
-		metadata.runtime, metadata.abi = pluginsdk.RuntimeRPCService, pluginsdk.RPCABIV1
+		wantKind = pluginmanifest.RuntimeWASMPolicy
 	}
-	if metadata.version == "" || metadata.entry == "" {
-		return verifiedPlugin{}, fmt.Errorf("manifest %s lacks release version or artifact entry", path)
+	if manifest.Runtime.Kind != wantKind {
+		return verifiedPlugin{}, fmt.Errorf("manifest %s runtime kind is %q, want %q", path, manifest.Runtime.Kind, wantKind)
 	}
-	return metadata, nil
+	destination, mode, err := pluginmanifest.ArtifactDestination(manifest)
+	if err != nil {
+		return verifiedPlugin{}, err
+	}
+	return verifiedPlugin{
+		id: expectedID, version: manifest.Version, runtime: manifest.Runtime.Kind, abi: manifest.Runtime.ABI,
+		entry: destination, artifactMode: mode, extraFiles: pluginmanifest.ExtraFiles(manifest, filepath.Dir(path)),
+	}, nil
+}
+
+type strictPackageValidator struct{ envelope buildkit.Validator }
+
+func (validator strictPackageValidator) Validate(ctx context.Context, packageDir string) error {
+	manifest, err := pluginmanifest.Load(filepath.Join(packageDir, "plugin.yaml"))
+	if err != nil {
+		return err
+	}
+	if err := pluginmanifest.ValidatePackageTree(packageDir, manifest); err != nil {
+		return err
+	}
+	return validator.envelope.Validate(ctx, packageDir)
 }
 
 func checkPerformance(ctx context.Context, args []string) error {
@@ -455,77 +428,41 @@ type pluginArtifactSpec struct {
 	artifactName string
 }
 
-type ciPluginManifest struct {
-	SchemaVersion int             `json:"schema_version"`
-	ID            string          `json:"id"`
-	Version       string          `json:"version"`
-	Name          string          `json:"name"`
-	Description   string          `json:"description"`
-	Compatibility json.RawMessage `json:"compatibility"`
-	Runtime       struct {
-		Kind      string `json:"kind"`
-		ABI       string `json:"abi"`
-		HostScope string `json:"host_scope"`
-		Entry     string `json:"entry"`
-	} `json:"runtime"`
-	Permissions   json.RawMessage `json:"permissions"`
-	ConfigSchema  string          `json:"config_schema"`
-	FailurePolicy json.RawMessage `json:"failure_policy"`
-	Cleanup       json.RawMessage `json:"cleanup"`
-	Metadata      json.RawMessage `json:"metadata"`
-}
-
-// pluginArtifactSpecFor is an explicit source-layout allowlist. It avoids
-// ad-hoc manifest parsing while keeping artifact kind and plugin identity
-// strict until a canonical manifest parser is published.
+// pluginArtifactSpecFor is the explicit source/build allowlist. The canonical
+// v1 manifest parser validates every plugin kind after its artifact is built.
 func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec, error) {
+	manifestPath := filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml")
+	manifest, err := pluginmanifest.Load(manifestPath)
+	if err != nil {
+		return pluginArtifactSpec{}, err
+	}
+	if manifest.ID != pluginID {
+		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q does not match manifest id %q", pluginID, manifest.ID)
+	}
+	wantKind, wantABI, wantEntry := pluginmanifest.RuntimeRPCService, pluginmanifest.RPCABIV1, pluginID
+	if pluginID == "waf" || pluginID == "ip-policy" || pluginID == "rate-limit" {
+		wantKind, wantABI, wantEntry = pluginmanifest.RuntimeWASMPolicy, pluginmanifest.PolicyABIV1, filepath.ToSlash(filepath.Join("artifacts", pluginID+".wasm"))
+	}
+	if manifest.Runtime.Kind != wantKind {
+		return pluginArtifactSpec{}, fmt.Errorf("plugin %q runtime kind %q is not %q", pluginID, manifest.Runtime.Kind, wantKind)
+	}
+	if manifest.Runtime.ABI != wantABI {
+		return pluginArtifactSpec{}, fmt.Errorf("plugin %q ABI %q is not %q", pluginID, manifest.Runtime.ABI, wantABI)
+	}
+	if manifest.Runtime.Entry != wantEntry {
+		return pluginArtifactSpec{}, fmt.Errorf("plugin %q entry %q is not %q", pluginID, manifest.Runtime.Entry, wantEntry)
+	}
+	if err := pluginmanifest.Validate(manifest, pluginID); err != nil {
+		return pluginArtifactSpec{}, fmt.Errorf("validate %s: %w", manifestPath, err)
+	}
 	switch pluginID {
 	case "waf", "ip-policy", "rate-limit":
 		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
 	case "reverse-l4", "docker-app", "accelerator-sources", "doh", "cloudflare-dns", "shadowsocks-server":
-		manifestPath := filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml")
-		manifestFile, err := os.Open(manifestPath)
-		if err != nil {
-			return pluginArtifactSpec{}, err
-		}
-		defer manifestFile.Close()
-		decoder := json.NewDecoder(manifestFile)
-		decoder.DisallowUnknownFields()
-		var manifest ciPluginManifest
-		if err := decoder.Decode(&manifest); err != nil {
-			return pluginArtifactSpec{}, fmt.Errorf("parse %s as YAML-compatible JSON: %w", manifestPath, err)
-		}
-		if err := ensureJSONEOF(decoder); err != nil {
-			return pluginArtifactSpec{}, fmt.Errorf("parse %s: %w", manifestPath, err)
-		}
-		if manifest.SchemaVersion != 1 {
-			return pluginArtifactSpec{}, fmt.Errorf("plugin %q manifest schema_version must be 1", pluginID)
-		}
-		if manifest.ID != pluginID {
-			return pluginArtifactSpec{}, fmt.Errorf("plugin id %q does not match manifest id %q", pluginID, manifest.ID)
-		}
-		if manifest.Runtime.Kind != pluginsdk.RuntimeRPCService {
-			return pluginArtifactSpec{}, fmt.Errorf("plugin %q runtime kind %q is not %q", pluginID, manifest.Runtime.Kind, pluginsdk.RuntimeRPCService)
-		}
-		if manifest.Runtime.ABI != pluginsdk.RPCABIV1 {
-			return pluginArtifactSpec{}, fmt.Errorf("plugin %q ABI %q is not %q", pluginID, manifest.Runtime.ABI, pluginsdk.RPCABIV1)
-		}
-		wantEntry := filepath.ToSlash(filepath.Join("artifacts", pluginID))
-		if manifest.Runtime.Entry != wantEntry {
-			return pluginArtifactSpec{}, fmt.Errorf("plugin %q entry %q is not %q", pluginID, manifest.Runtime.Entry, wantEntry)
-		}
-		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/" + pluginID + "/cmd/" + pluginID, artifactName: filepath.Base(manifest.Runtime.Entry)}, nil
+		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/" + pluginID + "/cmd/" + pluginID, artifactName: pluginID}, nil
 	default:
 		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q has no declared artifact source", pluginID)
 	}
-}
-
-func ensureJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("manifest must contain exactly one document")
-	}
-	return nil
 }
 
 func buildPluginArtifact(ctx context.Context, repositoryRoot, pluginID string, spec pluginArtifactSpec) (string, error) {
@@ -583,23 +520,23 @@ func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath,
 	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "windows" {
-		artifactName += ".exe"
-	}
 	outputPath := filepath.Join(outputDirectory, artifactName)
 	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "-o", outputPath, sourcePath)
 	command.Dir = repositoryRoot
+	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
 	if output, err := command.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build %s RPC artifact: %w\n%s", pluginID, err, output)
 	}
-	validate := exec.CommandContext(ctx, outputPath, "--nre-ci-rpc-handshake")
-	validate.Dir = repositoryRoot
-	output, err := validate.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("validate %s RPC handshake: %w\n%s", pluginID, err, output)
-	}
-	if strings.TrimSpace(string(output)) != pluginsdk.RPCABIV1 {
-		return "", fmt.Errorf("validate %s RPC handshake: got %q, want %q", pluginID, strings.TrimSpace(string(output)), pluginsdk.RPCABIV1)
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		validate := exec.CommandContext(ctx, outputPath, "--nre-ci-rpc-handshake")
+		validate.Dir = repositoryRoot
+		output, err := validate.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("validate %s RPC handshake: %w\n%s", pluginID, err, output)
+		}
+		if strings.TrimSpace(string(output)) != pluginsdk.RPCABIV1 {
+			return "", fmt.Errorf("validate %s RPC handshake: got %q, want %q", pluginID, strings.TrimSpace(string(output)), pluginsdk.RPCABIV1)
+		}
 	}
 	return outputPath, nil
 }

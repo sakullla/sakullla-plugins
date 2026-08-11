@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,7 +99,7 @@ func TestPackageEnvelopeVerifiesEd25519AndRejectsTamper(t *testing.T) {
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	identity := "sakullla-official-root-2026"
 	output := filepath.Join(root, "package")
-	_, err := BuildPackage(context.Background(), PackageRequest{
+	result, err := BuildPackage(context.Background(), PackageRequest{
 		ManifestPath: manifest, ArtifactPath: artifact, NoticePaths: []string{license}, OutputDir: output,
 		Signer: ed25519Signer{identity: identity, key: privateKey},
 		Validator: validatorFunc(func(_ context.Context, packageDir string) error {
@@ -107,6 +108,13 @@ func TestPackageEnvelopeVerifiesEd25519AndRejectsTamper(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	digest, err := DigestTree(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != result.PackageDigest {
+		t.Fatalf("DigestTree = %s, BuildPackage = %s", digest, result.PackageDigest)
 	}
 	if err := VerifyPackageEnvelope(output, identity, publicKey); err != nil {
 		t.Fatal(err)
@@ -176,6 +184,49 @@ func TestPackageUsesManifestArtifactPathAndIncludesSchemas(t *testing.T) {
 		Signer: deterministicSigner{}, Validator: validator,
 	}); err == nil {
 		t.Fatal("package accepted an artifact path escape")
+	}
+}
+
+func TestPackageAppliesDeclaredArtifactMode(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	manifest := writeFixture(t, root, "plugin.yaml", "schema_version: 1\n")
+	artifact := writeFixture(t, root, "plugin", "binary")
+	license := writeFixture(t, root, "LICENSE", "license")
+	output := filepath.Join(root, "package")
+	result, err := BuildPackage(context.Background(), PackageRequest{
+		ManifestPath: manifest, ArtifactPath: artifact, ArtifactDestination: "artifacts/linux-amd64/plugin", ArtifactMode: "executable",
+		NoticePaths: []string{license}, OutputDir: output, Signer: deterministicSigner{}, Validator: validatorFunc(func(context.Context, string) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := DigestTree(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != result.PackageDigest {
+		t.Fatalf("executable DigestTree = %s, BuildPackage = %s", digest, result.PackageDigest)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "package.files.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fileManifest packageFileManifest
+	if err := json.Unmarshal(data, &fileManifest); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, record := range fileManifest.Files {
+		if record.Path == "artifacts/linux-amd64/plugin" {
+			found = true
+			if record.Mode != "0755" {
+				t.Fatalf("artifact mode = %s, want 0755", record.Mode)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("package.files.json lacks executable artifact")
 	}
 }
 

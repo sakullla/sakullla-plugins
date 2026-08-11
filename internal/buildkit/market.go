@@ -2,32 +2,56 @@ package buildkit
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
+var marketDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
 type Market struct {
-	SchemaVersion int             `json:"schema_version"`
-	Commit        string          `json:"commit"`
-	SDKABI        string          `json:"sdk_abi"`
-	Packages      []MarketPackage `json:"packages"`
+	SchemaVersion int             `json:"schema_version" yaml:"schema_version"`
+	Commit        string          `json:"commit" yaml:"commit"`
+	SDKABI        string          `json:"sdk_abi" yaml:"sdk_abi"`
+	Packages      []MarketPackage `json:"packages" yaml:"packages"`
 }
 
 type MarketPackage struct {
-	ID             string `json:"id"`
-	Version        string `json:"version"`
-	Runtime        string `json:"runtime"`
-	ABI            string `json:"abi"`
-	PackageSHA256  string `json:"package_sha256"`
-	PackageURL     string `json:"package_url"`
-	SignerIdentity string `json:"signer_identity"`
+	ID             string `json:"id" yaml:"id"`
+	Version        string `json:"version" yaml:"version"`
+	Runtime        string `json:"runtime" yaml:"runtime"`
+	ABI            string `json:"abi" yaml:"abi"`
+	PackageSHA256  string `json:"package_sha256" yaml:"package_sha256"`
+	PackageURL     string `json:"package_url" yaml:"package_url"`
+	SignerIdentity string `json:"signer_identity" yaml:"signer_identity"`
+}
+
+func ParseMarket(data []byte) (Market, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	var market Market
+	if err := decoder.Decode(&market); err != nil {
+		return Market{}, fmt.Errorf("strictly decode market.yaml: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Market{}, fmt.Errorf("market.yaml must contain exactly one document")
+	}
+	if err := validateMarket(market); err != nil {
+		return Market{}, err
+	}
+	return market, nil
 }
 
 func RenderMarket(market Market) ([]byte, error) {
-	if market.SchemaVersion != 1 || market.Commit == "" || market.SDKABI == "" {
-		return nil, fmt.Errorf("market requires schema_version 1, commit, and sdk_abi")
+	if err := validateMarket(market); err != nil {
+		return nil, err
 	}
 	packages := append([]MarketPackage{}, market.Packages...)
 	sort.Slice(packages, func(i, j int) bool {
@@ -61,6 +85,25 @@ func RenderMarket(market Market) ([]byte, error) {
 		fmt.Fprintf(&output, "    signer_identity: %s\n", yamlString(pkg.SignerIdentity))
 	}
 	return output.Bytes(), nil
+}
+
+func validateMarket(market Market) error {
+	if market.SchemaVersion != 1 || market.Commit == "" || market.SDKABI == "" || len(market.Packages) == 0 {
+		return fmt.Errorf("market requires schema_version 1, commit, sdk_abi, and packages")
+	}
+	seen := make(map[string]struct{}, len(market.Packages))
+	for _, pkg := range market.Packages {
+		key := pkg.ID + "\x00" + pkg.Version
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("duplicate market package %s@%s", pkg.ID, pkg.Version)
+		}
+		seen[key] = struct{}{}
+		if pkg.ID == "" || pkg.Version == "" || pkg.Runtime == "" || pkg.ABI == "" ||
+			!marketDigestPattern.MatchString(pkg.PackageSHA256) || pkg.PackageURL == "" || pkg.SignerIdentity == "" {
+			return fmt.Errorf("market package %q has an empty or invalid required field", pkg.ID)
+		}
+	}
+	return nil
 }
 
 func yamlString(value string) string {

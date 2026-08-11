@@ -1,15 +1,54 @@
-{
-  "schema_version": 1,
-  "id": "accelerator-sources",
-  "version": "0.1.0",
-  "name": "Accelerator Sources",
-  "description": "Brokered Docker and GitHub accelerator source control plane",
-  "compatibility": {"host": ">=0.1.0", "agent": ">=0.1.0"},
-  "runtime": {"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "artifacts/accelerator-sources"},
-  "permissions": ["network-probe", "scheduler", "dynamic-ui", "audit"],
-  "config_schema": "config.schema.json",
-  "failure_policy": {"on_error": "fail-closed", "restart": "bounded-backoff"},
-  "cleanup": {"sources": "delete-owned", "probe_results": "delete-owned", "host_configuration": "never-modify"},
-  "metadata": {"capability.typed-accelerator-handles": "unavailable"}
-}
-
+schema_version: 1
+id: accelerator-sources
+version: 0.1.0
+name: Accelerator Sources
+description: Brokered Docker and GitHub accelerator source control plane
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: control-plane
+  entry: accelerator-sources
+artifacts:
+  - path: artifacts/linux-amd64/accelerator-sources
+    sha256: 0a9754be8d838419bf44252b77eb760e293a4db4b7ed3538283778df3f27a69e
+    size: 8013084
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - container.provider
+permissions:
+  - name: agent.read
+  - name: agent.configure
+  - name: container.read
+  - name: container.manage
+  - name: event.emit
+  - name: service.revocable-resource-handle
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain

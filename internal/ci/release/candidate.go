@@ -17,6 +17,7 @@ import (
 
 	"github.com/sakullla/sakullla-plugins/internal/buildkit"
 	"github.com/sakullla/sakullla-plugins/internal/ci/common"
+	"github.com/sakullla/sakullla-plugins/internal/pluginmanifest"
 )
 
 var fullOID = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -208,10 +209,23 @@ func Verify(candidate string) error {
 	if err != nil || digest(market) != provenance.MarketSHA256 {
 		return fmt.Errorf("release market digest mismatch")
 	}
+	marketDocument, err := buildkit.ParseMarket(market)
+	if err != nil {
+		return err
+	}
 	if provenance.SchemaVersion != 1 || !fullOID.MatchString(provenance.RepositoryCommit) ||
 		!fullOID.MatchString(provenance.SDKRepositoryCommit) || !isSHA256(provenance.SDKDescriptorSHA256) ||
 		provenance.SignerIdentity == "" || len(provenance.SDKABIs) == 0 || len(provenance.Packages) == 0 {
 		return fmt.Errorf("release provenance is incomplete")
+	}
+	marketABIs := strings.Split(marketDocument.SDKABI, ",")
+	sort.Strings(marketABIs)
+	if marketDocument.Commit != provenance.RepositoryCommit || strings.Join(marketABIs, ",") != strings.Join(provenance.SDKABIs, ",") || len(marketDocument.Packages) != len(provenance.Packages) {
+		return fmt.Errorf("release market identity, SDK ABI, or package count differs from provenance")
+	}
+	marketPackages := make(map[string]buildkit.MarketPackage, len(marketDocument.Packages))
+	for _, pkg := range marketDocument.Packages {
+		marketPackages[pkg.ID+"\x00"+pkg.Version] = pkg
 	}
 	for _, pkg := range provenance.Packages {
 		clean := filepath.Clean(filepath.FromSlash(pkg.Path))
@@ -221,6 +235,21 @@ func Verify(candidate string) error {
 		actual, err := buildkit.DigestTree(filepath.Join(candidate, clean))
 		if err != nil || actual != pkg.PackageSHA256 {
 			return fmt.Errorf("release package %s@%s digest mismatch", pkg.ID, pkg.Version)
+		}
+		entry, ok := marketPackages[pkg.ID+"\x00"+pkg.Version]
+		if !ok || entry.PackageSHA256 != pkg.PackageSHA256 || entry.PackageURL != pkg.Path || entry.SignerIdentity != provenance.SignerIdentity {
+			return fmt.Errorf("release market entry %s@%s differs from package evidence", pkg.ID, pkg.Version)
+		}
+		packageRoot := filepath.Join(candidate, clean)
+		manifest, err := pluginmanifest.Load(filepath.Join(packageRoot, "plugin.yaml"))
+		if err != nil {
+			return err
+		}
+		if err := pluginmanifest.ValidatePackageTree(packageRoot, manifest); err != nil {
+			return err
+		}
+		if manifest.ID != entry.ID || manifest.Version != entry.Version || manifest.Runtime.Kind != entry.Runtime || manifest.Runtime.ABI != entry.ABI || manifest.Signature.KeyID != entry.SignerIdentity {
+			return fmt.Errorf("release market entry %s@%s differs from signed plugin contract", pkg.ID, pkg.Version)
 		}
 	}
 	return validateLegalInputs(Input{

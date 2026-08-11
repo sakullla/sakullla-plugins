@@ -251,10 +251,10 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name, id, kind, abi, entry, needle string
 	}{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/reverse-l4", needle: "manifest id"},
-		{name: "kind", id: "reverse-l4", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/reverse-l4", needle: "runtime kind"},
-		{name: "abi", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/reverse-l4", needle: "ABI"},
-		{name: "entry", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other", needle: "entry"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "reverse-l4", needle: "manifest id"},
+		{name: "kind", id: "reverse-l4", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "reverse-l4", needle: "runtime kind"},
+		{name: "abi", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v2", entry: "reverse-l4", needle: "ABI"},
+		{name: "entry", id: "reverse-l4", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other", needle: "entry"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -269,10 +269,10 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 
 func TestPluginDockerAppManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/docker-app"},
-		{name: "kind", id: "docker-app", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/docker-app"},
-		{name: "abi", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/docker-app"},
-		{name: "entry", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "docker-app"},
+		{name: "kind", id: "docker-app", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "docker-app"},
+		{name: "abi", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v2", entry: "docker-app"},
+		{name: "entry", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -286,10 +286,10 @@ func TestPluginDockerAppManifestDriftFailsClosed(t *testing.T) {
 
 func TestPluginAcceleratorSourcesManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/accelerator-sources"},
-		{name: "kind", id: "accelerator-sources", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/accelerator-sources"},
-		{name: "abi", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/accelerator-sources"},
-		{name: "entry", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "accelerator-sources"},
+		{name: "kind", id: "accelerator-sources", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "accelerator-sources"},
+		{name: "abi", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v2", entry: "accelerator-sources"},
+		{name: "entry", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -303,10 +303,10 @@ func TestPluginAcceleratorSourcesManifestDriftFailsClosed(t *testing.T) {
 
 func TestPluginDoHManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/doh"},
-		{name: "kind", id: "doh", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/doh"},
-		{name: "abi", id: "doh", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/doh"},
-		{name: "entry", id: "doh", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "doh"},
+		{name: "kind", id: "doh", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "doh"},
+		{name: "abi", id: "doh", kind: "rpc-service", abi: "nre:rpc/v2", entry: "doh"},
+		{name: "entry", id: "doh", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -320,10 +320,10 @@ func TestPluginDoHManifestDriftFailsClosed(t *testing.T) {
 
 func TestPluginCloudflareDNSManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/cloudflare-dns"},
-		{name: "kind", id: "cloudflare-dns", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/cloudflare-dns"},
-		{name: "abi", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/cloudflare-dns"},
-		{name: "entry", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "cloudflare-dns"},
+		{name: "kind", id: "cloudflare-dns", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "cloudflare-dns"},
+		{name: "abi", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v2", entry: "cloudflare-dns"},
+		{name: "entry", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -337,10 +337,10 @@ func TestPluginCloudflareDNSManifestDriftFailsClosed(t *testing.T) {
 
 func TestPluginShadowsocksManifestDriftFailsClosed(t *testing.T) {
 	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/shadowsocks-server"},
-		{name: "kind", id: "shadowsocks-server", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "artifacts/shadowsocks-server"},
-		{name: "abi", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v2", entry: "artifacts/shadowsocks-server"},
-		{name: "entry", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v1", entry: "artifacts/other"},
+		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "shadowsocks-server"},
+		{name: "kind", id: "shadowsocks-server", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "shadowsocks-server"},
+		{name: "abi", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v2", entry: "shadowsocks-server"},
+		{name: "entry", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -389,9 +389,13 @@ func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string)
 	}
 	document := map[string]any{
 		"schema_version": 1, "id": id, "version": "0.1.0", "name": "Reverse L4", "description": "fixture",
-		"compatibility": map[string]any{}, "runtime": map[string]any{"kind": kind, "abi": abi, "host_scope": "agent", "entry": entry},
-		"permissions": []string{}, "config_schema": "config.schema.json", "failure_policy": map[string]any{},
-		"cleanup": map[string]any{}, "metadata": map[string]any{},
+		"compatibility": map[string]any{"host": "*", "agent": "*"}, "runtime": map[string]any{"kind": kind, "abi": abi, "host_scope": "agent", "entry": entry},
+		"artifacts":        []map[string]any{{"path": "artifacts/linux-amd64/" + pluginID, "sha256": strings.Repeat("a", 64), "size": 1, "mode": "executable", "goos": "linux", "goarch": "amd64"}},
+		"extension_points": []string{"l4.accept"}, "permissions": []map[string]string{{"name": "l4.inspect"}}, "config_schema": "config.schema.json",
+		"resource_budget": map[string]any{"timeout_ms": 1000, "memory_bytes": 65536, "concurrency": 1, "input_bytes": 1, "output_bytes": 1, "cpu_millis": 1, "restarts": 0},
+		"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "on-failure", "core_fallback": "preserve"},
+		"signature":       map[string]any{"algorithm": "ed25519", "key_id": "sakullla-official-root-2026", "file": "signature.json"},
+		"cleanup":         map[string]any{"instances": "delete", "config": "delete", "owned_data": "delete", "grants": "delete", "shared_refs": "retain", "audit_events": "retain"},
 	}
 	wire, err := json.Marshal(document)
 	if err != nil {

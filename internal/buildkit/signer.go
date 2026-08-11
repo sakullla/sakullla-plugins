@@ -122,13 +122,6 @@ func VerifyPackageEnvelope(packageDir, identity string, publicKey ed25519.Public
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		return fmt.Errorf("package signature is not canonical Ed25519 base64")
 	}
-	records, err := recordsForTree(packageDir, map[string]bool{"package.files.json": true, "signature.json": true})
-	if err != nil {
-		return err
-	}
-	if digestRecords(records) != document.PayloadSHA256 {
-		return fmt.Errorf("package payload digest mismatch")
-	}
 	manifestData, err := os.ReadFile(filepath.Join(packageDir, "package.files.json"))
 	if err != nil {
 		return err
@@ -141,6 +134,20 @@ func VerifyPackageEnvelope(packageDir, identity string, publicKey ed25519.Public
 	}
 	if err := manifestDecoder.Decode(&trailing); err != io.EOF {
 		return fmt.Errorf("package file manifest contains trailing JSON")
+	}
+	modeOverrides := make(map[string]string, len(manifest.Files))
+	for _, record := range manifest.Files {
+		if record.Mode != "0644" && record.Mode != "0755" {
+			return fmt.Errorf("package file manifest contains invalid mode %q", record.Mode)
+		}
+		modeOverrides[record.Path] = record.Mode
+	}
+	records, err := recordsForTreeWithModes(packageDir, map[string]bool{"package.files.json": true, "signature.json": true}, modeOverrides)
+	if err != nil {
+		return err
+	}
+	if digestRecords(records) != document.PayloadSHA256 {
+		return fmt.Errorf("package payload digest mismatch")
 	}
 	if manifest.SchemaVersion != 1 || manifest.PayloadSHA256 != document.PayloadSHA256 || len(manifest.Files) != len(records) {
 		return fmt.Errorf("package file manifest does not match signed payload")
