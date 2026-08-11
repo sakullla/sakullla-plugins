@@ -6,8 +6,6 @@ use sakullla_waf::{
 
 fn request<'a>(path: &'a [u8], query: &'a [u8], body: BodyWindow<'a>) -> NormalizedRequest<'a> {
     NormalizedRequest {
-        site: "site-a",
-        method: b"POST",
         path,
         query,
         headers: b"content-type: application/json",

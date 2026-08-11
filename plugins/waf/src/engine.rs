@@ -185,8 +185,6 @@ pub enum BodyWindow<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct NormalizedRequest<'a> {
-    pub site: &'a str,
-    pub method: &'a [u8],
     pub path: &'a [u8],
     pub query: &'a [u8],
     pub headers: &'a [u8],
@@ -279,7 +277,7 @@ impl<'a> WafEngine<'a> {
                 return self.matched(rule.id.as_slice(), request.trusted_source.address);
             }
         }
-        if !matches!(request.body, BodyWindow::Complete(_)) {
+        if self.requires_body(request.path) && !matches!(request.body, BodyWindow::Complete(_)) {
             return self.visible_skip(
                 request.trusted_source.address,
                 DecisionReason::BodyWindowSkipped,
@@ -292,6 +290,18 @@ impl<'a> WafEngine<'a> {
             rule_id: FixedBytes::EMPTY,
             source_digest: source_digest(request.trusted_source.address),
         }
+    }
+
+    fn requires_body(&self, path: &[u8]) -> bool {
+        MANAGED_RULES
+            .iter()
+            .any(|rule| rule.target == Target::Body && !self.excluded(rule.id.as_bytes(), path))
+            || self
+                .config
+                .custom
+                .iter()
+                .flatten()
+                .any(|rule| rule.target == Target::Body && !self.excluded(rule.id.as_slice(), path))
     }
 
     fn matched(&self, id: &[u8], source: &[u8]) -> Evaluation {

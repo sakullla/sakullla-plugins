@@ -163,12 +163,19 @@ mod wasm {
             return error_response(RuntimeErrorCode::Unavailable, "policy not initialized");
         }
 
-        match evaluate_with_host(&runtime.config) {
+        let mut host: HostClient<WasmHost, 512, FIELD_BYTES> =
+            match HostClient::new(WasmHost, HostLimits::new(16, 256)) {
+                Ok(host) => host,
+                Err(error) => {
+                    return error_response(runtime_error(error.status), "host unavailable");
+                }
+            };
+        match evaluate_with_host(&runtime.config, &mut host) {
             Ok((action, event, event_len)) => {
                 let Some(event) = event.get(..event_len) else {
                     return error_response(RuntimeErrorCode::Internal, "invalid event");
                 };
-                let host_result = emit_observability(action, event);
+                let host_result = emit_observability(&mut host, action);
                 if let Err(status) = host_result {
                     return error_response(runtime_error(status), "host operation failed");
                 }
@@ -190,54 +197,21 @@ mod wasm {
 
     fn evaluate_with_host(
         config: &PreparedConfig,
+        host: &mut HostClient<WasmHost, 512, FIELD_BYTES>,
     ) -> Result<(PolicyAction, [u8; 256], usize), AbiStatus> {
-        let mut host: HostClient<WasmHost, 512, FIELD_BYTES> =
-            HostClient::new(WasmHost, HostLimits::new(16, 256)).map_err(|error| error.status)?;
-        let mut site = Field::<96>::EMPTY;
-        let mut method = Field::<16>::EMPTY;
         let mut path = Field::<1024>::EMPTY;
         let mut query = Field::<1024>::EMPTY;
         let mut headers = Field::<2048>::EMPTY;
         let mut source = Field::<64>::EMPTY;
         let mut authenticated = Field::<8>::EMPTY;
-        let mut complete = Field::<8>::EMPTY;
-        read_field(&mut host, "site", &mut site)?;
-        read_field(&mut host, "method", &mut method)?;
-        read_field(&mut host, "path", &mut path)?;
-        read_field(&mut host, "query", &mut query)?;
-        read_field(&mut host, "headers", &mut headers)?;
-        read_field(&mut host, "trusted_source", &mut source)?;
-        read_field(
-            &mut host,
-            "trusted_source_authenticated",
-            &mut authenticated,
-        )?;
-        read_field(&mut host, "body_window_complete", &mut complete)?;
-        let mut body = Field::<BODY_WINDOW_BYTES>::EMPTY;
-        let response = host
-            .read_body_window(0, BODY_WINDOW_BYTES as u32)
-            .map_err(|error| error.status)?;
-        body.set(response.value, response.found)?;
+        read_field(host, "path", &mut path)?;
+        read_field(host, "query", &mut query)?;
+        read_field(host, "headers", &mut headers)?;
+        read_field(host, "trusted_source", &mut source)?;
+        read_field(host, "trusted_source_authenticated", &mut authenticated)?;
 
-        // Generation-owned state is touched only through the canonical host
-        // surface. It does not contain request or source material.
-        let state = host.state_get("waf.active").map_err(|error| error.status)?;
-        if !state.found {
-            host.state_put("waf.active", b"1")
-                .map_err(|error| error.status)?;
-        }
-
-        let site_text = core::str::from_utf8(site.as_slice()).unwrap_or("unknown");
-        let body_window = if !body.found {
-            BodyWindow::Unavailable
-        } else if complete.as_slice() == b"true" {
-            BodyWindow::Complete(body.as_slice())
-        } else {
-            BodyWindow::Truncated(body.as_slice())
-        };
-        let evaluation = WafEngine::new(config).evaluate(NormalizedRequest {
-            site: site_text,
-            method: method.as_slice(),
+        let engine = WafEngine::new(config);
+        let request = NormalizedRequest {
             path: path.as_slice(),
             query: query.as_slice(),
             headers: headers.as_slice(),
@@ -245,9 +219,42 @@ mod wasm {
                 authenticated: authenticated.as_slice() == b"true" && source.found,
                 address: source.as_slice(),
             },
-            body: body_window,
-        });
+            body: BodyWindow::Unavailable,
+        };
+        let mut evaluation = engine.evaluate(request);
+        if evaluation.reason == crate::DecisionReason::BodyWindowSkipped {
+            let mut complete = Field::<8>::EMPTY;
+            read_field(host, "body_window_complete", &mut complete)?;
+            let mut body = Field::<BODY_WINDOW_BYTES>::EMPTY;
+            let response = host
+                .read_body_window(0, BODY_WINDOW_BYTES as u32)
+                .map_err(|error| error.status)?;
+            body.set(response.value, response.found)?;
+            let body_window = if !body.found {
+                BodyWindow::Unavailable
+            } else if complete.as_slice() == b"true" {
+                BodyWindow::Complete(body.as_slice())
+            } else {
+                BodyWindow::Truncated(body.as_slice())
+            };
+            evaluation = engine.evaluate(NormalizedRequest {
+                path: path.as_slice(),
+                query: query.as_slice(),
+                headers: headers.as_slice(),
+                trusted_source: TrustedSource {
+                    authenticated: authenticated.as_slice() == b"true" && source.found,
+                    address: source.as_slice(),
+                },
+                body: body_window,
+            });
+        }
         let mut event = [0; 256];
+        if evaluation.action == PolicyAction::Allow {
+            return Ok((evaluation.action, event, 0));
+        }
+        let mut site = Field::<96>::EMPTY;
+        read_field(host, "site", &mut site)?;
+        let site_text = core::str::from_utf8(site.as_slice()).unwrap_or("unknown");
         let event_len = evaluation
             .write_event(site_text, &mut event)
             .ok_or(AbiStatus::ResourceExhausted)?;
@@ -263,9 +270,10 @@ mod wasm {
         output.set(response.value, response.found)
     }
 
-    fn emit_observability(action: PolicyAction, _event: &[u8]) -> Result<(), AbiStatus> {
-        let mut host: HostClient<WasmHost, 512, 64> =
-            HostClient::new(WasmHost, HostLimits::new(2, 64)).map_err(|error| error.status)?;
+    fn emit_observability(
+        host: &mut HostClient<WasmHost, 512, FIELD_BYTES>,
+        action: PolicyAction,
+    ) -> Result<(), AbiStatus> {
         if action != PolicyAction::Allow {
             let event_action = if action == PolicyAction::Deny {
                 nre_policy_guest::SecurityEventAction::Deny

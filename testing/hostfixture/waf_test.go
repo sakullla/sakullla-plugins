@@ -72,6 +72,67 @@ func TestWAFArtifactResetPreservesInitializedGenerationConfig(t *testing.T) {
 	}
 }
 
+func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
+	artifact := buildWAFArtifact(t)
+
+	t.Run("allow", func(t *testing.T) {
+		session, status := initPolicyArtifact(t, artifact, []byte(`{"mode":"deny"}`), "/safe", nil, true)
+		defer session.Close()
+		if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionAllow {
+			t.Fatalf("allow evaluation status = %d", status)
+		}
+		for _, name := range []string{pluginsdk.PolicyHostStateGet, pluginsdk.PolicyHostStatePut} {
+			if calls := session.HostCalls(name); calls != 0 {
+				t.Fatalf("%s calls = %d, want 0", name, calls)
+			}
+		}
+		for _, field := range []string{"method", "site"} {
+			if calls := session.FieldCalls(field); calls != 0 {
+				t.Fatalf("read_field(%q) calls = %d, want 0", field, calls)
+			}
+		}
+		if len(session.lastPayload) != 0 {
+			t.Fatalf("ALLOW payload = %q, want empty", session.lastPayload)
+		}
+		if calls := session.TotalHostCalls(); calls != 8 {
+			t.Fatalf("ALLOW host calls = %d, want 8", calls)
+		}
+	})
+
+	t.Run("path match", func(t *testing.T) {
+		config := []byte(`{"mode":"deny","custom_rules":[{"id":"path-probe","target":"path","needle":"probe"}]}`)
+		session, status := initPolicyArtifact(t, artifact, config, "/probe", nil, true)
+		defer session.Close()
+		if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionDeny {
+			t.Fatalf("path evaluation status = %d", status)
+		}
+		if calls := session.HostCalls(pluginsdk.PolicyHostReadBodyWindow); calls != 0 {
+			t.Fatalf("read_body_window calls = %d, want 0", calls)
+		}
+		if calls := session.FieldCalls("body_window_complete"); calls != 0 {
+			t.Fatalf("body_window_complete calls = %d, want 0", calls)
+		}
+		if calls := session.TotalHostCalls(); calls != 8 {
+			t.Fatalf("path match host calls = %d, want 8", calls)
+		}
+	})
+
+	t.Run("body rule excluded", func(t *testing.T) {
+		config := []byte(`{"mode":"deny","exclusions":[{"rule_id":"managed-xss-script","path_prefix":"/"}]}`)
+		session, status := initPolicyArtifact(t, artifact, config, "/safe", nil, true)
+		defer session.Close()
+		if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionAllow {
+			t.Fatalf("excluded body evaluation status = %d", status)
+		}
+		if calls := session.HostCalls(pluginsdk.PolicyHostReadBodyWindow); calls != 0 {
+			t.Fatalf("read_body_window calls = %d, want 0", calls)
+		}
+		if calls := session.TotalHostCalls(); calls != 6 {
+			t.Fatalf("excluded body host calls = %d, want 6", calls)
+		}
+	})
+}
+
 func buildWAFArtifact(t *testing.T) []byte {
 	t.Helper()
 	repositoryRoot := filepath.Clean(filepath.Join(testSourceDirectory(t), "..", ".."))
@@ -108,6 +169,9 @@ type policyArtifactSession struct {
 	evaluateCount int
 	eventCount    int
 	statePutCount int
+	hostCalls     map[string]int
+	fieldCalls    map[string]int
+	lastPayload   []byte
 }
 
 func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
@@ -124,7 +188,7 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 	t.Helper()
 	ctx := context.Background()
 	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV1))
-	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime}
+	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int)}
 	fields := map[string][]byte{
 		"site":                         []byte("site-a"),
 		"method":                       []byte("POST"),
@@ -139,6 +203,7 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 	for name, signature := range pluginsdk.PolicyV1HostFunctions() {
 		name := name
 		host.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(_ context.Context, module api.Module, stack []uint64) {
+			session.hostCalls[name]++
 			requestPointer, requestLength := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
 			responsePointer, responseCapacity := api.DecodeU32(stack[2]), api.DecodeU32(stack[3])
 			request, ok := module.Memory().Read(requestPointer, requestLength)
@@ -151,7 +216,9 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 			switch name {
 			case pluginsdk.PolicyHostReadField:
 				message := decodeWAFPolicyMessage(t, "ReadFieldRequest", request)
-				value, found := fields[wafMessageString(t, message, "name")]
+				field := wafMessageString(t, message, "name")
+				session.fieldCalls[field]++
+				value, found := fields[field]
 				response, err = marshalWAFBytesResponse(value, found)
 			case pluginsdk.PolicyHostReadBodyWindow:
 				message := decodeWAFPolicyMessage(t, "ReadBodyWindowRequest", request)
@@ -238,7 +305,28 @@ func (session *policyArtifactSession) Evaluate() pluginsdk.PolicyAction {
 	if actionField == nil {
 		session.t.Fatal("canonical EvaluateSuccess.action is missing")
 	}
+	payloadField := success.Descriptor().Fields().ByName("payload")
+	if payloadField == nil {
+		session.t.Fatal("canonical EvaluateSuccess.payload is missing")
+	}
+	session.lastPayload = append(session.lastPayload[:0], success.Get(payloadField).Bytes()...)
 	return pluginsdk.PolicyAction(success.Get(actionField).Enum())
+}
+
+func (session *policyArtifactSession) HostCalls(name string) int {
+	return session.hostCalls[name]
+}
+
+func (session *policyArtifactSession) FieldCalls(name string) int {
+	return session.fieldCalls[name]
+}
+
+func (session *policyArtifactSession) TotalHostCalls() int {
+	total := 0
+	for _, calls := range session.hostCalls {
+		total += calls
+	}
+	return total
 }
 
 func (session *policyArtifactSession) Reset() {
