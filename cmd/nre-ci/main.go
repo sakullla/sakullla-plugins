@@ -130,6 +130,14 @@ func checkAll(ctx context.Context, args []string) error {
 }
 
 func buildAll(ctx context.Context, args []string, verify sdkVerifier) (sdklock.Lock, []verifiedPlugin, error) {
+	return buildAllWithManifests(ctx, args, verify, false)
+}
+
+func buildAllForRelease(ctx context.Context, args []string, verify sdkVerifier) (sdklock.Lock, []verifiedPlugin, error) {
+	return buildAllWithManifests(ctx, args, verify, true)
+}
+
+func buildAllWithManifests(ctx context.Context, args []string, verify sdkVerifier, bindBuiltArtifacts bool) (sdklock.Lock, []verifiedPlugin, error) {
 	flags := flag.NewFlagSet("all", flag.ContinueOnError)
 	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
 	if err := flags.Parse(args); err != nil {
@@ -190,11 +198,11 @@ func buildAll(ctx context.Context, args []string, verify sdkVerifier) (sdklock.L
 			return sdklock.Lock{}, nil, err
 		}
 		manifest := filepath.Join(root, "plugins", id, "plugin.yaml")
-		metadata, err := releaseManifest(manifest, id, spec, artifact)
+		metadata, err := releaseManifest(manifest, id, spec, artifact, bindBuiltArtifacts)
 		if err != nil {
 			return sdklock.Lock{}, nil, err
 		}
-		metadata.manifest, metadata.artifact = manifest, artifact
+		metadata.artifact = artifact
 		plugins = append(plugins, metadata)
 	}
 	return lock, plugins, nil
@@ -240,7 +248,7 @@ func checkRelease(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	lock, plugins, err := buildAll(ctx, []string{"--sdk-lock", absoluteLock}, sdklock.Verify)
+	lock, plugins, err := buildAllForRelease(ctx, []string{"--sdk-lock", absoluteLock}, sdklock.Verify)
 	if err != nil {
 		return err
 	}
@@ -303,19 +311,31 @@ func makeReleaseStaging(absoluteOutput string) (string, error) {
 	return os.MkdirTemp(parent, ".release-packages-")
 }
 
-func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactFile string) (verifiedPlugin, error) {
+func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactFile string, bindBuiltArtifact bool) (verifiedPlugin, error) {
 	manifest, err := pluginmanifest.Load(path)
 	if err != nil {
 		return verifiedPlugin{}, err
 	}
-	validateSource := func() error {
-		if spec.kind == artifactWASMPolicy && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
-			return pluginmanifest.ValidateSourceContract(manifest, filepath.Dir(path), expectedID)
+	manifestPath := path
+	if bindBuiltArtifact {
+		bound, wire, err := pluginmanifest.RenderBuiltArtifactManifest(manifest, filepath.Dir(path), expectedID, artifactFile)
+		if err != nil {
+			return verifiedPlugin{}, fmt.Errorf("bind built artifact in %s: %w", path, err)
 		}
-		return pluginmanifest.ValidateSource(manifest, filepath.Dir(path), expectedID, artifactFile)
-	}
-	if err := validateSource(); err != nil {
-		return verifiedPlugin{}, fmt.Errorf("validate %s: %w", path, err)
+		manifest = bound
+		manifestPath = filepath.Join(filepath.Dir(artifactFile), "plugin.yaml")
+		if err := os.WriteFile(manifestPath, wire, 0o644); err != nil {
+			return verifiedPlugin{}, err
+		}
+	} else {
+		if spec.kind == artifactWASMPolicy && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
+			err = pluginmanifest.ValidateSourceContract(manifest, filepath.Dir(path), expectedID)
+		} else {
+			err = pluginmanifest.ValidateSource(manifest, filepath.Dir(path), expectedID, artifactFile)
+		}
+		if err != nil {
+			return verifiedPlugin{}, fmt.Errorf("validate %s: %w", path, err)
+		}
 	}
 	wantKind := pluginmanifest.RuntimeRPCService
 	if spec.kind == artifactWASMPolicy {
@@ -331,6 +351,7 @@ func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactF
 	return verifiedPlugin{
 		id: expectedID, version: manifest.Version, runtime: manifest.Runtime.Kind, abi: manifest.Runtime.ABI,
 		entry: destination, artifactMode: mode, extraFiles: pluginmanifest.ExtraFiles(manifest, filepath.Dir(path)),
+		manifest: manifestPath,
 	}, nil
 }
 

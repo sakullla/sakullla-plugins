@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
+	"github.com/sakullla/sakullla-plugins/internal/pluginmanifest"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
 )
 
@@ -379,6 +381,44 @@ func TestReleaseStagingCreatesMissingOutputParent(t *testing.T) {
 	defer os.RemoveAll(staging)
 	if filepath.Dir(staging) != filepath.Dir(output) {
 		t.Fatalf("release staging = %q, want parent %q", staging, filepath.Dir(output))
+	}
+}
+
+func TestReleaseManifestUsesGeneratedArtifactMetadataWithoutRewritingSource(t *testing.T) {
+	root := t.TempDir()
+	writeRPCManifest(t, root, "reverse-l4", "reverse-l4", "rpc-service", "nre:rpc/v1", "reverse-l4")
+	source := filepath.Join(root, "plugins", "reverse-l4", "plugin.yaml")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(source), "config.schema.json"), []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDirectory := filepath.Join(root, "target", "nre-ci", "reverse-l4")
+	if err := os.MkdirAll(artifactDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(artifactDirectory, "reverse-l4")
+	if err := os.WriteFile(artifact, []byte("workflow artifact"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := releaseManifest(source, "reverse-l4", pluginArtifactSpec{kind: artifactRPCService}, artifact, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := metadata.manifest, filepath.Join(artifactDirectory, "plugin.yaml"); got != want {
+		t.Fatalf("generated manifest path = %q, want %q", got, want)
+	}
+	if current, err := os.ReadFile(source); err != nil || !bytes.Equal(current, original) {
+		t.Fatalf("source manifest changed: %v", err)
+	}
+	generated, err := pluginmanifest.Load(metadata.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pluginmanifest.ValidateSource(generated, filepath.Dir(source), "reverse-l4", artifact); err != nil {
+		t.Fatalf("generated manifest does not bind workflow artifact: %v", err)
 	}
 }
 

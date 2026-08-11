@@ -54,3 +54,9 @@ finishes and persists `provenance.json`, hashes those exact bytes with SHA-256,
 and asks the official signer to sign the decoded 32-byte digest. The detached
 signature document is written afterward and is not included in the provenance
 digest.
+
+Release builds bind each candidate package manifest to the artifact produced
+inside the controlled build by replacing its artifact SHA-256 and size in a
+generated manifest copy. Source `plugin.yaml` files are not rewritten, so a
+developer does not need to build release artifacts locally just to refresh
+their metadata before GitHub Actions performs the authoritative build.

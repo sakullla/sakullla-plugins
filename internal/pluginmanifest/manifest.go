@@ -77,6 +77,50 @@ func Load(filename string) (Manifest, error) {
 	return manifest, nil
 }
 
+// RenderBuiltArtifactManifest returns a deterministic candidate manifest whose
+// artifact digest and size are bound to the artifact produced by the release
+// builder. The source manifest remains unchanged.
+func RenderBuiltArtifactManifest(manifest Manifest, root, expectedID, artifactFile string) (Manifest, []byte, error) {
+	if err := ValidateSourceContract(manifest, root, expectedID); err != nil {
+		return Manifest{}, nil, err
+	}
+	declared, err := artifactForBuild(manifest)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	info, err := os.Stat(artifactFile)
+	if err != nil || !info.Mode().IsRegular() {
+		return Manifest{}, nil, fmt.Errorf("artifact %q is not a regular build output: %w", artifactFile, err)
+	}
+	digest, err := digestFile(artifactFile)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	bound := manifest
+	bound.Artifacts = append([]Artifact(nil), manifest.Artifacts...)
+	updated := false
+	for index := range bound.Artifacts {
+		artifact := &bound.Artifacts[index]
+		if artifact.Path == declared.Path && artifact.Mode == declared.Mode && artifact.GOOS == declared.GOOS && artifact.GOARCH == declared.GOARCH {
+			artifact.SHA256 = digest
+			artifact.Size = info.Size()
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		return Manifest{}, nil, errors.New("built artifact is absent from plugin manifest")
+	}
+	if err := ValidateSource(bound, root, expectedID, artifactFile); err != nil {
+		return Manifest{}, nil, err
+	}
+	wire, err := yaml.Marshal(bound)
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("encode built artifact manifest: %w", err)
+	}
+	return bound, wire, nil
+}
+
 func ValidateSource(manifest Manifest, root, expectedID, artifactFile string) error {
 	if err := ValidateSourceContract(manifest, root, expectedID); err != nil {
 		return err

@@ -1,6 +1,7 @@
 package pluginmanifest
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -52,6 +53,32 @@ func TestValidateSourceAndPackageTreeUseOneV1Contract(t *testing.T) {
 	writeTestFile(t, packageRoot, "package.sig", []byte("legacy"), 0o644)
 	if err := ValidatePackageTree(packageRoot, manifest); err == nil || !strings.Contains(err.Error(), "unknown file") {
 		t.Fatalf("legacy package.sig error = %v", err)
+	}
+}
+
+func TestRenderBuiltArtifactManifestBindsWorkflowOutputWithoutMutatingSource(t *testing.T) {
+	root := t.TempDir()
+	artifactData := []byte("workflow-built-artifact")
+	artifactFile := writeTestFile(t, root, "build/example-plugin", artifactData, 0o755)
+	writeTestFile(t, root, "config.schema.json", []byte(`{"type":"object"}`), 0o644)
+	manifest := validRPCManifest(strings.Repeat("a", 64), 1)
+	bound, wire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(artifactData)
+	if got, want := bound.Artifacts[0].SHA256, hex.EncodeToString(digest[:]); got != want {
+		t.Fatalf("bound artifact digest = %s, want %s", got, want)
+	}
+	if got, want := bound.Artifacts[0].Size, int64(len(artifactData)); got != want {
+		t.Fatalf("bound artifact size = %d, want %d", got, want)
+	}
+	if manifest.Artifacts[0].SHA256 != strings.Repeat("a", 64) || manifest.Artifacts[0].Size != 1 {
+		t.Fatal("source manifest was mutated")
+	}
+	second, secondWire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile)
+	if err != nil || second.Artifacts[0] != bound.Artifacts[0] || !bytes.Equal(secondWire, wire) {
+		t.Fatalf("generated manifest is not deterministic: %v", err)
 	}
 }
 
