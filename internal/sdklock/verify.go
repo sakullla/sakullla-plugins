@@ -29,40 +29,9 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 		return Verification{}, err
 	}
 	defer os.RemoveAll(root)
-	checkout := filepath.Join(root, "repository")
-	if err := os.Mkdir(checkout, 0o755); err != nil {
+	checkout, err := checkoutLockedRepository(ctx, root, lock.Repository)
+	if err != nil {
 		return Verification{}, err
-	}
-	fetchTarget := lock.Repository.Commit
-	selector := "commit"
-	if lock.Repository.Branch != "" {
-		fetchTarget = "refs/heads/" + lock.Repository.Branch
-		selector = "branch " + lock.Repository.Branch
-	} else if lock.Repository.Tag != "" {
-		fetchTarget = "refs/tags/" + lock.Repository.Tag
-		selector = "tag " + lock.Repository.Tag
-	}
-	for _, args := range [][]string{
-		{"init", "--quiet"},
-		{"config", "core.autocrlf", "false"},
-		{"config", "core.eol", "lf"},
-		{"remote", "add", "origin", lock.Repository.URL},
-		{"fetch", "--quiet", "--depth=1", "origin", fetchTarget},
-	} {
-		if _, err := run(ctx, checkout, "git", args...); err != nil {
-			return Verification{}, fmt.Errorf("establish clean SDK checkout at %s: %w", lock.Repository.Commit, err)
-		}
-	}
-	resolved, err := run(ctx, checkout, "git", "rev-parse", "FETCH_HEAD^{commit}")
-	if err != nil || normalizeGitOutput(resolved) != lock.Repository.Commit {
-		return Verification{}, fmt.Errorf("repository %s does not resolve to locked commit %s", selector, lock.Repository.Commit)
-	}
-	if _, err := run(ctx, checkout, "git", "checkout", "--quiet", "--detach", lock.Repository.Commit); err != nil {
-		return Verification{}, fmt.Errorf("establish clean SDK checkout at %s: %w", lock.Repository.Commit, err)
-	}
-	head, err := run(ctx, checkout, "git", "rev-parse", "HEAD")
-	if err != nil || normalizeGitOutput(head) != lock.Repository.Commit {
-		return Verification{}, fmt.Errorf("clean checkout commit mismatch")
 	}
 	contractTree, err := run(ctx, checkout, "git", "rev-parse", "HEAD:"+lock.SDK.ModuleDirectory)
 	if err != nil || normalizeGitOutput(contractTree) != lock.SDK.ContractTreeOID {
@@ -123,6 +92,49 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 			return Verification{}, err
 		}
 	}
+	return finalizeVerification(lock, requireHostCapabilities, descriptorDigest, guestDigest)
+}
+
+func checkoutLockedRepository(ctx context.Context, root string, repository Repository) (string, error) {
+	checkout := filepath.Join(root, "repository")
+	if err := os.Mkdir(checkout, 0o755); err != nil {
+		return "", err
+	}
+	fetchTarget := repository.Commit
+	selector := "commit"
+	if repository.Branch != "" {
+		fetchTarget = "refs/heads/" + repository.Branch
+		selector = "branch " + repository.Branch
+	} else if repository.Tag != "" {
+		fetchTarget = "refs/tags/" + repository.Tag
+		selector = "tag " + repository.Tag
+	}
+	for _, args := range [][]string{
+		{"init", "--quiet"},
+		{"config", "core.autocrlf", "false"},
+		{"config", "core.eol", "lf"},
+		{"remote", "add", "origin", repository.URL},
+		{"fetch", "--quiet", "--depth=1", "origin", fetchTarget},
+	} {
+		if _, err := run(ctx, checkout, "git", args...); err != nil {
+			return "", fmt.Errorf("establish clean SDK checkout at %s: %w", repository.Commit, err)
+		}
+	}
+	resolved, err := run(ctx, checkout, "git", "rev-parse", "FETCH_HEAD^{commit}")
+	if err != nil || normalizeGitOutput(resolved) != repository.Commit {
+		return "", fmt.Errorf("repository %s does not resolve to locked commit %s", selector, repository.Commit)
+	}
+	if _, err := run(ctx, checkout, "git", "checkout", "--quiet", "--detach", repository.Commit); err != nil {
+		return "", fmt.Errorf("establish clean SDK checkout at %s: %w", repository.Commit, err)
+	}
+	head, err := run(ctx, checkout, "git", "rev-parse", "HEAD")
+	if err != nil || normalizeGitOutput(head) != repository.Commit {
+		return "", fmt.Errorf("clean checkout commit mismatch")
+	}
+	return checkout, nil
+}
+
+func finalizeVerification(lock Lock, requireHostCapabilities bool, descriptorDigest, guestDigest string) (Verification, error) {
 	missing := lock.MissingCapabilities()
 	result := Verification{Commit: lock.Repository.Commit, DescriptorSetSHA256: descriptorDigest, PluginManifestSchemaSHA256: lock.Artifacts.PluginSchemaSHA256, CanonicalGuestSHA256: guestDigest, MissingCapabilities: missing}
 	if requireHostCapabilities && len(missing) != 0 {
@@ -161,7 +173,11 @@ func verifyRustProjection(ctx context.Context, temporaryRoot, repositoryRoot, sd
 	if err != nil {
 		return fmt.Errorf("read lock-resolved Rust SDK projection: %w", err)
 	}
-	if !bytes.Equal(expected, actual) {
+	return verifyRustProjectionMatch(expected, actual)
+}
+
+func verifyRustProjectionMatch(repositoryProjection, lockResolvedProjection []byte) error {
+	if !bytes.Equal(repositoryProjection, lockResolvedProjection) {
 		return fmt.Errorf("repository Rust SDK projection differs from lock-resolved canonical SDK")
 	}
 	return nil

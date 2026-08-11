@@ -13,17 +13,10 @@ import (
 
 func TestSDKVerificationUsesCleanCheckoutAndCapabilityGate(t *testing.T) {
 	t.Parallel()
-	repository := t.TempDir()
+	repository := newSDKFixtureRepository(t)
 	workspace := t.TempDir()
-	writeSDKFixture(t, repository)
 	writeProjectionFixture(t, workspace, "locked-projection")
-	runGitTest(t, repository, "init", "--quiet")
-	runGitTest(t, repository, "config", "user.email", "sdk-fixture@example.invalid")
-	runGitTest(t, repository, "config", "user.name", "SDK Fixture")
-	runGitTest(t, repository, "add", ".")
-	runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
 	lock := fixtureLock(t, repository)
-	commit := lock.Repository.Commit
 	if err := lock.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -31,59 +24,75 @@ func TestSDKVerificationUsesCleanCheckoutAndCapabilityGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verification.Commit != commit || len(verification.MissingCapabilities) != 1 {
+	if verification.Commit != lock.Repository.Commit ||
+		verification.DescriptorSetSHA256 != lock.Artifacts.DescriptorSetSHA256 ||
+		verification.PluginManifestSchemaSHA256 != lock.Artifacts.PluginSchemaSHA256 ||
+		verification.CanonicalGuestSHA256 != lock.Artifacts.CanonicalGuestSHA256 ||
+		len(verification.MissingCapabilities) != 1 {
 		t.Fatalf("unexpected verification: %#v", verification)
 	}
-	projectionPath := filepath.Join(workspace, "crates", "nre-policy-guest", "src", "abi_generated.rs")
-	if err := os.WriteFile(projectionPath, []byte("sibling-projection"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(context.Background(), lock, false, workspace); err == nil || !strings.Contains(err.Error(), "differs from lock-resolved") {
+}
+
+func TestSDKProjectionMismatchFailsClosed(t *testing.T) {
+	t.Parallel()
+	err := verifyRustProjectionMatch([]byte("repository-projection"), []byte("lock-resolved-projection"))
+	if err == nil || !strings.Contains(err.Error(), "differs from lock-resolved") {
 		t.Fatalf("sibling-derived Rust projection did not fail closed: %v", err)
 	}
-	if err := os.WriteFile(projectionPath, []byte("locked-projection"), 0o644); err != nil {
-		t.Fatal(err)
+}
+
+func TestSDKRequiredCapabilitiesFailClosed(t *testing.T) {
+	t.Parallel()
+	lock := Lock{
+		Repository:           Repository{Commit: strings.Repeat("a", 40)},
+		Artifacts:            Artifacts{PluginSchemaSHA256: strings.Repeat("b", 64)},
+		RequiredCapabilities: []Capability{{ID: "policy.atomic-state", MissingReason: "fixture intentionally lacks atomic state"}},
 	}
-	if _, err := Verify(context.Background(), lock, true, workspace); err == nil {
-		t.Fatal("required missing Host capability did not fail closed")
+	verification, err := finalizeVerification(lock, true, "descriptor-digest", "guest-digest")
+	if err == nil || !strings.Contains(err.Error(), "required host capabilities are unavailable") {
+		t.Fatalf("required missing Host capability did not fail closed: %v", err)
+	}
+	if verification.Commit != lock.Repository.Commit ||
+		verification.DescriptorSetSHA256 != "descriptor-digest" ||
+		verification.PluginManifestSchemaSHA256 != lock.Artifacts.PluginSchemaSHA256 ||
+		verification.CanonicalGuestSHA256 != "guest-digest" ||
+		len(verification.MissingCapabilities) != 1 {
+		t.Fatalf("unexpected failed verification result: %#v", verification)
 	}
 }
 
 func TestSDKVerificationSupportsPinnedBranchAndTagSelectors(t *testing.T) {
-	repository := t.TempDir()
-	workspace := t.TempDir()
-	writeSDKFixture(t, repository)
-	writeProjectionFixture(t, workspace, "locked-projection")
-	runGitTest(t, repository, "init", "--quiet")
-	runGitTest(t, repository, "config", "user.email", "sdk-fixture@example.invalid")
-	runGitTest(t, repository, "config", "user.name", "SDK Fixture")
-	runGitTest(t, repository, "add", ".")
-	runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
+	t.Parallel()
+	repository := newSDKFixtureRepository(t)
 	runGitTest(t, repository, "branch", "sdk-candidate")
 	runGitTest(t, repository, "tag", "-a", "sdk-v1", "-m", "SDK v1")
 
+	locked := Repository{URL: repository, Commit: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD"))}
 	for name, selectRef := range map[string]func(*Repository){
 		"branch": func(repository *Repository) { repository.Branch = "sdk-candidate" },
 		"tag":    func(repository *Repository) { repository.Tag = "sdk-v1" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			lock := fixtureLock(t, repository)
-			selectRef(&lock.Repository)
-			if _, err := Verify(context.Background(), lock, false, workspace); err != nil {
+			selected := locked
+			selectRef(&selected)
+			checkout, err := checkoutLockedRepository(context.Background(), t.TempDir(), selected)
+			if err != nil {
 				t.Fatalf("verify pinned %s selector: %v", name, err)
+			}
+			if got := strings.TrimSpace(runGitTest(t, checkout, "rev-parse", "HEAD")); got != selected.Commit {
+				t.Fatalf("checked out commit = %s, want %s", got, selected.Commit)
 			}
 		})
 	}
 
-	locked := fixtureLock(t, repository)
 	if err := os.WriteFile(filepath.Join(repository, "drift.txt"), []byte("drift"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGitTest(t, repository, "add", "drift.txt")
 	runGitTest(t, repository, "commit", "--quiet", "-m", "move branch")
 	runGitTest(t, repository, "branch", "drifted")
-	locked.Repository.Branch = "drifted"
-	if _, err := Verify(context.Background(), locked, false, workspace); err == nil || !strings.Contains(err.Error(), "does not resolve to locked commit") {
+	locked.Branch = "drifted"
+	if _, err := checkoutLockedRepository(context.Background(), t.TempDir(), locked); err == nil || !strings.Contains(err.Error(), "does not resolve to locked commit") {
 		t.Fatalf("moving branch did not fail closed: %v", err)
 	}
 }
@@ -121,18 +130,14 @@ func TestSDKCapabilityEvidenceFailsClosed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			repository := t.TempDir()
-			workspace := t.TempDir()
 			writeSDKFixture(t, repository)
-			writeProjectionFixture(t, workspace, "locked-projection")
 			if err := os.WriteFile(filepath.Join(repository, "plugin-sdk", "go", "contracts.go"), []byte(contracts), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			runGitTest(t, repository, "init", "--quiet")
-			runGitTest(t, repository, "config", "user.email", "sdk-fixture@example.invalid")
-			runGitTest(t, repository, "config", "user.name", "SDK Fixture")
-			runGitTest(t, repository, "add", ".")
-			runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
-			if _, err := Verify(context.Background(), fixtureLock(t, repository), false, workspace); err == nil {
+			commitSDKFixtureRepository(t, repository)
+			capability := Capability{ID: "policy.body-window", Available: true, EvidencePath: "plugin-sdk/go/contracts.go", Symbols: []string{"PolicyHostReadBodyWindow"}}
+			err := verifyCapability(context.Background(), t.TempDir(), repository, filepath.Join(repository, "plugin-sdk"), "github.com/sakullla/nginx-reverse-emby/plugin-sdk", "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", capability)
+			if err == nil {
 				t.Fatal("invalid capability evidence did not fail closed")
 			}
 		})
@@ -199,6 +204,23 @@ func TestSDKGoModulePathAcceptsCheckoutLineEndings(t *testing.T) {
 			t.Fatalf("goModulePath() = %q, want %q", got, want)
 		}
 	}
+}
+
+func newSDKFixtureRepository(t *testing.T) string {
+	t.Helper()
+	repository := t.TempDir()
+	writeSDKFixture(t, repository)
+	commitSDKFixtureRepository(t, repository)
+	return repository
+}
+
+func commitSDKFixtureRepository(t *testing.T, repository string) {
+	t.Helper()
+	runGitTest(t, repository, "init", "--quiet")
+	runGitTest(t, repository, "config", "user.email", "sdk-fixture@example.invalid")
+	runGitTest(t, repository, "config", "user.name", "SDK Fixture")
+	runGitTest(t, repository, "add", ".")
+	runGitTest(t, repository, "commit", "--quiet", "-m", "fixture")
 }
 
 func writeSDKFixture(t *testing.T, root string) {
@@ -286,6 +308,7 @@ func fixtureLock(t *testing.T, repository string) Lock {
 }
 
 func TestRefreshRecalculatesStaleDerivedLockAndWritesAtomically(t *testing.T) {
+	t.Parallel()
 	repository := t.TempDir()
 	writeSDKFixture(t, repository)
 	runGitTest(t, repository, "init", "--quiet")
