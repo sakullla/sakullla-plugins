@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   candidate:
@@ -36,6 +36,25 @@ jobs:
         run: go build -trimpath -o "${{ runner.temp }}/nre-signing-provider" ./cmd/nre-signing-provider
       - name: Build and verify official candidate
         run: go run ./cmd/nre-ci release --verify-reproducible --signer env:NRE_OFFICIAL_SIGNER
+      - name: Publish verified official market branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          publish_root="${RUNNER_TEMP}/official-market"
+          mkdir -p "${publish_root}"
+          cp -a dist/release-candidate/. "${publish_root}/"
+          git -C "${publish_root}" init --quiet
+          git -C "${publish_root}" checkout --quiet --orphan official-market
+          git -C "${publish_root}" config user.name github-actions[bot]
+          git -C "${publish_root}" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "${publish_root}" add --all
+          git -C "${publish_root}" commit --quiet -m "market: publish ${GITHUB_SHA}"
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+          git -C "${publish_root}" config http.https://github.com/.extraheader "AUTHORIZATION: basic ${auth}"
+          git -C "${publish_root}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -C "${publish_root}" push --force origin HEAD:refs/heads/official-market
       - name: Upload immutable candidate evidence
         uses: actions/upload-artifact@v4
         with:

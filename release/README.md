@@ -42,3 +42,9 @@ This is a multi-plugin repository. The generated market points each entry at
 its own signed package root under `packages/<id>/<version>` inside the release
 candidate. The repository root is therefore never presented as a direct
 `purpose=plugin` source, which would incorrectly require a root `plugin.yaml`.
+
+Every push to `main` runs the complete reproducible release gate and then
+force-publishes only the verified candidate tree to the generated
+`official-market` branch. Consumers track that branch; its provenance retains
+the immutable source `main` commit. The release workflow is not triggered by
+updates to `official-market`, so publication cannot recurse.
