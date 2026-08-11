@@ -14,7 +14,7 @@ runtime:
   policy_kind: waf
 artifacts:
   - path: artifacts/waf.wasm
-    sha256: 542813ead5c465c5a853b05f8339b6417d97baa8552dcf64849f43b9ad362194
+    sha256: 4e2deabbae13572a39f6f28b8307e1a07b02c1a8ef393be919770ed37fed511a
     size: 169215
     mode: wasm
 extension_points:

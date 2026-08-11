@@ -151,7 +151,7 @@ func Load(filename string) (Manifest, error) {
 }
 
 func ValidateSource(manifest Manifest, root, expectedID, artifactFile string) error {
-	if err := Validate(manifest, expectedID); err != nil {
+	if err := ValidateSourceContract(manifest, root, expectedID); err != nil {
 		return err
 	}
 	declared, err := artifactForBuild(manifest)
@@ -168,6 +168,13 @@ func ValidateSource(manifest Manifest, root, expectedID, artifactFile string) er
 	}
 	if info.Size() != declared.Size || digest != declared.SHA256 {
 		return fmt.Errorf("artifact %s metadata mismatch: built size=%d sha256=%s, manifest size=%d sha256=%s", declared.Path, info.Size(), digest, declared.Size, declared.SHA256)
+	}
+	return nil
+}
+
+func ValidateSourceContract(manifest Manifest, root, expectedID string) error {
+	if err := Validate(manifest, expectedID); err != nil {
+		return err
 	}
 	for _, reference := range manifestReferences(manifest) {
 		if err := requireRegular(root, reference); err != nil {

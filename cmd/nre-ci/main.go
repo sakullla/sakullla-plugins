@@ -213,6 +213,9 @@ func checkRelease(ctx context.Context, args []string) error {
 	if flags.NArg() != 0 || *signerSpec == "" {
 		return fmt.Errorf("release requires --signer env:NAME and no positional arguments")
 	}
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return fmt.Errorf("official release requires a linux-amd64 build host")
+	}
 	absoluteLock, err := filepath.Abs(*lockPath)
 	if err != nil {
 		return err
@@ -305,7 +308,13 @@ func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactF
 	if err != nil {
 		return verifiedPlugin{}, err
 	}
-	if err := pluginmanifest.ValidateSource(manifest, filepath.Dir(path), expectedID, artifactFile); err != nil {
+	validateSource := func() error {
+		if spec.kind == artifactWASMPolicy && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
+			return pluginmanifest.ValidateSourceContract(manifest, filepath.Dir(path), expectedID)
+		}
+		return pluginmanifest.ValidateSource(manifest, filepath.Dir(path), expectedID, artifactFile)
+	}
+	if err := validateSource(); err != nil {
 		return verifiedPlugin{}, fmt.Errorf("validate %s: %w", path, err)
 	}
 	wantKind := pluginmanifest.RuntimeRPCService
