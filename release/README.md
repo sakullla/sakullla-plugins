@@ -6,23 +6,37 @@ atomically promotes the deterministic `market.yaml` projection at repository
 root. Failed SDK, package, validator, signer, provenance, or reproducibility
 checks leave an existing candidate and market unchanged.
 
+The repository workflow builds `cmd/nre-signing-provider` and routes both
+signing and envelope verification through it. Configure the protected GitHub
+Actions secret `NRE_OFFICIAL_ED25519_PRIVATE_KEY` with the single-line base64
+PKCS#8 value produced by:
+
+```text
+go run ./cmd/nre-signing-provider keygen --output <private-directory>
+```
+
 `--signer env:NRE_OFFICIAL_SIGNER` reads a JSON provider descriptor from the
-named environment variable:
+named environment variable. The workflow creates the equivalent of:
 
 ```json
 {
-  "command": "external-hsm-signer",
-  "args": [],
+  "command": "/runner-temp/nre-signing-provider",
+  "args": ["sign", "--key-env", "NRE_OFFICIAL_ED25519_PRIVATE_KEY"],
   "identity": "sakullla-official-root-2026",
-  "validator_command": "nre-plugin-validator",
-  "validator_args": []
+  "validator_command": "/runner-temp/nre-signing-provider",
+  "validator_args": ["verify", "--public-key-file", "release/official-ed25519-public-key.hex", "--identity", "sakullla-official-root-2026"]
 }
 ```
 
 The descriptor contains executable routing and public identity only. Private
-key material is not a supported field. The signer receives a digest request on
-stdin and must return the external signature response expected by
-`internal/buildkit.CommandSigner`.
+key material is not a supported field. The PKCS#8 secret remains in its
+separate environment variable and is never emitted by the provider. Replacing
+the repository-owned provider with an HSM command later does not change the
+release protocol.
+
+The validator uses the committed `release/official-ed25519-public-key.hex`
+rather than deriving trust from the private secret. A missing or mismatched
+secret therefore fails the release instead of silently changing the root.
 
 This is a multi-plugin repository. The generated market points each entry at
 its own signed package root under `packages/<id>/<version>` inside the release

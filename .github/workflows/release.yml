@@ -1,11 +1,16 @@
 name: official-release-candidate
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: official-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   candidate:
@@ -13,7 +18,8 @@ jobs:
     environment: official-release
     env:
       GOTOOLCHAIN: local
-      NRE_OFFICIAL_SIGNER: ${{ secrets.NRE_OFFICIAL_SIGNER }}
+      NRE_OFFICIAL_ED25519_PRIVATE_KEY: ${{ secrets.NRE_OFFICIAL_ED25519_PRIVATE_KEY }}
+      NRE_OFFICIAL_SIGNER: '{"command":"${{ runner.temp }}/nre-signing-provider","args":["sign","--key-env","NRE_OFFICIAL_ED25519_PRIVATE_KEY"],"identity":"sakullla-official-root-2026","validator_command":"${{ runner.temp }}/nre-signing-provider","validator_args":["verify","--public-key-file","release/official-ed25519-public-key.hex","--identity","sakullla-official-root-2026"]}'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -26,6 +32,8 @@ jobs:
         with:
           toolchain: "1.97.1"
           target: wasm32-unknown-unknown
+      - name: Build repository-owned signing provider
+        run: go build -trimpath -o "${{ runner.temp }}/nre-signing-provider" ./cmd/nre-signing-provider
       - name: Build and verify official candidate
         run: go run ./cmd/nre-ci release --verify-reproducible --signer env:NRE_OFFICIAL_SIGNER
       - name: Upload immutable candidate evidence

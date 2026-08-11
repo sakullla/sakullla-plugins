@@ -3,6 +3,7 @@ package buildkit
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,15 @@ type deterministicSigner struct{}
 
 func (deterministicSigner) Sign(_ context.Context, digest []byte) (Signature, error) {
 	return Signature{Algorithm: "test-only-sha256", Identity: "test://fixture", Value: append([]byte("fixture:"), digest...)}, nil
+}
+
+type ed25519Signer struct {
+	identity string
+	key      ed25519.PrivateKey
+}
+
+func (signer ed25519Signer) Sign(_ context.Context, digest []byte) (Signature, error) {
+	return Signature{Algorithm: "ed25519", Identity: signer.identity, Value: ed25519.Sign(signer.key, digest)}, nil
 }
 
 type inspectingValidator struct {
@@ -74,6 +84,38 @@ func TestPackageReproducible(t *testing.T) {
 	}
 	if !bytes.Equal(firstSignature, secondSignature) {
 		t.Fatal("signature documents are not deterministic")
+	}
+}
+
+func TestPackageEnvelopeVerifiesEd25519AndRejectsTamper(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	manifest := writeFixture(t, root, "source/plugin.yaml", "schema_version: 1\nid: fixture\n")
+	artifact := writeFixture(t, root, "source/plugin.wasm", "deterministic wasm bytes")
+	license := writeFixture(t, root, "source/LICENSE", "fixture license\n")
+	seed := bytes.Repeat([]byte{0x2a}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	identity := "sakullla-official-root-2026"
+	output := filepath.Join(root, "package")
+	_, err := BuildPackage(context.Background(), PackageRequest{
+		ManifestPath: manifest, ArtifactPath: artifact, NoticePaths: []string{license}, OutputDir: output,
+		Signer: ed25519Signer{identity: identity, key: privateKey},
+		Validator: validatorFunc(func(_ context.Context, packageDir string) error {
+			return VerifyPackageEnvelope(packageDir, identity, publicKey)
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPackageEnvelope(output, identity, publicKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "artifact", "plugin.wasm"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPackageEnvelope(output, identity, publicKey); err == nil {
+		t.Fatal("tampered package passed envelope verification")
 	}
 }
 
