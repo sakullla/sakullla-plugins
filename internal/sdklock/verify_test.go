@@ -93,7 +93,7 @@ func TestSDKLockRejectsAmbiguousOrInvalidRepositorySelectors(t *testing.T) {
 		SchemaVersion:        1,
 		Repository:           Repository{URL: "https://example.invalid/repository.git", Commit: strings.Repeat("a", 40)},
 		SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk", ModuleDirectory: "plugin-sdk", PackagePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
-		Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
+		Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PluginSchemaSHA256: strings.Repeat("2", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
 		RequiredCapabilities: []Capability{{ID: "policy.trusted-source", MissingReason: "fixture unavailable"}},
 	}
 	base.CapabilityContractSHA256 = CapabilityDigest(base.RequiredCapabilities)
@@ -146,7 +146,7 @@ func TestSDKLockRejectsCapabilityEvidencePathEscapes(t *testing.T) {
 			SchemaVersion:        1,
 			Repository:           Repository{URL: "https://example.invalid/repository.git", Commit: strings.Repeat("a", 40)},
 			SDK:                  SDK{ModulePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk", ModuleDirectory: "plugin-sdk", PackagePath: "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go", ContractTreeOID: strings.Repeat("b", 40)},
-			Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
+			Artifacts:            Artifacts{DescriptorSetSHA256: strings.Repeat("c", 64), PluginSchemaSHA256: strings.Repeat("2", 64), PolicyProtoSHA256: strings.Repeat("d", 64), RPCProtoSHA256: strings.Repeat("e", 64), CanonicalGuestSHA256: strings.Repeat("f", 64), ValidatorTreeOID: strings.Repeat("1", 40)},
 			RequiredCapabilities: []Capability{{ID: "policy.body-window", Available: true, EvidencePath: evidence, Symbols: []string{"PolicyHostReadBodyWindow"}}},
 		}
 		lock.CapabilityContractSHA256 = CapabilityDigest(lock.RequiredCapabilities)
@@ -207,6 +207,7 @@ func writeSDKFixture(t *testing.T, root string) {
 		"plugin-sdk/go.mod":                                           "module github.com/sakullla/nginx-reverse-emby/plugin-sdk\n\ngo 1.26.5\n",
 		"plugin-sdk/go/contracts.go":                                  "package pluginsdk\nimport \"context\"\nconst PolicyHostReadBodyWindow = \"fixture\"\nconst Projection = \"locked-projection\"\ntype PolicyHost interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\n",
 		"plugin-sdk/go/protoschema/schema.go":                         "package protoschema\nfunc DescriptorSetBytes() ([]byte,error) { return []byte(\"fixture-descriptor\"),nil }\n",
+		"plugin-sdk/go/schema/plugin-manifest-v1.schema.json":         "{\"title\":\"fixture manifest schema\"}\n",
 		"plugin-sdk/go/compatfixture/cmd/generate/main.go":            "package main\nimport \"fmt\"\nfunc main(){ fmt.Print(\"666978747572652d6775657374\\n\") }\n",
 		"plugin-sdk/policy/v1/policy.proto":                           "syntax = \"proto3\"; package fixture.policy;\n",
 		"plugin-sdk/rpc/v1/plugin.proto":                              "syntax = \"proto3\"; package fixture.rpc;\n",
@@ -266,6 +267,7 @@ func fixtureLock(t *testing.T, repository string) Lock {
 		},
 		Artifacts: Artifacts{
 			DescriptorSetSHA256:  hex.EncodeToString(descriptor[:]),
+			PluginSchemaSHA256:   mustGitBlobSHA(t, repository, "plugin-sdk/go/schema/plugin-manifest-v1.schema.json"),
 			PolicyProtoSHA256:    mustGitBlobSHA(t, repository, "plugin-sdk/policy/v1/policy.proto"),
 			RPCProtoSHA256:       mustGitBlobSHA(t, repository, "plugin-sdk/rpc/v1/plugin.proto"),
 			CanonicalGuestSHA256: hex.EncodeToString(guest[:]),

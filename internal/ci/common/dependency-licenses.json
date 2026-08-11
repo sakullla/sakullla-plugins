@@ -2,8 +2,10 @@
   "schema_version": 1,
   "go_modules": {
     "github.com/sakullla/nginx-reverse-emby/plugin-sdk": "GPL-3.0-only",
+    "github.com/santhosh-tekuri/jsonschema/v6": "Apache-2.0",
     "github.com/tetratelabs/wazero": "Apache-2.0",
     "golang.org/x/sys": "BSD-3-Clause",
+    "golang.org/x/text": "BSD-3-Clause",
     "google.golang.org/protobuf": "BSD-3-Clause",
     "gopkg.in/yaml.v3": "MIT AND Apache-2.0"
   },

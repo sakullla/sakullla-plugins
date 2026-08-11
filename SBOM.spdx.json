@@ -27,11 +27,21 @@
     {
       "SPDXID": "SPDXRef-Package-plugin-sdk",
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "versionInfo": "v0.2.0",
+      "versionInfo": "v0.3.0",
       "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
       "filesAnalyzed": false,
       "licenseConcluded": "GPL-3.0-only",
       "licenseDeclared": "GPL-3.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-jsonschema-v6",
+      "name": "github.com/santhosh-tekuri/jsonschema/v6",
+      "versionInfo": "v6.0.3",
+      "downloadLocation": "https://github.com/santhosh-tekuri/jsonschema",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION"
     },
     {
@@ -49,6 +59,16 @@
       "name": "golang.org/x/sys",
       "versionInfo": "v0.44.0",
       "downloadLocation": "https://go.googlesource.com/sys",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-text",
+      "name": "golang.org/x/text",
+      "versionInfo": "v0.14.0",
+      "downloadLocation": "https://go.googlesource.com/text",
       "filesAnalyzed": false,
       "licenseConcluded": "BSD-3-Clause",
       "licenseDeclared": "BSD-3-Clause",
@@ -80,6 +100,16 @@
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-plugin-sdk"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-jsonschema-v6"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-jsonschema-v6",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-text"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",

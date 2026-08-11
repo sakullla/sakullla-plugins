@@ -29,6 +29,7 @@ func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 		},
 		Artifacts: sdklock.Artifacts{
 			DescriptorSetSHA256:  strings.Repeat("c", 64),
+			PluginSchemaSHA256:   strings.Repeat("2", 64),
 			PolicyProtoSHA256:    strings.Repeat("d", 64),
 			RPCProtoSHA256:       strings.Repeat("e", 64),
 			CanonicalGuestSHA256: strings.Repeat("f", 64),

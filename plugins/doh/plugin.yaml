@@ -13,8 +13,8 @@ runtime:
   entry: doh
 artifacts:
   - path: artifacts/linux-amd64/doh
-    sha256: bd3459a8a97e81acaa1ab92fe41aed2705ae2527e411b3e0acb0d7c438202b44
-    size: 8109587
+    sha256: 08ea6d1c744d92207b8c2b09aa9e4ce76511c4fc0f17d1d8c844293db7e45a6f
+    size: 8587776
     mode: executable
     goos: linux
     goarch: amd64

@@ -16,10 +16,11 @@ import (
 )
 
 type Verification struct {
-	Commit               string   `json:"commit"`
-	DescriptorSetSHA256  string   `json:"descriptor_set_sha256"`
-	CanonicalGuestSHA256 string   `json:"canonical_guest_sha256"`
-	MissingCapabilities  []string `json:"missing_capabilities"`
+	Commit                     string   `json:"commit"`
+	DescriptorSetSHA256        string   `json:"descriptor_set_sha256"`
+	PluginManifestSchemaSHA256 string   `json:"plugin_manifest_schema_sha256"`
+	CanonicalGuestSHA256       string   `json:"canonical_guest_sha256"`
+	MissingCapabilities        []string `json:"missing_capabilities"`
 }
 
 func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, repositoryRoot string) (Verification, error) {
@@ -72,8 +73,9 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 		return Verification{}, fmt.Errorf("validator tree digest mismatch")
 	}
 	for path, expected := range map[string]string{
-		"plugin-sdk/policy/v1/policy.proto": lock.Artifacts.PolicyProtoSHA256,
-		"plugin-sdk/rpc/v1/plugin.proto":    lock.Artifacts.RPCProtoSHA256,
+		"plugin-sdk/policy/v1/policy.proto":                   lock.Artifacts.PolicyProtoSHA256,
+		"plugin-sdk/rpc/v1/plugin.proto":                      lock.Artifacts.RPCProtoSHA256,
+		"plugin-sdk/go/schema/plugin-manifest-v1.schema.json": lock.Artifacts.PluginSchemaSHA256,
 	} {
 		actual, err := gitBlobSHA256(ctx, checkout, path)
 		if err != nil || actual != expected {
@@ -122,7 +124,7 @@ func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, reposi
 		}
 	}
 	missing := lock.MissingCapabilities()
-	result := Verification{Commit: lock.Repository.Commit, DescriptorSetSHA256: descriptorDigest, CanonicalGuestSHA256: guestDigest, MissingCapabilities: missing}
+	result := Verification{Commit: lock.Repository.Commit, DescriptorSetSHA256: descriptorDigest, PluginManifestSchemaSHA256: lock.Artifacts.PluginSchemaSHA256, CanonicalGuestSHA256: guestDigest, MissingCapabilities: missing}
 	if requireHostCapabilities && len(missing) != 0 {
 		return result, fmt.Errorf("required host capabilities are unavailable: %s", strings.Join(missing, "; "))
 	}

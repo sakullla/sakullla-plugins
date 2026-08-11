@@ -42,6 +42,7 @@ type SDK struct {
 
 type Artifacts struct {
 	DescriptorSetSHA256  string `json:"descriptor_set_sha256"`
+	PluginSchemaSHA256   string `json:"plugin_manifest_schema_sha256"`
 	PolicyProtoSHA256    string `json:"policy_proto_sha256"`
 	RPCProtoSHA256       string `json:"rpc_proto_sha256"`
 	CanonicalGuestSHA256 string `json:"canonical_guest_sha256"`
@@ -95,11 +96,12 @@ func (lock Lock) Validate() error {
 		return fmt.Errorf("SDK and validator Git tree OIDs must be full SHA-1 object IDs")
 	}
 	for name, value := range map[string]string{
-		"descriptor_set":      lock.Artifacts.DescriptorSetSHA256,
-		"policy_proto":        lock.Artifacts.PolicyProtoSHA256,
-		"rpc_proto":           lock.Artifacts.RPCProtoSHA256,
-		"canonical_guest":     lock.Artifacts.CanonicalGuestSHA256,
-		"capability_contract": lock.CapabilityContractSHA256,
+		"descriptor_set":         lock.Artifacts.DescriptorSetSHA256,
+		"plugin_manifest_schema": lock.Artifacts.PluginSchemaSHA256,
+		"policy_proto":           lock.Artifacts.PolicyProtoSHA256,
+		"rpc_proto":              lock.Artifacts.RPCProtoSHA256,
+		"canonical_guest":        lock.Artifacts.CanonicalGuestSHA256,
+		"capability_contract":    lock.CapabilityContractSHA256,
 	} {
 		if !sha256Hex.MatchString(value) {
 			return fmt.Errorf("%s digest must be lowercase SHA-256", name)

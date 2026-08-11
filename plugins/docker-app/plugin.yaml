@@ -13,8 +13,8 @@ runtime:
   entry: docker-app
 artifacts:
   - path: artifacts/linux-amd64/docker-app
-    sha256: e78d9515a63ce0ed63f7fcb000e055a5e7c104c1feba604d1e3da129f0b4bdd8
-    size: 7734141
+    sha256: 8ebe9b89d285dc4a3ec6cb994265338d07dcb2679c7477c519c75e108b971675
+    size: 8343588
     mode: executable
     goos: linux
     goarch: amd64

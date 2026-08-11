@@ -13,8 +13,8 @@ runtime:
   entry: shadowsocks-server
 artifacts:
   - path: artifacts/linux-amd64/shadowsocks-server
-    sha256: c3d1412fe848e99c5da8b2080408bdc64174c80714b5fdda31f3015c092da774
-    size: 8311107
+    sha256: e2cec116f5bf1c482e22233be41a4ecbc59149f338e702bf06bbd45b4c647ced
+    size: 8791112
     mode: executable
     goos: linux
     goarch: amd64

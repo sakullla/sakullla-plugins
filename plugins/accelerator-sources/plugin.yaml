@@ -13,8 +13,8 @@ runtime:
   entry: accelerator-sources
 artifacts:
   - path: artifacts/linux-amd64/accelerator-sources
-    sha256: 0a9754be8d838419bf44252b77eb760e293a4db4b7ed3538283778df3f27a69e
-    size: 8013084
+    sha256: 4e470d1a8ad3938997c4db79b0cc82882a07c4bf4a5b39827a1e3fc38fe2c93a
+    size: 8618950
     mode: executable
     goos: linux
     goarch: amd64

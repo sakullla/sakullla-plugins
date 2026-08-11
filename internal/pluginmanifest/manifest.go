@@ -12,125 +12,52 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	RuntimeRPCService = "rpc-service"
-	RuntimeWASMPolicy = "wasm-policy"
-	RPCABIV1          = "nre:rpc/v1"
-	PolicyABIV1       = "nre:policy/v1"
+	RuntimeRPCService = pluginsdk.RuntimeRPCService
+	RuntimeWASMPolicy = pluginsdk.RuntimeWASMPolicy
+	RPCABIV1          = pluginsdk.RPCABIV1
+	PolicyABIV1       = pluginsdk.PolicyABIV1
 	OfficialKeyID     = "sakullla-official-root-2026"
 )
 
-var (
-	identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$`)
-	versionPattern    = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
-	hexDigestPattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
-)
+const pluginManifestSchemaURL = "https://github.com/sakullla/nginx-reverse-emby/plugin-sdk/schema/plugin-manifest-v1.schema.json"
 
-var allowedExtensionPoints = stringSet(
-	"http.request", "http.response", "l4.accept", "policy.provider",
-	"dns.provider", "container.provider", "tunnel.provider", "ui.route",
-)
+var canonicalSchema = sync.OnceValues(func() (*jsonschema.Schema, error) {
+	var document any
+	decoder := json.NewDecoder(bytes.NewReader(pluginsdk.PluginManifestSchemaV1()))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("decode SDK plugin manifest schema: %w", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(pluginManifestSchemaURL, document); err != nil {
+		return nil, fmt.Errorf("register SDK plugin manifest schema: %w", err)
+	}
+	return compiler.Compile(pluginManifestSchemaURL)
+})
 
-var allowedPermissions = stringSet(
-	"agent.read", "agent.configure", "event.emit", "http.inspect", "http.respond",
-	"l4.inspect", "l4.respond", "policy.read", "policy.write", "secret.use",
-	"storage.read", "storage.write", "container.read", "container.manage", "dns.manage",
-	"policy.atomic-state", "policy.monotonic-clock", "policy.trusted-source",
-	"service.revocable-resource-handle", "ui.dynamic-actions",
-)
-
-type Manifest struct {
-	SchemaVersion   int            `yaml:"schema_version"`
-	ID              string         `yaml:"id"`
-	Version         string         `yaml:"version"`
-	Name            string         `yaml:"name"`
-	Description     string         `yaml:"description"`
-	Compatibility   Compatibility  `yaml:"compatibility"`
-	Runtime         Runtime        `yaml:"runtime"`
-	Artifacts       []Artifact     `yaml:"artifacts"`
-	ExtensionPoints []string       `yaml:"extension_points"`
-	Permissions     []Permission   `yaml:"permissions"`
-	ConfigSchema    string         `yaml:"config_schema"`
-	UISchema        string         `yaml:"ui_schema,omitempty"`
-	Assets          []string       `yaml:"assets,omitempty"`
-	ResourceBudget  ResourceBudget `yaml:"resource_budget"`
-	FailurePolicy   FailurePolicy  `yaml:"failure_policy"`
-	Signature       Signature      `yaml:"signature"`
-	Migrations      []Migration    `yaml:"migrations,omitempty"`
-	Cleanup         Cleanup        `yaml:"cleanup"`
-}
-
-type Compatibility struct {
-	Host  string `yaml:"host"`
-	Agent string `yaml:"agent"`
-}
-
-type Runtime struct {
-	Kind       string `yaml:"kind"`
-	ABI        string `yaml:"abi"`
-	HostScope  string `yaml:"host_scope"`
-	Entry      string `yaml:"entry"`
-	PolicyKind string `yaml:"policy_kind,omitempty"`
-}
-
-type Artifact struct {
-	Path   string `yaml:"path"`
-	SHA256 string `yaml:"sha256"`
-	Size   int64  `yaml:"size"`
-	Mode   string `yaml:"mode"`
-	GOOS   string `yaml:"goos,omitempty"`
-	GOARCH string `yaml:"goarch,omitempty"`
-}
-
-type Permission struct {
-	Name string `yaml:"name"`
-}
-
-type ResourceBudget struct {
-	TimeoutMS   int64 `yaml:"timeout_ms"`
-	MemoryBytes int64 `yaml:"memory_bytes"`
-	Concurrency int   `yaml:"concurrency"`
-	InputBytes  int64 `yaml:"input_bytes"`
-	OutputBytes int64 `yaml:"output_bytes"`
-	CPUMillis   int64 `yaml:"cpu_millis,omitempty"`
-	Restarts    int   `yaml:"restarts,omitempty"`
-}
-
-type FailurePolicy struct {
-	OnError      string `yaml:"on_error"`
-	OnBudget     string `yaml:"on_budget"`
-	Restart      string `yaml:"restart"`
-	CoreFallback string `yaml:"core_fallback"`
-}
-
-type Signature struct {
-	Algorithm string `yaml:"algorithm"`
-	KeyID     string `yaml:"key_id"`
-	File      string `yaml:"file"`
-}
-
-type Migration struct {
-	From string `yaml:"from"`
-	To   string `yaml:"to"`
-	File string `yaml:"file"`
-}
-
-type Cleanup struct {
-	Instances   string `yaml:"instances"`
-	Config      string `yaml:"config"`
-	OwnedData   string `yaml:"owned_data"`
-	Grants      string `yaml:"grants"`
-	SharedRefs  string `yaml:"shared_refs"`
-	AuditEvents string `yaml:"audit_events"`
-}
+// The SDK owns the structural plugin.yaml v1 contract. This package adds the
+// stricter official-publisher semantic and package-envelope profile.
+type Manifest = pluginsdk.Manifest
+type Compatibility = pluginsdk.Compatibility
+type Runtime = pluginsdk.Runtime
+type Artifact = pluginsdk.Artifact
+type Permission = pluginsdk.Permission
+type ResourceBudget = pluginsdk.ResourceBudget
+type FailurePolicy = pluginsdk.FailurePolicy
+type Signature = pluginsdk.Signature
+type Migration = pluginsdk.Migration
+type Cleanup = pluginsdk.CleanupPolicy
 
 func Load(filename string) (Manifest, error) {
 	data, err := os.ReadFile(filename)
@@ -311,8 +238,11 @@ func ArtifactDestination(manifest Manifest) (string, string, error) {
 }
 
 func Validate(manifest Manifest, expectedID string) error {
-	if manifest.SchemaVersion != 1 || manifest.ID != expectedID || !identifierPattern.MatchString(manifest.ID) || !versionPattern.MatchString(manifest.Version) {
-		return fmt.Errorf("manifest requires schema_version 1, id %q, and semantic version", expectedID)
+	if err := validateCanonicalSchema(manifest); err != nil {
+		return err
+	}
+	if manifest.ID != expectedID {
+		return fmt.Errorf("manifest id %q does not match expected plugin %q", manifest.ID, expectedID)
 	}
 	if strings.TrimSpace(manifest.Name) == "" || strings.TrimSpace(manifest.Description) == "" || manifest.Compatibility.Host == "" || manifest.Compatibility.Agent == "" {
 		return errors.New("manifest name, description, and host/agent compatibility are required")
@@ -324,16 +254,6 @@ func Validate(manifest Manifest, expectedID string) error {
 		return errors.New("manifest requires extension_points and artifacts")
 	}
 	if err := validateRuntimeAndArtifacts(manifest); err != nil {
-		return err
-	}
-	if err := validateUniqueAllowed("extension point", manifest.ExtensionPoints, allowedExtensionPoints); err != nil {
-		return err
-	}
-	permissionNames := make([]string, 0, len(manifest.Permissions))
-	for _, permission := range manifest.Permissions {
-		permissionNames = append(permissionNames, permission.Name)
-	}
-	if err := validateUniqueAllowed("permission", permissionNames, allowedPermissions); err != nil {
 		return err
 	}
 	if err := validateReferences(manifest); err != nil {
@@ -381,7 +301,7 @@ func validateRuntimeAndArtifacts(manifest Manifest) error {
 			return errors.New("wasm-policy artifact must be the single platform-neutral .wasm runtime entry")
 		}
 	case RuntimeRPCService:
-		if runtime.ABI != RPCABIV1 || !oneOf(runtime.HostScope, "agent", "control-plane") || runtime.PolicyKind != "" || !identifierPattern.MatchString(runtime.Entry) {
+		if runtime.ABI != RPCABIV1 || !oneOf(runtime.HostScope, "agent", "control-plane") || runtime.PolicyKind != "" || runtime.Entry == "" || strings.ContainsAny(runtime.Entry, `/\\`) {
 			return errors.New("rpc-service requires nre:rpc/v1, an allowed host_scope, and a logical entry name")
 		}
 		for _, artifact := range manifest.Artifacts {
@@ -399,8 +319,8 @@ func validateRuntimeAndArtifacts(manifest Manifest) error {
 	}
 	seen := make(map[string]struct{}, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
-		if !safePath(artifact.Path) || !hexDigestPattern.MatchString(artifact.SHA256) || artifact.Size <= 0 {
-			return fmt.Errorf("artifact %q requires a canonical path, lowercase SHA-256, and positive size", artifact.Path)
+		if !safePath(artifact.Path) {
+			return fmt.Errorf("artifact %q requires a canonical path", artifact.Path)
 		}
 		if _, duplicate := seen[artifact.Path]; duplicate {
 			return fmt.Errorf("duplicate artifact %q", artifact.Path)
@@ -425,7 +345,7 @@ func validateReferences(manifest Manifest) error {
 		seen[asset] = struct{}{}
 	}
 	for _, migration := range manifest.Migrations {
-		if !versionPattern.MatchString(migration.From) || !versionPattern.MatchString(migration.To) || migration.From == migration.To || !safePath(migration.File) || !strings.HasPrefix(migration.File, "migrations/") || path.Ext(migration.File) != ".json" {
+		if migration.From == migration.To || !safePath(migration.File) || !strings.HasPrefix(migration.File, "migrations/") || path.Ext(migration.File) != ".json" {
 			return fmt.Errorf("migration %q must declare distinct semantic versions and a migrations/*.json file", migration.File)
 		}
 		if _, duplicate := seen[migration.File]; duplicate {
@@ -465,7 +385,7 @@ func validateDynamicUI(filename string, permissions []Permission) error {
 		if _, ok := declared["ui.dynamic-actions"]; !ok {
 			return errors.New("dynamic UI action requires ui.dynamic-actions permission")
 		}
-		if _, ok := allowedPermissions[action.Capability]; !ok || action.Capability == "ui.dynamic-actions" {
+		if action.Capability == "" || action.Capability == "ui.dynamic-actions" {
 			return fmt.Errorf("dynamic UI action capability %q is not an allowed action capability", action.Capability)
 		}
 		if _, ok := declared[action.Capability]; !ok {
@@ -514,16 +434,23 @@ func safePath(value string) bool {
 	return value != "" && fs.ValidPath(value) && path.Clean(value) == value && !strings.Contains(value, `\`)
 }
 
-func validateUniqueAllowed(kind string, values []string, allowed map[string]struct{}) error {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if _, ok := allowed[value]; !ok {
-			return fmt.Errorf("%s %q is not allowed", kind, value)
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return fmt.Errorf("duplicate %s %q", kind, value)
-		}
-		seen[value] = struct{}{}
+func validateCanonicalSchema(manifest Manifest) error {
+	schema, err := canonicalSchema()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("encode plugin manifest for SDK schema validation: %w", err)
+	}
+	var document any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil {
+		return fmt.Errorf("decode plugin manifest for SDK schema validation: %w", err)
+	}
+	if err := schema.Validate(document); err != nil {
+		return fmt.Errorf("SDK plugin manifest schema: %w", err)
 	}
 	return nil
 }
