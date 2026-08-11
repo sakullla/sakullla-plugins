@@ -369,6 +369,18 @@ func TestCargoTargetDirectoryFollowsCargoEnvironment(t *testing.T) {
 	}
 }
 
+func TestReleaseStagingCreatesMissingOutputParent(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "missing", "nested", "candidate")
+	staging, err := makeReleaseStaging(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(staging)
+	if filepath.Dir(staging) != filepath.Dir(output) {
+		t.Fatalf("release staging = %q, want parent %q", staging, filepath.Dir(output))
+	}
+}
+
 func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string) {
 	t.Helper()
 	directory := filepath.Join(root, "plugins", pluginID)

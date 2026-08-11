@@ -248,7 +248,7 @@ func checkRelease(ctx context.Context, args []string) error {
 	if !filepath.IsAbs(absoluteOutput) {
 		absoluteOutput = filepath.Join(root, filepath.FromSlash(absoluteOutput))
 	}
-	staging, err := os.MkdirTemp(filepath.Dir(absoluteOutput), ".release-packages-")
+	staging, err := makeReleaseStaging(absoluteOutput)
 	if err != nil {
 		return err
 	}
@@ -296,6 +296,14 @@ func checkRelease(ctx context.Context, args []string) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+func makeReleaseStaging(absoluteOutput string) (string, error) {
+	parent := filepath.Dir(absoluteOutput)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, ".release-packages-")
 }
 
 func releaseManifest(path, expectedID string, spec pluginArtifactSpec) (verifiedPlugin, error) {
