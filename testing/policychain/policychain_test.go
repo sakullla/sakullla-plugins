@@ -66,30 +66,6 @@ func TestPolicyChainDisableAndRevoke(t *testing.T) {
 	}
 }
 
-func TestPolicyChainFailureIsolationAndStreamingUnbound(t *testing.T) {
-	harness := configuredHarness(t, func(stage Stage, request Request, _ map[string]string) (Decision, error) {
-		if stage == StageRateLimit && request.BindingID == "binding-a" {
-			return Decision{}, errors.New("fixture pool saturated")
-		}
-		return allow("ok"), nil
-	})
-	if err := harness.PutBinding(binding("binding-b", nil)); err != nil {
-		t.Fatal(err)
-	}
-	failed := harness.Evaluate(context.Background(), requestFor("binding-a"))
-	unrelated := harness.Evaluate(context.Background(), requestFor("binding-b"))
-	unbound := harness.Evaluate(context.Background(), Request{RequestID: "streaming", Payload: make([]byte, 1<<20)})
-	if failed.Decision.Action != pluginsdk.PolicyActionDeny || failed.Failure == nil {
-		t.Fatalf("bound failure result = %#v", failed)
-	}
-	if unrelated.Decision.Action != pluginsdk.PolicyActionAllow || unrelated.Failure != nil {
-		t.Fatalf("unrelated binding result = %#v", unrelated)
-	}
-	if !unbound.Unbound || unbound.Decision.Action != pluginsdk.PolicyActionAllow || len(unbound.Stages) != 0 {
-		t.Fatalf("unbound streaming result = %#v", unbound)
-	}
-}
-
 func TestPolicyChainDeadlineIsolationDoesNotBlockUnboundOrOtherBinding(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -209,12 +185,15 @@ func TestPolicyChainBudgetAndPoolFailuresAreBindingLocal(t *testing.T) {
 			}
 			failed := harness.Evaluate(context.Background(), requestFor("binding-a"))
 			unrelated := harness.Evaluate(context.Background(), requestFor("binding-b"))
-			unbound := harness.Evaluate(context.Background(), Request{RequestID: "streaming"})
+			unbound := harness.Evaluate(context.Background(), Request{RequestID: "streaming", Payload: make([]byte, 1<<20)})
 			if !errors.Is(failed.Failure, test.failure) || failed.Decision.Action != pluginsdk.PolicyActionDeny {
 				t.Fatalf("local failure = %#v", failed)
 			}
-			if unrelated.Failure != nil || unrelated.Decision.Action != pluginsdk.PolicyActionAllow || !unbound.Unbound {
-				t.Fatalf("failure escaped binding unrelated=%#v unbound=%#v", unrelated, unbound)
+			if unrelated.Failure != nil || unrelated.Decision.Action != pluginsdk.PolicyActionAllow {
+				t.Fatalf("failure escaped binding unrelated=%#v", unrelated)
+			}
+			if !unbound.Unbound || unbound.Decision.Action != pluginsdk.PolicyActionAllow || len(unbound.Stages) != 0 {
+				t.Fatalf("unbound streaming result=%#v", unbound)
 			}
 		})
 	}

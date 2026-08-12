@@ -10,6 +10,17 @@ const POLICY: StableId = StableId(2);
 const RULE: StableId = StableId(3);
 const SOURCE: StableId = StableId(4);
 
+const HTTP_SOURCE_CORPUS: &str =
+    include_str!("../../../testing/corpus/rate-limit/http-source-limit.json");
+const HTTP_GLOBAL_CORPUS: &str =
+    include_str!("../../../testing/corpus/rate-limit/http-global-limit.json");
+const L4_EXISTING_CORPUS: &str =
+    include_str!("../../../testing/corpus/rate-limit/l4-existing-session.json");
+const L4_NEW_CORPUS: &str =
+    include_str!("../../../testing/corpus/rate-limit/l4-new-connection.json");
+const GENERATION_CORPUS: &str =
+    include_str!("../../../testing/corpus/rate-limit/generation-reset.json");
+
 fn spec(interval: u64, burst: u32) -> BucketSpec {
     BucketSpec {
         emission_interval_ns: interval,
@@ -39,6 +50,11 @@ fn admit<const N: usize>(
 
 #[test]
 fn http_source_and_rule_global_buckets_are_independent_and_return_429() {
+    assert!(HTTP_SOURCE_CORPUS.contains("\"source_limited\""));
+    assert!(HTTP_SOURCE_CORPUS.contains("\"denial_status\": 429"));
+    assert!(HTTP_GLOBAL_CORPUS.contains("\"rule_global_limited\""));
+    assert!(HTTP_GLOBAL_CORPUS.contains("\"denial_status\": 429"));
+
     let mut limiter = LocalLimiter::<16>::new();
     assert_eq!(
         admit(
@@ -79,6 +95,9 @@ fn http_source_and_rule_global_buckets_are_independent_and_return_429() {
 
 #[test]
 fn l4_consumes_only_new_connection_or_flow() {
+    assert!(L4_EXISTING_CORPUS.contains("\"expected_key_count\": 0"));
+    assert!(L4_NEW_CORPUS.contains("\"l4_new_connection\""));
+
     let mut limiter = LocalLimiter::<8>::new();
     for _ in 0..10 {
         assert_eq!(
@@ -122,6 +141,8 @@ fn l4_consumes_only_new_connection_or_flow() {
 
 #[test]
 fn generation_reset_and_hot_update_do_not_reuse_old_keys() {
+    assert!(GENERATION_CORPUS.contains("\"generation_ids\": [7, 8]"));
+
     let mut limiter = LocalLimiter::<8>::new();
     assert_eq!(
         admit(

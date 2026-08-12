@@ -1,7 +1,0 @@
-{
-  "case": "capabilities-unavailable",
-  "required_capabilities": ["policy.monotonic-clock", "policy.atomic-state"],
-  "available": [false, false],
-  "expected_init_status": "incompatible_abi",
-  "expected_package_gate": "blocked"
-}

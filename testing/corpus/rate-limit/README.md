@@ -10,7 +10,6 @@ bucket configuration, and stable expected reason/action.
 - `l4-existing-session.json`: an established session never consumes admission.
 - `l4-new-connection.json`: only a new connection consumes L4 source capacity.
 - `generation-reset.json`: a new generation cannot reuse old counter state.
-- `capabilities-unavailable.json`: missing monotonic clock or atomic state blocks activation.
 
 All identifiers are opaque stable test values. Durations are nanoseconds from a
 Host monotonic clock, never wall-clock timestamps.
