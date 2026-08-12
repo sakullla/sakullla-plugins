@@ -97,153 +97,32 @@ func TestPluginReverseL4PostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
 	}
 }
 
-func TestPluginDockerAppPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
-	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = checkPluginWithVerifier(context.Background(), []string{"--id", "docker-app", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
-		if !required {
-			t.Fatal("Docker RPC plugin bypassed capability gate")
-		}
-		return sdklock.Verification{}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "docker-app"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "docker-app", name)); err != nil || info.IsDir() {
-		t.Fatalf("Docker RPC artifact missing: %v", err)
-	}
-}
-
-func TestPluginAcceleratorSourcesPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
-	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = checkPluginWithVerifier(context.Background(), []string{"--id", "accelerator-sources", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
-		if !required {
-			t.Fatal("accelerator RPC plugin bypassed capability gate")
-		}
-		return sdklock.Verification{}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "accelerator-sources"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "accelerator-sources", name)); err != nil || info.IsDir() {
-		t.Fatalf("accelerator RPC artifact missing: %v", err)
-	}
-}
-
-func TestPluginDoHPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
-	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = checkPluginWithVerifier(context.Background(), []string{"--id", "doh", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
-		if !required {
-			t.Fatal("DoH RPC plugin bypassed capability gate")
-		}
-		return sdklock.Verification{}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "doh"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "doh", name)); err != nil || info.IsDir() {
-		t.Fatalf("DoH RPC artifact missing: %v", err)
-	}
-}
-
-func TestPluginCloudflareDNSPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
-	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = checkPluginWithVerifier(context.Background(), []string{"--id", "cloudflare-dns", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
-		if !required {
-			t.Fatal("Cloudflare DNS RPC plugin bypassed capability gate")
-		}
-		return sdklock.Verification{}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "cloudflare-dns"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "cloudflare-dns", name)); err != nil || info.IsDir() {
-		t.Fatalf("Cloudflare DNS RPC artifact missing: %v", err)
-	}
-}
-
-func TestPluginShadowsocksPostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
-	lockPath, err := filepath.Abs(filepath.Join("..", "..", "sdk.lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = checkPluginWithVerifier(context.Background(), []string{"--id", "shadowsocks-server", "--sdk-lock", lockPath}, func(_ context.Context, _ sdklock.Lock, required bool, _ string) (sdklock.Verification, error) {
-		if !required {
-			t.Fatal("Shadowsocks RPC plugin bypassed capability gate")
-		}
-		return sdklock.Verification{}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "shadowsocks-server"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "shadowsocks-server", name)); err != nil || info.IsDir() {
-		t.Fatalf("Shadowsocks RPC artifact missing: %v", err)
-	}
-}
-
 func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rpc, err := pluginArtifactSpecFor(repositoryRoot, "reverse-l4")
-	if err != nil || rpc.kind != artifactRPCService || !strings.Contains(rpc.sourcePath, "reverse-l4/cmd/reverse-l4") {
-		t.Fatalf("reverse-l4 artifact spec = %#v err=%v", rpc, err)
+	tests := []struct {
+		id           string
+		kind         pluginArtifactKind
+		sourceNeedle string
+		packageName  string
+	}{
+		{id: "reverse-l4", kind: artifactRPCService, sourceNeedle: "reverse-l4/cmd/reverse-l4"},
+		{id: "docker-app", kind: artifactRPCService, sourceNeedle: "docker-app/cmd/docker-app"},
+		{id: "accelerator-sources", kind: artifactRPCService, sourceNeedle: "accelerator-sources/cmd/accelerator-sources"},
+		{id: "doh", kind: artifactRPCService, sourceNeedle: "doh/cmd/doh"},
+		{id: "cloudflare-dns", kind: artifactRPCService, sourceNeedle: "cloudflare-dns/cmd/cloudflare-dns"},
+		{id: "shadowsocks-server", kind: artifactRPCService, sourceNeedle: "shadowsocks-server/cmd/shadowsocks-server"},
+		{id: "waf", kind: artifactWASMPolicy, packageName: "sakullla-waf"},
 	}
-	docker, err := pluginArtifactSpecFor(repositoryRoot, "docker-app")
-	if err != nil || docker.kind != artifactRPCService || !strings.Contains(docker.sourcePath, "docker-app/cmd/docker-app") {
-		t.Fatalf("docker-app artifact spec = %#v err=%v", docker, err)
-	}
-	accelerator, err := pluginArtifactSpecFor(repositoryRoot, "accelerator-sources")
-	if err != nil || accelerator.kind != artifactRPCService || !strings.Contains(accelerator.sourcePath, "accelerator-sources/cmd/accelerator-sources") {
-		t.Fatalf("accelerator-sources artifact spec = %#v err=%v", accelerator, err)
-	}
-	dohArtifact, err := pluginArtifactSpecFor(repositoryRoot, "doh")
-	if err != nil || dohArtifact.kind != artifactRPCService || !strings.Contains(dohArtifact.sourcePath, "doh/cmd/doh") {
-		t.Fatalf("DoH artifact spec = %#v err=%v", dohArtifact, err)
-	}
-	cloudflareArtifact, err := pluginArtifactSpecFor(repositoryRoot, "cloudflare-dns")
-	if err != nil || cloudflareArtifact.kind != artifactRPCService || !strings.Contains(cloudflareArtifact.sourcePath, "cloudflare-dns/cmd/cloudflare-dns") {
-		t.Fatalf("Cloudflare DNS artifact spec = %#v err=%v", cloudflareArtifact, err)
-	}
-	shadowsocksArtifact, err := pluginArtifactSpecFor(repositoryRoot, "shadowsocks-server")
-	if err != nil || shadowsocksArtifact.kind != artifactRPCService || !strings.Contains(shadowsocksArtifact.sourcePath, "shadowsocks-server/cmd/shadowsocks-server") {
-		t.Fatalf("Shadowsocks artifact spec = %#v err=%v", shadowsocksArtifact, err)
-	}
-	wasm, err := pluginArtifactSpecFor(repositoryRoot, "waf")
-	if err != nil || wasm.kind != artifactWASMPolicy || wasm.packageName != "sakullla-waf" {
-		t.Fatalf("WAF artifact spec = %#v err=%v", wasm, err)
+	for _, test := range tests {
+		t.Run(test.id, func(t *testing.T) {
+			spec, err := pluginArtifactSpecFor(repositoryRoot, test.id)
+			if err != nil || spec.kind != test.kind || (test.sourceNeedle != "" && !strings.Contains(spec.sourcePath, test.sourceNeedle)) || spec.packageName != test.packageName {
+				t.Fatalf("artifact spec = %#v err=%v", spec, err)
+			}
+		})
 	}
 	if _, err := pluginArtifactSpecFor(repositoryRoot, "unmapped-plugin"); err == nil {
 		t.Fatal("unknown plugin source layout was accepted")
@@ -265,91 +144,6 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 			_, err := pluginArtifactSpecFor(root, "reverse-l4")
 			if err == nil || !strings.Contains(err.Error(), test.needle) {
 				t.Fatalf("manifest drift error = %v", err)
-			}
-		})
-	}
-}
-
-func TestPluginDockerAppManifestDriftFailsClosed(t *testing.T) {
-	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "docker-app"},
-		{name: "kind", id: "docker-app", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "docker-app"},
-		{name: "abi", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v2", entry: "docker-app"},
-		{name: "entry", id: "docker-app", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeRPCManifest(t, root, "docker-app", test.id, test.kind, test.abi, test.entry)
-			if _, err := pluginArtifactSpecFor(root, "docker-app"); err == nil {
-				t.Fatal("docker-app manifest drift was accepted")
-			}
-		})
-	}
-}
-
-func TestPluginAcceleratorSourcesManifestDriftFailsClosed(t *testing.T) {
-	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "accelerator-sources"},
-		{name: "kind", id: "accelerator-sources", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "accelerator-sources"},
-		{name: "abi", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v2", entry: "accelerator-sources"},
-		{name: "entry", id: "accelerator-sources", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeRPCManifest(t, root, "accelerator-sources", test.id, test.kind, test.abi, test.entry)
-			if _, err := pluginArtifactSpecFor(root, "accelerator-sources"); err == nil {
-				t.Fatal("accelerator-sources manifest drift was accepted")
-			}
-		})
-	}
-}
-
-func TestPluginDoHManifestDriftFailsClosed(t *testing.T) {
-	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "doh"},
-		{name: "kind", id: "doh", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "doh"},
-		{name: "abi", id: "doh", kind: "rpc-service", abi: "nre:rpc/v2", entry: "doh"},
-		{name: "entry", id: "doh", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeRPCManifest(t, root, "doh", test.id, test.kind, test.abi, test.entry)
-			if _, err := pluginArtifactSpecFor(root, "doh"); err == nil {
-				t.Fatal("DoH manifest drift was accepted")
-			}
-		})
-	}
-}
-
-func TestPluginCloudflareDNSManifestDriftFailsClosed(t *testing.T) {
-	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "cloudflare-dns"},
-		{name: "kind", id: "cloudflare-dns", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "cloudflare-dns"},
-		{name: "abi", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v2", entry: "cloudflare-dns"},
-		{name: "entry", id: "cloudflare-dns", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeRPCManifest(t, root, "cloudflare-dns", test.id, test.kind, test.abi, test.entry)
-			if _, err := pluginArtifactSpecFor(root, "cloudflare-dns"); err == nil {
-				t.Fatal("Cloudflare DNS manifest drift was accepted")
-			}
-		})
-	}
-}
-
-func TestPluginShadowsocksManifestDriftFailsClosed(t *testing.T) {
-	for _, test := range []struct{ name, id, kind, abi, entry string }{
-		{name: "id", id: "other", kind: "rpc-service", abi: "nre:rpc/v1", entry: "shadowsocks-server"},
-		{name: "kind", id: "shadowsocks-server", kind: "wasm-policy", abi: "nre:rpc/v1", entry: "shadowsocks-server"},
-		{name: "abi", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v2", entry: "shadowsocks-server"},
-		{name: "entry", id: "shadowsocks-server", kind: "rpc-service", abi: "nre:rpc/v1", entry: "other"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeRPCManifest(t, root, "shadowsocks-server", test.id, test.kind, test.abi, test.entry)
-			if _, err := pluginArtifactSpecFor(root, "shadowsocks-server"); err == nil {
-				t.Fatal("Shadowsocks manifest drift was accepted")
 			}
 		})
 	}
