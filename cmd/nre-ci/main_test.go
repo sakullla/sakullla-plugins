@@ -115,6 +115,8 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 		{id: "cloudflare-dns", kind: artifactRPCService, sourceNeedle: "cloudflare-dns/cmd/cloudflare-dns"},
 		{id: "shadowsocks-server", kind: artifactRPCService, sourceNeedle: "shadowsocks-server/cmd/shadowsocks-server"},
 		{id: "waf", kind: artifactWASMPolicy, packageName: "sakullla-waf"},
+		{id: "ip-policy", kind: artifactWASMPolicy, packageName: "sakullla-ip-policy"},
+		{id: "rate-limit", kind: artifactWASMPolicy, packageName: "sakullla-rate-limit"},
 	}
 	for _, test := range tests {
 		t.Run(test.id, func(t *testing.T) {
