@@ -55,6 +55,31 @@ fn http_source_and_rule_global_buckets_are_independent_and_return_429() {
     assert!(HTTP_GLOBAL_CORPUS.contains("\"rule_global_limited\""));
     assert!(HTTP_GLOBAL_CORPUS.contains("\"denial_status\": 429"));
 
+    let mut source_limiter = LocalLimiter::<16>::new();
+    assert_eq!(
+        admit(
+            &mut source_limiter,
+            AdmissionKind::Http,
+            0,
+            StableId(41),
+            spec(100, 1),
+            Some(spec(1, 10))
+        )
+        .action,
+        PolicyAction::Allow
+    );
+    let source_denied = admit(
+        &mut source_limiter,
+        AdmissionKind::Http,
+        0,
+        StableId(41),
+        spec(100, 1),
+        Some(spec(1, 10)),
+    );
+    assert_eq!(source_denied.action, PolicyAction::Deny);
+    assert_eq!(source_denied.reason, DecisionReason::SourceLimited);
+    assert_eq!(source_denied.http_status, Some(429));
+
     let mut limiter = LocalLimiter::<16>::new();
     assert_eq!(
         admit(
