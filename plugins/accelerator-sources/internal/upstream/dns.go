@@ -45,6 +45,10 @@ func (adapter NetResolverAdapter) Lookup(ctx context.Context, host string) (DNSR
 		resolver = net.DefaultResolver
 	}
 	addresses, err := resolver.LookupIPAddr(ctx, host)
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) && dnsError.IsNotFound {
+		err = ErrDNSNotFound
+	}
 	if adapter.TTL <= 0 {
 		adapter.TTL = time.Minute
 	}
@@ -58,7 +62,10 @@ type dnsEntry struct {
 	host      string
 	addresses []net.IPAddr
 	err       error
+	negative  bool
 	expiresAt time.Time
+	swrUntil  time.Time
+	sieUntil  time.Time
 }
 
 type dnsCall struct {
@@ -112,9 +119,12 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 		cache.mu.Unlock()
 		return nil, ErrClosed
 	}
+	var stale []net.IPAddr
+	staleAllowed := false
 	if element, found := cache.entries[host]; found {
 		entry := element.Value.(*dnsEntry)
-		if cache.clock.Now().Before(entry.expiresAt) {
+		now := cache.clock.Now()
+		if now.Before(entry.expiresAt) {
 			cache.lru.MoveToFront(element)
 			if cache.onHit != nil {
 				cache.onHit()
@@ -124,7 +134,24 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 			cache.mu.Unlock()
 			return result, err
 		}
-		cache.removeLocked(element)
+		if !entry.negative && now.Before(entry.swrUntil) {
+			if cache.onHit != nil {
+				cache.onHit()
+			}
+			if _, running := cache.flights[host]; !running {
+				call := &dnsCall{done: make(chan struct{})}
+				cache.flights[host] = call
+				go cache.runLookup(context.Background(), host, call)
+			}
+			result := cloneAddresses(entry.addresses)
+			cache.mu.Unlock()
+			return result, nil
+		}
+		if !entry.negative && now.Before(entry.sieUntil) {
+			stale, staleAllowed = cloneAddresses(entry.addresses), true
+		} else {
+			cache.removeLocked(element)
+		}
 	}
 	if cache.onMiss != nil {
 		cache.onMiss()
@@ -135,6 +162,9 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-call.done:
+			if call.err != nil && staleAllowed && !errors.Is(call.err, ErrDNSNotFound) {
+				return stale, nil
+			}
 			return cloneAddresses(call.result), call.err
 		}
 	}
@@ -142,37 +172,53 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 	cache.flights[host] = call
 	cache.mu.Unlock()
 
+	cache.runLookup(ctx, host, call)
+	if call.err != nil && staleAllowed && !errors.Is(call.err, ErrDNSNotFound) {
+		return stale, nil
+	}
+	return cloneAddresses(call.result), call.err
+}
+
+func (cache *DNSCache) runLookup(ctx context.Context, host string, call *dnsCall) {
 	if cache.onQuery != nil {
 		cache.onQuery()
 	}
 	lookup, err := cache.resolver.Lookup(ctx, host)
+	call.result, call.err = cloneAddresses(lookup.Addresses), err
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cacheable := false
+	negative := false
 	ttl := lookup.TTL
-	if err != nil {
-		ttl = lookup.NegativeTTL
-		if ttl <= 0 {
-			ttl = 15 * time.Second
-		}
-	}
-	if ttl < time.Second {
-		ttl = time.Second
+	if err == nil && ttl > 0 && len(lookup.Addresses) > 0 {
+		cacheable = true
+	} else if errors.Is(err, ErrDNSNotFound) && lookup.NegativeTTL > 0 {
+		cacheable, negative, ttl = true, true, lookup.NegativeTTL
 	}
 	if ttl > 10*time.Minute {
 		ttl = 10 * time.Minute
 	}
-	call.result, call.err = cloneAddresses(lookup.Addresses), err
-
-	cache.mu.Lock()
-	if !cache.closed {
-		entry := &dnsEntry{host: host, addresses: cloneAddresses(call.result), err: err, expiresAt: cache.clock.Now().Add(ttl)}
+	if cacheable && !cache.closed {
+		if old, found := cache.entries[host]; found {
+			cache.removeLocked(old)
+		}
+		expiresAt := cache.clock.Now().Add(ttl)
+		entry := &dnsEntry{host: host, addresses: cloneAddresses(call.result), err: err, negative: negative, expiresAt: expiresAt, swrUntil: expiresAt, sieUntil: expiresAt}
+		if !negative {
+			entry.swrUntil = expiresAt.Add(30 * time.Second)
+			entry.sieUntil = entry.swrUntil.Add(2 * time.Minute)
+		}
 		cache.entries[host] = cache.lru.PushFront(entry)
 		for cache.lru.Len() > cache.maxEntries {
 			cache.removeLocked(cache.lru.Back())
 		}
+	} else if errors.Is(err, ErrDNSNotFound) || err == nil {
+		if old, found := cache.entries[host]; found {
+			cache.removeLocked(old)
+		}
 	}
 	delete(cache.flights, host)
 	close(call.done)
-	cache.mu.Unlock()
-	return cloneAddresses(call.result), call.err
 }
 
 func cloneAddresses(input []net.IPAddr) []net.IPAddr {

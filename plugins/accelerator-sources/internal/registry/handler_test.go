@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,6 +60,7 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	var registryServer *httptest.Server
 	var tokenCalls atomic.Int32
 	var manifestCalls atomic.Int32
+	var unauthenticatedRemote, authenticatedRemote string
 	registryServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/token":
@@ -69,10 +71,13 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 			_, _ = io.WriteString(writer, `{"access_token":"fixture-token"}`)
 		case "/v2/library/alpine/manifests/latest":
 			if request.Header.Get("Authorization") != "Bearer fixture-token" {
+				unauthenticatedRemote = request.RemoteAddr
 				writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture-registry",scope="repository:library/alpine:pull"`, registryServer.URL+"/token"))
 				writer.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(writer, "bounded challenge body")
 				return
 			}
+			authenticatedRemote = request.RemoteAddr
 			manifestCalls.Add(1)
 			writer.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
 			writer.Header().Set("Docker-Content-Digest", digest)
@@ -94,6 +99,9 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	if recorder.Header().Get("Docker-Content-Digest") != digest || tokenCalls.Load() != 1 {
 		t.Fatalf("token or digest boundary not applied: calls=%d digest=%q", tokenCalls.Load(), recorder.Header().Get("Docker-Content-Digest"))
 	}
+	if unauthenticatedRemote == "" || authenticatedRemote != unauthenticatedRemote {
+		t.Fatalf("401 body was not drained for connection reuse: unauth=%q auth=%q", unauthenticatedRemote, authenticatedRemote)
+	}
 	second := httptest.NewRecorder()
 	secondRequest := httptest.NewRequest(http.MethodGet, "/v2/alpine/manifests/", nil)
 	secondRequest.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
@@ -107,6 +115,114 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	handler.ServeHTTP(differentAccept, differentRequest)
 	if differentAccept.Code != http.StatusOK || tokenCalls.Load() != 1 || manifestCalls.Load() != 2 {
 		t.Fatalf("manifest Accept cache key collapsed: token=%d manifest=%d status=%d", tokenCalls.Load(), manifestCalls.Load(), differentAccept.Code)
+	}
+}
+
+func TestManifestCacheConditionalRequestsMatchColdAndWarm(t *testing.T) {
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	const etag = `"manifest-etag"`
+	const modified = "Wed, 21 Oct 2015 07:28:00 GMT"
+	registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("ETag", etag)
+		writer.Header().Set("Last-Modified", modified)
+		writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		if request.Header.Get("If-None-Match") == etag || request.Header.Get("If-Modified-Since") == modified {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = writer.Write(manifest)
+	}))
+	defer registryServer.Close()
+	for _, testCase := range []struct{ name, header, value string }{
+		{name: "etag", header: "If-None-Match", value: etag},
+		{name: "last modified", header: "If-Modified-Since", value: modified},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			warmHandler := newFixtureHandler(t, registryServer.URL)
+			warm := httptest.NewRecorder()
+			warmHandler.ServeHTTP(warm, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+			if warm.Code != http.StatusOK {
+				t.Fatalf("warm fill: %d %s", warm.Code, warm.Body.String())
+			}
+			warmConditional := httptest.NewRecorder()
+			warmRequest := httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil)
+			warmRequest.Header.Set(testCase.header, testCase.value)
+			warmHandler.ServeHTTP(warmConditional, warmRequest)
+
+			coldHandler := newFixtureHandler(t, registryServer.URL)
+			coldConditional := httptest.NewRecorder()
+			coldRequest := httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil)
+			coldRequest.Header.Set(testCase.header, testCase.value)
+			coldHandler.ServeHTTP(coldConditional, coldRequest)
+			if warmConditional.Code != http.StatusNotModified || coldConditional.Code != http.StatusNotModified || warmConditional.Body.Len() != 0 || coldConditional.Body.Len() != 0 {
+				t.Fatalf("conditional behavior differs: warm=%d/%q cold=%d/%q", warmConditional.Code, warmConditional.Body.String(), coldConditional.Code, coldConditional.Body.String())
+			}
+		})
+	}
+}
+
+func TestWarmPathRegistryTokenManifestAndBlobWorkload(t *testing.T) {
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	blob := bytes.Repeat([]byte("registry-performance-layer"), 4096)
+	blobDigest := registryDigest(blob)
+	var tokenCalls, manifestCalls, blobCalls atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/token":
+			tokenCalls.Add(1)
+			_, _ = io.WriteString(writer, `{"token":"warm-token","expires_in":300}`)
+		case "/v2/example/app/manifests/latest":
+			if request.Header.Get("Authorization") != "Bearer warm-token" {
+				writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, server.URL+"/token"))
+				writer.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(writer, "challenge")
+				return
+			}
+			manifestCalls.Add(1)
+			writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = writer.Write(manifest)
+		case "/v2/example/app/blobs/" + blobDigest:
+			blobCalls.Add(1)
+			writer.Header().Set("Docker-Content-Digest", blobDigest)
+			_, _ = writer.Write(blob)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	handler := newFixtureHandler(t, server.URL)
+	requestManifest := func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+		if recorder.Code != http.StatusOK || !bytes.Equal(recorder.Body.Bytes(), manifest) {
+			t.Errorf("manifest workload response: %d %q", recorder.Code, recorder.Body.Bytes())
+		}
+	}
+	for wave := 0; wave < 2; wave++ {
+		var wait sync.WaitGroup
+		for range 100 {
+			wait.Add(1)
+			go func() { defer wait.Done(); requestManifest() }()
+		}
+		wait.Wait()
+	}
+	if tokenCalls.Load() != 1 || manifestCalls.Load() != 1 {
+		t.Fatalf("warm token/manifest operations were not reduced by 90%%: token=%d manifest=%d", tokenCalls.Load(), manifestCalls.Load())
+	}
+	for range 10 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/blobs/"+blobDigest, nil))
+		if recorder.Code != http.StatusOK || registryDigest(recorder.Body.Bytes()) != blobDigest {
+			t.Fatalf("streamed blob digest mismatch: status=%d", recorder.Code)
+		}
+	}
+	if blobCalls.Load() != 10 {
+		t.Fatalf("blob was cached instead of streamed: calls=%d", blobCalls.Load())
+	}
+	metrics := handler.upstream.Snapshot()
+	if metrics.ReusedConnections == 0 || metrics.TransferredBytes < uint64(len(blob)*10) {
+		t.Fatalf("warm workload metrics missing reuse/bytes: %+v", metrics)
 	}
 }
 

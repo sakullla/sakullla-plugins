@@ -72,14 +72,16 @@ type Metrics struct {
 }
 
 type Manager struct {
-	client    *http.Client
-	transport *http.Transport
-	dns       *DNSCache
-	tokens    *Cache[TokenEntry]
-	manifests *Cache[ManifestEntry]
-	metrics   counters
-	baseDial  func(context.Context, string, string) (net.Conn, error)
-	closed    atomic.Bool
+	client           *http.Client
+	transport        *http.Transport
+	privateClient    *http.Client
+	privateTransport *http.Transport
+	dns              *DNSCache
+	tokens           *Cache[TokenEntry]
+	manifests        *Cache[ManifestEntry]
+	metrics          counters
+	baseDial         func(context.Context, string, string) (net.Conn, error)
+	closed           atomic.Bool
 }
 
 type addressLease struct {
@@ -134,6 +136,12 @@ func New(options Options) (*Manager, error) {
 	transport.DialContext = manager.dialContext
 	client.Transport = transport
 	manager.client = &client
+	privateTransport := transport.Clone()
+	privateTransport.DialContext = manager.dialContext
+	privateClient := client
+	privateClient.Transport = privateTransport
+	manager.privateTransport = privateTransport
+	manager.privateClient = &privateClient
 	return manager, nil
 }
 
@@ -221,7 +229,11 @@ func (manager *Manager) Do(request *http.Request, policy Policy) (*http.Response
 		return nil, err
 	}
 	manager.metrics.upstreamCalls.Add(1)
-	response, err := manager.client.Do(prepared)
+	client := manager.client
+	if policy.AllowPrivate {
+		client = manager.privateClient
+	}
+	response, err := client.Do(prepared)
 	if response != nil && response.ProtoMajor == 2 {
 		manager.metrics.http2Requests.Add(1)
 	}
@@ -312,6 +324,7 @@ func (manager *Manager) Snapshot() Metrics {
 func (manager *Manager) Close() error {
 	if manager.closed.CompareAndSwap(false, true) {
 		manager.transport.CloseIdleConnections()
+		manager.privateTransport.CloseIdleConnections()
 		manager.dns.Close()
 		manager.tokens.Close()
 		manager.manifests.Close()

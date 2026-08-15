@@ -49,6 +49,7 @@ func resolvConfServers() []string {
 func (resolver *WireResolver) Lookup(ctx context.Context, host string) (DNSResult, error) {
 	var combined []net.IPAddr
 	minimumTTL := time.Duration(0)
+	minimumTTLSet := false
 	negativeTTL := 15 * time.Second
 	var lastErr error
 	for _, queryType := range []uint16{1, 28} {
@@ -61,9 +62,7 @@ func (resolver *WireResolver) Lookup(ctx context.Context, host string) (DNSResul
 			continue
 		}
 		combined = append(combined, addresses...)
-		if minimumTTL == 0 || ttl < minimumTTL {
-			minimumTTL = ttl
-		}
+		minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, ttl)
 	}
 	if len(combined) == 0 {
 		if lastErr == nil {
@@ -164,6 +163,7 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 	}
 	var addresses []net.IPAddr
 	minimumTTL := time.Duration(0)
+	minimumTTLSet := false
 	negativeTTL := 15 * time.Second
 	for index := 0; index < answers+authorities; index++ {
 		next, err := skipDNSName(message, offset)
@@ -180,9 +180,7 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 		if index < answers && recordType == queryType && ((recordType == 1 && length == 4) || (recordType == 28 && length == 16)) {
 			addresses = append(addresses, net.IPAddr{IP: append(net.IP(nil), message[dataOffset:dataOffset+length]...)})
 			ttl := time.Duration(ttlSeconds) * time.Second
-			if minimumTTL == 0 || ttl < minimumTTL {
-				minimumTTL = ttl
-			}
+			minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, ttl)
 		}
 		if index >= answers && recordType == 6 && length >= 20 {
 			minimum := binary.BigEndian.Uint32(message[dataOffset+length-4 : dataOffset+length])
@@ -200,6 +198,13 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 		return nil, 0, negativeTTL, errDNSWire
 	}
 	return addresses, minimumTTL, negativeTTL, nil
+}
+
+func lowerTTL(current time.Duration, initialized bool, candidate time.Duration) (time.Duration, bool) {
+	if !initialized || candidate < current {
+		return candidate, true
+	}
+	return current, true
 }
 
 func skipDNSName(message []byte, offset int) (int, error) {

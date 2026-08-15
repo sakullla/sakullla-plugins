@@ -8,7 +8,14 @@ import (
 	"time"
 )
 
-var ErrClosed = errors.New("upstream owner is closed")
+var (
+	ErrClosed         = errors.New("upstream owner is closed")
+	ErrPermanentCache = errors.New("cache fill failure must invalidate stale state")
+)
+
+func PermanentCacheError(err error) error {
+	return errors.Join(ErrPermanentCache, err)
+}
 
 type Clock interface {
 	Now() time.Time
@@ -19,9 +26,11 @@ type realClock struct{}
 func (realClock) Now() time.Time { return time.Now() }
 
 type Loaded[V any] struct {
-	Value V
-	Size  int64
-	TTL   time.Duration
+	Value                V
+	Size                 int64
+	TTL                  time.Duration
+	StaleWhileRevalidate time.Duration
+	StaleIfError         time.Duration
 }
 
 type cacheEntry[V any] struct {
@@ -29,6 +38,8 @@ type cacheEntry[V any] struct {
 	value     V
 	size      int64
 	expiresAt time.Time
+	swrUntil  time.Time
+	sieUntil  time.Time
 }
 
 type cacheCall[V any] struct {
@@ -94,7 +105,9 @@ func (cache *Cache[V]) getLocked(key string) (V, bool) {
 	}
 	entry := element.Value.(*cacheEntry[V])
 	if !cache.clock.Now().Before(entry.expiresAt) {
-		cache.removeLocked(element)
+		if !cache.clock.Now().Before(entry.sieUntil) {
+			cache.removeLocked(element)
+		}
 		if cache.onMiss != nil {
 			cache.onMiss()
 		}
@@ -107,46 +120,132 @@ func (cache *Cache[V]) getLocked(key string) (V, bool) {
 	return entry.value, true
 }
 
-func (cache *Cache[V]) GetOrLoad(ctx context.Context, key string, load func(context.Context) (Loaded[V], error)) (V, error) {
-	if value, found := cache.Get(key); found {
-		return value, nil
+type cacheState int
+
+const (
+	cacheMissing cacheState = iota
+	cacheFresh
+	cacheSWR
+	cacheSIE
+)
+
+func (cache *Cache[V]) inspectLocked(key string) (*cacheEntry[V], cacheState) {
+	element, found := cache.entries[key]
+	if !found {
+		return nil, cacheMissing
 	}
+	entry := element.Value.(*cacheEntry[V])
+	now := cache.clock.Now()
+	if now.Before(entry.expiresAt) {
+		cache.lru.MoveToFront(element)
+		return entry, cacheFresh
+	}
+	if now.Before(entry.swrUntil) {
+		cache.lru.MoveToFront(element)
+		return entry, cacheSWR
+	}
+	if now.Before(entry.sieUntil) {
+		cache.lru.MoveToFront(element)
+		return entry, cacheSIE
+	}
+	cache.removeLocked(element)
+	return nil, cacheMissing
+}
+
+func (cache *Cache[V]) GetOrLoad(ctx context.Context, key string, load func(context.Context) (Loaded[V], error)) (V, error) {
 	cache.mu.Lock()
 	if cache.closed {
 		cache.mu.Unlock()
 		var zero V
 		return zero, ErrClosed
 	}
-	if call, found := cache.flights[key]; found {
-		cache.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			var zero V
-			return zero, ctx.Err()
-		case <-call.done:
-			return call.loaded.Value, call.err
+	stale, state := cache.inspectLocked(key)
+	if state == cacheFresh {
+		if cache.onHit != nil {
+			cache.onHit()
 		}
+		value := stale.value
+		cache.mu.Unlock()
+		return value, nil
+	}
+	if state == cacheSWR {
+		if cache.onHit != nil {
+			cache.onHit()
+		}
+		if _, running := cache.flights[key]; !running {
+			call := &cacheCall[V]{done: make(chan struct{})}
+			cache.flights[key] = call
+			go cache.runLoad(context.Background(), key, call, load)
+		}
+		value := stale.value
+		cache.mu.Unlock()
+		return value, nil
+	}
+	if cache.onMiss != nil {
+		cache.onMiss()
+	}
+	if call, found := cache.flights[key]; found {
+		staleValue, mayUseStale := staleValue(stale, state)
+		cache.mu.Unlock()
+		return waitCacheCall(ctx, call, staleValue, mayUseStale)
 	}
 	call := &cacheCall[V]{done: make(chan struct{})}
 	cache.flights[key] = call
+	staleValue, mayUseStale := staleValue(stale, state)
 	cache.mu.Unlock()
 
+	cache.runLoad(ctx, key, call, load)
+	if call.err != nil && mayUseStale && !errors.Is(call.err, ErrPermanentCache) {
+		return staleValue, nil
+	}
+	return call.loaded.Value, call.err
+}
+
+func staleValue[V any](entry *cacheEntry[V], state cacheState) (V, bool) {
+	if entry != nil && state == cacheSIE {
+		return entry.value, true
+	}
+	var zero V
+	return zero, false
+}
+
+func waitCacheCall[V any](ctx context.Context, call *cacheCall[V], stale V, mayUseStale bool) (V, error) {
+	select {
+	case <-ctx.Done():
+		var zero V
+		return zero, ctx.Err()
+	case <-call.done:
+		if call.err != nil && mayUseStale && !errors.Is(call.err, ErrPermanentCache) {
+			return stale, nil
+		}
+		return call.loaded.Value, call.err
+	}
+}
+
+func (cache *Cache[V]) runLoad(ctx context.Context, key string, call *cacheCall[V], load func(context.Context) (Loaded[V], error)) {
 	call.loaded, call.err = load(ctx)
 	cache.mu.Lock()
+	if errors.Is(call.err, ErrPermanentCache) {
+		if element, found := cache.entries[key]; found {
+			cache.removeLocked(element)
+		}
+	}
 	if call.err == nil && !cache.closed && call.loaded.TTL > 0 && call.loaded.Size <= cache.maxBytes {
 		cache.setLocked(key, call.loaded)
 	}
 	delete(cache.flights, key)
 	close(call.done)
 	cache.mu.Unlock()
-	return call.loaded.Value, call.err
 }
 
 func (cache *Cache[V]) setLocked(key string, loaded Loaded[V]) {
 	if old, found := cache.entries[key]; found {
 		cache.removeLocked(old)
 	}
-	entry := &cacheEntry[V]{key: key, value: loaded.Value, size: loaded.Size, expiresAt: cache.clock.Now().Add(loaded.TTL)}
+	expiresAt := cache.clock.Now().Add(loaded.TTL)
+	swrUntil := expiresAt.Add(loaded.StaleWhileRevalidate)
+	sieUntil := swrUntil.Add(loaded.StaleIfError)
+	entry := &cacheEntry[V]{key: key, value: loaded.Value, size: loaded.Size, expiresAt: expiresAt, swrUntil: swrUntil, sieUntil: sieUntil}
 	cache.entries[key] = cache.lru.PushFront(entry)
 	cache.bytes += loaded.Size
 	for cache.lru.Len() > cache.maxEntries || cache.bytes > cache.maxBytes {

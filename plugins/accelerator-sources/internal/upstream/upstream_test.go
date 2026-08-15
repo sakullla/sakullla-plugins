@@ -81,6 +81,97 @@ func TestDNSConcurrentColdMissTTLNegativeRecoveryAndEviction(t *testing.T) {
 	}
 }
 
+func TestDNSTransientLeaderFailureDoesNotPoisonCache(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	resolver := ResolverFunc(func(ctx context.Context, _ string) (DNSResult, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return DNSResult{NegativeTTL: time.Minute}, ctx.Err()
+		}
+		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: time.Minute}, nil
+	})
+	cache := NewDNSCache(nil, resolver, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() { _, err := cache.Resolve(ctx, "transient.test"); leaderDone <- err }()
+	<-started
+	waiterDone := make(chan error, 1)
+	go func() { _, err := cache.Resolve(context.Background(), "transient.test"); waiterDone <- err }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if !errors.Is(<-leaderDone, context.Canceled) || !errors.Is(<-waiterDone, context.Canceled) {
+		t.Fatal("cold flight did not broadcast its transient failure")
+	}
+	addresses, err := cache.Resolve(context.Background(), "transient.test")
+	if err != nil || len(addresses) != 1 || calls.Load() != 2 {
+		t.Fatalf("transient failure poisoned DNS cache: addresses=%v calls=%d err=%v", addresses, calls.Load(), err)
+	}
+}
+
+func TestDNSZeroTTLAndSWRSingleRefresh(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	var zeroCalls atomic.Int32
+	zeroCache := NewDNSCache(clock, ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		zeroCalls.Add(1)
+		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: 0}, nil
+	}), 8)
+	_, _ = zeroCache.Resolve(context.Background(), "zero.test")
+	_, _ = zeroCache.Resolve(context.Background(), "zero.test")
+	if zeroCalls.Load() != 2 {
+		t.Fatalf("zero TTL answer was cached: calls=%d", zeroCalls.Load())
+	}
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var calls atomic.Int32
+	cache := NewDNSCache(clock, ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		call := calls.Add(1)
+		if call == 2 {
+			close(refreshStarted)
+			<-releaseRefresh
+		}
+		address := "8.8.8.8"
+		if call > 1 {
+			address = "1.1.1.1"
+		}
+		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP(address)}}, TTL: 2 * time.Second}, nil
+	}), 8)
+	_, _ = cache.Resolve(context.Background(), "swr.test")
+	clock.Advance(3 * time.Second)
+	var wait sync.WaitGroup
+	for range 100 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			addresses, err := cache.Resolve(context.Background(), "swr.test")
+			if err != nil || addresses[0].IP.String() != "8.8.8.8" {
+				t.Errorf("SWR did not return stale positive answer: %v %v", addresses, err)
+			}
+		}()
+	}
+	wait.Wait()
+	<-refreshStarted
+	if calls.Load() != 2 {
+		t.Fatalf("100 expired DNS requests started %d refreshes", calls.Load()-1)
+	}
+	close(releaseRefresh)
+}
+
+func TestDNSMixedZeroAndPositiveTTLAlwaysKeepsZero(t *testing.T) {
+	for _, values := range [][]time.Duration{{0, time.Minute}, {time.Minute, 0}} {
+		minimum := time.Duration(0)
+		initialized := false
+		for _, value := range values {
+			minimum, initialized = lowerTTL(minimum, initialized, value)
+		}
+		if !initialized || minimum != 0 {
+			t.Fatalf("mixed TTL order %v produced %s", values, minimum)
+		}
+	}
+}
+
 func TestTokenCacheAndManifestCacheSingleflightTTLAndBytes(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1, 0)}
 	cache := NewCache[string](clock, 2, 8)
@@ -116,6 +207,103 @@ func TestTokenCacheAndManifestCacheSingleflightTTLAndBytes(t *testing.T) {
 	_, _ = cache.GetOrLoad(context.Background(), "manifest-b", fixedLoad("bbbb", time.Minute))
 	if _, found := cache.Get("token"); found {
 		t.Fatal("byte/entry bounded cache did not evict LRU")
+	}
+}
+
+func TestTokenCacheAtomicFillAndFlightRegistration(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	cache := NewCache[string](clock, 4, 1024)
+	cache.mu.Lock()
+	started := make(chan struct{})
+	done := make(chan struct{})
+	var loaderCalls atomic.Int32
+	go func() {
+		close(started)
+		value, err := cache.GetOrLoad(context.Background(), "token", func(context.Context) (Loaded[string], error) {
+			loaderCalls.Add(1)
+			return Loaded[string]{Value: "duplicate", Size: 9, TTL: time.Minute}, nil
+		})
+		if err != nil || value != "filled" {
+			t.Errorf("atomic fill lookup: value=%q err=%v", value, err)
+		}
+		close(done)
+	}()
+	<-started
+	// Publish under the exact lock that owns both lookup and flight
+	// registration. The blocked caller must observe this completed fill and
+	// cannot create a second serial loader wave.
+	cache.setLocked("token", Loaded[string]{Value: "filled", Size: 6, TTL: time.Minute})
+	cache.mu.Unlock()
+	<-done
+	if loaderCalls.Load() != 0 {
+		t.Fatalf("completed fill raced into %d duplicate loader calls", loaderCalls.Load())
+	}
+}
+
+func TestManifestCacheSWRSingleRefreshSIEAndPermanentInvalidation(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	cache := NewCache[string](clock, 8, 1024)
+	var loads atomic.Int32
+	initial := func(context.Context) (Loaded[string], error) {
+		loads.Add(1)
+		return Loaded[string]{Value: "v1", Size: 2, TTL: time.Second, StaleWhileRevalidate: 10 * time.Second, StaleIfError: time.Minute}, nil
+	}
+	if value, err := cache.GetOrLoad(context.Background(), "manifest", initial); err != nil || value != "v1" {
+		t.Fatalf("initial fill: %q %v", value, err)
+	}
+	clock.Advance(2 * time.Second)
+	refreshStarted := make(chan struct{})
+	release := make(chan struct{})
+	refresh := func(context.Context) (Loaded[string], error) {
+		if loads.Add(1) == 2 {
+			close(refreshStarted)
+			<-release
+		}
+		return Loaded[string]{Value: "v2", Size: 2, TTL: time.Second, StaleWhileRevalidate: 10 * time.Second, StaleIfError: time.Minute}, nil
+	}
+	var wait sync.WaitGroup
+	for range 100 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			value, err := cache.GetOrLoad(context.Background(), "manifest", refresh)
+			if err != nil || value != "v1" {
+				t.Errorf("manifest SWR: %q %v", value, err)
+			}
+		}()
+	}
+	wait.Wait()
+	<-refreshStarted
+	if loads.Load() != 2 {
+		t.Fatalf("100 expired manifests started %d refreshes", loads.Load()-1)
+	}
+	close(release)
+	refreshed := false
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if current, found := cache.Get("manifest"); found && current == "v2" {
+			refreshed = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !refreshed {
+		t.Fatal("background manifest refresh did not publish")
+	}
+	clock.Advance(12 * time.Second)
+	value, err := cache.GetOrLoad(context.Background(), "manifest", func(context.Context) (Loaded[string], error) {
+		return Loaded[string]{}, errors.New("temporary upstream failure")
+	})
+	if err != nil || value != "v2" {
+		t.Fatalf("manifest stale-if-error failed: %q %v", value, err)
+	}
+	_, err = cache.GetOrLoad(context.Background(), "manifest", func(context.Context) (Loaded[string], error) {
+		return Loaded[string]{}, PermanentCacheError(errors.New("integrity failure"))
+	})
+	if !errors.Is(err, ErrPermanentCache) {
+		t.Fatalf("permanent failure served stale manifest: %v", err)
+	}
+	if _, found := cache.Get("manifest"); found {
+		t.Fatal("permanent manifest failure did not invalidate stale entry")
 	}
 }
 
@@ -197,6 +385,59 @@ func TestConnectionPoolDefaultPolicy(t *testing.T) {
 	transport := manager.transport
 	if !transport.ForceAttemptHTTP2 || transport.MaxIdleConns != 256 || transport.MaxIdleConnsPerHost != 32 || transport.MaxConnsPerHost != 64 || transport.IdleConnTimeout != 90*time.Second || transport.ResponseHeaderTimeout != 30*time.Second || transport.ExpectContinueTimeout != time.Second {
 		t.Fatalf("unexpected connection pool defaults: %+v", transport)
+	}
+}
+
+func TestConnectionPoolSecurityPolicyIsolation(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.InsecureSkipVerify = true // local policy-isolation fixture
+	var lookups atomic.Int32
+	resolver := ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		if lookups.Add(1) == 1 {
+			return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, TTL: time.Minute}, nil
+		}
+		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: time.Minute}, nil
+	})
+	var mu sync.Mutex
+	var dialed []string
+	manager, err := New(Options{
+		Client: &http.Client{Transport: transport}, Resolver: resolver,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			mu.Lock()
+			dialed = append(dialed, address)
+			mu.Unlock()
+			return (&net.Dialer{}).DialContext(ctx, network, serverURL.Host)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	request, _ := http.NewRequest(http.MethodGet, "https://policy.test/value", nil)
+	response, err := manager.Do(request, Policy{AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	manager.dns.Delete("policy.test")
+	request, _ = http.NewRequest(http.MethodGet, "https://policy.test/value", nil)
+	response, err = manager.Do(request, Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 2 || dialed[0] != "127.0.0.1:443" || dialed[1] != "8.8.8.8:443" {
+		t.Fatalf("security policies reused one connection pool: dials=%v", dialed)
 	}
 }
 
