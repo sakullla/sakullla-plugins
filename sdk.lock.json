@@ -2,22 +2,22 @@
   "schema_version": 1,
   "repository": {
     "url": "https://github.com/sakullla/nginx-reverse-emby.git",
-    "commit": "a193fae6ea8151758a7896f64f606837f5ae312f",
-    "tag": "plugin-sdk/v0.3.3"
+    "commit": "cd62e17577bfedef0026e76d48737ca3e15aa53d",
+    "tag": "plugin-sdk/v0.6.0"
   },
   "sdk": {
     "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
     "module_directory": "plugin-sdk",
     "package_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-    "contract_tree_oid": "54a5fafe6e5190723df61d5c850b7c7f25aeafb1"
+    "contract_tree_oid": "ebcb5e7328cc2ee493db4bb4152770eba91f58c0"
   },
   "artifacts": {
     "descriptor_set_sha256": "9bd720a647d0da83d8427c47df9d89bebf2463a4304fa5fee83cbc59dd7578ee",
-    "plugin_manifest_schema_sha256": "1cdbe4f9ebd4b6d2957ab70059342189380e2b98f36f72f3ebccfb68ee2ba215",
+    "plugin_manifest_schema_sha256": "cbe7064367ef81ac7ad6d230f7f154c58f53440dbf3c711ca99270feb4755ded",
     "policy_proto_sha256": "45f856c7fdda40b8d28584153aa71f8621af469f30542b227b11907427c19ded",
     "rpc_proto_sha256": "7139a3be681eac2faf4e6fc4351db836c4ecd779fe383ec65fb4d8d4dd13f5d4",
     "canonical_guest_sha256": "fc89d8d018d749de23b6979774e917f71b22883dd302d931b3791e37f50ea7ec",
-    "validator_tree_oid": "44ea28dfcfc462462ef1655725d12fa258e7f210"
+    "validator_tree_oid": "bcebb9aa2a41a4a049d3c3634cdbf6fec699ef61"
   },
   "required_capabilities": [
     {
@@ -74,6 +74,18 @@
       ]
     },
     {
+      "id": "rpc.http-backend-provider",
+      "available": true,
+      "evidence_path": "plugin-sdk/go/http_backend_provider.go",
+      "symbols": [
+        "ExtensionHTTPBackendProvider",
+        "RPCFeatureHTTPBackendProviderV1",
+        "PermissionHTTPOutbound",
+        "HTTPBackendProviderDescriptor",
+        "ValidateHTTPBackendProviderManifest"
+      ]
+    },
+    {
       "id": "rpc.lifecycle",
       "available": true,
       "evidence_path": "plugin-sdk/go/contracts.go",
@@ -103,5 +115,5 @@
       ]
     }
   ],
-  "capability_contract_sha256": "6350d6d60e33d723d0645f4870f690d7533098a9ca88a18c1fd3d6ebb87a3b47"
+  "capability_contract_sha256": "e326711bd8ffd95bc39ba005b4042281397a6274539d3f9b77e97b78c483e759"
 }

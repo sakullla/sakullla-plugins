@@ -37,7 +37,7 @@
     {
       "SPDXID": "SPDXRef-Package-plugin-sdk",
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "versionInfo": "v0.3.4-0.20260815184225-cd62e17577bf",
+      "versionInfo": "v0.6.0",
       "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
       "filesAnalyzed": false,
       "licenseConcluded": "GPL-3.0-only",
@@ -92,6 +92,16 @@
       "filesAnalyzed": false,
       "licenseConcluded": "BSD-3-Clause",
       "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-genproto-googleapis-rpc",
+      "name": "google.golang.org/genproto/googleapis/rpc",
+      "versionInfo": "v0.0.0-20240604185151-ef581f913117",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION"
     },
     {
@@ -160,6 +170,11 @@
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-x-text"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-genproto-googleapis-rpc"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",

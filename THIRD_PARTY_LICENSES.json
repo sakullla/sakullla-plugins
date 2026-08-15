@@ -8,7 +8,7 @@
     },
     {
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "version": "v0.3.4-0.20260815184225-cd62e17577bf",
+      "version": "v0.6.0",
       "license": "GPL-3.0-only"
     },
     {
@@ -35,6 +35,11 @@
       "name": "golang.org/x/text",
       "version": "v0.16.0",
       "license": "BSD-3-Clause"
+    },
+    {
+      "name": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20240604185151-ef581f913117",
+      "license": "Apache-2.0"
     },
     {
       "name": "google.golang.org/grpc",

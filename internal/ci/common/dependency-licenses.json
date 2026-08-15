@@ -8,6 +8,7 @@
     "golang.org/x/net": "BSD-3-Clause",
     "golang.org/x/sys": "BSD-3-Clause",
     "golang.org/x/text": "BSD-3-Clause",
+    "google.golang.org/genproto/googleapis/rpc": "Apache-2.0",
     "google.golang.org/grpc": "Apache-2.0",
     "google.golang.org/protobuf": "BSD-3-Clause",
     "gopkg.in/yaml.v3": "MIT AND Apache-2.0"

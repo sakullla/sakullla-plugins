@@ -57,6 +57,40 @@ type Capability struct {
 	MissingReason string   `json:"missing_reason,omitempty"`
 }
 
+// RequireHTTPBackendProvider records the indivisible typed contract consumed by
+// Agent-scoped HTTP backend provider plugins. Refresh and verification still
+// prove these declarations against the selected canonical SDK commit.
+func RequireHTTPBackendProvider(lock Lock) Lock {
+	required := Capability{
+		ID:           "rpc.http-backend-provider",
+		Available:    true,
+		EvidencePath: "plugin-sdk/go/http_backend_provider.go",
+		Symbols: []string{
+			"ExtensionHTTPBackendProvider",
+			"RPCFeatureHTTPBackendProviderV1",
+			"PermissionHTTPOutbound",
+			"HTTPBackendProviderDescriptor",
+			"ValidateHTTPBackendProviderManifest",
+		},
+	}
+	replaced := false
+	for index := range lock.RequiredCapabilities {
+		if lock.RequiredCapabilities[index].ID == required.ID {
+			lock.RequiredCapabilities[index] = required
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lock.RequiredCapabilities = append(lock.RequiredCapabilities, required)
+	}
+	sort.Slice(lock.RequiredCapabilities, func(i, j int) bool {
+		return lock.RequiredCapabilities[i].ID < lock.RequiredCapabilities[j].ID
+	})
+	lock.CapabilityContractSHA256 = CapabilityDigest(lock.RequiredCapabilities)
+	return lock
+}
+
 func Load(path string) (Lock, error) {
 	lock, err := Read(path)
 	if err != nil {

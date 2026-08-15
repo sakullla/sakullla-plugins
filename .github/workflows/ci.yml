@@ -24,6 +24,8 @@ jobs:
           toolchain: "1.97.1"
           target: wasm32-unknown-unknown
           components: clippy,rustfmt
+      - name: Verify canonical SDK identity and capabilities
+        run: go run ./cmd/nre-ci sdk --require-host-capabilities
       - name: Verify generated files, licenses, and secrets
         run: go run ./cmd/nre-ci repository --root .
       - name: Test Go workspace

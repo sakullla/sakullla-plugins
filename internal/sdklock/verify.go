@@ -24,6 +24,9 @@ type Verification struct {
 }
 
 func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, repositoryRoot string) (Verification, error) {
+	if err := VerifyModuleIdentity(repositoryRoot, lock); err != nil {
+		return Verification{}, err
+	}
 	root, err := os.MkdirTemp("", "sakullla-sdk-checkout-")
 	if err != nil {
 		return Verification{}, err
@@ -279,6 +282,8 @@ func capabilityProbe(id, packagePath string) (string, bool) {
 		return fmt.Sprintf("package main\nimport (\"context\"; %s)\ntype required interface { EmitEvent(context.Context, sdk.PolicySecurityEvent) error; AddMetric(context.Context, string, int64) error }\nvar _ required = (sdk.PolicyHost)(nil)\nconst (_ string = sdk.PolicyHostEmitEvent; _ string = sdk.PolicyHostAddMetric)\nfunc main() {}\n", quotedImport), true
 	case "rpc.lifecycle":
 		return fmt.Sprintf("package main\nimport %s\nconst _ string = sdk.RPCABIV1\nvar _ = sdk.RPCHandshakeRequest{ABI: \"\", PluginID: \"\", PluginVersion: \"\", PackageDigest: \"\", ArtifactDigest: \"\", GrantedScopes: []string{}, Generation: \"\"}\nvar _ = sdk.RPCHandshakeResponse{ABI: \"\", Capabilities: []string{}}\nvar _ = sdk.LifecycleRequest{Generation: \"\", Config: []byte{}}\nvar _ = sdk.LifecycleResponse{Success: &sdk.LifecycleSuccess{Ready: true}}\nvar _ = sdk.LifecycleResponse.Validate\nfunc main() {}\n", quotedImport), true
+	case "rpc.http-backend-provider":
+		return fmt.Sprintf("package main\nimport %s\nconst (_ string = sdk.ExtensionHTTPBackendProvider; _ string = sdk.RPCFeatureHTTPBackendProviderV1; _ string = sdk.PermissionHTTPOutbound)\nvar _ = sdk.HTTPBackendProviderDescriptor{ID: \"default\", DisplayName: \"Default\"}\nvar _ = sdk.ValidateHTTPBackendProviderManifest\nvar _ = sdk.ServeHTTPBackendProviders\nvar _ = sdk.HTTPBackendProviderReadyPath\nfunc main() {}\n", quotedImport), true
 	case "policy.atomic-state":
 		return hostCapabilityProbe(quotedImport, "CapabilityPolicyAtomicState"), true
 	case "policy.monotonic-clock":

@@ -17,6 +17,7 @@ func TestSDKVerificationUsesCleanCheckoutAndCapabilityGate(t *testing.T) {
 	workspace := t.TempDir()
 	writeProjectionFixture(t, workspace, "locked-projection")
 	lock := fixtureLock(t, repository)
+	writeModuleIdentityFixture(t, workspace, lock)
 	if err := lock.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -276,11 +277,12 @@ func main() {
 
 func fixtureLock(t *testing.T, repository string) Lock {
 	t.Helper()
+	runGitTest(t, repository, "tag", "-f", "plugin-sdk/v1.2.3")
 	descriptor := sha256.Sum256([]byte("fixture-descriptor"))
 	guest := sha256.Sum256([]byte("fixture-guest"))
 	lock := Lock{
 		SchemaVersion: 1,
-		Repository:    Repository{URL: repository, Commit: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD"))},
+		Repository:    Repository{URL: repository, Commit: strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD")), Tag: "plugin-sdk/v1.2.3"},
 		SDK: SDK{
 			ModulePath:      "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
 			ModuleDirectory: "plugin-sdk",
@@ -373,6 +375,7 @@ func TestCapabilityProbeCoversCanonicalLockCatalog(t *testing.T) {
 		"policy.normalized-http-snapshot",
 		"policy.trusted-source",
 		"rpc.lifecycle",
+		"rpc.http-backend-provider",
 		"service.revocable-resource-handle",
 		"ui.dynamic-actions",
 	} {
@@ -380,5 +383,21 @@ func TestCapabilityProbeCoversCanonicalLockCatalog(t *testing.T) {
 		if !ok || probe == "" {
 			t.Fatalf("canonical capability %q has no typed probe", id)
 		}
+	}
+}
+
+func writeModuleIdentityFixture(t *testing.T, root string, lock Lock) {
+	t.Helper()
+	version, err := ModuleVersion(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := lock.SDK.ModulePath
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26.5\n\nrequire "+module+" "+version+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sums := module + " " + version + " h1:fixture\n" + module + " " + version + "/go.mod h1:fixture\n"
+	if err := os.WriteFile(filepath.Join(root, "go.sum"), []byte(sums), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

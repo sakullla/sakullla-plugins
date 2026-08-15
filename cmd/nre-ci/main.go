@@ -40,6 +40,7 @@ func run(ctx context.Context, args []string) error {
 		lockPath := flags.String("lock", "sdk.lock.json", "canonical SDK lock")
 		requireCapabilities := flags.Bool("require-host-capabilities", false, "fail when any required host capability is unavailable")
 		update := flags.Bool("update", false, "resolve the configured SDK selector and atomically refresh lock, module, and Rust projection")
+		tag := flags.String("tag", "", "canonical plugin-sdk/v* tag selected during --update")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -51,9 +52,11 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		if *update {
-			if err := updateSDKLock(ctx, absoluteLock); err != nil {
+			if err := updateSDKLock(ctx, absoluteLock, *tag); err != nil {
 				return err
 			}
+		} else if *tag != "" {
+			return fmt.Errorf("--tag requires --update")
 		}
 		lock, err := sdklock.Load(absoluteLock)
 		if err != nil {
@@ -137,32 +140,215 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
-func updateSDKLock(ctx context.Context, lockPath string) error {
+func updateSDKLock(ctx context.Context, lockPath, tag string) error {
 	lock, err := sdklock.Read(lockPath)
 	if err != nil {
 		return err
 	}
+	if tag != "" {
+		if !strings.HasPrefix(tag, "plugin-sdk/v") {
+			return fmt.Errorf("SDK update tag must be canonical plugin-sdk/v*")
+		}
+		lock.Repository.Tag = tag
+		lock.Repository.Branch = ""
+	}
+	lock = sdklock.RequireHTTPBackendProvider(lock)
 	refreshed, err := sdklock.Refresh(ctx, lock)
 	if err != nil {
 		return err
 	}
 	repositoryRoot := filepath.Dir(lockPath)
-	if refreshed.Repository.Tag == "" || !strings.HasPrefix(refreshed.Repository.Tag, "plugin-sdk/v") {
-		return fmt.Errorf("SDK update requires a canonical plugin-sdk/v* tag")
+	version, err := sdklock.ModuleVersion(refreshed)
+	if err != nil {
+		return err
 	}
-	version := strings.TrimPrefix(refreshed.Repository.Tag, "plugin-sdk/")
+	stagingRoot, err := os.MkdirTemp("", "sakullla-sdk-update-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stagingRoot)
+	for _, relative := range []string{"go.mod", "go.sum", "internal/ci/sdk/cmd/generate-policy-rust/main.go"} {
+		if err := copySDKUpdateFile(repositoryRoot, stagingRoot, relative); err != nil {
+			return err
+		}
+	}
+	stagedSum := filepath.Join(stagingRoot, "go.sum")
+	if err := removeModuleSums(stagedSum, refreshed.SDK.ModulePath); err != nil {
+		return err
+	}
 	for _, invocation := range [][]string{
 		{"mod", "edit", "-require=" + refreshed.SDK.ModulePath + "@" + version},
 		{"mod", "download", refreshed.SDK.ModulePath + "@" + version},
 		{"run", "./internal/ci/sdk/cmd/generate-policy-rust", "--output", "crates/nre-policy-guest/src/abi_generated.rs"},
 	} {
 		command := exec.CommandContext(ctx, "go", invocation...)
-		command.Dir = repositoryRoot
+		command.Dir = stagingRoot
+		command.Env = cleanGoEnvironment()
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("refresh SDK repository projection with go %s: %w: %s", strings.Join(invocation, " "), err, output)
 		}
 	}
-	return sdklock.Write(lockPath, refreshed)
+	stagedLock := filepath.Join(stagingRoot, "sdk.lock.json")
+	if err := sdklock.Write(stagedLock, refreshed); err != nil {
+		return err
+	}
+	if err := sdklock.VerifyModuleIdentity(stagingRoot, refreshed); err != nil {
+		return err
+	}
+	if _, err := sdklock.Verify(ctx, refreshed, true, stagingRoot); err != nil {
+		return fmt.Errorf("verify staged SDK update: %w", err)
+	}
+	return promoteSDKUpdate(repositoryRoot, stagingRoot, []string{
+		"go.mod",
+		"go.sum",
+		"crates/nre-policy-guest/src/abi_generated.rs",
+		"sdk.lock.json",
+	})
+}
+
+func copySDKUpdateFile(sourceRoot, targetRoot, relative string) error {
+	data, err := os.ReadFile(filepath.Join(sourceRoot, filepath.FromSlash(relative)))
+	if err != nil {
+		return fmt.Errorf("stage SDK update input %s: %w", relative, err)
+	}
+	target := filepath.Join(targetRoot, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, data, 0o644)
+}
+
+func removeModuleSums(path, modulePath string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 1 && fields[0] == modulePath {
+			continue
+		}
+		if line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+}
+
+func promoteSDKUpdate(repositoryRoot, stagingRoot string, relatives []string) error {
+	type replacement struct {
+		target, staged, backup string
+		committed              bool
+	}
+	replacements := make([]replacement, 0, len(relatives))
+	defer func() {
+		for _, current := range replacements {
+			if current.staged != "" {
+				_ = os.Remove(current.staged)
+			}
+		}
+	}()
+	for _, relative := range relatives {
+		target := filepath.Join(repositoryRoot, filepath.FromSlash(relative))
+		info, err := os.Stat(target)
+		if err != nil {
+			return fmt.Errorf("inspect SDK update target %s: %w", relative, err)
+		}
+		data, err := os.ReadFile(filepath.Join(stagingRoot, filepath.FromSlash(relative)))
+		if err != nil {
+			return fmt.Errorf("read staged SDK update %s: %w", relative, err)
+		}
+		staged, err := os.CreateTemp(filepath.Dir(target), ".sdk-update-new-")
+		if err != nil {
+			return err
+		}
+		stagedPath := staged.Name()
+		if err := staged.Chmod(info.Mode().Perm()); err == nil {
+			_, err = staged.Write(data)
+		}
+		if err == nil {
+			err = staged.Sync()
+		}
+		if closeErr := staged.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(stagedPath)
+			return fmt.Errorf("stage atomic SDK update %s: %w", relative, err)
+		}
+		backup, err := os.CreateTemp(filepath.Dir(target), ".sdk-update-old-")
+		if err != nil {
+			_ = os.Remove(stagedPath)
+			return err
+		}
+		backupPath := backup.Name()
+		if err := backup.Close(); err != nil {
+			_ = os.Remove(stagedPath)
+			_ = os.Remove(backupPath)
+			return err
+		}
+		if err := os.Remove(backupPath); err != nil {
+			_ = os.Remove(stagedPath)
+			return err
+		}
+		replacements = append(replacements, replacement{target: target, staged: stagedPath, backup: backupPath})
+	}
+	rollback := func(last int) error {
+		var failures []string
+		for index := last; index >= 0; index-- {
+			current := &replacements[index]
+			if !current.committed {
+				continue
+			}
+			if err := os.Remove(current.target); err != nil && !os.IsNotExist(err) {
+				failures = append(failures, err.Error())
+				continue
+			}
+			if err := os.Rename(current.backup, current.target); err != nil {
+				failures = append(failures, err.Error())
+			} else {
+				current.committed = false
+			}
+		}
+		if len(failures) != 0 {
+			return fmt.Errorf("rollback SDK update: %s", strings.Join(failures, "; "))
+		}
+		return nil
+	}
+	for index := range replacements {
+		current := &replacements[index]
+		if err := os.Rename(current.target, current.backup); err != nil {
+			_ = rollback(index - 1)
+			return fmt.Errorf("backup SDK update target %s: %w", current.target, err)
+		}
+		current.committed = true
+		if err := os.Rename(current.staged, current.target); err != nil {
+			rollbackErr := rollback(index)
+			if rollbackErr != nil {
+				return fmt.Errorf("promote staged SDK update %s: %w (%v)", current.target, err, rollbackErr)
+			}
+			return fmt.Errorf("promote staged SDK update %s: %w", current.target, err)
+		}
+		current.staged = ""
+	}
+	for index := range replacements {
+		_ = os.Remove(replacements[index].backup)
+		replacements[index].committed = false
+	}
+	return nil
+}
+
+func cleanGoEnvironment() []string {
+	blocked := map[string]bool{"GOENV": true, "GOFLAGS": true, "GOTOOLCHAIN": true, "GOWORK": true}
+	environment := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !blocked[strings.ToUpper(key)] {
+			environment = append(environment, entry)
+		}
+	}
+	return append(environment, "GOENV=off", "GOFLAGS=", "GOTOOLCHAIN=local", "GOWORK=off")
 }
 
 type verifiedPlugin struct {
