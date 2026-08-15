@@ -140,8 +140,13 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
-func updateSDKLock(ctx context.Context, lockPath, tag string) error {
+func updateSDKLock(ctx context.Context, lockPath, tag string) (returnErr error) {
 	repositoryRoot := filepath.Dir(lockPath)
+	repositoryLock, err := acquireSDKUpdateLock(ctx, repositoryRoot)
+	if err != nil {
+		return err
+	}
+	defer joinSDKUpdateLockClose(&returnErr, repositoryLock)
 	if err := recoverSDKUpdateWithFS(repositoryRoot, osSDKTransactionFS{}); err != nil {
 		return fmt.Errorf("recover interrupted SDK update: %w", err)
 	}

@@ -88,6 +88,9 @@ func promoteSDKUpdateWithFS(repositoryRoot, stagingRoot string, relatives []stri
 
 	manifest := sdkTransactionManifest{SchemaVersion: 1, Files: make([]sdkTransactionEntry, 0, len(relatives))}
 	abortBeforeManifest := func(operationErr error) error {
+		if errors.Is(operationErr, errSDKTransactionCrash) {
+			return operationErr
+		}
 		return errors.Join(operationErr, cleanupSDKPreManifest(repositoryRoot, manifest.Files, fileSystem))
 	}
 	for _, relative := range relatives {
@@ -129,9 +132,15 @@ func promoteSDKUpdateWithFS(repositoryRoot, stagingRoot string, relatives []stri
 		return abortBeforeManifest(fmt.Errorf("write durable SDK transaction manifest: %w", err))
 	}
 	if err := fileSystem.Rename(manifestTemp, manifestPath); err != nil {
+		if errors.Is(err, errSDKTransactionCrash) {
+			return err
+		}
 		return abortBeforeManifest(fmt.Errorf("publish SDK transaction manifest: %w", err))
 	}
 	if err := fileSystem.SyncDir(repositoryRoot); err != nil {
+		if errors.Is(err, errSDKTransactionCrash) {
+			return err
+		}
 		return failSDKTransaction(repositoryRoot, manifest, fileSystem, fmt.Errorf("sync SDK transaction manifest directory: %w", err))
 	}
 
@@ -248,11 +257,17 @@ func rollbackSDKTransaction(repositoryRoot string, manifest sdkTransactionManife
 		}
 		if targetExists {
 			if err := sdkTransactionRemove(fileSystem, target); err != nil {
+				if errors.Is(err, errSDKTransactionCrash) {
+					return err
+				}
 				failures = append(failures, fmt.Errorf("remove failed SDK target %s: %w", entry.Path, err))
 				continue
 			}
 		}
 		if err := sdkTransactionRename(fileSystem, oldPath, target); err != nil {
+			if errors.Is(err, errSDKTransactionCrash) {
+				return err
+			}
 			failures = append(failures, fmt.Errorf("restore SDK target %s: %w", entry.Path, err))
 		}
 	}
@@ -269,6 +284,9 @@ func rollbackSDKTransaction(repositoryRoot string, manifest sdkTransactionManife
 }
 
 func failSDKTransaction(repositoryRoot string, manifest sdkTransactionManifest, fileSystem sdkTransactionFS, operationErr error) error {
+	if !sdkTransactionCanRollback(repositoryRoot, manifest, fileSystem) {
+		return errors.Join(operationErr, fmt.Errorf("rollback SDK transaction: complete old generation is unavailable; durable journal retained"))
+	}
 	rollbackErr := rollbackSDKTransaction(repositoryRoot, manifest, fileSystem)
 	if rollbackErr != nil {
 		return errors.Join(operationErr, fmt.Errorf("rollback SDK transaction: %w", rollbackErr))
@@ -281,7 +299,10 @@ func cleanupSDKTransaction(repositoryRoot string, manifest sdkTransactionManifes
 	for _, entry := range manifest.Files {
 		target := sdkTransactionPath(repositoryRoot, entry.Path)
 		for _, path := range []string{target + sdkTransactionNewSuffix, target + sdkTransactionOldSuffix} {
-			if err := sdkTransactionRemove(fileSystem, path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := sdkTransactionRemoveIfExists(fileSystem, path); err != nil {
+				if errors.Is(err, errSDKTransactionCrash) {
+					return err
+				}
 				failures = append(failures, err)
 			}
 		}
@@ -289,7 +310,7 @@ func cleanupSDKTransaction(repositoryRoot string, manifest sdkTransactionManifes
 	if len(failures) != 0 {
 		return errors.Join(failures...)
 	}
-	if err := sdkTransactionRemove(fileSystem, filepath.Join(repositoryRoot, sdkTransactionManifestName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := sdkTransactionRemoveIfExists(fileSystem, filepath.Join(repositoryRoot, sdkTransactionManifestName)); err != nil {
 		return err
 	}
 	return nil
@@ -299,12 +320,18 @@ func cleanupSDKPreManifest(repositoryRoot string, entries []sdkTransactionEntry,
 	var failures []error
 	for _, entry := range entries {
 		path := sdkTransactionPath(repositoryRoot, entry.Path) + sdkTransactionNewSuffix
-		if err := sdkTransactionRemove(fileSystem, path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := sdkTransactionRemoveIfExists(fileSystem, path); err != nil {
+			if errors.Is(err, errSDKTransactionCrash) {
+				return err
+			}
 			failures = append(failures, err)
 		}
 	}
 	for _, path := range []string{filepath.Join(repositoryRoot, sdkTransactionManifestTemp)} {
-		if err := sdkTransactionRemove(fileSystem, path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := sdkTransactionRemoveIfExists(fileSystem, path); err != nil {
+			if errors.Is(err, errSDKTransactionCrash) {
+				return err
+			}
 			failures = append(failures, err)
 		}
 	}
@@ -319,11 +346,11 @@ func cleanupSDKOrphans(repositoryRoot string, fileSystem sdkTransactionFS) error
 		} else if exists {
 			return fmt.Errorf("orphan SDK transaction backup exists without durable manifest: %s", relative)
 		}
-		if err := sdkTransactionRemove(fileSystem, target+sdkTransactionNewSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := sdkTransactionRemoveIfExists(fileSystem, target+sdkTransactionNewSuffix); err != nil {
 			return err
 		}
 	}
-	if err := sdkTransactionRemove(fileSystem, filepath.Join(repositoryRoot, sdkTransactionManifestTemp)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := sdkTransactionRemoveIfExists(fileSystem, filepath.Join(repositoryRoot, sdkTransactionManifestTemp)); err != nil {
 		return err
 	}
 	return nil
@@ -407,6 +434,15 @@ func sdkTransactionRemove(fileSystem sdkTransactionFS, path string) error {
 		return err
 	}
 	return fileSystem.SyncDir(filepath.Dir(path))
+}
+
+func sdkTransactionRemoveIfExists(fileSystem sdkTransactionFS, path string) error {
+	if _, exists, err := sdkTransactionFileDigest(fileSystem, path); err != nil {
+		return err
+	} else if !exists {
+		return nil
+	}
+	return sdkTransactionRemove(fileSystem, path)
 }
 
 func sdkTransactionFileDigest(fileSystem sdkTransactionFS, path string) (string, bool, error) {
