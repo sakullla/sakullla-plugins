@@ -135,13 +135,102 @@ func TestHuggingFaceLargeFileStreaming(t *testing.T) {
 		if request.URL.Path != "/org/model/resolve/main/model.bin" {
 			t.Errorf("unexpected path %q", request.URL.Path)
 		}
-		writer.Header().Set("Content-Length", "114688")
 		_, _ = io.WriteString(writer, payload)
 	})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/huggingface.co/org/model/resolve/main/model.bin", nil))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != payload {
 		t.Fatalf("unexpected Hugging Face response: status=%d bytes=%d", recorder.Code, recorder.Body.Len())
+	}
+}
+
+func TestScriptHEADUsesTransformedRepresentationWithoutRangeMetadata(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodHead || request.Header.Get("Range") != "" || request.Header.Get("If-Range") != "" {
+			t.Errorf("HEAD script forwarded source range semantics: method=%s range=%q if-range=%q", request.Method, request.Header.Get("Range"), request.Header.Get("If-Range"))
+		}
+		writer.Header().Set("Accept-Ranges", "bytes")
+		writer.Header().Set("Content-Range", "bytes 0-9/100")
+		writer.Header().Set("Content-Length", "100")
+		writer.Header().Set("ETag", `"source-etag"`)
+		writer.WriteHeader(http.StatusOK)
+	})
+	request := httptest.NewRequest(http.MethodHead, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+	request.Header.Set("Range", "bytes=10-")
+	request.Header.Set("If-Range", `"source-etag"`)
+	request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.Len() != 0 {
+		t.Fatalf("HEAD script response failed: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	for _, header := range []string{"Accept-Ranges", "Content-Range", "Content-Length", "ETag"} {
+		if value := recorder.Header().Get(header); value != "" {
+			t.Fatalf("HEAD transformed response retained %s=%q", header, value)
+		}
+	}
+}
+
+func TestScriptRejectsPartialUpstreamAndClearsRangeHeaders(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Range") != "" || request.Header.Get("If-Range") != "" {
+			t.Errorf("script forwarded range headers: %v", request.Header)
+		}
+		writer.Header().Set("Accept-Ranges", "bytes")
+		writer.Header().Set("Content-Range", "bytes 0-9/100")
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(writer, "partial")
+	})
+	request := httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.ps1", nil)
+	request.Header.Set("Range", "bytes=0-9")
+	request.Header.Set("If-Range", `"source"`)
+	request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("partial script upstream was accepted: status=%d", recorder.Code)
+	}
+	if recorder.Header().Get("Accept-Ranges") != "" || recorder.Header().Get("Content-Range") != "" {
+		t.Fatalf("partial script leaked range metadata: %v", recorder.Header())
+	}
+}
+
+func TestGitHubStreamingChunkedTruncationAbortsClientRead(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		connection, buffered, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack upstream: %v", err)
+			return
+		}
+		defer connection.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n")
+		_ = buffered.Flush()
+	}))
+	defer upstreamServer.Close()
+	endpoint, _ := url.Parse(upstreamServer.URL)
+	manager, err := upstream.New(upstream.Options{Resolver: fixtureResolver{address: net.ParseIP("127.0.0.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	handler, err := NewHandler(Options{Upstream: manager, Targets: map[string]*url.URL{"github.com": endpoint}, AllowHTTP: true, AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := httptest.NewServer(handler)
+	defer service.Close()
+	response, err := http.Get(service.URL + "/github.com/acme/project/releases/download/v1/file.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr == nil || string(body) != "helloworld" {
+		t.Fatalf("truncated chunked stream appeared complete: body=%q err=%v", body, readErr)
 	}
 }
 

@@ -79,7 +79,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusMethodNotAllowed, "unsupported source method")
 		return
 	}
-	isScript := request.Method == http.MethodGet && (strings.EqualFold(path.Ext(target.Path), ".sh") || strings.EqualFold(path.Ext(target.Path), ".ps1"))
+	isScript := (request.Method == http.MethodGet || request.Method == http.MethodHead) && (strings.EqualFold(path.Ext(target.Path), ".sh") || strings.EqualFold(path.Ext(target.Path), ".ps1"))
 	var authority *url.URL
 	if isScript {
 		authority, err = ExternalAuthority(request)
@@ -88,20 +88,22 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 	}
-	response, err := handler.follow(request, target, class)
+	response, err := handler.follow(request, target, class, isScript)
 	if err != nil {
 		writeError(writer, http.StatusBadGateway, "source upstream request failed")
 		return
 	}
 	defer response.Body.Close()
 	if isScript && response.StatusCode >= 200 && response.StatusCode < 300 {
-		handler.serveScript(writer, response, authority)
+		handler.serveScript(writer, request.Method, response, authority)
 		return
 	}
 	copyHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {
-		_, _ = streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: response.ContentLength, Flush: streaming.FlushFunc(writer)})
+		if _, err := streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: response.ContentLength, Flush: streaming.FlushFunc(writer)}); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
@@ -166,7 +168,7 @@ func sourceClass(host string) string {
 	return "github"
 }
 
-func (handler *Handler) follow(incoming *http.Request, target *url.URL, class string) (*http.Response, error) {
+func (handler *Handler) follow(incoming *http.Request, target *url.URL, class string, transformed bool) (*http.Response, error) {
 	var replay *requestReplay
 	if incoming.Method == http.MethodPost {
 		var err error
@@ -189,7 +191,7 @@ func (handler *Handler) follow(incoming *http.Request, target *url.URL, class st
 		if replay != nil {
 			request.ContentLength = replay.size
 		}
-		copyRequestHeaders(request.Header, incoming.Header)
+		copyRequestHeaders(request.Header, incoming.Header, transformed)
 		response, err := handler.upstream.Do(request, upstream.Policy{AllowHTTP: handler.allowHTTP, AllowPrivate: handler.allowPrivate})
 		if err != nil {
 			return nil, err
@@ -231,11 +233,22 @@ func (handler *Handler) allowedRedirect(target *url.URL, class string) bool {
 	return host == "huggingface.co" || strings.HasSuffix(host, ".huggingface.co") || host == "hf.co" || strings.HasSuffix(host, ".hf.co") || strings.HasSuffix(host, ".xethub.hf.co")
 }
 
-func (handler *Handler) serveScript(writer http.ResponseWriter, response *http.Response, authority *url.URL) {
+func (handler *Handler) serveScript(writer http.ResponseWriter, method string, response *http.Response, authority *url.URL) {
+	if response.StatusCode == http.StatusPartialContent {
+		drainAndClose(response.Body)
+		writeError(writer, http.StatusBadGateway, "script upstream returned a partial representation")
+		return
+	}
 	encoding := strings.TrimSpace(strings.ToLower(response.Header.Get("Content-Encoding")))
 	if encoding != "" && encoding != "identity" {
 		drainAndClose(response.Body)
 		writeError(writer, http.StatusBadGateway, "script upstream returned unsupported content encoding")
+		return
+	}
+	if method == http.MethodHead {
+		copyHeaders(writer.Header(), response.Header)
+		clearTransformedHeaders(writer.Header())
+		writer.WriteHeader(response.StatusCode)
 		return
 	}
 	if response.ContentLength > maxScriptBytes {
@@ -250,10 +263,16 @@ func (handler *Handler) serveScript(writer http.ResponseWriter, response *http.R
 	prefix := strings.TrimSuffix(authority.String(), "/") + "/"
 	rewritten := scriptURLPattern.ReplaceAllFunc(body, func(value []byte) []byte { return append([]byte(prefix), value[len("https://"):]...) })
 	copyHeaders(writer.Header(), response.Header)
-	writer.Header().Del("Content-Encoding")
+	clearTransformedHeaders(writer.Header())
 	writer.Header().Set("Content-Length", strconv.Itoa(len(rewritten)))
 	writer.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(writer, bytes.NewReader(rewritten))
+}
+
+func clearTransformedHeaders(header http.Header) {
+	for _, name := range []string{"Accept-Ranges", "Content-Encoding", "Content-Range", "Content-Length", "ETag"} {
+		header.Del(name)
+	}
 }
 
 func isRedirect(status int) bool {
@@ -345,8 +364,12 @@ func joinPath(prefix, suffix string) string {
 	return strings.TrimSuffix(prefix, "/") + "/" + strings.TrimPrefix(suffix, "/")
 }
 
-func copyRequestHeaders(destination, source http.Header) {
-	for _, name := range []string{"Accept", "Content-Type", "If-Modified-Since", "If-None-Match", "Range", "User-Agent"} {
+func copyRequestHeaders(destination, source http.Header, transformed bool) {
+	names := []string{"Accept", "Content-Type", "If-Modified-Since", "If-None-Match", "User-Agent"}
+	if !transformed {
+		names = append(names, "Range", "If-Range")
+	}
+	for _, name := range names {
 		if value := source.Get(name); value != "" {
 			destination.Set(name, value)
 		}

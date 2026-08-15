@@ -23,6 +23,8 @@
     "max_body_bytes": 33554432
   },
   "script_content_encoding": ["identity", "reject-gzip", "reject-br"],
+  "script_representation": ["GET-transform", "HEAD-transform", "suppress-range", "reject-206", "clear-range-metadata"],
+  "stream_failure": "abort downstream transport after a late copy or length error",
   "rejected": [
     "/example.com/file",
     "/proxy/127.0.0.1/file"

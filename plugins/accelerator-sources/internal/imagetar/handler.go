@@ -587,14 +587,14 @@ func writeBytes(archive *tar.Writer, name string, body []byte) error {
 }
 
 func (handler *Handler) parseImageRef(value string) (imageRef, error) {
-	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimSpace(value)
 	if value == "" || strings.ContainsAny(value, "?#\\") {
 		return imageRef{}, errors.New("invalid image")
 	}
 	registry := "docker.io"
 	parts := strings.Split(value, "/")
 	if len(parts) > 1 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":")) {
-		registry = parts[0]
+		registry = strings.ToLower(parts[0])
 		parts = parts[1:]
 	}
 	source, found := handler.sources[registry]
@@ -604,7 +604,7 @@ func (handler *Handler) parseImageRef(value string) (imageRef, error) {
 	reference := "latest"
 	last := parts[len(parts)-1]
 	if at := strings.LastIndex(last, "@"); at >= 0 {
-		reference = last[at+1:]
+		reference = strings.ToLower(last[at+1:])
 		parts[len(parts)-1] = last[:at]
 	} else if colon := strings.LastIndex(last, ":"); colon >= 0 {
 		reference = last[colon+1:]
@@ -613,7 +613,9 @@ func (handler *Handler) parseImageRef(value string) (imageRef, error) {
 	if registry == "docker.io" && len(parts) == 1 {
 		parts = append([]string{"library"}, parts...)
 	}
-	for _, part := range parts {
+	for index, part := range parts {
+		part = strings.ToLower(part)
+		parts[index] = part
 		if !namePartPattern.MatchString(part) {
 			return imageRef{}, errors.New("invalid repository")
 		}

@@ -152,6 +152,41 @@ func TestOfflineRejectsUnsupportedRegistry(t *testing.T) {
 	}
 }
 
+func TestOfflinePreservesUppercaseTagInManifestPathAndRepoTags(t *testing.T) {
+	layerTar, layer := makeLayerFixture(t, []byte("tag-case"))
+	config := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest(layerTar)))
+	document := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}, Layers: []descriptor{{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}}}
+	manifestBody, _ := json.Marshal(document)
+	var manifestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.Contains(request.URL.Path, "/manifests/"):
+			manifestPath = request.URL.Path
+			writer.Header().Set("Content-Type", document.MediaType)
+			_, _ = writer.Write(manifestBody)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+document.Config.Digest):
+			_, _ = writer.Write(config)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+document.Layers[0].Digest):
+			_, _ = writer.Write(layer)
+		}
+	}))
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/offline?image=Example/App:RC1", nil))
+	if recorder.Code != http.StatusOK || manifestPath != "/v2/example/app/manifests/RC1" {
+		t.Fatalf("tag case changed in manifest request: status=%d path=%q", recorder.Code, manifestPath)
+	}
+	entries := readTar(t, recorder.Body.Bytes())
+	var archiveManifest []struct {
+		RepoTags []string `json:"RepoTags"`
+	}
+	if err := json.Unmarshal(entries["manifest.json"], &archiveManifest); err != nil || len(archiveManifest) != 1 || len(archiveManifest[0].RepoTags) != 1 || archiveManifest[0].RepoTags[0] != "example/app:RC1" {
+		t.Fatalf("tag case changed in archive RepoTags: manifest=%s err=%v", entries["manifest.json"], err)
+	}
+}
+
 func TestOfflineManifestIntegrityAndMediaTypeFailClosed(t *testing.T) {
 	valid := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: descriptor{Digest: digest([]byte("config")), Size: 6}, Layers: []descriptor{{Digest: digest([]byte("layer")), Size: 5}}}
 	body, _ := json.Marshal(valid)

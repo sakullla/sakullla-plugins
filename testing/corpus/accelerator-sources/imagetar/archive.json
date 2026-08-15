@@ -8,5 +8,6 @@
   "storage": "bounded per-layer temporary spool; the complete archive is never persisted",
   "index_descriptor": ["supported-media-type", "digest", "exact-size"],
   "post_commit_failure": "abort downstream transport without tar terminator",
-  "shared_layer": "validate every config diff_id before writing one layer entry"
+  "shared_layer": "validate every config diff_id before writing one layer entry",
+  "tag_case": "preserve tag verbatim in manifest path and RepoTags while normalizing registry/repository"
 }
