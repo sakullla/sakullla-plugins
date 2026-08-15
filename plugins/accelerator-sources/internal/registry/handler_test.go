@@ -314,6 +314,7 @@ func TestRegistrySameLengthWrongDigestAbortsStream(t *testing.T) {
 func TestRegistryRejectsBadManifestDigestAndUnsupportedTargets(t *testing.T) {
 	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
 	registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		writer.Header().Set("Docker-Content-Digest", "sha256:"+strings.Repeat("0", 64))
 		_, _ = writer.Write(manifest)
 	}))
@@ -347,6 +348,33 @@ func TestRegistryRejectsBadManifestDigestAndUnsupportedTargets(t *testing.T) {
 	handler.ServeHTTP(unsupported, httptest.NewRequest(http.MethodGet, "/v2/evil.example/app/manifests/latest", nil))
 	if unsupported.Code != http.StatusNotFound || !strings.Contains(unsupported.Body.String(), "REGISTRY_UNSUPPORTED") {
 		t.Fatalf("unsupported registry response: status=%d body=%s", unsupported.Code, unsupported.Body.String())
+	}
+}
+
+func TestRegistryRejectsContradictoryManifestMediaTypes(t *testing.T) {
+	index := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}]}`)
+	image := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1},"layers":[]}`)
+	cases := []struct {
+		name        string
+		body        []byte
+		contentType string
+	}{
+		{name: "index body labeled image", body: index, contentType: "application/vnd.oci.image.manifest.v1+json"},
+		{name: "image body labeled index", body: image, contentType: "application/vnd.oci.image.index.v1+json"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", testCase.contentType)
+				_, _ = writer.Write(testCase.body)
+			}))
+			defer registryServer.Close()
+			recorder := httptest.NewRecorder()
+			newFixtureHandler(t, registryServer.URL).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+			if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "MANIFEST_INVALID") {
+				t.Fatalf("contradictory media types were accepted: status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -414,6 +442,36 @@ func TestRegistryRebindingIsRejectedAtPinnedDial(t *testing.T) {
 	}
 	if resolver.calls.Load() != 2 {
 		t.Fatalf("expected preflight and pinned-dial resolutions, got %d", resolver.calls.Load())
+	}
+}
+
+func TestRegistryCustomTLSDialHookCannotBypassPinnedDial(t *testing.T) {
+	endpoint, _ := url.Parse("https://tls-hook.public.test")
+	resolver := &sequenceResolver{answers: [][]net.IPAddr{
+		{{IP: net.ParseIP("8.8.8.8")}},
+		{{IP: net.ParseIP("127.0.0.1")}},
+	}}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var hookCalls atomic.Int32
+	transport.DialTLSContext = func(context.Context, string, string) (net.Conn, error) {
+		hookCalls.Add(1)
+		return nil, errors.New("unsafe TLS hook called")
+	}
+	handler, err := NewHandler(Options{
+		Client:   &http.Client{Transport: transport},
+		Resolver: resolver,
+		Sources:  []Source{{Name: "docker.io", Endpoint: endpoint}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+	if hookCalls.Load() != 0 {
+		t.Fatalf("custom TLS hook bypassed pinned dial: calls=%d", hookCalls.Load())
+	}
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "UPSTREAM_FORBIDDEN") {
+		t.Fatalf("pinned dial did not reject rebinding: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

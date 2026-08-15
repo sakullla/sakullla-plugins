@@ -108,6 +108,11 @@ func NewHandler(options Options) (*Handler, error) {
 	if transportOK {
 		transport.DisableCompression = true
 		transport.Proxy = nil
+		// HTTPS must flow through DialContext so the address selected by the
+		// policy resolver is the address actually dialed. Custom TLS hooks would
+		// otherwise bypass the pinned dialer entirely.
+		transport.DialTLS = nil
+		transport.DialTLSContext = nil
 		baseDial := transport.DialContext
 		if baseDial == nil {
 			baseDial = (&net.Dialer{}).DialContext
@@ -619,11 +624,15 @@ func validManifest(body []byte, contentType string) bool {
 	if json.Unmarshal(body, &envelope) != nil || envelope.SchemaVersion != 2 {
 		return false
 	}
-	mediaType := envelope.MediaType
-	if mediaType == "" {
-		mediaType = contentType
+	bodyMediaType := normalizeManifestMediaType(envelope.MediaType)
+	headerMediaType := normalizeManifestMediaType(contentType)
+	if bodyMediaType != "" && headerMediaType != "" && bodyMediaType != headerMediaType {
+		return false
 	}
-	mediaType = strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0])
+	mediaType := bodyMediaType
+	if mediaType == "" {
+		mediaType = headerMediaType
+	}
 	switch mediaType {
 	case "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json":
 		if envelope.Config == nil || envelope.Layers == nil || !validManifestDescriptor(*envelope.Config) {
@@ -651,7 +660,7 @@ func validManifest(body []byte, contentType string) bool {
 }
 
 func recognizedManifestMediaType(value string) bool {
-	value = strings.TrimSpace(strings.SplitN(value, ";", 2)[0])
+	value = normalizeManifestMediaType(value)
 	switch value {
 	case "application/vnd.docker.distribution.manifest.v2+json",
 		"application/vnd.oci.image.manifest.v1+json",
@@ -661,6 +670,10 @@ func recognizedManifestMediaType(value string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeManifestMediaType(value string) string {
+	return strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0]))
 }
 
 func validManifestDescriptor(descriptor manifestDescriptor) bool {
