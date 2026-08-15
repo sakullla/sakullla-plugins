@@ -3,7 +3,6 @@
 package registry
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,11 +13,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/streaming"
 )
@@ -90,13 +87,15 @@ func NewHandler(options Options) (*Handler, error) {
 		transport.DisableCompression = true
 		options.Client = &http.Client{Transport: transport}
 	}
+	client := *options.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if options.Resolver == nil {
 		options.Resolver = net.DefaultResolver
 	}
 	if len(options.Sources) == 0 {
 		options.Sources = DefaultSources()
 	}
-	handler := &Handler{client: options.Client, resolver: options.Resolver, sources: make(map[string]*Source)}
+	handler := &Handler{client: &client, resolver: options.Resolver, sources: make(map[string]*Source)}
 	for index := range options.Sources {
 		source := &options.Sources[index]
 		if err := validateSource(source); err != nil {
@@ -139,6 +138,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	resolved, err := handler.resolve(request.URL.Path)
 	if err != nil {
 		writeMappedError(writer, err)
+		return
+	}
+	if resolved.kind == resourcePing {
+		writer.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+		writer.WriteHeader(http.StatusOK)
 		return
 	}
 	upstreamURL := *resolved.source.Endpoint
@@ -286,7 +290,6 @@ func (handler *Handler) upstreamRequest(ctx context.Context, incoming *http.Requ
 		return nil, err
 	}
 	for _, header := range []string{"Accept", "Range", "If-Range", "If-None-Match", "If-Modified-Since", "User-Agent"} {
-		request.Header.Values(header)
 		for _, value := range incoming.Header.Values(header) {
 			request.Header.Add(header, value)
 		}
@@ -482,8 +485,13 @@ func isPublicIP(address net.IP) bool {
 }
 
 func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, response *http.Response) {
+	if request.Method == http.MethodHead {
+		copyResponseHeaders(writer.Header(), response.Header)
+		writer.WriteHeader(response.StatusCode)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
-	if err != nil || len(body) > maxManifestBytes || !json.Valid(body) {
+	if err != nil || len(body) > maxManifestBytes || !validManifest(body) {
 		writeMappedError(writer, errManifestInvalid)
 		return
 	}
@@ -501,9 +509,14 @@ func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.
 	writer.Header().Set("Docker-Content-Digest", digest)
 	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	writer.WriteHeader(response.StatusCode)
-	if request.Method != http.MethodHead {
-		_, _ = writer.Write(body)
+	_, _ = writer.Write(body)
+}
+
+func validManifest(body []byte) bool {
+	var envelope struct {
+		SchemaVersion int `json:"schemaVersion"`
 	}
+	return json.Unmarshal(body, &envelope) == nil && envelope.SchemaVersion == 2
 }
 
 func hashHex(value []byte) string {
@@ -512,18 +525,17 @@ func hashHex(value []byte) string {
 }
 
 func (handler *Handler) serveStream(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, response *http.Response) {
-	copyResponseHeaders(writer.Header(), response.Header)
-	if resolved.kind == resourcePing {
-		writer.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
-	}
 	expectedDigest := ""
 	if resolved.kind == resourceBlob {
-		expectedDigest = resolved.reference
-		if advertised := response.Header.Get("Docker-Content-Digest"); advertised != "" && !strings.EqualFold(advertised, expectedDigest) {
+		if response.StatusCode != http.StatusPartialContent {
+			expectedDigest = resolved.reference
+		}
+		if advertised := response.Header.Get("Docker-Content-Digest"); advertised != "" && !strings.EqualFold(advertised, resolved.reference) {
 			writeMappedError(writer, streaming.ErrDigestMismatch)
 			return
 		}
 	}
+	copyResponseHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
 	if request.Method == http.MethodHead {
 		return
@@ -549,14 +561,8 @@ func copyUpstreamError(writer http.ResponseWriter, response *http.Response) {
 	if status < 400 || status > 599 {
 		status = http.StatusBadGateway
 	}
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-	if len(bytes.TrimSpace(body)) == 0 {
-		writeError(writer, status, "UPSTREAM_ERROR", "registry upstream rejected the request")
-		return
-	}
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_, _ = writer.Write(body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	writeError(writer, status, "UPSTREAM_ERROR", "registry upstream rejected the request")
 }
 
 func writeMappedError(writer http.ResponseWriter, err error) {
@@ -584,12 +590,3 @@ func writeError(writer http.ResponseWriter, status int, code string, message str
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{"errors": []map[string]string{{"code": code, "message": message}}})
 }
-
-// CleanPath is retained as a small defensive helper for future service routes.
-func CleanPath(value string) string {
-	return path.Clean("/" + strings.TrimPrefix(value, "/"))
-}
-
-// Ensure the compiler keeps time in this package's dependency boundary when
-// custom clients use context deadlines in tests and production.
-var _ = time.Second

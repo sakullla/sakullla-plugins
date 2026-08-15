@@ -1,0 +1,38 @@
+[
+  {
+    "name": "docker official image defaults",
+    "request_path": "/v2/alpine/manifests/",
+    "registry": "docker.io",
+    "upstream_path": "/v2/library/alpine/manifests/latest"
+  },
+  {
+    "name": "docker explicit namespace and tag",
+    "request_path": "/v2/example/team/manifests/stable",
+    "registry": "docker.io",
+    "upstream_path": "/v2/example/team/manifests/stable"
+  },
+  {
+    "name": "github container registry",
+    "request_path": "/v2/ghcr.io/example/app/manifests/v1",
+    "registry": "ghcr.io",
+    "upstream_path": "/v2/example/app/manifests/v1"
+  },
+  {
+    "name": "google container registry",
+    "request_path": "/v2/gcr.io/example/app/manifests/latest",
+    "registry": "gcr.io",
+    "upstream_path": "/v2/example/app/manifests/latest"
+  },
+  {
+    "name": "quay",
+    "request_path": "/v2/quay.io/example/app/manifests/latest",
+    "registry": "quay.io",
+    "upstream_path": "/v2/example/app/manifests/latest"
+  },
+  {
+    "name": "kubernetes registry",
+    "request_path": "/v2/registry.k8s.io/example/app/manifests/latest",
+    "registry": "registry.k8s.io",
+    "upstream_path": "/v2/example/app/manifests/latest"
+  }
+]
