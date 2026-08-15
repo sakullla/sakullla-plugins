@@ -298,7 +298,7 @@ func (handler *Handler) fetch(ctx context.Context, incoming *http.Request, resol
 	if err != nil {
 		return nil, err
 	}
-	request, err = handler.upstreamRequest(ctx, incoming, target, "Bearer "+token)
+	request, err = handler.upstreamRequest(ctx, incoming, target, "Bearer "+token.Value)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +309,9 @@ func (handler *Handler) fetch(ctx context.Context, incoming *http.Request, resol
 	// A registry can revoke a token before its advertised expiry. Invalidate it
 	// and permit one exact reacquisition/retry; a second 401 is authoritative.
 	drainAndClose(response.Body)
-	handler.upstream.Tokens().Delete(tokenKey)
+	handler.upstream.Tokens().CompareAndDelete(tokenKey, func(current upstreamclient.TokenEntry) bool {
+		return current.Version == token.Version
+	})
 	if nextChallenge := response.Header.Get("WWW-Authenticate"); nextChallenge != "" {
 		challenge = nextChallenge
 	}
@@ -317,7 +319,7 @@ func (handler *Handler) fetch(ctx context.Context, incoming *http.Request, resol
 	if err != nil {
 		return nil, err
 	}
-	request, err = handler.upstreamRequest(ctx, incoming, target, "Bearer "+token)
+	request, err = handler.upstreamRequest(ctx, incoming, target, "Bearer "+token.Value)
 	if err != nil {
 		return nil, err
 	}
@@ -434,17 +436,18 @@ func splitChallenge(value string) []string {
 	return append(result, value[start:])
 }
 
-func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest, rawChallenge string) (string, string, error) {
+func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest, rawChallenge string) (upstreamclient.TokenEntry, string, error) {
+	var zero upstreamclient.TokenEntry
 	challenge, err := parseBearerChallenge(rawChallenge)
 	if err != nil {
-		return "", "", err
+		return zero, "", err
 	}
 	realm, err := url.Parse(challenge.realm)
 	if err != nil || realm.Hostname() == "" {
-		return "", "", errUpstreamAuth
+		return zero, "", errUpstreamAuth
 	}
 	if err := handler.validateOutbound(ctx, resolved.source, realm, true); err != nil {
-		return "", "", err
+		return zero, "", err
 	}
 	query := realm.Query()
 	if challenge.service != "" {
@@ -452,7 +455,7 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 	}
 	expectedScope := "repository:" + resolved.repository + ":pull"
 	if challenge.scope != "" && challenge.scope != expectedScope {
-		return "", "", errUpstreamAuth
+		return zero, "", errUpstreamAuth
 	}
 	query.Set("scope", expectedScope)
 	realm.RawQuery = query.Encode()
@@ -499,20 +502,35 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 		if timingErr != nil {
 			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, timingErr
 		}
-		ttl := refreshAt.Sub(receivedAt)
-		if ttl < 0 {
-			ttl = 0
-		}
-		return upstreamclient.Loaded[upstreamclient.TokenEntry]{Value: upstreamclient.TokenEntry{Value: payload.Token, ExpiresAt: expiresAt}, Size: int64(len(payload.Token)), TTL: ttl}, nil
+		ttl, swr := tokenCacheWindows(receivedAt, refreshAt, expiresAt)
+		entry := handler.upstream.NewTokenEntry(payload.Token, expiresAt)
+		return upstreamclient.Loaded[upstreamclient.TokenEntry]{Value: entry, Size: int64(len(payload.Token)), TTL: ttl, StaleWhileRevalidate: swr}, nil
 	})
 	if err != nil {
-		return "", cacheKey, err
+		return zero, cacheKey, err
 	}
 	if !entry.ExpiresAt.After(handler.upstream.Now()) {
-		handler.upstream.Tokens().Delete(cacheKey)
-		return "", cacheKey, errUpstreamAuth
+		handler.upstream.Tokens().CompareAndDelete(cacheKey, func(current upstreamclient.TokenEntry) bool {
+			return current.Version == entry.Version
+		})
+		return zero, cacheKey, errUpstreamAuth
 	}
-	return entry.Value, cacheKey, nil
+	return entry, cacheKey, nil
+}
+
+func tokenCacheWindows(receivedAt time.Time, refreshAt time.Time, expiresAt time.Time) (time.Duration, time.Duration) {
+	remaining := expiresAt.Sub(receivedAt)
+	if remaining <= 0 {
+		return 0, 0
+	}
+	fresh := refreshAt.Sub(receivedAt)
+	if fresh <= 0 {
+		fresh = min(time.Nanosecond, remaining)
+	}
+	if fresh > remaining {
+		fresh = remaining
+	}
+	return fresh, remaining - fresh
 }
 
 func tokenCacheTiming(receivedAt time.Time, issuedRaw string, expiresIn int64) (time.Time, time.Time, error) {
@@ -640,9 +658,12 @@ func (handler *Handler) serveCachedManifest(writer http.ResponseWriter, request 
 				copyResponseHeaders(header, response.Header)
 				return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: upstreamclient.ManifestEntry{Status: http.StatusNotModified, Header: header}}, nil
 			}
+			if err := validateManifest304(previous, response.Header); err != nil {
+				return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, upstreamclient.PermanentCacheError(err)
+			}
 			updated := previous
 			updated.Header = previous.Header.Clone()
-			mergeResponseHeaders(updated.Header, response.Header)
+			mergeManifestValidators(updated.Header, response.Header)
 			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: updated, Size: int64(len(updated.Body) + headerSize(updated.Header)), TTL: ttl, StaleWhileRevalidate: swr, StaleIfError: sie}, nil
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -678,8 +699,8 @@ func manifestCacheWindows(reference string) (time.Duration, time.Duration, time.
 	return time.Minute, 30 * time.Second, 5 * time.Minute
 }
 
-func mergeResponseHeaders(destination http.Header, source http.Header) {
-	for _, header := range []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type", "Docker-Content-Digest", "ETag", "Last-Modified"} {
+func mergeManifestValidators(destination http.Header, source http.Header) {
+	for _, header := range []string{"ETag", "Last-Modified"} {
 		if values := source.Values(header); len(values) > 0 {
 			destination.Del(header)
 			for _, value := range values {
@@ -687,6 +708,29 @@ func mergeResponseHeaders(destination http.Header, source http.Header) {
 			}
 		}
 	}
+}
+
+func validateManifest304(entry upstreamclient.ManifestEntry, header http.Header) error {
+	for _, advertised := range header.Values("Docker-Content-Digest") {
+		if advertised == "" || !strings.EqualFold(advertised, entry.Digest) {
+			return streaming.ErrDigestMismatch
+		}
+	}
+	for _, advertised := range header.Values("Content-Length") {
+		length, err := strconv.ParseInt(strings.TrimSpace(advertised), 10, 64)
+		if err != nil || length != int64(len(entry.Body)) {
+			return errManifestInvalid
+		}
+	}
+	for _, advertised := range header.Values("Content-Type") {
+		if advertised == "" || !validManifest(entry.Body, advertised) {
+			return errManifestInvalid
+		}
+		if cached := entry.Header.Get("Content-Type"); cached != "" && normalizeManifestMediaType(cached) != normalizeManifestMediaType(advertised) {
+			return errManifestInvalid
+		}
+	}
+	return nil
 }
 
 func serveManifestEntryConditional(writer http.ResponseWriter, request *http.Request, entry upstreamclient.ManifestEntry) {

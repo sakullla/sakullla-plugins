@@ -181,6 +181,20 @@ func (cache *Cache[V]) Delete(key string) {
 	cache.mu.Unlock()
 }
 
+// CompareAndDelete removes key only when its current value still matches the
+// value observed by the caller. It prevents a delayed failure from evicting a
+// newer singleflight result published under the same cache key.
+func (cache *Cache[V]) CompareAndDelete(key string, match func(V) bool) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	element, found := cache.entries[key]
+	if !found || match == nil || !match(element.Value.(*cacheEntry[V]).value) {
+		return false
+	}
+	cache.removeLocked(element)
+	return true
+}
+
 func (cache *Cache[V]) getLocked(key string) (V, bool) {
 	var zero V
 	if cache.closed {

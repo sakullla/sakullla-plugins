@@ -45,6 +45,7 @@ type Options struct {
 type TokenEntry struct {
 	Value     string
 	ExpiresAt time.Time
+	Version   uint64
 }
 
 type ManifestEntry struct {
@@ -84,6 +85,7 @@ type Manager struct {
 	baseDial         func(context.Context, string, string) (net.Conn, error)
 	refreshes        *refreshGroup
 	clock            Clock
+	tokenVersion     atomic.Uint64
 	closed           atomic.Bool
 }
 
@@ -315,6 +317,9 @@ func (manager *Manager) Tokens() *Cache[TokenEntry]       { return manager.token
 func (manager *Manager) Manifests() *Cache[ManifestEntry] { return manager.manifests }
 func (manager *Manager) Client() *http.Client             { return manager.client }
 func (manager *Manager) Now() time.Time                   { return manager.clock.Now() }
+func (manager *Manager) NewTokenEntry(value string, expiresAt time.Time) TokenEntry {
+	return TokenEntry{Value: value, ExpiresAt: expiresAt, Version: manager.tokenVersion.Add(1)}
+}
 
 func (manager *Manager) Snapshot() Metrics {
 	return Metrics{

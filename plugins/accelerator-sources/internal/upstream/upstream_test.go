@@ -443,6 +443,78 @@ func TestTokenCacheAtomicFillAndFlightRegistration(t *testing.T) {
 	}
 }
 
+func TestTokenCacheRefreshSWRFailureAndHardExpiry(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	cache := NewCache[TokenEntry](clock, 8, 1024)
+	initial := TokenEntry{Value: "token-1", ExpiresAt: clock.Now().Add(time.Minute), Version: 1}
+	if value, err := cache.GetOrLoad(context.Background(), "token", func(context.Context) (Loaded[TokenEntry], error) {
+		return Loaded[TokenEntry]{Value: initial, Size: 7, TTL: 30 * time.Second, StaleWhileRevalidate: 30 * time.Second}, nil
+	}); err != nil || value.Version != 1 {
+		t.Fatalf("initial token fill: %+v %v", value, err)
+	}
+	clock.Advance(31 * time.Second)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var refreshes atomic.Int32
+	failedRefresh := func(context.Context) (Loaded[TokenEntry], error) {
+		if refreshes.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return Loaded[TokenEntry]{}, errors.New("token endpoint unavailable")
+	}
+	var wait sync.WaitGroup
+	for range 100 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			value, err := cache.GetOrLoad(context.Background(), "token", failedRefresh)
+			if err != nil || value.Version != 1 {
+				t.Errorf("token SWR did not serve unexpired token: %+v %v", value, err)
+			}
+		}()
+	}
+	wait.Wait()
+	<-started
+	if refreshes.Load() != 1 {
+		t.Fatalf("100 token SWR callers started %d refreshes", refreshes.Load())
+	}
+	clock.Advance(29 * time.Second)
+	hardContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, hardErr := cache.GetOrLoad(hardContext, "token", fixedTokenLoad(TokenEntry{Value: "unexpected"}, time.Minute))
+	cancel()
+	if !errors.Is(hardErr, context.DeadlineExceeded) {
+		t.Fatalf("hard expiry served token during blocked refresh: %v", hardErr)
+	}
+	close(release)
+	for deadline := time.Now().Add(time.Second); ; {
+		cache.mu.Lock()
+		flights := len(cache.flights)
+		cache.mu.Unlock()
+		if flights == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed token refresh did not clean up")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, found := cache.Get("token"); found {
+		t.Fatal("token survived its real expiresAt")
+	}
+	newToken := TokenEntry{Value: "token-2", ExpiresAt: clock.Now().Add(time.Minute), Version: 2}
+	value, err := cache.GetOrLoad(context.Background(), "token", fixedTokenLoad(newToken, 30*time.Second))
+	if err != nil || value.Version != 2 {
+		t.Fatalf("hard-expired token did not recover: %+v %v", value, err)
+	}
+}
+
+func fixedTokenLoad(value TokenEntry, ttl time.Duration) func(context.Context) (Loaded[TokenEntry], error) {
+	return func(context.Context) (Loaded[TokenEntry], error) {
+		return Loaded[TokenEntry]{Value: value, Size: int64(len(value.Value)), TTL: ttl}, nil
+	}
+}
+
 func TestManifestCacheSWRSingleRefreshSIEAndPermanentInvalidation(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1, 0)}
 	cache := NewCache[string](clock, 8, 1024)

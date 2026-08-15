@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,24 +135,41 @@ func TestTokenCacheIssuedAtEarlyRefreshAndRepeated401(t *testing.T) {
 	}
 	challenge := fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, tokenServer.URL)
 	first, _, err := handler.fetchToken(context.Background(), resolved, challenge)
-	if err != nil || first != "token-1" {
-		t.Fatalf("initial token: %q %v", first, err)
+	if err != nil || first.Value != "token-1" {
+		t.Fatalf("initial token: %+v %v", first, err)
 	}
 	clock.Advance(29 * time.Second)
 	second, _, err := handler.fetchToken(context.Background(), resolved, challenge)
 	if err != nil || second != first || tokenCalls.Load() != 1 {
-		t.Fatalf("token refreshed before boundary: %q calls=%d err=%v", second, tokenCalls.Load(), err)
+		t.Fatalf("token refreshed before boundary: %+v calls=%d err=%v", second, tokenCalls.Load(), err)
 	}
 	clock.Advance(2 * time.Second)
 	third, _, err := handler.fetchToken(context.Background(), resolved, challenge)
-	if err != nil || third != "token-2" || tokenCalls.Load() != 2 {
-		t.Fatalf("token did not refresh at expiry-minus-30s: %q calls=%d err=%v", third, tokenCalls.Load(), err)
+	if err != nil || third.Version != first.Version || third.Value != "token-1" {
+		t.Fatalf("early refresh did not serve valid stale token: %+v calls=%d err=%v", third, tokenCalls.Load(), err)
+	}
+	var refreshed upstreamclient.TokenEntry
+	for deadline := time.Now().Add(time.Second); ; {
+		refreshed, _, err = handler.fetchToken(context.Background(), resolved, challenge)
+		if err == nil && refreshed.Value == "token-2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background token refresh did not publish: %+v calls=%d err=%v", refreshed, tokenCalls.Load(), err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if refreshed.Version == first.Version || tokenCalls.Load() != 2 {
+		t.Fatalf("token refresh version/call boundary: first=%+v refreshed=%+v calls=%d", first, refreshed, tokenCalls.Load())
 	}
 
 	received := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
 	expiresAt, refreshAt, err := tokenCacheTiming(received, received.Add(-10*time.Second).Format(time.RFC3339), 100)
 	if err != nil || !expiresAt.Equal(received.Add(90*time.Second)) || !refreshAt.Equal(received.Add(60*time.Second)) {
 		t.Fatalf("issued_at timing: expiry=%s refresh=%s err=%v", expiresAt, refreshAt, err)
+	}
+	if ttl, swr := tokenCacheWindows(received, refreshAt, expiresAt); ttl != time.Minute || swr != 30*time.Second {
+		t.Fatalf("token fresh/SWR windows: ttl=%s swr=%s", ttl, swr)
 	}
 	if expiresAt, refreshAt, err := tokenCacheTiming(received, "", 300); err != nil || !expiresAt.Equal(received.Add(300*time.Second)) || !refreshAt.Equal(received.Add(240*time.Second)) {
 		t.Fatalf("80%% timing: expiry=%s refresh=%s err=%v", expiresAt, refreshAt, err)
@@ -163,35 +181,66 @@ func TestTokenCacheIssuedAtEarlyRefreshAndRepeated401(t *testing.T) {
 		t.Fatalf("expired token was accepted: %v", err)
 	}
 
-	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	blob := []byte("delayed-revocation-fixture")
+	blobDigest := registryDigest(blob)
 	var registryServer *httptest.Server
-	var issued, authenticated atomic.Int32
+	var issued, oldAttempts, newAttempts atomic.Int32
+	allOld := make(chan struct{})
 	registryServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/token":
-			call := issued.Add(1)
-			_, _ = fmt.Fprintf(writer, `{"token":"retry-%d","expires_in":300}`, call)
-		case "/v2/example/app/manifests/latest":
+			issued.Add(1)
+			_, _ = io.WriteString(writer, `{"token":"retry-token","expires_in":300}`)
+		case "/v2/example/app/blobs/" + blobDigest:
 			authorization := request.Header.Get("Authorization")
-			if authorization == "" || authorization == "Bearer retry-1" {
-				if authorization != "" {
-					authenticated.Add(1)
-				}
+			if authorization == "" {
 				writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, registryServer.URL+"/token"))
 				writer.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			authenticated.Add(1)
-			writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-			_, _ = writer.Write(manifest)
+			if authorization == "Bearer retry-token" {
+				oldWave := false
+				for !oldWave {
+					current := oldAttempts.Load()
+					if current >= 100 {
+						break
+					}
+					oldWave = oldAttempts.CompareAndSwap(current, current+1)
+					if oldWave && current+1 == 100 {
+						close(allOld)
+					}
+				}
+				if !oldWave {
+					newAttempts.Add(1)
+					writer.Header().Set("Docker-Content-Digest", blobDigest)
+					_, _ = writer.Write(blob)
+					return
+				}
+				<-allOld
+				writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, registryServer.URL+"/token"))
+				writer.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			http.Error(writer, "unexpected authorization", http.StatusUnauthorized)
 		}
 	}))
 	defer registryServer.Close()
-	retryHandler := newFixtureHandler(t, registryServer.URL)
-	recorder := httptest.NewRecorder()
-	retryHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
-	if recorder.Code != http.StatusOK || issued.Load() != 2 || authenticated.Load() != 2 {
-		t.Fatalf("repeated 401 retry boundary: status=%d tokens=%d authenticated=%d body=%s", recorder.Code, issued.Load(), authenticated.Load(), recorder.Body.String())
+	retryHandler := newFixtureHandlerWithMaxConnections(t, registryServer.URL, 128)
+	var wait sync.WaitGroup
+	for range 100 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			recorder := httptest.NewRecorder()
+			retryHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/blobs/"+blobDigest, nil))
+			if recorder.Code != http.StatusOK || !bytes.Equal(recorder.Body.Bytes(), blob) {
+				t.Errorf("repeated 401 response: status=%d body=%q", recorder.Code, recorder.Body.String())
+			}
+		}()
+	}
+	wait.Wait()
+	if issued.Load() != 2 || oldAttempts.Load() != 100 || newAttempts.Load() != 100 {
+		t.Fatalf("100-way repeated 401 did not converge: tokens=%d old=%d new=%d", issued.Load(), oldAttempts.Load(), newAttempts.Load())
 	}
 }
 
@@ -357,6 +406,67 @@ func TestManifestCacheValidatorRefreshWindowsAnd4xxInvalidation(t *testing.T) {
 	}
 	if ttl, swr, sie := manifestCacheWindows("latest"); ttl != time.Minute || swr != 30*time.Second || sie != 5*time.Minute {
 		t.Fatalf("tag windows: %s %s %s", ttl, swr, sie)
+	}
+}
+
+func TestManifestCacheConflicting304MetadataPermanentlyInvalidates(t *testing.T) {
+	body := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	digest := registryDigest(body)
+	entry := upstreamclient.ManifestEntry{Status: http.StatusOK, Body: body, Digest: digest, Header: http.Header{
+		"Content-Type":          []string{"application/vnd.oci.image.manifest.v1+json"},
+		"Content-Length":        []string{strconv.Itoa(len(body))},
+		"Docker-Content-Digest": []string{digest},
+		"Etag":                  []string{`"v1"`},
+	}}
+	for _, testCase := range []struct {
+		name   string
+		header string
+		value  func([]byte) string
+	}{
+		{name: "digest", header: "Docker-Content-Digest", value: func([]byte) string { return "sha256:" + strings.Repeat("b", 64) }},
+		{name: "content type", header: "Content-Type", value: func([]byte) string { return "application/vnd.oci.image.index.v1+json" }},
+		{name: "content length", header: "Content-Length", value: func(body []byte) string { return strconv.Itoa(len(body) + 1) }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			clock := &registryFakeClock{now: time.Unix(1, 0)}
+			conflict := make(http.Header)
+			conflict.Set(testCase.header, testCase.value(body))
+			validationErr := validateManifest304(entry, conflict)
+			if validationErr == nil {
+				t.Fatal("conflicting 304 metadata was accepted")
+			}
+			cache := upstreamclient.NewCache[upstreamclient.ManifestEntry](clock, 8, 1<<20)
+			_, err := cache.GetOrLoad(context.Background(), "manifest", func(context.Context) (upstreamclient.Loaded[upstreamclient.ManifestEntry], error) {
+				return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: entry, Size: int64(len(body)), TTL: time.Second, StaleIfError: time.Second}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(1500 * time.Millisecond)
+			_, err = cache.GetOrLoad(context.Background(), "manifest", func(context.Context) (upstreamclient.Loaded[upstreamclient.ManifestEntry], error) {
+				return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, upstreamclient.PermanentCacheError(validationErr)
+			})
+			if !errors.Is(err, upstreamclient.ErrPermanentCache) {
+				t.Fatalf("conflicting 304 was not permanent: %v", err)
+			}
+			if _, found := cache.Peek("manifest"); found {
+				t.Fatal("conflicting 304 did not invalidate cached representation")
+			}
+		})
+	}
+	matching := http.Header{
+		"Content-Type":          []string{entry.Header.Get("Content-Type")},
+		"Content-Length":        []string{entry.Header.Get("Content-Length")},
+		"Docker-Content-Digest": []string{entry.Digest},
+		"Etag":                  []string{`"v1-next"`},
+	}
+	if err := validateManifest304(entry, matching); err != nil {
+		t.Fatalf("matching 304 metadata rejected: %v", err)
+	}
+	updated := entry.Header.Clone()
+	mergeManifestValidators(updated, matching)
+	if updated.Get("ETag") != `"v1-next"` || updated.Get("Content-Length") != strconv.Itoa(len(body)) || updated.Get("Docker-Content-Digest") != digest {
+		t.Fatalf("304 validator merge altered representation metadata: %v", updated)
 	}
 }
 
@@ -819,6 +929,25 @@ func newFixtureHandler(t *testing.T, endpointValue string) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return handler
+}
+
+func newFixtureHandlerWithMaxConnections(t *testing.T, endpointValue string, maxConnections int) *Handler {
+	t.Helper()
+	endpoint, err := url.Parse(endpointValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := upstreamclient.New(upstreamclient.Options{MaxConnsPerHost: maxConnections})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(Options{Upstream: manager, Sources: []Source{{Name: "docker.io", Endpoint: endpoint, AllowHTTP: true, AllowPrivate: true}}})
+	if err != nil {
+		_ = manager.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
 	return handler
 }
 
