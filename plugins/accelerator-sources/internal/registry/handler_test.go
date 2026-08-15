@@ -118,6 +118,83 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	}
 }
 
+func TestTokenCacheIssuedAtEarlyRefreshAndRepeated401(t *testing.T) {
+	clock := &registryFakeClock{now: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)}
+	var tokenCalls atomic.Int32
+	var tokenServer *httptest.Server
+	tokenServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		call := tokenCalls.Add(1)
+		_, _ = fmt.Fprintf(writer, `{"token":"token-%d","issued_at":%q,"expires_in":60}`, call, clock.Now().Format(time.RFC3339))
+	}))
+	defer tokenServer.Close()
+	handler := newClockFixtureHandler(t, tokenServer.URL, clock)
+	resolved, err := handler.resolve("/v2/example/app/manifests/latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, tokenServer.URL)
+	first, _, err := handler.fetchToken(context.Background(), resolved, challenge)
+	if err != nil || first != "token-1" {
+		t.Fatalf("initial token: %q %v", first, err)
+	}
+	clock.Advance(29 * time.Second)
+	second, _, err := handler.fetchToken(context.Background(), resolved, challenge)
+	if err != nil || second != first || tokenCalls.Load() != 1 {
+		t.Fatalf("token refreshed before boundary: %q calls=%d err=%v", second, tokenCalls.Load(), err)
+	}
+	clock.Advance(2 * time.Second)
+	third, _, err := handler.fetchToken(context.Background(), resolved, challenge)
+	if err != nil || third != "token-2" || tokenCalls.Load() != 2 {
+		t.Fatalf("token did not refresh at expiry-minus-30s: %q calls=%d err=%v", third, tokenCalls.Load(), err)
+	}
+
+	received := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
+	expiresAt, refreshAt, err := tokenCacheTiming(received, received.Add(-10*time.Second).Format(time.RFC3339), 100)
+	if err != nil || !expiresAt.Equal(received.Add(90*time.Second)) || !refreshAt.Equal(received.Add(60*time.Second)) {
+		t.Fatalf("issued_at timing: expiry=%s refresh=%s err=%v", expiresAt, refreshAt, err)
+	}
+	if expiresAt, refreshAt, err := tokenCacheTiming(received, "", 300); err != nil || !expiresAt.Equal(received.Add(300*time.Second)) || !refreshAt.Equal(received.Add(240*time.Second)) {
+		t.Fatalf("80%% timing: expiry=%s refresh=%s err=%v", expiresAt, refreshAt, err)
+	}
+	if expiresAt, refreshAt, err := tokenCacheTiming(received, "", 0); err != nil || !expiresAt.Equal(received.Add(time.Minute)) || !refreshAt.Equal(received.Add(30*time.Second)) {
+		t.Fatalf("default timing: expiry=%s refresh=%s err=%v", expiresAt, refreshAt, err)
+	}
+	if _, _, err := tokenCacheTiming(received, received.Add(-2*time.Minute).Format(time.RFC3339), 60); !errors.Is(err, errUpstreamAuth) {
+		t.Fatalf("expired token was accepted: %v", err)
+	}
+
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	var registryServer *httptest.Server
+	var issued, authenticated atomic.Int32
+	registryServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/token":
+			call := issued.Add(1)
+			_, _ = fmt.Fprintf(writer, `{"token":"retry-%d","expires_in":300}`, call)
+		case "/v2/example/app/manifests/latest":
+			authorization := request.Header.Get("Authorization")
+			if authorization == "" || authorization == "Bearer retry-1" {
+				if authorization != "" {
+					authenticated.Add(1)
+				}
+				writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture",scope="repository:example/app:pull"`, registryServer.URL+"/token"))
+				writer.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			authenticated.Add(1)
+			writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = writer.Write(manifest)
+		}
+	}))
+	defer registryServer.Close()
+	retryHandler := newFixtureHandler(t, registryServer.URL)
+	recorder := httptest.NewRecorder()
+	retryHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+	if recorder.Code != http.StatusOK || issued.Load() != 2 || authenticated.Load() != 2 {
+		t.Fatalf("repeated 401 retry boundary: status=%d tokens=%d authenticated=%d body=%s", recorder.Code, issued.Load(), authenticated.Load(), recorder.Body.String())
+	}
+}
+
 func TestManifestCacheConditionalRequestsMatchColdAndWarm(t *testing.T) {
 	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
 	const etag = `"manifest-etag"`
@@ -158,6 +235,128 @@ func TestManifestCacheConditionalRequestsMatchColdAndWarm(t *testing.T) {
 				t.Fatalf("conditional behavior differs: warm=%d/%q cold=%d/%q", warmConditional.Code, warmConditional.Body.String(), coldConditional.Code, coldConditional.Body.String())
 			}
 		})
+	}
+}
+
+func TestManifestCacheValidatorRefreshWindowsAnd4xxInvalidation(t *testing.T) {
+	clock := &registryFakeClock{now: time.Unix(1, 0)}
+	v1 := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
+	v2 := bytes.Replace(v1, []byte(`"size":1`), []byte(`"size":2`), 1)
+	v3 := bytes.Replace(v1, []byte(`"size":1`), []byte(`"size":3`), 1)
+	var mode atomic.Int32
+	var calls atomic.Int32
+	refreshed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		switch mode.Load() {
+		case 0:
+			writer.Header().Set("ETag", `"v1"`)
+			_, _ = writer.Write(v1)
+		case 1:
+			if request.Header.Get("If-None-Match") != `"v1"` {
+				t.Errorf("refresh omitted cached validator: %q", request.Header.Get("If-None-Match"))
+			}
+			writer.Header().Set("ETag", `"v2"`)
+			_, _ = writer.Write(v2)
+			select {
+			case refreshed <- struct{}{}:
+			default:
+			}
+		case 2:
+			writer.WriteHeader(http.StatusNotFound)
+		case 3:
+			writer.Header().Set("ETag", `"v3"`)
+			_, _ = writer.Write(v3)
+		case 4:
+			if request.Header.Get("If-None-Match") != `"v1"` {
+				t.Errorf("304 refresh omitted cached validator: %q", request.Header.Get("If-None-Match"))
+			}
+			writer.Header().Set("ETag", `"v1"`)
+			writer.WriteHeader(http.StatusNotModified)
+			select {
+			case refreshed <- struct{}{}:
+			default:
+			}
+		}
+	}))
+	defer server.Close()
+	handler := newClockFixtureHandler(t, server.URL, clock)
+	path := "/v2/example/app/manifests/latest"
+	cacheKey := strings.Join([]string{"docker.io", "example/app", "latest", "", "anonymous", "true", "true"}, "\x00")
+	request := func(header string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if header != "" {
+			req.Header.Set("If-None-Match", header)
+		}
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if response := request(""); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), v1) {
+		t.Fatalf("manifest fill: %d %s", response.Code, response.Body.String())
+	}
+	if response := request(`"v1"`); response.Code != http.StatusNotModified || calls.Load() != 1 {
+		t.Fatalf("fresh conditional was not local: status=%d calls=%d", response.Code, calls.Load())
+	}
+	mode.Store(4)
+	clock.Advance(61 * time.Second)
+	if response := request(""); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), v1) {
+		t.Fatalf("SWR did not serve verified stale body: %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-refreshed:
+	case <-time.After(time.Second):
+		t.Fatal("validator refresh did not start")
+	}
+	for deadline := time.Now().Add(time.Second); ; {
+		if _, found := handler.upstream.Manifests().Get(cacheKey); found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("304 refresh did not publish extended entry")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clock.Advance(59 * time.Second)
+	if response := request(""); response.Code != http.StatusOK || calls.Load() != 2 {
+		t.Fatalf("upstream 304 did not extend freshness: status=%d calls=%d", response.Code, calls.Load())
+	}
+	mode.Store(1)
+	clock.Advance(2 * time.Second)
+	if response := request(""); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), v1) {
+		t.Fatalf("second SWR did not serve verified stale body: %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-refreshed:
+	case <-time.After(time.Second):
+		t.Fatal("conditional 200 refresh did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		response := request("")
+		if bytes.Equal(response.Body.Bytes(), v2) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("conditional 200 did not replace cache: %s", response.Body.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mode.Store(2)
+	clock.Advance(91 * time.Second)
+	if response := request(""); response.Code != http.StatusNotFound {
+		t.Fatalf("authoritative 4xx served SIE: status=%d body=%s", response.Code, response.Body.String())
+	}
+	mode.Store(3)
+	if response := request(""); response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), v3) {
+		t.Fatalf("4xx did not invalidate cache: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if ttl, swr, sie := manifestCacheWindows(strings.Repeat("a", 0) + "sha256:" + strings.Repeat("a", 64)); ttl != 10*time.Minute || swr != 5*time.Minute || sie != 30*time.Minute {
+		t.Fatalf("digest windows: %s %s %s", ttl, swr, sie)
+	}
+	if ttl, swr, sie := manifestCacheWindows("latest"); ttl != time.Minute || swr != 30*time.Second || sie != 5*time.Minute {
+		t.Fatalf("tag windows: %s %s %s", ttl, swr, sie)
 	}
 }
 
@@ -620,6 +819,42 @@ func newFixtureHandler(t *testing.T, endpointValue string) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return handler
+}
+
+type registryFakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (clock *registryFakeClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *registryFakeClock) Advance(duration time.Duration) {
+	clock.mu.Lock()
+	clock.now = clock.now.Add(duration)
+	clock.mu.Unlock()
+}
+
+func newClockFixtureHandler(t *testing.T, endpointValue string, clock upstreamclient.Clock) *Handler {
+	t.Helper()
+	endpoint, err := url.Parse(endpointValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := upstreamclient.New(upstreamclient.Options{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(Options{Upstream: manager, Sources: []Source{{Name: "docker.io", Endpoint: endpoint, AllowHTTP: true, AllowPrivate: true}}})
+	if err != nil {
+		_ = manager.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
 	return handler
 }
 

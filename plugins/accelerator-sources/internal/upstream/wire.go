@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -50,21 +51,29 @@ func (resolver *WireResolver) Lookup(ctx context.Context, host string) (DNSResul
 	var combined []net.IPAddr
 	minimumTTL := time.Duration(0)
 	minimumTTLSet := false
-	negativeTTL := 15 * time.Second
+	negativeTTL := time.Duration(0)
+	negativeTTLSet := false
 	var lastErr error
+	var transientErr error
 	for _, queryType := range []uint16{1, 28} {
 		addresses, ttl, negative, err := resolver.lookupType(ctx, host, queryType)
-		if negative > 0 && negative < negativeTTL {
-			negativeTTL = negative
+		if negative > 0 {
+			negativeTTL, negativeTTLSet = lowerTTL(negativeTTL, negativeTTLSet, negative)
 		}
 		if err != nil {
 			lastErr = err
+			if !errors.Is(err, ErrDNSNotFound) {
+				transientErr = err
+			}
 			continue
 		}
 		combined = append(combined, addresses...)
 		minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, ttl)
 	}
 	if len(combined) == 0 {
+		if transientErr != nil {
+			lastErr = transientErr
+		}
 		if lastErr == nil {
 			lastErr = ErrDNSNotFound
 		}
@@ -117,10 +126,59 @@ func (resolver *WireResolver) exchange(ctx context.Context, server string, query
 	if err != nil {
 		return nil, err
 	}
-	if count < 12 || binary.BigEndian.Uint16(buffer[2:4])&0x0200 != 0 {
+	if count < 12 {
 		return nil, errDNSWire
 	}
+	if binary.BigEndian.Uint16(buffer[2:4])&0x0200 != 0 {
+		return resolver.exchangeTCP(ctx, server, query, deadline)
+	}
 	return append([]byte(nil), buffer[:count]...), nil
+}
+
+func (resolver *WireResolver) exchangeTCP(ctx context.Context, server string, query []byte, deadline time.Time) ([]byte, error) {
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	connection, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", server)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(deadline)
+	framed := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(query)))
+	copy(framed[2:], query)
+	if err := writeAll(connection, framed); err != nil {
+		return nil, err
+	}
+	var length [2]byte
+	if _, err := io.ReadFull(connection, length[:]); err != nil {
+		return nil, err
+	}
+	size := int(binary.BigEndian.Uint16(length[:]))
+	if size < 12 {
+		return nil, errDNSWire
+	}
+	response := make([]byte, size)
+	if _, err := io.ReadFull(connection, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func writeAll(writer io.Writer, data []byte) error {
+	for len(data) > 0 {
+		count, err := writer.Write(data)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return io.ErrUnexpectedEOF
+		}
+		data = data[count:]
+	}
+	return nil
 }
 
 func dnsQuery(host string, queryType uint16) ([]byte, uint16, error) {
@@ -164,7 +222,9 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 	var addresses []net.IPAddr
 	minimumTTL := time.Duration(0)
 	minimumTTLSet := false
-	negativeTTL := 15 * time.Second
+	negativeTTL := time.Duration(0)
+	negativeTTLSet := false
+	authoritativeNODATA := false
 	for index := 0; index < answers+authorities; index++ {
 		next, err := skipDNSName(message, offset)
 		if err != nil || next+10 > len(message) {
@@ -183,18 +243,20 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 			minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, ttl)
 		}
 		if index >= answers && recordType == 6 && length >= 20 {
+			authoritativeNODATA = true
 			minimum := binary.BigEndian.Uint32(message[dataOffset+length-4 : dataOffset+length])
 			negative := time.Duration(min(ttlSeconds, minimum)) * time.Second
-			if negative > 0 && negative < negativeTTL {
-				negativeTTL = negative
-			}
+			negativeTTL, negativeTTLSet = lowerTTL(negativeTTL, negativeTTLSet, negative)
 		}
 		offset = dataOffset + length
 	}
-	if rcode == 3 || len(addresses) == 0 {
+	if rcode == 3 || (rcode == 0 && len(addresses) == 0 && authoritativeNODATA) {
 		return nil, 0, negativeTTL, ErrDNSNotFound
 	}
 	if rcode != 0 {
+		return nil, 0, negativeTTL, errDNSWire
+	}
+	if len(addresses) == 0 {
 		return nil, 0, negativeTTL, errDNSWire
 	}
 	return addresses, minimumTTL, negativeTTL, nil

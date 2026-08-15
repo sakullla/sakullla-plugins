@@ -48,6 +48,58 @@ type cacheCall[V any] struct {
 	err    error
 }
 
+type refreshGroup struct {
+	mu      sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	timeout time.Duration
+	wait    sync.WaitGroup
+	closed  bool
+}
+
+func newRefreshGroup(timeout time.Duration) *refreshGroup {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &refreshGroup{ctx: ctx, cancel: cancel, timeout: timeout}
+}
+
+func (group *refreshGroup) start(run func(context.Context)) bool {
+	group.mu.Lock()
+	if group.closed {
+		group.mu.Unlock()
+		return false
+	}
+	group.wait.Add(1)
+	group.mu.Unlock()
+	go func() {
+		defer group.wait.Done()
+		ctx, cancel := context.WithTimeout(group.ctx, group.timeout)
+		defer cancel()
+		run(ctx)
+	}()
+	return true
+}
+
+func (group *refreshGroup) close() {
+	group.mu.Lock()
+	if !group.closed {
+		group.closed = true
+		group.cancel()
+	}
+	group.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		group.wait.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 // Cache is a generation-local bounded byte+entry LRU with per-key
 // singleflight. Values are never persisted or shared across generations.
 type Cache[V any] struct {
@@ -63,6 +115,8 @@ type Cache[V any] struct {
 	onHit      func()
 	onMiss     func()
 	onEvict    func()
+	refreshes  *refreshGroup
+	ownsGroup  bool
 }
 
 func NewCache[V any](clock Clock, maxEntries int, maxBytes int64) *Cache[V] {
@@ -75,7 +129,18 @@ func NewCache[V any](clock Clock, maxEntries int, maxBytes int64) *Cache[V] {
 	if maxBytes <= 0 {
 		maxBytes = 1
 	}
-	return &Cache[V]{clock: clock, maxEntries: maxEntries, maxBytes: maxBytes, entries: make(map[string]*list.Element), lru: list.New(), flights: make(map[string]*cacheCall[V])}
+	return &Cache[V]{clock: clock, maxEntries: maxEntries, maxBytes: maxBytes, entries: make(map[string]*list.Element), lru: list.New(), flights: make(map[string]*cacheCall[V]), refreshes: newRefreshGroup(30 * time.Second), ownsGroup: true}
+}
+
+func (cache *Cache[V]) withRefreshGroup(group *refreshGroup) *Cache[V] {
+	cache.mu.Lock()
+	old, owned := cache.refreshes, cache.ownsGroup
+	cache.refreshes, cache.ownsGroup = group, false
+	cache.mu.Unlock()
+	if owned {
+		old.close()
+	}
+	return cache
 }
 
 func (cache *Cache[V]) WithMetrics(hit func(), miss func(), evict func()) *Cache[V] {
@@ -89,6 +154,31 @@ func (cache *Cache[V]) Get(key string) (V, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	return cache.getLocked(key)
+}
+
+// Peek returns an entry throughout its bounded freshness/SWR/SIE window.
+// Callers use it only to attach validators to a refresh; it does not extend
+// the entry or count as a cache hit.
+func (cache *Cache[V]) Peek(key string) (V, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	var zero V
+	if cache.closed {
+		return zero, false
+	}
+	entry, state := cache.inspectLocked(key)
+	if state == cacheMissing {
+		return zero, false
+	}
+	return entry.value, true
+}
+
+func (cache *Cache[V]) Delete(key string) {
+	cache.mu.Lock()
+	if element, found := cache.entries[key]; found {
+		cache.removeLocked(element)
+	}
+	cache.mu.Unlock()
 }
 
 func (cache *Cache[V]) getLocked(key string) (V, bool) {
@@ -175,7 +265,7 @@ func (cache *Cache[V]) GetOrLoad(ctx context.Context, key string, load func(cont
 		if _, running := cache.flights[key]; !running {
 			call := &cacheCall[V]{done: make(chan struct{})}
 			cache.flights[key] = call
-			go cache.runLoad(context.Background(), key, call, load)
+			cache.startLoad(key, call, load)
 		}
 		value := stale.value
 		cache.mu.Unlock()
@@ -192,13 +282,18 @@ func (cache *Cache[V]) GetOrLoad(ctx context.Context, key string, load func(cont
 	call := &cacheCall[V]{done: make(chan struct{})}
 	cache.flights[key] = call
 	staleValue, mayUseStale := staleValue(stale, state)
+	cache.startLoad(key, call, load)
 	cache.mu.Unlock()
+	return waitCacheCall(ctx, call, staleValue, mayUseStale)
+}
 
-	cache.runLoad(ctx, key, call, load)
-	if call.err != nil && mayUseStale && !errors.Is(call.err, ErrPermanentCache) {
-		return staleValue, nil
+func (cache *Cache[V]) startLoad(key string, call *cacheCall[V], load func(context.Context) (Loaded[V], error)) {
+	if cache.refreshes.start(func(ctx context.Context) { cache.runLoad(ctx, key, call, load) }) {
+		return
 	}
-	return call.loaded.Value, call.err
+	call.err = ErrClosed
+	delete(cache.flights, key)
+	close(call.done)
 }
 
 func staleValue[V any](entry *cacheEntry[V], state cacheState) (V, bool) {
@@ -272,5 +367,9 @@ func (cache *Cache[V]) Close() {
 	cache.entries = make(map[string]*list.Element)
 	cache.lru.Init()
 	cache.bytes = 0
+	group, owned := cache.refreshes, cache.ownsGroup
 	cache.mu.Unlock()
+	if owned {
+		group.close()
+	}
 }

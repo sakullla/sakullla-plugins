@@ -87,6 +87,8 @@ type DNSCache struct {
 	onHit      func()
 	onMiss     func()
 	onEvict    func()
+	refreshes  *refreshGroup
+	ownsGroup  bool
 }
 
 func NewDNSCache(clock Clock, resolver Resolver, maxEntries int) *DNSCache {
@@ -99,7 +101,18 @@ func NewDNSCache(clock Clock, resolver Resolver, maxEntries int) *DNSCache {
 	if maxEntries <= 0 {
 		maxEntries = 256
 	}
-	return &DNSCache{clock: clock, resolver: resolver, maxEntries: maxEntries, entries: make(map[string]*list.Element), lru: list.New(), flights: make(map[string]*dnsCall)}
+	return &DNSCache{clock: clock, resolver: resolver, maxEntries: maxEntries, entries: make(map[string]*list.Element), lru: list.New(), flights: make(map[string]*dnsCall), refreshes: newRefreshGroup(30 * time.Second), ownsGroup: true}
+}
+
+func (cache *DNSCache) withRefreshGroup(group *refreshGroup) *DNSCache {
+	cache.mu.Lock()
+	old, owned := cache.refreshes, cache.ownsGroup
+	cache.refreshes, cache.ownsGroup = group, false
+	cache.mu.Unlock()
+	if owned {
+		old.close()
+	}
+	return cache
 }
 
 func (cache *DNSCache) WithMetrics(query func(), hit func(), miss func(), evict func()) *DNSCache {
@@ -141,7 +154,7 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 			if _, running := cache.flights[host]; !running {
 				call := &dnsCall{done: make(chan struct{})}
 				cache.flights[host] = call
-				go cache.runLookup(context.Background(), host, call)
+				cache.startLookup(host, call)
 			}
 			result := cloneAddresses(entry.addresses)
 			cache.mu.Unlock()
@@ -170,13 +183,30 @@ func (cache *DNSCache) Resolve(ctx context.Context, host string) ([]net.IPAddr, 
 	}
 	call := &dnsCall{done: make(chan struct{})}
 	cache.flights[host] = call
+	cache.startLookup(host, call)
 	cache.mu.Unlock()
+	return waitDNSCall(ctx, call, stale, staleAllowed)
+}
 
-	cache.runLookup(ctx, host, call)
-	if call.err != nil && staleAllowed && !errors.Is(call.err, ErrDNSNotFound) {
-		return stale, nil
+func waitDNSCall(ctx context.Context, call *dnsCall, stale []net.IPAddr, staleAllowed bool) ([]net.IPAddr, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		if call.err != nil && staleAllowed && !errors.Is(call.err, ErrDNSNotFound) {
+			return stale, nil
+		}
+		return cloneAddresses(call.result), call.err
 	}
-	return cloneAddresses(call.result), call.err
+}
+
+func (cache *DNSCache) startLookup(host string, call *dnsCall) {
+	if cache.refreshes.start(func(ctx context.Context) { cache.runLookup(ctx, host, call) }) {
+		return
+	}
+	call.err = ErrClosed
+	delete(cache.flights, host)
+	close(call.done)
 }
 
 func (cache *DNSCache) runLookup(ctx context.Context, host string, call *dnsCall) {
@@ -241,7 +271,11 @@ func (cache *DNSCache) Close() {
 	cache.closed = true
 	cache.entries = make(map[string]*list.Element)
 	cache.lru.Init()
+	group, owned := cache.refreshes, cache.ownsGroup
 	cache.mu.Unlock()
+	if owned {
+		group.close()
+	}
 }
 
 func (cache *DNSCache) Delete(host string) {

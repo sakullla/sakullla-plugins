@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -83,12 +84,17 @@ func TestDNSConcurrentColdMissTTLNegativeRecoveryAndEviction(t *testing.T) {
 
 func TestDNSTransientLeaderFailureDoesNotPoisonCache(t *testing.T) {
 	started := make(chan struct{})
+	release := make(chan struct{})
 	var calls atomic.Int32
 	resolver := ResolverFunc(func(ctx context.Context, _ string) (DNSResult, error) {
 		if calls.Add(1) == 1 {
 			close(started)
-			<-ctx.Done()
-			return DNSResult{NegativeTTL: time.Minute}, ctx.Err()
+			select {
+			case <-release:
+				return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: time.Minute}, nil
+			case <-ctx.Done():
+				return DNSResult{}, ctx.Err()
+			}
 		}
 		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: time.Minute}, nil
 	})
@@ -101,11 +107,15 @@ func TestDNSTransientLeaderFailureDoesNotPoisonCache(t *testing.T) {
 	go func() { _, err := cache.Resolve(context.Background(), "transient.test"); waiterDone <- err }()
 	time.Sleep(20 * time.Millisecond)
 	cancel()
-	if !errors.Is(<-leaderDone, context.Canceled) || !errors.Is(<-waiterDone, context.Canceled) {
-		t.Fatal("cold flight did not broadcast its transient failure")
+	if !errors.Is(<-leaderDone, context.Canceled) {
+		t.Fatal("leader cancellation did not cancel only its waiter")
+	}
+	close(release)
+	if err := <-waiterDone; err != nil {
+		t.Fatalf("independent waiter did not receive manager-owned refresh: %v", err)
 	}
 	addresses, err := cache.Resolve(context.Background(), "transient.test")
-	if err != nil || len(addresses) != 1 || calls.Load() != 2 {
+	if err != nil || len(addresses) != 1 || calls.Load() != 1 {
 		t.Fatalf("transient failure poisoned DNS cache: addresses=%v calls=%d err=%v", addresses, calls.Load(), err)
 	}
 }
@@ -121,6 +131,16 @@ func TestDNSZeroTTLAndSWRSingleRefresh(t *testing.T) {
 	_, _ = zeroCache.Resolve(context.Background(), "zero.test")
 	if zeroCalls.Load() != 2 {
 		t.Fatalf("zero TTL answer was cached: calls=%d", zeroCalls.Load())
+	}
+	var negativeZeroCalls atomic.Int32
+	negativeZeroCache := NewDNSCache(clock, ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		negativeZeroCalls.Add(1)
+		return DNSResult{NegativeTTL: 0}, ErrDNSNotFound
+	}), 8)
+	_, _ = negativeZeroCache.Resolve(context.Background(), "negative-zero.test")
+	_, _ = negativeZeroCache.Resolve(context.Background(), "negative-zero.test")
+	if negativeZeroCalls.Load() != 2 {
+		t.Fatalf("zero TTL negative answer was cached: calls=%d", negativeZeroCalls.Load())
 	}
 
 	refreshStarted := make(chan struct{})
@@ -170,6 +190,189 @@ func TestDNSMixedZeroAndPositiveTTLAlwaysKeepsZero(t *testing.T) {
 			t.Fatalf("mixed TTL order %v produced %s", values, minimum)
 		}
 	}
+}
+
+func TestDNSWireRCODEClassificationAndTCPFallback(t *testing.T) {
+	query, id, err := dnsQuery("fixture.test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	soa := dnsFixtureRecord(6, 60, make([]byte, 20))
+	binary.BigEndian.PutUint32(soa[len(soa)-4:], 30)
+	for _, testCase := range []struct {
+		name        string
+		flags       uint16
+		authority   []byte
+		notFound    bool
+		wantWireErr bool
+	}{
+		{name: "nxdomain", flags: 0x8183, notFound: true},
+		{name: "authoritative nodata", flags: 0x8180, authority: soa, notFound: true},
+		{name: "servfail", flags: 0x8182, wantWireErr: true},
+		{name: "refused", flags: 0x8185, wantWireErr: true},
+		{name: "non-authoritative empty", flags: 0x8180, wantWireErr: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := dnsFixtureResponse(query, testCase.flags, nil, testCase.authority)
+			_, _, _, parseErr := parseDNSResponse(response, id, 1)
+			if errors.Is(parseErr, ErrDNSNotFound) != testCase.notFound || (testCase.wantWireErr && !errors.Is(parseErr, errDNSWire)) {
+				t.Fatalf("classification: %v", parseErr)
+			}
+		})
+	}
+
+	tcp, udp := listenDNSFixture(t)
+	defer tcp.Close()
+	defer udp.Close()
+	serverDone := make(chan error, 2)
+	go func() {
+		buffer := make([]byte, 512)
+		count, peer, readErr := udp.ReadFrom(buffer)
+		if readErr == nil {
+			truncated := dnsFixtureResponse(buffer[:count], 0x8380, nil, nil)
+			_, readErr = udp.WriteTo(truncated, peer)
+		}
+		serverDone <- readErr
+	}()
+	go func() {
+		connection, acceptErr := tcp.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		var prefix [2]byte
+		if _, acceptErr = io.ReadFull(connection, prefix[:]); acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		request := make([]byte, binary.BigEndian.Uint16(prefix[:]))
+		if _, acceptErr = io.ReadFull(connection, request); acceptErr == nil {
+			answer := dnsFixtureRecord(1, 60, []byte{8, 8, 4, 4})
+			response := dnsFixtureResponse(request, 0x8180, answer, nil)
+			framed := make([]byte, len(response)+2)
+			binary.BigEndian.PutUint16(framed[:2], uint16(len(response)))
+			copy(framed[2:], response)
+			_, acceptErr = connection.Write(framed)
+		}
+		serverDone <- acceptErr
+	}()
+	resolver := &WireResolver{Servers: []string{tcp.Addr().String()}, Timeout: 2 * time.Second}
+	addresses, ttl, _, err := resolver.lookupType(context.Background(), "fixture.test", 1)
+	if err != nil || len(addresses) != 1 || !addresses[0].IP.Equal(net.ParseIP("8.8.4.4")) || ttl != time.Minute {
+		t.Fatalf("TCP fallback: addresses=%v ttl=%s err=%v", addresses, ttl, err)
+	}
+	for range 2 {
+		if err := <-serverDone; err != nil {
+			t.Fatalf("DNS fixture: %v", err)
+		}
+	}
+}
+
+func listenDNSFixture(t *testing.T) (net.Listener, net.PacketConn) {
+	t.Helper()
+	for port := 20053; port < 40053; port++ {
+		address := fmt.Sprintf("127.0.0.1:%d", port)
+		tcp, err := net.Listen("tcp4", address)
+		if err != nil {
+			continue
+		}
+		udp, err := net.ListenPacket("udp4", address)
+		if err == nil {
+			return tcp, udp
+		}
+		_ = tcp.Close()
+	}
+	t.Fatal("no shared TCP/UDP fixture port available")
+	return nil, nil
+}
+
+func TestDNSRCODETransientColdSWRAndSIEBoundaries(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	var calls atomic.Int32
+	refreshDone := make(chan struct{}, 1)
+	mode := atomic.Int32{}
+	cache := NewDNSCache(clock, ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		calls.Add(1)
+		switch mode.Load() {
+		case 0:
+			return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, TTL: time.Second}, nil
+		case 1:
+			select {
+			case refreshDone <- struct{}{}:
+			default:
+			}
+			return DNSResult{}, errDNSWire
+		default:
+			return DNSResult{NegativeTTL: time.Minute}, ErrDNSNotFound
+		}
+	}), 8)
+	if addresses, err := cache.Resolve(context.Background(), "rcode.test"); err != nil || len(addresses) != 1 {
+		t.Fatalf("positive fill: %v %v", addresses, err)
+	}
+	mode.Store(1)
+	clock.Advance(2 * time.Second)
+	if addresses, err := cache.Resolve(context.Background(), "rcode.test"); err != nil || addresses[0].IP.String() != "8.8.8.8" {
+		t.Fatalf("SWR did not serve stale on transient RCODE: %v %v", addresses, err)
+	}
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("SWR transient refresh did not complete")
+	}
+	clock.Advance(30 * time.Second)
+	if addresses, err := cache.Resolve(context.Background(), "rcode.test"); err != nil || addresses[0].IP.String() != "8.8.8.8" {
+		t.Fatalf("SIE did not serve stale on transient RCODE: %v %v", addresses, err)
+	}
+	mode.Store(2)
+	if _, err := cache.Resolve(context.Background(), "rcode.test"); !errors.Is(err, ErrDNSNotFound) {
+		t.Fatalf("authoritative negative did not invalidate SIE: %v", err)
+	}
+	before := calls.Load()
+	if _, err := cache.Resolve(context.Background(), "rcode.test"); !errors.Is(err, ErrDNSNotFound) || calls.Load() != before {
+		t.Fatalf("authoritative negative was not strictly cached: calls=%d err=%v", calls.Load(), err)
+	}
+
+	var coldCalls atomic.Int32
+	cold := NewDNSCache(clock, ResolverFunc(func(context.Context, string) (DNSResult, error) {
+		if coldCalls.Add(1) == 1 {
+			return DNSResult{}, errDNSWire
+		}
+		return DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("1.1.1.1")}}, TTL: time.Minute}, nil
+	}), 8)
+	if _, err := cold.Resolve(context.Background(), "cold-rcode.test"); !errors.Is(err, errDNSWire) {
+		t.Fatalf("cold transient RCODE classification: %v", err)
+	}
+	if addresses, err := cold.Resolve(context.Background(), "cold-rcode.test"); err != nil || len(addresses) != 1 || coldCalls.Load() != 2 {
+		t.Fatalf("cold transient RCODE poisoned cache: %v calls=%d err=%v", addresses, coldCalls.Load(), err)
+	}
+}
+
+func dnsFixtureResponse(query []byte, flags uint16, answers []byte, authority []byte) []byte {
+	response := make([]byte, 12, 12+len(query)-12+len(answers)+len(authority))
+	copy(response[:2], query[:2])
+	binary.BigEndian.PutUint16(response[2:4], flags)
+	binary.BigEndian.PutUint16(response[4:6], 1)
+	if len(answers) > 0 {
+		binary.BigEndian.PutUint16(response[6:8], 1)
+	}
+	if len(authority) > 0 {
+		binary.BigEndian.PutUint16(response[8:10], 1)
+	}
+	response = append(response, query[12:]...)
+	response = append(response, answers...)
+	return append(response, authority...)
+}
+
+func dnsFixtureRecord(recordType uint16, ttl uint32, data []byte) []byte {
+	record := make([]byte, 12+len(data))
+	record[0], record[1] = 0xc0, 0x0c
+	binary.BigEndian.PutUint16(record[2:4], recordType)
+	binary.BigEndian.PutUint16(record[4:6], 1)
+	binary.BigEndian.PutUint32(record[6:10], ttl)
+	binary.BigEndian.PutUint16(record[10:12], uint16(len(data)))
+	copy(record[12:], data)
+	return record
 }
 
 func TestTokenCacheAndManifestCacheSingleflightTTLAndBytes(t *testing.T) {
@@ -371,6 +574,40 @@ func TestConnectionPoolHTTPSHTTP2ReuseLimitAndClose(t *testing.T) {
 	request := fixtureRequest(t, server, "/closed")
 	if _, err := manager.Do(request, Policy{AllowPrivate: true}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed manager accepted request: %v", err)
+	}
+}
+
+func TestConnectionPoolCloseCancelsAndWaitsForRefresh(t *testing.T) {
+	manager, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	ended := make(chan struct{})
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := manager.Tokens().GetOrLoad(context.Background(), "stalled", func(ctx context.Context) (Loaded[TokenEntry], error) {
+			close(started)
+			<-ctx.Done()
+			close(ended)
+			return Loaded[TokenEntry]{}, ctx.Err()
+		})
+		waiter <- err
+	}()
+	<-started
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel refresh")
+	}
+	if !errors.Is(<-waiter, context.Canceled) {
+		t.Fatal("refresh waiter did not observe manager cancellation")
+	}
+	if _, found := manager.Tokens().Get("stalled"); found {
+		t.Fatal("closed generation published a refresh")
 	}
 }
 

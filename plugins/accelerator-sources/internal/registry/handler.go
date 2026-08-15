@@ -165,10 +165,6 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	upstreamURL.Path = joinURLPath(resolved.source.Endpoint.Path, resolved.upstreamPath)
 	upstreamURL.RawQuery = request.URL.RawQuery
 	if resolved.kind == resourceManifest && request.Method == http.MethodGet {
-		if request.Header.Get("If-None-Match") != "" || request.Header.Get("If-Modified-Since") != "" {
-			handler.serveConditionalManifest(writer, request, resolved, &upstreamURL)
-			return
-		}
 		handler.serveCachedManifest(writer, request, resolved, &upstreamURL)
 		return
 	}
@@ -298,7 +294,26 @@ func (handler *Handler) fetch(ctx context.Context, incoming *http.Request, resol
 	}
 	challenge := response.Header.Get("WWW-Authenticate")
 	drainAndClose(response.Body)
-	token, err := handler.fetchToken(ctx, resolved, challenge)
+	token, tokenKey, err := handler.fetchToken(ctx, resolved, challenge)
+	if err != nil {
+		return nil, err
+	}
+	request, err = handler.upstreamRequest(ctx, incoming, target, "Bearer "+token)
+	if err != nil {
+		return nil, err
+	}
+	response, err = handler.doFollowing(ctx, resolved.source, request)
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		return response, err
+	}
+	// A registry can revoke a token before its advertised expiry. Invalidate it
+	// and permit one exact reacquisition/retry; a second 401 is authoritative.
+	drainAndClose(response.Body)
+	handler.upstream.Tokens().Delete(tokenKey)
+	if nextChallenge := response.Header.Get("WWW-Authenticate"); nextChallenge != "" {
+		challenge = nextChallenge
+	}
+	token, _, err = handler.fetchToken(ctx, resolved, challenge)
 	if err != nil {
 		return nil, err
 	}
@@ -419,17 +434,17 @@ func splitChallenge(value string) []string {
 	return append(result, value[start:])
 }
 
-func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest, rawChallenge string) (string, error) {
+func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest, rawChallenge string) (string, string, error) {
 	challenge, err := parseBearerChallenge(rawChallenge)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	realm, err := url.Parse(challenge.realm)
 	if err != nil || realm.Hostname() == "" {
-		return "", errUpstreamAuth
+		return "", "", errUpstreamAuth
 	}
 	if err := handler.validateOutbound(ctx, resolved.source, realm, true); err != nil {
-		return "", err
+		return "", "", err
 	}
 	query := realm.Query()
 	if challenge.service != "" {
@@ -437,7 +452,7 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 	}
 	expectedScope := "repository:" + resolved.repository + ":pull"
 	if challenge.scope != "" && challenge.scope != expectedScope {
-		return "", errUpstreamAuth
+		return "", "", errUpstreamAuth
 	}
 	query.Set("scope", expectedScope)
 	realm.RawQuery = query.Encode()
@@ -461,9 +476,10 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
 		}
 		var payload struct {
-			Token       string `json:"token"`
-			AccessToken string `json:"access_token"`
-			ExpiresIn   int64  `json:"expires_in"`
+			Token       string          `json:"token"`
+			AccessToken string          `json:"access_token"`
+			ExpiresIn   json.RawMessage `json:"expires_in"`
+			IssuedAt    string          `json:"issued_at"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
@@ -474,19 +490,53 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 		if payload.Token == "" {
 			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
 		}
-		ttl := time.Duration(payload.ExpiresIn) * time.Second
-		if ttl <= 0 {
-			ttl = 5 * time.Minute
+		var expiresIn int64
+		if len(payload.ExpiresIn) > 0 {
+			_ = json.Unmarshal(payload.ExpiresIn, &expiresIn)
 		}
-		if ttl > time.Hour {
-			ttl = time.Hour
+		receivedAt := handler.upstream.Now()
+		expiresAt, refreshAt, timingErr := tokenCacheTiming(receivedAt, payload.IssuedAt, expiresIn)
+		if timingErr != nil {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, timingErr
 		}
-		return upstreamclient.Loaded[upstreamclient.TokenEntry]{Value: upstreamclient.TokenEntry{Value: payload.Token}, Size: int64(len(payload.Token)), TTL: ttl}, nil
+		ttl := refreshAt.Sub(receivedAt)
+		if ttl < 0 {
+			ttl = 0
+		}
+		return upstreamclient.Loaded[upstreamclient.TokenEntry]{Value: upstreamclient.TokenEntry{Value: payload.Token, ExpiresAt: expiresAt}, Size: int64(len(payload.Token)), TTL: ttl}, nil
 	})
 	if err != nil {
-		return "", err
+		return "", cacheKey, err
 	}
-	return entry.Value, nil
+	if !entry.ExpiresAt.After(handler.upstream.Now()) {
+		handler.upstream.Tokens().Delete(cacheKey)
+		return "", cacheKey, errUpstreamAuth
+	}
+	return entry.Value, cacheKey, nil
+}
+
+func tokenCacheTiming(receivedAt time.Time, issuedRaw string, expiresIn int64) (time.Time, time.Time, error) {
+	lifetime := time.Duration(expiresIn) * time.Second
+	if lifetime <= 0 {
+		lifetime = time.Minute
+	}
+	issuedAt := receivedAt
+	if issuedRaw != "" {
+		parsed, err := time.Parse(time.RFC3339, issuedRaw)
+		if err != nil {
+			return time.Time{}, time.Time{}, errUpstreamAuth
+		}
+		issuedAt = parsed
+	}
+	expiresAt := issuedAt.Add(lifetime)
+	if !expiresAt.After(receivedAt) {
+		return time.Time{}, time.Time{}, errUpstreamAuth
+	}
+	refreshAt := issuedAt.Add(lifetime * 4 / 5)
+	if beforeExpiry := expiresAt.Add(-30 * time.Second); beforeExpiry.Before(refreshAt) {
+		refreshAt = beforeExpiry
+	}
+	return expiresAt, refreshAt, nil
 }
 
 func (handler *Handler) validateOutbound(_ context.Context, source *Source, target *url.URL, token bool) error {
@@ -566,16 +616,39 @@ func (statusError upstreamStatusError) Error() string {
 func (handler *Handler) serveCachedManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, target *url.URL) {
 	key := strings.Join([]string{resolved.source.Name, resolved.repository, resolved.reference, strings.Join(request.Header.Values("Accept"), ","), "anonymous", strconv.FormatBool(resolved.source.AllowHTTP), strconv.FormatBool(resolved.source.AllowPrivate)}, "\x00")
 	requestTemplate := request.Clone(context.Background())
+	previous, hasPrevious := handler.upstream.Manifests().Peek(key)
 	entry, err := handler.upstream.Manifests().GetOrLoad(request.Context(), key, func(ctx context.Context) (upstreamclient.Loaded[upstreamclient.ManifestEntry], error) {
-		response, err := handler.fetch(ctx, requestTemplate, resolved, target)
+		refreshRequest := requestTemplate.Clone(context.Background())
+		if hasPrevious {
+			refreshRequest.Header.Del("If-None-Match")
+			refreshRequest.Header.Del("If-Modified-Since")
+			if etag := previous.Header.Get("ETag"); etag != "" {
+				refreshRequest.Header.Set("If-None-Match", etag)
+			} else if modified := previous.Header.Get("Last-Modified"); modified != "" {
+				refreshRequest.Header.Set("If-Modified-Since", modified)
+			}
+		}
+		response, err := handler.fetch(ctx, refreshRequest, resolved, target)
 		if err != nil {
 			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, err
 		}
 		defer response.Body.Close()
+		ttl, swr, sie := manifestCacheWindows(resolved.reference)
+		if response.StatusCode == http.StatusNotModified {
+			if !hasPrevious {
+				header := make(http.Header)
+				copyResponseHeaders(header, response.Header)
+				return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: upstreamclient.ManifestEntry{Status: http.StatusNotModified, Header: header}}, nil
+			}
+			updated := previous
+			updated.Header = previous.Header.Clone()
+			mergeResponseHeaders(updated.Header, response.Header)
+			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: updated, Size: int64(len(updated.Body) + headerSize(updated.Header)), TTL: ttl, StaleWhileRevalidate: swr, StaleIfError: sie}, nil
+		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			drainAndClose(response.Body)
 			err := error(upstreamStatusError{status: response.StatusCode})
-			if response.StatusCode >= 400 && response.StatusCode <= 404 {
+			if response.StatusCode < 500 || response.StatusCode > 599 {
 				err = upstreamclient.PermanentCacheError(err)
 			}
 			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, err
@@ -584,11 +657,7 @@ func (handler *Handler) serveCachedManifest(writer http.ResponseWriter, request 
 		if err != nil {
 			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, upstreamclient.PermanentCacheError(err)
 		}
-		ttl := time.Minute
-		if digestPattern.MatchString(resolved.reference) {
-			ttl = 10 * time.Minute
-		}
-		return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: manifest, Size: int64(len(manifest.Body) + headerSize(manifest.Header)), TTL: ttl, StaleWhileRevalidate: 30 * time.Second, StaleIfError: 5 * time.Minute}, nil
+		return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: manifest, Size: int64(len(manifest.Body) + headerSize(manifest.Header)), TTL: ttl, StaleWhileRevalidate: swr, StaleIfError: sie}, nil
 	})
 	if err != nil {
 		var statusError upstreamStatusError
@@ -599,26 +668,55 @@ func (handler *Handler) serveCachedManifest(writer http.ResponseWriter, request 
 		writeMappedError(writer, err)
 		return
 	}
-	serveManifestEntry(writer, entry)
+	serveManifestEntryConditional(writer, request, entry)
 }
 
-func (handler *Handler) serveConditionalManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, target *url.URL) {
-	response, err := handler.fetch(request.Context(), request, resolved, target)
-	if err != nil {
-		writeMappedError(writer, err)
-		return
+func manifestCacheWindows(reference string) (time.Duration, time.Duration, time.Duration) {
+	if digestPattern.MatchString(reference) {
+		return 10 * time.Minute, 5 * time.Minute, 30 * time.Minute
 	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotModified {
-		copyResponseHeaders(writer.Header(), response.Header)
+	return time.Minute, 30 * time.Second, 5 * time.Minute
+}
+
+func mergeResponseHeaders(destination http.Header, source http.Header) {
+	for _, header := range []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type", "Docker-Content-Digest", "ETag", "Last-Modified"} {
+		if values := source.Values(header); len(values) > 0 {
+			destination.Del(header)
+			for _, value := range values {
+				destination.Add(header, value)
+			}
+		}
+	}
+}
+
+func serveManifestEntryConditional(writer http.ResponseWriter, request *http.Request, entry upstreamclient.ManifestEntry) {
+	if entry.Status == http.StatusNotModified || manifestNotModified(request.Header, entry.Header) {
+		copyResponseHeaders(writer.Header(), entry.Header)
 		writer.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		copyUpstreamError(writer, response)
-		return
+	serveManifestEntry(writer, entry)
+}
+
+func manifestNotModified(request http.Header, cached http.Header) bool {
+	if condition := request.Get("If-None-Match"); condition != "" {
+		etag := cached.Get("ETag")
+		for _, candidate := range strings.Split(condition, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "*" || (etag != "" && strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(etag, "W/")) {
+				return true
+			}
+		}
+		return false
 	}
-	handler.serveManifest(writer, request, resolved, response)
+	condition := request.Get("If-Modified-Since")
+	modified := cached.Get("Last-Modified")
+	if condition == "" || modified == "" {
+		return false
+	}
+	conditionTime, conditionErr := http.ParseTime(condition)
+	modifiedTime, modifiedErr := http.ParseTime(modified)
+	return conditionErr == nil && modifiedErr == nil && !modifiedTime.After(conditionTime)
 }
 
 func manifestEntryFromResponse(resolved resolvedRequest, response *http.Response) (upstreamclient.ManifestEntry, error) {

@@ -43,7 +43,8 @@ type Options struct {
 }
 
 type TokenEntry struct {
-	Value string
+	Value     string
+	ExpiresAt time.Time
 }
 
 type ManifestEntry struct {
@@ -81,6 +82,8 @@ type Manager struct {
 	manifests        *Cache[ManifestEntry]
 	metrics          counters
 	baseDial         func(context.Context, string, string) (net.Conn, error)
+	refreshes        *refreshGroup
+	clock            Clock
 	closed           atomic.Bool
 }
 
@@ -117,20 +120,20 @@ func New(options Options) (*Manager, error) {
 	transport.DialTLS = nil
 	transport.DialTLSContext = nil
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	manager := &Manager{client: &client, transport: transport}
+	manager := &Manager{client: &client, transport: transport, refreshes: newRefreshGroup(30 * time.Second), clock: options.Clock}
 	if options.Dial != nil {
 		manager.baseDial = options.Dial
 	} else {
 		manager.baseDial = (&net.Dialer{Timeout: defaultDuration(options.DialTimeout, 10*time.Second), KeepAlive: 30 * time.Second}).DialContext
 	}
-	manager.dns = NewDNSCache(options.Clock, options.Resolver, options.MaxDNSEntries).WithMetrics(
+	manager.dns = NewDNSCache(options.Clock, options.Resolver, options.MaxDNSEntries).withRefreshGroup(manager.refreshes).WithMetrics(
 		func() { manager.metrics.dnsQueries.Add(1) }, func() { manager.metrics.dnsHits.Add(1) },
 		func() { manager.metrics.dnsMisses.Add(1) }, func() { manager.metrics.dnsEvictions.Add(1) },
 	)
-	manager.tokens = NewCache[TokenEntry](options.Clock, defaultInt(options.TokenEntries, 256), defaultInt64(options.TokenBytes, 1<<20)).WithMetrics(
+	manager.tokens = NewCache[TokenEntry](options.Clock, defaultInt(options.TokenEntries, 256), defaultInt64(options.TokenBytes, 1<<20)).withRefreshGroup(manager.refreshes).WithMetrics(
 		func() { manager.metrics.cacheHits.Add(1) }, func() { manager.metrics.cacheMisses.Add(1) }, func() { manager.metrics.cacheEvictions.Add(1) },
 	)
-	manager.manifests = NewCache[ManifestEntry](options.Clock, defaultInt(options.ManifestEntries, 256), defaultInt64(options.ManifestBytes, 32<<20)).WithMetrics(
+	manager.manifests = NewCache[ManifestEntry](options.Clock, defaultInt(options.ManifestEntries, 256), defaultInt64(options.ManifestBytes, 32<<20)).withRefreshGroup(manager.refreshes).WithMetrics(
 		func() { manager.metrics.cacheHits.Add(1) }, func() { manager.metrics.cacheMisses.Add(1) }, func() { manager.metrics.cacheEvictions.Add(1) },
 	)
 	transport.DialContext = manager.dialContext
@@ -311,6 +314,7 @@ func (manager *Manager) AddTransferredBytes(value int64) {
 func (manager *Manager) Tokens() *Cache[TokenEntry]       { return manager.tokens }
 func (manager *Manager) Manifests() *Cache[ManifestEntry] { return manager.manifests }
 func (manager *Manager) Client() *http.Client             { return manager.client }
+func (manager *Manager) Now() time.Time                   { return manager.clock.Now() }
 
 func (manager *Manager) Snapshot() Metrics {
 	return Metrics{
@@ -323,11 +327,12 @@ func (manager *Manager) Snapshot() Metrics {
 
 func (manager *Manager) Close() error {
 	if manager.closed.CompareAndSwap(false, true) {
-		manager.transport.CloseIdleConnections()
-		manager.privateTransport.CloseIdleConnections()
 		manager.dns.Close()
 		manager.tokens.Close()
 		manager.manifests.Close()
+		manager.refreshes.close()
+		manager.transport.CloseIdleConnections()
+		manager.privateTransport.CloseIdleConnections()
 	}
 	return nil
 }
