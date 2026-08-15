@@ -302,10 +302,11 @@ func (handler *Handler) stream(writer http.ResponseWriter, request *http.Request
 	}
 	archive := tar.NewWriter(writer)
 	if err := handler.writeArchive(request.Context(), archive, writer, resolved); err != nil {
-		_ = archive.Close()
-		return
+		panic(http.ErrAbortHandler)
 	}
-	_ = archive.Close()
+	if err := archive.Close(); err != nil {
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func (handler *Handler) resolveImage(ctx context.Context, value, platformValue string) (resolvedImage, error) {
@@ -333,7 +334,10 @@ func (handler *Handler) resolveImage(ctx context.Context, value, platformValue s
 		if err := json.Unmarshal(body, &document); err != nil || document.SchemaVersion != 2 {
 			return resolvedImage{}, errors.New("invalid selected manifest")
 		}
-		if selected.MediaType != "" && document.MediaType != selected.MediaType {
+		if int64(len(body)) != selected.Size {
+			return resolvedImage{}, errors.New("selected manifest size mismatch")
+		}
+		if document.MediaType != selected.MediaType {
 			return resolvedImage{}, errors.New("selected manifest media type mismatch")
 		}
 	}
@@ -396,21 +400,34 @@ func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, r
 	if err := streaming.FlushFunc(response)(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
+	type verifiedLayer struct {
+		diffID         string
+		size           int64
+		path           string
+		compressedSize int64
+		mediaType      string
+	}
+	verified := make(map[string]verifiedLayer)
 	for _, image := range images {
 		for index, layer := range image.layers {
-			if written[layer.Digest] {
+			expectedDiffID := strings.ToLower(image.diffIDs[index])
+			if existing, found := verified[layer.Digest]; found {
+				if existing.diffID != expectedDiffID || existing.size <= 0 || existing.path != image.paths[index] || existing.compressedSize != layer.Size || existing.mediaType != layer.MediaType {
+					return streaming.ErrDigestMismatch
+				}
 				continue
 			}
-			written[layer.Digest] = true
 			spool, size, diffID, err := handler.spoolLayer(ctx, image.ref, layer)
 			if err != nil {
 				return err
 			}
-			if diffID != strings.ToLower(image.diffIDs[index]) {
+			if diffID != expectedDiffID {
 				spool.Close()
 				os.Remove(spool.Name())
 				return streaming.ErrDigestMismatch
 			}
+			verified[layer.Digest] = verifiedLayer{diffID: diffID, size: size, path: image.paths[index], compressedSize: layer.Size, mediaType: layer.MediaType}
+			written[layer.Digest] = true
 			if err := archive.WriteHeader(&tar.Header{Name: image.paths[index], Mode: 0o644, Size: size, ModTime: time.Unix(0, 0)}); err != nil {
 				spool.Close()
 				os.Remove(spool.Name())
@@ -622,13 +639,14 @@ func (handler *Handler) fetchManifest(ctx context.Context, ref imageRef, referen
 		if err != nil {
 			return upstream.Loaded[upstream.ManifestEntry]{}, err
 		}
-		defer response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			drainAndClose(response.Body)
 			if response.StatusCode >= 500 {
 				return upstream.Loaded[upstream.ManifestEntry]{}, errors.New("manifest upstream temporarily unavailable")
 			}
 			return upstream.Loaded[upstream.ManifestEntry]{}, upstream.PermanentCacheError(errors.New("manifest request failed"))
 		}
+		defer response.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
 		if err != nil || len(body) > maxManifestBytes {
 			return upstream.Loaded[upstream.ManifestEntry]{}, upstream.PermanentCacheError(errors.New("manifest too large"))
@@ -671,7 +689,7 @@ func (handler *Handler) fetchBlob(ctx context.Context, ref imageRef, digest stri
 		return nil, 0, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		response.Body.Close()
+		drainAndClose(response.Body)
 		return nil, 0, errors.New("blob request failed")
 	}
 	return response.Body, response.ContentLength, nil
@@ -694,8 +712,12 @@ func (handler *Handler) fetch(ctx context.Context, ref imageRef, requestPath, ac
 	if err != nil || response.StatusCode != http.StatusUnauthorized {
 		return response, err
 	}
+	nextChallenge := response.Header.Get("WWW-Authenticate")
 	drainAndClose(response.Body)
 	handler.upstream.Tokens().CompareAndDelete(token.key, func(current upstream.TokenEntry) bool { return current.Version == token.entry.Version })
+	if nextChallenge != "" {
+		challenge = nextChallenge
+	}
 	token, err = handler.fetchToken(ctx, ref, challenge)
 	if err != nil {
 		return nil, err
@@ -766,7 +788,7 @@ func (handler *Handler) fetchToken(ctx context.Context, ref imageRef, challenge 
 		query.Set("service", service)
 	}
 	parsed.RawQuery = query.Encode()
-	cacheKey := strings.Join([]string{"offline-token", parsed.String(), ref.Registry, ref.Repository, expectedScope, "anonymous"}, "\x00")
+	cacheKey := strings.Join([]string{parsed.String(), service, expectedScope, ref.Registry, ref.Repository, "anonymous", strconv.FormatBool(ref.Source.AllowHTTP), strconv.FormatBool(ref.Source.AllowPrivate)}, "\x00")
 	entry, err := handler.upstream.Tokens().GetOrLoad(ctx, cacheKey, func(ctx context.Context) (upstream.Loaded[upstream.TokenEntry], error) {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 		if err != nil {
@@ -776,19 +798,20 @@ func (handler *Handler) fetchToken(ctx context.Context, ref imageRef, challenge 
 		if err != nil {
 			return upstream.Loaded[upstream.TokenEntry]{}, err
 		}
-		defer response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			drainAndClose(response.Body)
 			return upstream.Loaded[upstream.TokenEntry]{}, errors.New("token request failed")
 		}
+		defer response.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(response.Body, maxTokenBytes+1))
 		if err != nil || len(body) > maxTokenBytes {
 			return upstream.Loaded[upstream.TokenEntry]{}, errors.New("token response too large")
 		}
 		var payload struct {
-			Token       string `json:"token"`
-			AccessToken string `json:"access_token"`
-			ExpiresIn   int64  `json:"expires_in"`
-			IssuedAt    string `json:"issued_at"`
+			Token       string          `json:"token"`
+			AccessToken string          `json:"access_token"`
+			ExpiresIn   json.RawMessage `json:"expires_in"`
+			IssuedAt    string          `json:"issued_at"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return upstream.Loaded[upstream.TokenEntry]{}, err
@@ -799,30 +822,18 @@ func (handler *Handler) fetchToken(ctx context.Context, ref imageRef, challenge 
 		if payload.Token == "" {
 			return upstream.Loaded[upstream.TokenEntry]{}, errors.New("token is missing")
 		}
-		if payload.ExpiresIn <= 0 {
-			payload.ExpiresIn = 60
+		var expiresIn int64
+		if len(payload.ExpiresIn) > 0 {
+			_ = json.Unmarshal(payload.ExpiresIn, &expiresIn)
 		}
 		receivedAt := handler.upstream.Now()
-		issuedAt := receivedAt
-		if payload.IssuedAt != "" {
-			parsedIssuedAt, err := time.Parse(time.RFC3339, payload.IssuedAt)
-			if err != nil || parsedIssuedAt.After(receivedAt.Add(5*time.Minute)) {
-				return upstream.Loaded[upstream.TokenEntry]{}, errors.New("invalid token issued_at")
-			}
-			issuedAt = parsedIssuedAt
+		expiresAt, refreshAt, timingErr := tokenCacheTiming(receivedAt, payload.IssuedAt, expiresIn)
+		if timingErr != nil {
+			return upstream.Loaded[upstream.TokenEntry]{}, timingErr
 		}
-		expiresAt := issuedAt.Add(time.Duration(payload.ExpiresIn) * time.Second)
-		remaining := expiresAt.Sub(receivedAt)
-		if remaining <= 0 {
-			return upstream.Loaded[upstream.TokenEntry]{}, errors.New("token already expired")
-		}
-		early := minDuration(30*time.Second, remaining/10)
-		ttl := remaining - early
-		if ttl <= 0 {
-			ttl = minDuration(time.Second, remaining)
-		}
+		ttl, swr := tokenCacheWindows(receivedAt, refreshAt, expiresAt)
 		entry := handler.upstream.NewTokenEntry(payload.Token, expiresAt)
-		return upstream.Loaded[upstream.TokenEntry]{Value: entry, Size: int64(len(payload.Token)), TTL: ttl, StaleWhileRevalidate: remaining - ttl}, nil
+		return upstream.Loaded[upstream.TokenEntry]{Value: entry, Size: int64(len(payload.Token)), TTL: ttl, StaleWhileRevalidate: swr}, nil
 	})
 	if err != nil {
 		return tokenLease{}, err
@@ -906,6 +917,12 @@ func selectPlatform(descriptors []descriptor, value string) (descriptor, error) 
 			if err := validateDescriptor(descriptor); err != nil {
 				return descriptor, err
 			}
+			if descriptor.Size <= 0 {
+				return descriptor, errors.New("selected manifest descriptor size is invalid")
+			}
+			if !supportedImageManifestType(descriptor.MediaType) {
+				return descriptor, errors.New("selected manifest descriptor media type is unsupported")
+			}
 			return descriptor, nil
 		}
 	}
@@ -928,7 +945,7 @@ func parsePlatform(value string) (platform, error) {
 }
 
 func validateDescriptor(value descriptor) error {
-	if !digestPattern.MatchString(strings.ToLower(value.Digest)) || value.Size < 0 {
+	if !digestPattern.MatchString(value.Digest) || value.Size < 0 {
 		return errors.New("invalid image descriptor")
 	}
 	return nil
@@ -941,6 +958,10 @@ func supportedManifestType(value string) bool {
 	default:
 		return false
 	}
+}
+
+func supportedImageManifestType(value string) bool {
+	return value == "application/vnd.oci.image.manifest.v1+json" || value == "application/vnd.docker.distribution.manifest.v2+json"
 }
 
 func supportedConfigType(value string) bool {
@@ -968,6 +989,45 @@ func minDuration(left, right time.Duration) time.Duration {
 		return left
 	}
 	return right
+}
+
+func tokenCacheWindows(receivedAt, refreshAt, expiresAt time.Time) (time.Duration, time.Duration) {
+	remaining := expiresAt.Sub(receivedAt)
+	if remaining <= 0 {
+		return 0, 0
+	}
+	fresh := refreshAt.Sub(receivedAt)
+	if fresh <= 0 {
+		fresh = minDuration(time.Nanosecond, remaining)
+	}
+	if fresh > remaining {
+		fresh = remaining
+	}
+	return fresh, remaining - fresh
+}
+
+func tokenCacheTiming(receivedAt time.Time, issuedRaw string, expiresIn int64) (time.Time, time.Time, error) {
+	lifetime := time.Duration(expiresIn) * time.Second
+	if lifetime <= 0 {
+		lifetime = time.Minute
+	}
+	issuedAt := receivedAt
+	if issuedRaw != "" {
+		parsed, err := time.Parse(time.RFC3339, issuedRaw)
+		if err != nil {
+			return time.Time{}, time.Time{}, errors.New("invalid token issued_at")
+		}
+		issuedAt = parsed
+	}
+	expiresAt := issuedAt.Add(lifetime)
+	if !expiresAt.After(receivedAt) {
+		return time.Time{}, time.Time{}, errors.New("token already expired")
+	}
+	refreshAt := issuedAt.Add(lifetime * 4 / 5)
+	if beforeExpiry := expiresAt.Add(-30 * time.Second); beforeExpiry.Before(refreshAt) {
+		refreshAt = beforeExpiry
+	}
+	return expiresAt, refreshAt, nil
 }
 
 func drainAndClose(body io.ReadCloser) {

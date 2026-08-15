@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,7 +63,7 @@ func TestOfflinePlatformSelectionBatchTarAndDigest(t *testing.T) {
 	selectedDigest := digest(selectedBody)
 	index := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.index.v1+json", Manifests: []descriptor{
 		{Digest: digest([]byte("arm")), Size: 3, Platform: platform{OS: "linux", Architecture: "arm64"}},
-		{Digest: selectedDigest, Size: int64(len(selectedBody)), Platform: platform{OS: "linux", Architecture: "amd64"}},
+		{MediaType: selected.MediaType, Digest: selectedDigest, Size: int64(len(selectedBody)), Platform: platform{OS: "linux", Architecture: "amd64"}},
 	}}
 	indexBody, _ := json.Marshal(index)
 	var selectedCalls atomic.Int32
@@ -194,11 +195,134 @@ func TestOfflineLayerDiffIDMismatchCannotCompleteArchive(t *testing.T) {
 	defer server.Close()
 	handler, manager := newOfflineFixture(t, server.URL)
 	defer manager.Close()
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest", nil))
-	entries := readTar(t, recorder.Body.Bytes())
-	if _, found := entries[digestHex(document.Layers[0].Digest)+"/layer.tar"]; found {
-		t.Fatalf("diffID-mismatched layer entered archive; raw=%d compressed=%d", len(layerTar), len(layer))
+	service := httptest.NewServer(handler)
+	defer service.Close()
+	response, err := http.Get(service.URL + "/api/offline?image=example/app:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr == nil {
+		t.Fatalf("diffID mismatch completed as transport success; raw=%d compressed=%d", len(layerTar), len(layer))
+	}
+}
+
+func TestOfflineSharedLayerValidatesEveryImageDiffID(t *testing.T) {
+	layerTar, layer := makeLayerFixture(t, []byte("shared-layer"))
+	goodConfig := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest(layerTar)))
+	badConfig := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest([]byte("conflict"))))
+	layerDescriptor := descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}
+	manifests := map[string][]byte{}
+	configs := map[string][]byte{}
+	for repository, config := range map[string][]byte{"first": goodConfig, "second": badConfig} {
+		configDescriptor := descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}
+		document := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: configDescriptor, Layers: []descriptor{layerDescriptor}}
+		manifests[repository], _ = json.Marshal(document)
+		configs[configDescriptor.Digest] = config
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		for repository, body := range manifests {
+			if strings.Contains(request.URL.Path, "/"+repository+"/manifests/") {
+				writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+				_, _ = writer.Write(body)
+				return
+			}
+		}
+		for digest, config := range configs {
+			if strings.HasSuffix(request.URL.Path, "/blobs/"+digest) {
+				_, _ = writer.Write(config)
+				return
+			}
+		}
+		if strings.HasSuffix(request.URL.Path, "/blobs/"+layerDescriptor.Digest) {
+			_, _ = writer.Write(layer)
+		}
+	}))
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	service := httptest.NewServer(handler)
+	defer service.Close()
+	response, err := http.Post(service.URL+"/api/offline", "application/json", strings.NewReader(`{"images":["example/first:latest","example/second:latest"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr == nil {
+		t.Fatal("shared layer skipped the second image diffID conflict")
+	}
+}
+
+func TestOfflineLayerDownloadFailureAbortsClientRead(t *testing.T) {
+	layerTar, layer := makeLayerFixture(t, bytes.Repeat([]byte("upstream-cut"), 1024))
+	config := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest(layerTar)))
+	document := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}, Layers: []descriptor{{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}}}
+	manifestBody, _ := json.Marshal(document)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.Contains(request.URL.Path, "/manifests/"):
+			writer.Header().Set("Content-Type", document.MediaType)
+			_, _ = writer.Write(manifestBody)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+document.Config.Digest):
+			_, _ = writer.Write(config)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+document.Layers[0].Digest):
+			writer.Header().Set("Content-Length", strconv.Itoa(len(layer)))
+			_, _ = writer.Write(layer[:len(layer)/2])
+		}
+	}))
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	service := httptest.NewServer(handler)
+	defer service.Close()
+	response, err := http.Get(service.URL + "/api/offline?image=example/app:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr == nil {
+		t.Fatal("truncated upstream layer completed as a successful tar response")
+	}
+}
+
+func TestOfflineIndexDescriptorTypeAndSizeFailClosed(t *testing.T) {
+	child := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json"}
+	childBody, _ := json.Marshal(child)
+	for _, fixture := range []struct {
+		name      string
+		mediaType string
+		size      int64
+	}{
+		{"missing-type", "", int64(len(childBody))},
+		{"unsupported-type", "application/json", int64(len(childBody))},
+		{"zero-size", child.MediaType, 0},
+		{"wrong-size", child.MediaType, int64(len(childBody) + 1)},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			selected := descriptor{MediaType: fixture.mediaType, Digest: digest(childBody), Size: fixture.size, Platform: platform{OS: "linux", Architecture: "amd64"}}
+			index := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.index.v1+json", Manifests: []descriptor{selected}}
+			indexBody, _ := json.Marshal(index)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if strings.HasSuffix(request.URL.Path, "/manifests/latest") {
+					writer.Header().Set("Content-Type", index.MediaType)
+					_, _ = writer.Write(indexBody)
+					return
+				}
+				writer.Header().Set("Content-Type", child.MediaType)
+				_, _ = writer.Write(childBody)
+			}))
+			defer server.Close()
+			handler, manager := newOfflineFixture(t, server.URL)
+			defer manager.Close()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest&platform=linux/amd64", nil))
+			if recorder.Code != http.StatusBadGateway || recorder.Header().Get("Content-Type") == "application/x-tar" {
+				t.Fatalf("invalid index descriptor entered archive: status=%d type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+			}
+		})
 	}
 }
 
@@ -230,7 +354,7 @@ func TestOfflineTokenFakeClockNeverCrossesExpiresAt(t *testing.T) {
 	if err != nil || first.entry.Value != "short-lived" {
 		t.Fatalf("initial token failed: lease=%+v err=%v", first, err)
 	}
-	clock.Advance(91 * time.Second)
+	clock.Advance(71 * time.Second)
 	stale, err := handler.fetchToken(context.Background(), ref, challenge)
 	if err != nil || stale.entry.Version != first.entry.Version {
 		t.Fatalf("early refresh did not serve still-valid token: lease=%+v err=%v", stale, err)
@@ -242,9 +366,109 @@ func TestOfflineTokenFakeClockNeverCrossesExpiresAt(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("early refresh did not start: calls=%d", calls.Load())
 	}
-	clock.Advance(10 * time.Second)
+	clock.Advance(30 * time.Second)
 	if _, err := handler.fetchToken(context.Background(), ref, challenge); err == nil {
 		t.Fatal("token remained usable after its real expiresAt")
+	}
+}
+
+func TestOfflineTokenTimingUses80PercentAndExpiryMinus30Seconds(t *testing.T) {
+	base := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	for _, fixture := range []struct {
+		name      string
+		expiresIn int64
+		refresh   time.Time
+	}{
+		{"long", 1000, base.Add(800 * time.Second)},
+		{"medium", 100, base.Add(70 * time.Second)},
+		{"short", 20, base.Add(-10 * time.Second)},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			expiresAt, refreshAt, err := tokenCacheTiming(base, base.Format(time.RFC3339), fixture.expiresIn)
+			if err != nil || !expiresAt.Equal(base.Add(time.Duration(fixture.expiresIn)*time.Second)) || !refreshAt.Equal(fixture.refresh) {
+				t.Fatalf("unexpected token timing: expires=%v refresh=%v err=%v", expiresAt, refreshAt, err)
+			}
+			fresh, swr := tokenCacheWindows(base, refreshAt, expiresAt)
+			if fresh+swr != time.Duration(fixture.expiresIn)*time.Second || fresh <= 0 {
+				t.Fatalf("token windows cross expiresAt: fresh=%v swr=%v", fresh, swr)
+			}
+		})
+	}
+}
+
+func TestOfflineSecond401UsesRotatedChallenge(t *testing.T) {
+	var tokenA, tokenB atomic.Int32
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/token-a":
+			tokenA.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"token": "old", "expires_in": 300})
+		case "/token-b":
+			tokenB.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"token": "new", "expires_in": 300})
+		default:
+			switch request.Header.Get("Authorization") {
+			case "":
+				writer.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/token-a",service="fixture",scope="repository:example/app:pull"`)
+				writer.WriteHeader(http.StatusUnauthorized)
+			case "Bearer old":
+				writer.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/token-b",service="fixture",scope="repository:example/app:pull"`)
+				writer.WriteHeader(http.StatusUnauthorized)
+			case "Bearer new":
+				_, _ = io.WriteString(writer, "manifest")
+			}
+		}
+	})
+	server.Start()
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	ref, _ := handler.parseImageRef("example/app:latest")
+	response, err := handler.fetch(context.Background(), ref, "/v2/example/app/manifests/latest", manifestAccept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if string(body) != "manifest" || tokenA.Load() != 1 || tokenB.Load() != 1 {
+		t.Fatalf("rotated challenge was not used: body=%q tokenA=%d tokenB=%d", body, tokenA.Load(), tokenB.Load())
+	}
+}
+
+func TestOfflineNon2xxBodiesDrainForConnectionReuse(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token-status" {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(writer, strings.Repeat("status-body", 1024))
+			return
+		}
+		writer.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(writer, strings.Repeat("status-body", 1024))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	ref, _ := handler.parseImageRef("example/app:latest")
+	for range 2 {
+		_, _, _ = handler.fetchManifest(context.Background(), ref, "latest")
+	}
+	for range 2 {
+		_, _, _ = handler.fetchBlob(context.Background(), ref, digest([]byte("missing")))
+	}
+	challenge := `Bearer realm="` + server.URL + `/token-status",service="fixture",scope="repository:example/app:pull"`
+	for range 2 {
+		_, _ = handler.fetchToken(context.Background(), ref, challenge)
+	}
+	if connections.Load() != 1 {
+		t.Fatalf("non-2xx bodies prevented HTTP/1.1 reuse: connections=%d", connections.Load())
 	}
 }
 

@@ -1,12 +1,16 @@
 package sourceproxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,6 +181,116 @@ func TestScriptRequestsIdentityEncoding(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("script failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestScriptRejectsActualCompressedEncoding(t *testing.T) {
+	var compressed bytes.Buffer
+	zipper := gzip.NewWriter(&compressed)
+	_, _ = io.WriteString(zipper, "curl https://github.com/acme/tool/archive/main.tar.gz\n")
+	_ = zipper.Close()
+	brotli, err := base64.StdEncoding.DecodeString("GzYAAMTcRqka0q7bknPIFF70LKZBCkFV53rYOz1Uct8IeGN9+cIPtVHAtTrcRWBom0I94j9N")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		encoding string
+		body     []byte
+	}{{"gzip", compressed.Bytes()}, {"br", brotli}} {
+		t.Run(fixture.encoding, func(t *testing.T) {
+			handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Encoding", fixture.encoding)
+				_, _ = writer.Write(fixture.body)
+			})
+			request := httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+			request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+			request.Header.Set("X-Forwarded-Proto", "https")
+			request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadGateway || bytes.Contains(recorder.Body.Bytes(), fixture.body) {
+				t.Fatalf("encoded script was treated as plaintext: status=%d body=%q", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestGitHubPOSTRedirectReplaysBodyOnlyFor307And308(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			payload := strings.Repeat("git-want-line\n", 128)
+			var bodies []string
+			handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+				body, _ := io.ReadAll(request.Body)
+				bodies = append(bodies, string(body))
+				if len(bodies) == 1 {
+					writer.Header().Set("Location", "/replayed/git-upload-pack")
+					writer.WriteHeader(status)
+					return
+				}
+				_, _ = io.WriteString(writer, "result")
+			})
+			request := httptest.NewRequest(http.MethodPost, "/github.com/acme/project.git/git-upload-pack", strings.NewReader(payload))
+			request.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK || recorder.Body.String() != "result" || len(bodies) != 2 || bodies[0] != payload || bodies[1] != payload {
+				t.Fatalf("POST body was not replayed: status=%d bodies=%d", recorder.Code, len(bodies))
+			}
+		})
+	}
+}
+
+func TestGitHubPOSTRedirectRejectsMethodChangingStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls atomic.Int32
+			handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				writer.Header().Set("Location", "/must-not-run/git-upload-pack")
+				writer.WriteHeader(status)
+				_, _ = io.WriteString(writer, "redirect")
+			})
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/github.com/acme/project.git/git-upload-pack", strings.NewReader("want")))
+			if recorder.Code != http.StatusBadGateway || calls.Load() != 1 {
+				t.Fatalf("method-changing POST redirect was followed: status=%d calls=%d", recorder.Code, calls.Load())
+			}
+		})
+	}
+}
+
+type cancelingBody struct {
+	cancel context.CancelFunc
+	done   bool
+}
+
+func (body *cancelingBody) Read(buffer []byte) (int, error) {
+	if body.done {
+		return 0, io.EOF
+	}
+	body.done = true
+	copy(buffer, "partial-git-body")
+	body.cancel()
+	return len("partial-git-body"), nil
+}
+
+func (*cancelingBody) Close() error { return nil }
+
+func TestGitHubPOSTCancellationCleansReplaySpool(t *testing.T) {
+	temporary := t.TempDir()
+	t.Setenv("TMP", temporary)
+	t.Setenv("TEMP", temporary)
+	handler, _ := fixtureHandler(t, func(http.ResponseWriter, *http.Request) { t.Fatal("canceled request reached upstream") })
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/github.com/acme/project.git/git-upload-pack", nil).WithContext(ctx)
+	request.Body = &cancelingBody{cancel: cancel}
+	request.ContentLength = -1
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	entries, err := os.ReadDir(temporary)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("canceled POST left replay spool: entries=%v err=%v", entries, err)
 	}
 }
 

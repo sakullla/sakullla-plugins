@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -19,8 +20,9 @@ import (
 )
 
 const (
-	maxRedirects   = 5
-	maxScriptBytes = 4 << 20
+	maxRedirects    = 5
+	maxScriptBytes  = 4 << 20
+	maxGitBodyBytes = 32 << 20
 )
 
 var scriptURLPattern = regexp.MustCompile(`https://(?:github\.com|api\.github\.com|codeload\.github\.com|raw\.githubusercontent\.com|gist\.github\.com|gist\.githubusercontent\.com|objects\.githubusercontent\.com|release-assets\.githubusercontent\.com|github\.githubassets\.com|huggingface\.co)/[^\s"'<>]+`)
@@ -165,24 +167,46 @@ func sourceClass(host string) string {
 }
 
 func (handler *Handler) follow(incoming *http.Request, target *url.URL, class string) (*http.Response, error) {
-	current := target
-	for redirects := 0; redirects <= maxRedirects; redirects++ {
-		request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, current.String(), incoming.Body)
+	var replay *requestReplay
+	if incoming.Method == http.MethodPost {
+		var err error
+		replay, err = spoolRequest(incoming)
 		if err != nil {
 			return nil, err
+		}
+		defer replay.Close()
+	}
+	current := target
+	for redirects := 0; redirects <= maxRedirects; redirects++ {
+		var body io.ReadCloser
+		if replay != nil {
+			body = replay.Reader()
+		}
+		request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, current.String(), body)
+		if err != nil {
+			return nil, err
+		}
+		if replay != nil {
+			request.ContentLength = replay.size
 		}
 		copyRequestHeaders(request.Header, incoming.Header)
 		response, err := handler.upstream.Do(request, upstream.Policy{AllowHTTP: handler.allowHTTP, AllowPrivate: handler.allowPrivate})
 		if err != nil {
 			return nil, err
 		}
-		if response.StatusCode < 300 || response.StatusCode > 399 {
+		if !isRedirect(response.StatusCode) || response.Header.Get("Location") == "" {
 			return response, nil
 		}
 		location, err := response.Location()
 		drainAndClose(response.Body)
 		if err != nil || !handler.allowedRedirect(location, class) {
 			return nil, errors.New("unsafe source redirect")
+		}
+		if incoming.Method == http.MethodPost && response.StatusCode != http.StatusTemporaryRedirect && response.StatusCode != http.StatusPermanentRedirect {
+			return nil, errors.New("git POST redirect does not preserve method")
+		}
+		if incoming.Method == http.MethodPost && !strings.HasSuffix(location.Path, "/git-upload-pack") {
+			return nil, errors.New("git POST redirect target is unsupported")
 		}
 		current = location
 	}
@@ -208,6 +232,12 @@ func (handler *Handler) allowedRedirect(target *url.URL, class string) bool {
 }
 
 func (handler *Handler) serveScript(writer http.ResponseWriter, response *http.Response, authority *url.URL) {
+	encoding := strings.TrimSpace(strings.ToLower(response.Header.Get("Content-Encoding")))
+	if encoding != "" && encoding != "identity" {
+		drainAndClose(response.Body)
+		writeError(writer, http.StatusBadGateway, "script upstream returned unsupported content encoding")
+		return
+	}
 	if response.ContentLength > maxScriptBytes {
 		writeError(writer, http.StatusBadGateway, "script exceeds rewrite limit")
 		return
@@ -224,6 +254,91 @@ func (handler *Handler) serveScript(writer http.ResponseWriter, response *http.R
 	writer.Header().Set("Content-Length", strconv.Itoa(len(rewritten)))
 	writer.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(writer, bytes.NewReader(rewritten))
+}
+
+func isRedirect(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
+}
+
+type requestReplay struct {
+	file *os.File
+	size int64
+}
+
+func spoolRequest(request *http.Request) (*requestReplay, error) {
+	if request.Body == nil || request.ContentLength > maxGitBodyBytes {
+		return nil, errors.New("git POST body is missing or too large")
+	}
+	if err := request.Context().Err(); err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp("", "accelerator-git-request-*.body")
+	if err != nil {
+		return nil, err
+	}
+	replay := &requestReplay{file: file}
+	cleanup := func(err error) (*requestReplay, error) {
+		replay.Close()
+		return nil, err
+	}
+	buffer := make([]byte, 32*1024)
+	limited := io.LimitReader(request.Body, maxGitBodyBytes+1)
+	for {
+		if err := request.Context().Err(); err != nil {
+			return cleanup(err)
+		}
+		count, readErr := limited.Read(buffer)
+		if count > 0 {
+			written, writeErr := file.Write(buffer[:count])
+			replay.size += int64(written)
+			if writeErr != nil || written != count {
+				if writeErr == nil {
+					writeErr = io.ErrShortWrite
+				}
+				return cleanup(writeErr)
+			}
+			if replay.size > maxGitBodyBytes {
+				return cleanup(errors.New("git POST body is too large"))
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return cleanup(readErr)
+		}
+	}
+	_ = request.Body.Close()
+	if request.ContentLength >= 0 && replay.size != request.ContentLength {
+		return cleanup(errors.New("git POST body length mismatch"))
+	}
+	return replay, nil
+}
+
+func (replay *requestReplay) Reader() io.ReadCloser {
+	return io.NopCloser(io.NewSectionReader(replay.file, 0, replay.size))
+}
+
+func (replay *requestReplay) Close() error {
+	if replay == nil || replay.file == nil {
+		return nil
+	}
+	name := replay.file.Name()
+	closeErr := replay.file.Close()
+	removeErr := os.Remove(name)
+	replay.file = nil
+	if closeErr != nil {
+		return closeErr
+	}
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	return nil
 }
 
 func joinPath(prefix, suffix string) string {

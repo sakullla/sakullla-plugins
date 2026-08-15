@@ -5,5 +5,8 @@
   "max_batch_images": 16,
   "integrity": ["descriptor-size", "compressed-sha256", "manifest-media-type", "config-rootfs-diff-ids", "uncompressed-layer-sha256"],
   "layer_compression": ["gzip", "zstd", "identity"],
-  "storage": "bounded per-layer temporary spool; the complete archive is never persisted"
+  "storage": "bounded per-layer temporary spool; the complete archive is never persisted",
+  "index_descriptor": ["supported-media-type", "digest", "exact-size"],
+  "post_commit_failure": "abort downstream transport without tar terminator",
+  "shared_layer": "validate every config diff_id before writing one layer entry"
 }

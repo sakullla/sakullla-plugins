@@ -69,7 +69,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			writeError(writer, http.StatusBadRequest, "valid Docker Hub image is required")
 			return
 		}
-		target.Path = joinPath(handler.endpoint.Path, "/v2/repositories/"+namespace+"/"+repository+"/tags")
+		target.Path = joinPath(handler.endpoint.Path, "/v2/namespaces/"+namespace+"/repositories/"+repository+"/tags")
 	default:
 		http.NotFound(writer, request)
 		return

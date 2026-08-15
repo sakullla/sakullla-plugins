@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,11 @@ func TestSearchAndTagsUseDockerHubCatalogRoutes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests <- request.Clone(request.Context())
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"results":[]}`)
+		if strings.Contains(request.URL.Path, "/namespaces/") {
+			_, _ = io.WriteString(writer, `{"count":1,"next":null,"previous":null,"results":[{"name":"latest","full_size":123,"tag_status":"active"}]}`)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"count":0,"next":null,"previous":null,"results":[]}`)
 	}))
 	defer server.Close()
 	endpoint, _ := url.Parse(server.URL)
@@ -37,11 +42,14 @@ func TestSearchAndTagsUseDockerHubCatalogRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, route := range []string{"/api/search?q=nginx&page_size=200", "/api/tags?image=alpine"} {
+	for _, fixture := range []struct{ route, contains string }{
+		{"/api/search?q=nginx&page_size=200", `"count":0`},
+		{"/api/tags?image=alpine", `"name":"latest"`},
+	} {
 		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
-		if recorder.Code != http.StatusOK || recorder.Body.String() != `{"results":[]}` {
-			t.Fatalf("route %q failed: status=%d body=%q", route, recorder.Code, recorder.Body.String())
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fixture.route, nil))
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), fixture.contains) {
+			t.Fatalf("route %q failed: status=%d body=%q", fixture.route, recorder.Code, recorder.Body.String())
 		}
 	}
 	search := <-requests
@@ -49,7 +57,7 @@ func TestSearchAndTagsUseDockerHubCatalogRoutes(t *testing.T) {
 		t.Fatalf("unexpected search request: %s", search.URL.String())
 	}
 	tags := <-requests
-	if tags.URL.Path != "/v2/repositories/library/alpine/tags" {
+	if tags.URL.Path != "/v2/namespaces/library/repositories/alpine/tags" || tags.URL.Query().Get("page") != "1" || tags.URL.Query().Get("page_size") != "25" || tags.Header.Get("Authorization") != "" {
 		t.Fatalf("unexpected tags request: %s", tags.URL.String())
 	}
 	if manager.Snapshot().UpstreamCalls != 2 {

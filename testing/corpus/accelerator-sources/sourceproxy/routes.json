@@ -17,6 +17,12 @@
     "/huggingface.co/organization/model/resolve/main/config.json",
     "/huggingface.co/organization/model/resolve/main/model.safetensors"
   ],
+  "git_post_redirects": {
+    "replay": [307, 308],
+    "reject": [301, 302, 303],
+    "max_body_bytes": 33554432
+  },
+  "script_content_encoding": ["identity", "reject-gzip", "reject-br"],
   "rejected": [
     "/example.com/file",
     "/proxy/127.0.0.1/file"
