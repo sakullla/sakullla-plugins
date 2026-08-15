@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	upstreamclient "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
 )
 
 func TestRegistryProductCorpusRoutesSupportedRegistries(t *testing.T) {
@@ -56,6 +58,7 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	digest := registryDigest(manifest)
 	var registryServer *httptest.Server
 	var tokenCalls atomic.Int32
+	var manifestCalls atomic.Int32
 	registryServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/token":
@@ -70,6 +73,7 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 				writer.WriteHeader(http.StatusUnauthorized)
 				return
 			}
+			manifestCalls.Add(1)
 			writer.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
 			writer.Header().Set("Docker-Content-Digest", digest)
 			_, _ = writer.Write(manifest)
@@ -89,6 +93,20 @@ func TestRegistryBearerTokenAndMultiArchitectureManifest(t *testing.T) {
 	}
 	if recorder.Header().Get("Docker-Content-Digest") != digest || tokenCalls.Load() != 1 {
 		t.Fatalf("token or digest boundary not applied: calls=%d digest=%q", tokenCalls.Load(), recorder.Header().Get("Docker-Content-Digest"))
+	}
+	second := httptest.NewRecorder()
+	secondRequest := httptest.NewRequest(http.MethodGet, "/v2/alpine/manifests/", nil)
+	secondRequest.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
+	handler.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusOK || tokenCalls.Load() != 1 || manifestCalls.Load() != 1 {
+		t.Fatalf("warm token/manifest cache missed: token=%d manifest=%d status=%d", tokenCalls.Load(), manifestCalls.Load(), second.Code)
+	}
+	differentAccept := httptest.NewRecorder()
+	differentRequest := httptest.NewRequest(http.MethodGet, "/v2/alpine/manifests/", nil)
+	differentRequest.Header.Set("Accept", "application/vnd.docker.distribution.manifest.list.v2+json")
+	handler.ServeHTTP(differentAccept, differentRequest)
+	if differentAccept.Code != http.StatusOK || tokenCalls.Load() != 1 || manifestCalls.Load() != 2 {
+		t.Fatalf("manifest Accept cache key collapsed: token=%d manifest=%d status=%d", tokenCalls.Load(), manifestCalls.Load(), differentAccept.Code)
 	}
 }
 
@@ -397,26 +415,10 @@ func TestRegistryRejectsLoopbackWithoutFixtureOverride(t *testing.T) {
 func TestRegistryRejectsPrivateRedirectAndNonHTTPSPort(t *testing.T) {
 	publicEndpoint, _ := url.Parse("https://registry.public.test")
 	source := &Source{Name: "docker.io", Endpoint: publicEndpoint}
-	var calls atomic.Int32
-	handler := &Handler{
-		client: &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-				calls.Add(1)
-				return &http.Response{
-					StatusCode: http.StatusTemporaryRedirect,
-					Header:     http.Header{"Location": []string{"https://169.254.1.1/layer"}},
-					Body:       io.NopCloser(strings.NewReader("")),
-					Request:    request,
-				}, nil
-			}),
-		},
-		resolver: hostResolver{},
-	}
-	request, _ := http.NewRequest(http.MethodGet, "https://registry.public.test/v2/example/app/blobs/value", nil)
-	_, err := handler.doFollowing(context.Background(), source, request)
-	if !errors.Is(err, errUnsafeUpstream) || calls.Load() != 1 {
-		t.Fatalf("private redirect was not rejected before its dial: calls=%d err=%v", calls.Load(), err)
+	handler := &Handler{}
+	privateEndpoint, _ := url.Parse("https://169.254.1.1/layer")
+	if err := handler.validateOutbound(context.Background(), source, privateEndpoint, false); !errors.Is(err, errUnsafeUpstream) {
+		t.Fatalf("private redirect was not rejected before its dial: %v", err)
 	}
 
 	portEndpoint, _ := url.Parse("https://registry.public.test:444/v2")
@@ -431,17 +433,28 @@ func TestRegistryRebindingIsRejectedAtPinnedDial(t *testing.T) {
 		{{IP: net.ParseIP("8.8.8.8")}},
 		{{IP: net.ParseIP("127.0.0.1")}},
 	}}
-	handler, err := NewHandler(Options{Resolver: resolver, Sources: []Source{{Name: "docker.io", Endpoint: endpoint}}})
+	var dialed string
+	manager, err := upstreamclient.New(upstreamclient.Options{
+		Resolver: upstreamclient.NetResolverAdapter{Resolver: resolver, TTL: time.Minute},
+		Dial: func(_ context.Context, _, address string) (net.Conn, error) {
+			dialed = address
+			return nil, errors.New("fixture dial stopped")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(Options{Upstream: manager, Sources: []Source{{Name: "docker.io", Endpoint: endpoint}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
-	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "UPSTREAM_FORBIDDEN") {
-		t.Fatalf("rebinding dial was not rejected: calls=%d status=%d body=%s", resolver.calls.Load(), recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("fixture pinned dial response: calls=%d status=%d body=%s", resolver.calls.Load(), recorder.Code, recorder.Body.String())
 	}
-	if resolver.calls.Load() != 2 {
-		t.Fatalf("expected preflight and pinned-dial resolutions, got %d", resolver.calls.Load())
+	if resolver.calls.Load() != 1 || dialed != "8.8.8.8:443" {
+		t.Fatalf("verified address lease was not pinned: calls=%d dialed=%q", resolver.calls.Load(), dialed)
 	}
 }
 
@@ -457,11 +470,17 @@ func TestRegistryCustomTLSDialHookCannotBypassPinnedDial(t *testing.T) {
 		hookCalls.Add(1)
 		return nil, errors.New("unsafe TLS hook called")
 	}
-	handler, err := NewHandler(Options{
+	manager, err := upstreamclient.New(upstreamclient.Options{
 		Client:   &http.Client{Transport: transport},
-		Resolver: resolver,
-		Sources:  []Source{{Name: "docker.io", Endpoint: endpoint}},
+		Resolver: upstreamclient.NetResolverAdapter{Resolver: resolver, TTL: time.Minute},
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("fixture dial stopped")
+		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(Options{Upstream: manager, Sources: []Source{{Name: "docker.io", Endpoint: endpoint}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +489,7 @@ func TestRegistryCustomTLSDialHookCannotBypassPinnedDial(t *testing.T) {
 	if hookCalls.Load() != 0 {
 		t.Fatalf("custom TLS hook bypassed pinned dial: calls=%d", hookCalls.Load())
 	}
-	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "UPSTREAM_FORBIDDEN") {
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "UPSTREAM_UNAVAILABLE") {
 		t.Fatalf("pinned dial did not reject rebinding: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -490,21 +509,6 @@ func newFixtureHandler(t *testing.T, endpointValue string) *Handler {
 
 func registryDigest(body []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(body))
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return function(request)
-}
-
-type hostResolver struct{}
-
-func (hostResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
-	if address := net.ParseIP(host); address != nil {
-		return []net.IPAddr{{IP: address}}, nil
-	}
-	return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
 }
 
 type sequenceResolver struct {

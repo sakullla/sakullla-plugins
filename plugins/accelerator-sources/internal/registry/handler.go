@@ -16,8 +16,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/streaming"
+	upstreamclient "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
 )
 
 const (
@@ -52,6 +54,7 @@ type Options struct {
 	Client   *http.Client
 	Resolver Resolver
 	Sources  []Source
+	Upstream *upstreamclient.Manager
 }
 
 // Resolver is the bounded DNS capability used both for preflight policy and
@@ -61,8 +64,7 @@ type Resolver interface {
 }
 
 type Handler struct {
-	client   *http.Client
-	resolver Resolver
+	upstream *upstreamclient.Manager
 	sources  map[string]*Source
 	docker   *Source
 }
@@ -88,45 +90,24 @@ func mustSource(name string, rawURL string, aliases []string, tokenHosts []strin
 }
 
 func NewHandler(options Options) (*Handler, error) {
-	if options.Resolver == nil {
-		options.Resolver = net.DefaultResolver
-	}
 	if len(options.Sources) == 0 {
 		options.Sources = DefaultSources()
 	}
-	if options.Client == nil {
-		options.Client = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	}
-	client := *options.Client
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	transport, transportOK := client.Transport.(*http.Transport)
-	if client.Transport == nil {
-		transport, transportOK = http.DefaultTransport.(*http.Transport).Clone(), true
-	} else if transportOK {
-		transport = transport.Clone()
-	}
-	if transportOK {
-		transport.DisableCompression = true
-		transport.Proxy = nil
-		// HTTPS must flow through DialContext so the address selected by the
-		// policy resolver is the address actually dialed. Custom TLS hooks would
-		// otherwise bypass the pinned dialer entirely.
-		transport.DialTLS = nil
-		transport.DialTLSContext = nil
-		baseDial := transport.DialContext
-		if baseDial == nil {
-			baseDial = (&net.Dialer{}).DialContext
+	manager := options.Upstream
+	if manager == nil {
+		var err error
+		var resolver upstreamclient.Resolver
+		if options.Resolver != nil {
+			resolver = upstreamclient.NetResolverAdapter{Resolver: options.Resolver, TTL: time.Minute, NegativeTTL: 15 * time.Second}
 		}
-		transport.DialContext = (&safeDialer{resolver: options.Resolver, baseDial: baseDial}).DialContext
-		client.Transport = transport
-	} else {
-		for index := range options.Sources {
-			if !options.Sources[index].AllowPrivate {
-				return nil, errors.New("public registry sources require an address-pinning HTTP transport")
-			}
+		manager, err = upstreamclient.New(upstreamclient.Options{
+			Client: options.Client, Resolver: resolver,
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
-	handler := &Handler{client: &client, resolver: options.Resolver, sources: make(map[string]*Source)}
+	handler := &Handler{upstream: manager, sources: make(map[string]*Source)}
 	for index := range options.Sources {
 		source := &options.Sources[index]
 		if err := validateSource(source); err != nil {
@@ -147,48 +128,8 @@ func NewHandler(options Options) (*Handler, error) {
 	return handler, nil
 }
 
-type dialPolicy struct {
-	allowPrivate bool
-}
-
-type dialPolicyKey struct{}
-
-type safeDialer struct {
-	resolver Resolver
-	baseDial func(context.Context, string, string) (net.Conn, error)
-}
-
-func (dialer *safeDialer) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
-	policy, _ := ctx.Value(dialPolicyKey{}).(dialPolicy)
-	if policy.allowPrivate {
-		return dialer.baseDial(ctx, network, address)
-	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil || port != "443" {
-		return nil, errUnsafeUpstream
-	}
-	addresses, err := dialer.resolver.LookupIPAddr(ctx, host)
-	if err != nil || len(addresses) == 0 {
-		return nil, errUnsafeUpstream
-	}
-	for _, candidate := range addresses {
-		if !isPublicIP(candidate.IP) {
-			return nil, errUnsafeUpstream
-		}
-	}
-	var dialErr error
-	for _, candidate := range addresses {
-		connection, err := dialer.baseDial(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
-		if err == nil {
-			return connection, nil
-		}
-		dialErr = err
-	}
-	return nil, dialErr
-}
-
-func withDialPolicy(ctx context.Context, source *Source) context.Context {
-	return context.WithValue(ctx, dialPolicyKey{}, dialPolicy{allowPrivate: source.AllowPrivate})
+func (handler *Handler) Close() error {
+	return handler.upstream.Close()
 }
 
 func validateSource(source *Source) error {
@@ -223,6 +164,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	upstreamURL := *resolved.source.Endpoint
 	upstreamURL.Path = joinURLPath(resolved.source.Endpoint.Path, resolved.upstreamPath)
 	upstreamURL.RawQuery = request.URL.RawQuery
+	if resolved.kind == resourceManifest && request.Method == http.MethodGet {
+		handler.serveCachedManifest(writer, request, resolved, &upstreamURL)
+		return
+	}
 	response, err := handler.fetch(request.Context(), request, resolved, &upstreamURL)
 	if err != nil {
 		writeMappedError(writer, err)
@@ -382,20 +327,22 @@ func (handler *Handler) doFollowing(ctx context.Context, source *Source, request
 		if err := handler.validateOutbound(ctx, source, current.URL, false); err != nil {
 			return nil, err
 		}
-		current = current.WithContext(withDialPolicy(current.Context(), source))
-		response, err := handler.client.Do(current)
+		response, err := handler.upstream.Do(current, upstreamclient.Policy{AllowHTTP: source.AllowHTTP, AllowPrivate: source.AllowPrivate})
 		if err != nil {
+			if errors.Is(err, upstreamclient.ErrUnsafeAddress) || errors.Is(err, upstreamclient.ErrUnsafePort) {
+				return nil, errUnsafeUpstream
+			}
 			return nil, err
 		}
 		if response.StatusCode < 300 || response.StatusCode > 399 || response.Header.Get("Location") == "" {
 			return response, nil
 		}
 		if redirects >= maxRedirects {
-			response.Body.Close()
+			drainAndClose(response.Body)
 			return nil, errors.New("too many registry redirects")
 		}
 		nextURL, err := current.URL.Parse(response.Header.Get("Location"))
-		response.Body.Close()
+		drainAndClose(response.Body)
 		if err != nil {
 			return nil, errUnsafeUpstream
 		}
@@ -490,40 +437,55 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 	}
 	query.Set("scope", expectedScope)
 	realm.RawQuery = query.Encode()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, realm.String(), nil)
+	cacheKey := strings.Join([]string{realm.String(), challenge.service, expectedScope, resolved.source.Name, resolved.repository, "anonymous"}, "\x00")
+	entry, err := handler.upstream.Tokens().GetOrLoad(ctx, cacheKey, func(ctx context.Context) (upstreamclient.Loaded[upstreamclient.TokenEntry], error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, realm.String(), nil)
+		if err != nil {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, err
+		}
+		response, err := handler.upstream.Do(request, upstreamclient.Policy{AllowHTTP: resolved.source.AllowHTTP, AllowPrivate: resolved.source.AllowPrivate})
+		if err != nil {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			drainAndClose(response.Body)
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
+		}
+		body, err := io.ReadAll(io.LimitReader(response.Body, maxTokenBytes+1))
+		if err != nil || len(body) > maxTokenBytes {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
+		}
+		var payload struct {
+			Token       string `json:"token"`
+			AccessToken string `json:"access_token"`
+			ExpiresIn   int64  `json:"expires_in"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
+		}
+		if payload.Token == "" {
+			payload.Token = payload.AccessToken
+		}
+		if payload.Token == "" {
+			return upstreamclient.Loaded[upstreamclient.TokenEntry]{}, errUpstreamAuth
+		}
+		ttl := time.Duration(payload.ExpiresIn) * time.Second
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		if ttl > time.Hour {
+			ttl = time.Hour
+		}
+		return upstreamclient.Loaded[upstreamclient.TokenEntry]{Value: upstreamclient.TokenEntry{Value: payload.Token}, Size: int64(len(payload.Token)), TTL: ttl}, nil
+	})
 	if err != nil {
 		return "", err
 	}
-	request = request.WithContext(withDialPolicy(request.Context(), resolved.source))
-	response, err := handler.client.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", errUpstreamAuth
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxTokenBytes+1))
-	if err != nil || len(body) > maxTokenBytes {
-		return "", errUpstreamAuth
-	}
-	var payload struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", errUpstreamAuth
-	}
-	if payload.Token == "" {
-		payload.Token = payload.AccessToken
-	}
-	if payload.Token == "" {
-		return "", errUpstreamAuth
-	}
-	return payload.Token, nil
+	return entry.Value, nil
 }
 
-func (handler *Handler) validateOutbound(ctx context.Context, source *Source, target *url.URL, token bool) error {
+func (handler *Handler) validateOutbound(_ context.Context, source *Source, target *url.URL, token bool) error {
 	if target == nil || target.User != nil || target.Hostname() == "" || target.Fragment != "" {
 		return errUnsafeUpstream
 	}
@@ -550,20 +512,18 @@ func (handler *Handler) validateOutbound(ctx context.Context, source *Source, ta
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return errUnsafeUpstream
 	}
-	addresses, err := handler.resolver.LookupIPAddr(ctx, host)
-	if err != nil || len(addresses) == 0 {
+	if address := net.ParseIP(host); address != nil && !upstreamclient.IsPublicIP(address) {
 		return errUnsafeUpstream
-	}
-	for _, address := range addresses {
-		if !isPublicIP(address.IP) {
-			return errUnsafeUpstream
-		}
 	}
 	return nil
 }
 
-func isPublicIP(address net.IP) bool {
-	return address != nil && !address.IsUnspecified() && !address.IsLoopback() && !address.IsPrivate() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() && !address.IsMulticast()
+func drainAndClose(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 64<<10))
+	_ = body.Close()
 }
 
 func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, response *http.Response) {
@@ -585,26 +545,93 @@ func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.
 		writer.WriteHeader(response.StatusCode)
 		return
 	}
+	entry, err := manifestEntryFromResponse(resolved, response)
+	if err != nil {
+		writeMappedError(writer, err)
+		return
+	}
+	serveManifestEntry(writer, entry)
+}
+
+type upstreamStatusError struct{ status int }
+
+func (statusError upstreamStatusError) Error() string {
+	return "registry upstream rejected the manifest request"
+}
+
+func (handler *Handler) serveCachedManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, target *url.URL) {
+	key := strings.Join([]string{resolved.source.Name, resolved.repository, resolved.reference, strings.Join(request.Header.Values("Accept"), ","), "anonymous"}, "\x00")
+	entry, err := handler.upstream.Manifests().GetOrLoad(request.Context(), key, func(ctx context.Context) (upstreamclient.Loaded[upstreamclient.ManifestEntry], error) {
+		response, err := handler.fetch(ctx, request, resolved, target)
+		if err != nil {
+			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			drainAndClose(response.Body)
+			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, upstreamStatusError{status: response.StatusCode}
+		}
+		manifest, err := manifestEntryFromResponse(resolved, response)
+		if err != nil {
+			return upstreamclient.Loaded[upstreamclient.ManifestEntry]{}, err
+		}
+		ttl := time.Minute
+		if digestPattern.MatchString(resolved.reference) {
+			ttl = 10 * time.Minute
+		}
+		return upstreamclient.Loaded[upstreamclient.ManifestEntry]{Value: manifest, Size: int64(len(manifest.Body) + headerSize(manifest.Header)), TTL: ttl}, nil
+	})
+	if err != nil {
+		var statusError upstreamStatusError
+		if errors.As(err, &statusError) {
+			writeError(writer, statusError.status, "UPSTREAM_ERROR", "registry upstream rejected the request")
+			return
+		}
+		writeMappedError(writer, err)
+		return
+	}
+	serveManifestEntry(writer, entry)
+}
+
+func manifestEntryFromResponse(resolved resolvedRequest, response *http.Response) (upstreamclient.ManifestEntry, error) {
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
 	if err != nil || len(body) > maxManifestBytes || !validManifest(body, response.Header.Get("Content-Type")) {
-		writeMappedError(writer, errManifestInvalid)
-		return
+		return upstreamclient.ManifestEntry{}, errManifestInvalid
 	}
 	digest := "sha256:" + hashHex(body)
 	upstreamDigest := response.Header.Get("Docker-Content-Digest")
 	if upstreamDigest != "" && !strings.EqualFold(upstreamDigest, digest) {
-		writeMappedError(writer, streaming.ErrDigestMismatch)
-		return
+		return upstreamclient.ManifestEntry{}, streaming.ErrDigestMismatch
 	}
 	if digestPattern.MatchString(resolved.reference) && !strings.EqualFold(resolved.reference, digest) {
-		writeMappedError(writer, streaming.ErrDigestMismatch)
-		return
+		return upstreamclient.ManifestEntry{}, streaming.ErrDigestMismatch
 	}
-	copyResponseHeaders(writer.Header(), response.Header)
-	writer.Header().Set("Docker-Content-Digest", digest)
-	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	writer.WriteHeader(response.StatusCode)
-	_, _ = writer.Write(body)
+	header := make(http.Header)
+	copyResponseHeaders(header, response.Header)
+	header.Set("Docker-Content-Digest", digest)
+	header.Set("Content-Length", strconv.Itoa(len(body)))
+	return upstreamclient.ManifestEntry{Status: response.StatusCode, Header: header, Body: append([]byte(nil), body...), Digest: digest}, nil
+}
+
+func serveManifestEntry(writer http.ResponseWriter, entry upstreamclient.ManifestEntry) {
+	for key, values := range entry.Header {
+		for _, value := range values {
+			writer.Header().Add(key, value)
+		}
+	}
+	writer.WriteHeader(entry.Status)
+	_, _ = writer.Write(entry.Body)
+}
+
+func headerSize(header http.Header) int {
+	size := 0
+	for key, values := range header {
+		size += len(key)
+		for _, value := range values {
+			size += len(value)
+		}
+	}
+	return size
 }
 
 type manifestDescriptor struct {
