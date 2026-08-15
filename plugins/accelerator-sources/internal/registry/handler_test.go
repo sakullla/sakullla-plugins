@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -106,9 +108,19 @@ func TestRegistryBlobRangeAndRedirect(t *testing.T) {
 		_, _ = writer.Write(blob[2:6])
 	}))
 	defer cdn.Close()
-	registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	var registryServer *httptest.Server
+	registryServer = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			_, _ = io.WriteString(writer, `{"token":"blob-token"}`)
+			return
+		}
 		if request.Header.Get("Range") != "bytes=2-5" {
 			t.Errorf("range not forwarded before redirect: %q", request.Header.Get("Range"))
+		}
+		if request.Header.Get("Authorization") != "Bearer blob-token" {
+			writer.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fixture-registry",scope="repository:example/app:pull"`, registryServer.URL+"/token"))
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		http.Redirect(writer, request, cdn.URL+"/layer", http.StatusTemporaryRedirect)
 	}))
@@ -121,6 +133,50 @@ func TestRegistryBlobRangeAndRedirect(t *testing.T) {
 	if recorder.Code != http.StatusPartialContent || recorder.Body.String() != "cdef" || recorder.Header().Get("Content-Range") != "bytes 2-5/10" {
 		t.Fatalf("unexpected range response: status=%d range=%q body=%q", recorder.Code, recorder.Header().Get("Content-Range"), recorder.Body.String())
 	}
+}
+
+func TestRegistryPartialRangeRejectsWrongOrTruncatedIntervals(t *testing.T) {
+	blob := []byte("abcdefghij")
+	digest := registryDigest(blob)
+	t.Run("wrong interval", func(t *testing.T) {
+		registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set("Content-Range", "bytes 3-6/10")
+			writer.Header().Set("Docker-Content-Digest", digest)
+			writer.WriteHeader(http.StatusPartialContent)
+			_, _ = writer.Write(blob[3:7])
+		}))
+		defer registryServer.Close()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/v2/example/app/blobs/"+digest, nil)
+		request.Header.Set("Range", "bytes=2-5")
+		newFixtureHandler(t, registryServer.URL).ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "RANGE_INVALID") {
+			t.Fatalf("wrong interval response: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+	t.Run("chunked truncation", func(t *testing.T) {
+		registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set("Content-Range", "bytes 2-5/10")
+			writer.Header().Set("Docker-Content-Digest", digest)
+			writer.WriteHeader(http.StatusPartialContent)
+			_, _ = writer.Write(blob[2:4])
+			writer.(http.Flusher).Flush()
+		}))
+		defer registryServer.Close()
+		proxy := httptest.NewServer(newFixtureHandler(t, registryServer.URL))
+		defer proxy.Close()
+		request, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v2/example/app/blobs/"+digest, nil)
+		request.Header.Set("Range", "bytes=2-5")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("start partial stream: %v", err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr == nil || !bytes.Equal(body, blob[2:4]) || bytes.Contains(body, []byte(`"errors"`)) {
+			t.Fatalf("truncated partial stream was not aborted cleanly: err=%v body=%q", readErr, body)
+		}
+	})
 }
 
 func TestRegistryLargeBlobStreamsFirstByteAndFinalDigest(t *testing.T) {
@@ -226,8 +282,37 @@ func TestRegistryMidstreamFailureDoesNotAppendError(t *testing.T) {
 	}
 }
 
+func TestRegistrySameLengthWrongDigestAbortsStream(t *testing.T) {
+	correct := []byte("correct-layer-content")
+	wrong := []byte("tampered-layer-bytes!")
+	if len(correct) != len(wrong) {
+		t.Fatal("fixture bodies must be the same length")
+	}
+	digest := registryDigest(correct)
+	registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Length", fmt.Sprint(len(wrong)))
+		writer.Header().Set("Docker-Content-Digest", digest)
+		_, _ = writer.Write(wrong)
+	}))
+	defer registryServer.Close()
+	proxy := httptest.NewServer(newFixtureHandler(t, registryServer.URL))
+	defer proxy.Close()
+	response, err := http.Get(proxy.URL + "/v2/example/app/blobs/" + digest)
+	if err != nil {
+		t.Fatalf("start digest failure stream: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr == nil {
+		t.Fatal("same-length digest failure completed successfully")
+	}
+	if !bytes.Equal(body, wrong) || bytes.Contains(body, []byte(`"errors"`)) {
+		t.Fatalf("digest failure appended or changed content: %q", body)
+	}
+}
+
 func TestRegistryRejectsBadManifestDigestAndUnsupportedTargets(t *testing.T) {
-	manifest := []byte(`{"schemaVersion":2}`)
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}`)
 	registryServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Docker-Content-Digest", "sha256:"+strings.Repeat("0", 64))
 		_, _ = writer.Write(manifest)
@@ -242,13 +327,20 @@ func TestRegistryRejectsBadManifestDigestAndUnsupportedTargets(t *testing.T) {
 	}
 
 	invalidManifestServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`{"schemaVersion":1}`))
+		_, _ = writer.Write([]byte(`{"schemaVersion":2}`))
 	}))
 	defer invalidManifestServer.Close()
 	invalidManifest := httptest.NewRecorder()
 	newFixtureHandler(t, invalidManifestServer.URL).ServeHTTP(invalidManifest, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
 	if invalidManifest.Code != http.StatusBadGateway || !strings.Contains(invalidManifest.Body.String(), "MANIFEST_INVALID") {
 		t.Fatalf("invalid manifest response: status=%d body=%s", invalidManifest.Code, invalidManifest.Body.String())
+	}
+
+	headMismatch := httptest.NewRecorder()
+	headRequest := httptest.NewRequest(http.MethodHead, "/v2/example/app/manifests/"+registryDigest(manifest), nil)
+	handler.ServeHTTP(headMismatch, headRequest)
+	if headMismatch.Code != http.StatusBadGateway || !strings.Contains(headMismatch.Body.String(), "DIGEST_INVALID") {
+		t.Fatalf("digest-addressed HEAD mismatch response: status=%d body=%s", headMismatch.Code, headMismatch.Body.String())
 	}
 
 	unsupported := httptest.NewRecorder()
@@ -274,6 +366,57 @@ func TestRegistryRejectsLoopbackWithoutFixtureOverride(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsPrivateRedirectAndNonHTTPSPort(t *testing.T) {
+	publicEndpoint, _ := url.Parse("https://registry.public.test")
+	source := &Source{Name: "docker.io", Endpoint: publicEndpoint}
+	var calls atomic.Int32
+	handler := &Handler{
+		client: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusTemporaryRedirect,
+					Header:     http.Header{"Location": []string{"https://169.254.1.1/layer"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    request,
+				}, nil
+			}),
+		},
+		resolver: hostResolver{},
+	}
+	request, _ := http.NewRequest(http.MethodGet, "https://registry.public.test/v2/example/app/blobs/value", nil)
+	_, err := handler.doFollowing(context.Background(), source, request)
+	if !errors.Is(err, errUnsafeUpstream) || calls.Load() != 1 {
+		t.Fatalf("private redirect was not rejected before its dial: calls=%d err=%v", calls.Load(), err)
+	}
+
+	portEndpoint, _ := url.Parse("https://registry.public.test:444/v2")
+	if err := handler.validateOutbound(context.Background(), source, portEndpoint, false); !errors.Is(err, errUnsafeUpstream) {
+		t.Fatalf("non-HTTPS-default port was accepted: %v", err)
+	}
+}
+
+func TestRegistryRebindingIsRejectedAtPinnedDial(t *testing.T) {
+	endpoint, _ := url.Parse("https://rebind.public.test")
+	resolver := &sequenceResolver{answers: [][]net.IPAddr{
+		{{IP: net.ParseIP("8.8.8.8")}},
+		{{IP: net.ParseIP("127.0.0.1")}},
+	}}
+	handler, err := NewHandler(Options{Resolver: resolver, Sources: []Source{{Name: "docker.io", Endpoint: endpoint}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v2/example/app/manifests/latest", nil))
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "UPSTREAM_FORBIDDEN") {
+		t.Fatalf("rebinding dial was not rejected: calls=%d status=%d body=%s", resolver.calls.Load(), recorder.Code, recorder.Body.String())
+	}
+	if resolver.calls.Load() != 2 {
+		t.Fatalf("expected preflight and pinned-dial resolutions, got %d", resolver.calls.Load())
+	}
+}
+
 func newFixtureHandler(t *testing.T, endpointValue string) *Handler {
 	t.Helper()
 	endpoint, err := url.Parse(endpointValue)
@@ -289,4 +432,32 @@ func newFixtureHandler(t *testing.T, endpointValue string) *Handler {
 
 func registryDigest(body []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(body))
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+type hostResolver struct{}
+
+func (hostResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	if address := net.ParseIP(host); address != nil {
+		return []net.IPAddr{{IP: address}}, nil
+	}
+	return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+}
+
+type sequenceResolver struct {
+	calls   atomic.Int32
+	answers [][]net.IPAddr
+}
+
+func (resolver *sequenceResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	index := int(resolver.calls.Add(1)) - 1
+	if index >= len(resolver.answers) {
+		index = len(resolver.answers) - 1
+	}
+	return resolver.answers[index], nil
 }

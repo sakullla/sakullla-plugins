@@ -50,13 +50,19 @@ type Source struct {
 // user configuration; an empty value installs the fixed product defaults.
 type Options struct {
 	Client   *http.Client
-	Resolver *net.Resolver
+	Resolver Resolver
 	Sources  []Source
+}
+
+// Resolver is the bounded DNS capability used both for preflight policy and
+// for the transport's actual, address-pinned dial.
+type Resolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
 
 type Handler struct {
 	client   *http.Client
-	resolver *net.Resolver
+	resolver Resolver
 	sources  map[string]*Source
 	docker   *Source
 }
@@ -82,18 +88,38 @@ func mustSource(name string, rawURL string, aliases []string, tokenHosts []strin
 }
 
 func NewHandler(options Options) (*Handler, error) {
-	if options.Client == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.DisableCompression = true
-		options.Client = &http.Client{Transport: transport}
-	}
-	client := *options.Client
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if options.Resolver == nil {
 		options.Resolver = net.DefaultResolver
 	}
 	if len(options.Sources) == 0 {
 		options.Sources = DefaultSources()
+	}
+	if options.Client == nil {
+		options.Client = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	}
+	client := *options.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	transport, transportOK := client.Transport.(*http.Transport)
+	if client.Transport == nil {
+		transport, transportOK = http.DefaultTransport.(*http.Transport).Clone(), true
+	} else if transportOK {
+		transport = transport.Clone()
+	}
+	if transportOK {
+		transport.DisableCompression = true
+		transport.Proxy = nil
+		baseDial := transport.DialContext
+		if baseDial == nil {
+			baseDial = (&net.Dialer{}).DialContext
+		}
+		transport.DialContext = (&safeDialer{resolver: options.Resolver, baseDial: baseDial}).DialContext
+		client.Transport = transport
+	} else {
+		for index := range options.Sources {
+			if !options.Sources[index].AllowPrivate {
+				return nil, errors.New("public registry sources require an address-pinning HTTP transport")
+			}
+		}
 	}
 	handler := &Handler{client: &client, resolver: options.Resolver, sources: make(map[string]*Source)}
 	for index := range options.Sources {
@@ -114,6 +140,50 @@ func NewHandler(options Options) (*Handler, error) {
 		}
 	}
 	return handler, nil
+}
+
+type dialPolicy struct {
+	allowPrivate bool
+}
+
+type dialPolicyKey struct{}
+
+type safeDialer struct {
+	resolver Resolver
+	baseDial func(context.Context, string, string) (net.Conn, error)
+}
+
+func (dialer *safeDialer) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	policy, _ := ctx.Value(dialPolicyKey{}).(dialPolicy)
+	if policy.allowPrivate {
+		return dialer.baseDial(ctx, network, address)
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port != "443" {
+		return nil, errUnsafeUpstream
+	}
+	addresses, err := dialer.resolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addresses) == 0 {
+		return nil, errUnsafeUpstream
+	}
+	for _, candidate := range addresses {
+		if !isPublicIP(candidate.IP) {
+			return nil, errUnsafeUpstream
+		}
+	}
+	var dialErr error
+	for _, candidate := range addresses {
+		connection, err := dialer.baseDial(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		if err == nil {
+			return connection, nil
+		}
+		dialErr = err
+	}
+	return nil, dialErr
+}
+
+func withDialPolicy(ctx context.Context, source *Source) context.Context {
+	return context.WithValue(ctx, dialPolicyKey{}, dialPolicy{allowPrivate: source.AllowPrivate})
 }
 
 func validateSource(source *Source) error {
@@ -187,6 +257,7 @@ var (
 	errUnsafeUpstream      = errors.New("unsafe upstream")
 	errUpstreamAuth        = errors.New("upstream authentication failed")
 	errManifestInvalid     = errors.New("manifest is invalid")
+	errRangeInvalid        = errors.New("registry range is invalid")
 )
 
 func (handler *Handler) resolve(requestPath string) (resolvedRequest, error) {
@@ -306,6 +377,7 @@ func (handler *Handler) doFollowing(ctx context.Context, source *Source, request
 		if err := handler.validateOutbound(ctx, source, current.URL, false); err != nil {
 			return nil, err
 		}
+		current = current.WithContext(withDialPolicy(current.Context(), source))
 		response, err := handler.client.Do(current)
 		if err != nil {
 			return nil, err
@@ -417,6 +489,7 @@ func (handler *Handler) fetchToken(ctx context.Context, resolved resolvedRequest
 	if err != nil {
 		return "", err
 	}
+	request = request.WithContext(withDialPolicy(request.Context(), resolved.source))
 	response, err := handler.client.Do(request)
 	if err != nil {
 		return "", err
@@ -450,6 +523,10 @@ func (handler *Handler) validateOutbound(ctx context.Context, source *Source, ta
 		return errUnsafeUpstream
 	}
 	if target.Scheme != "https" && !(source.AllowHTTP && target.Scheme == "http") {
+		return errUnsafeUpstream
+	}
+	port := target.Port()
+	if !source.AllowPrivate && port != "" && port != "443" {
 		return errUnsafeUpstream
 	}
 	if token {
@@ -486,12 +563,25 @@ func isPublicIP(address net.IP) bool {
 
 func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, response *http.Response) {
 	if request.Method == http.MethodHead {
+		advertised := response.Header.Get("Docker-Content-Digest")
+		if advertised != "" && !digestPattern.MatchString(advertised) {
+			writeMappedError(writer, streaming.ErrDigestInvalid)
+			return
+		}
+		if digestPattern.MatchString(resolved.reference) && !strings.EqualFold(advertised, resolved.reference) {
+			writeMappedError(writer, streaming.ErrDigestMismatch)
+			return
+		}
+		if mediaType := response.Header.Get("Content-Type"); mediaType != "" && !recognizedManifestMediaType(mediaType) {
+			writeMappedError(writer, errManifestInvalid)
+			return
+		}
 		copyResponseHeaders(writer.Header(), response.Header)
 		writer.WriteHeader(response.StatusCode)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
-	if err != nil || len(body) > maxManifestBytes || !validManifest(body) {
+	if err != nil || len(body) > maxManifestBytes || !validManifest(body, response.Header.Get("Content-Type")) {
 		writeMappedError(writer, errManifestInvalid)
 		return
 	}
@@ -512,11 +602,69 @@ func (handler *Handler) serveManifest(writer http.ResponseWriter, request *http.
 	_, _ = writer.Write(body)
 }
 
-func validManifest(body []byte) bool {
+type manifestDescriptor struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Size      *int64 `json:"size"`
+}
+
+func validManifest(body []byte, contentType string) bool {
 	var envelope struct {
-		SchemaVersion int `json:"schemaVersion"`
+		SchemaVersion int                  `json:"schemaVersion"`
+		MediaType     string               `json:"mediaType"`
+		Config        *manifestDescriptor  `json:"config"`
+		Layers        []manifestDescriptor `json:"layers"`
+		Manifests     []manifestDescriptor `json:"manifests"`
 	}
-	return json.Unmarshal(body, &envelope) == nil && envelope.SchemaVersion == 2
+	if json.Unmarshal(body, &envelope) != nil || envelope.SchemaVersion != 2 {
+		return false
+	}
+	mediaType := envelope.MediaType
+	if mediaType == "" {
+		mediaType = contentType
+	}
+	mediaType = strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0])
+	switch mediaType {
+	case "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json":
+		if envelope.Config == nil || envelope.Layers == nil || !validManifestDescriptor(*envelope.Config) {
+			return false
+		}
+		for _, descriptor := range envelope.Layers {
+			if !validManifestDescriptor(descriptor) {
+				return false
+			}
+		}
+		return true
+	case "application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.index.v1+json":
+		if len(envelope.Manifests) == 0 {
+			return false
+		}
+		for _, descriptor := range envelope.Manifests {
+			if !validManifestDescriptor(descriptor) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func recognizedManifestMediaType(value string) bool {
+	value = strings.TrimSpace(strings.SplitN(value, ";", 2)[0])
+	switch value {
+	case "application/vnd.docker.distribution.manifest.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.index.v1+json":
+		return true
+	default:
+		return false
+	}
+}
+
+func validManifestDescriptor(descriptor manifestDescriptor) bool {
+	return descriptor.MediaType != "" && descriptor.Size != nil && *descriptor.Size >= 0 && digestPattern.MatchString(descriptor.Digest)
 }
 
 func hashHex(value []byte) string {
@@ -526,26 +674,124 @@ func hashHex(value []byte) string {
 
 func (handler *Handler) serveStream(writer http.ResponseWriter, request *http.Request, resolved resolvedRequest, response *http.Response) {
 	expectedDigest := ""
+	expectedLength := response.ContentLength
 	if resolved.kind == resourceBlob {
 		if response.StatusCode != http.StatusPartialContent {
 			expectedDigest = resolved.reference
 		}
-		if advertised := response.Header.Get("Docker-Content-Digest"); advertised != "" && !strings.EqualFold(advertised, resolved.reference) {
+		advertised := response.Header.Get("Docker-Content-Digest")
+		if advertised != "" && !strings.EqualFold(advertised, resolved.reference) {
 			writeMappedError(writer, streaming.ErrDigestMismatch)
 			return
 		}
+		if request.Method == http.MethodHead && advertised == "" {
+			writeMappedError(writer, streaming.ErrDigestInvalid)
+			return
+		}
+		if response.StatusCode == http.StatusPartialContent {
+			var err error
+			expectedLength, err = validatePartialRange(request.Header.Get("Range"), response.Header.Get("Content-Range"))
+			if err != nil || (response.ContentLength >= 0 && response.ContentLength != expectedLength) {
+				writeMappedError(writer, errRangeInvalid)
+				return
+			}
+		}
 	}
 	copyResponseHeaders(writer.Header(), response.Header)
+	if request.Method != http.MethodHead {
+		// Declaring a trailer forces framed streaming instead of a fixed-size
+		// response. A late integrity failure can then abort observably rather
+		// than looking like a successfully completed Content-Length body.
+		writer.Header().Del("Content-Length")
+		writer.Header().Set("Trailer", "X-Accelerator-Stream-Error")
+	}
 	writer.WriteHeader(response.StatusCode)
 	if request.Method == http.MethodHead {
 		return
 	}
-	_, err := streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: response.ContentLength, ExpectedDigest: expectedDigest, Flush: streaming.FlushFunc(writer)})
+	_, err := streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: expectedLength, ExpectedDigest: expectedDigest, Flush: streaming.FlushFunc(writer)})
 	if err != nil {
+		writer.Header().Set("X-Accelerator-Stream-Error", "integrity-failure")
 		// The response is already committed. Abort the HTTP stream instead of
 		// appending an error representation to registry bytes.
 		panic(http.ErrAbortHandler)
 	}
+}
+
+type requestedByteRange struct {
+	start  int64
+	end    int64
+	suffix int64
+	open   bool
+}
+
+func validatePartialRange(requestRange string, contentRange string) (int64, error) {
+	requested, err := parseRequestedRange(requestRange)
+	if err != nil {
+		return 0, err
+	}
+	if !strings.HasPrefix(contentRange, "bytes ") {
+		return 0, errRangeInvalid
+	}
+	interval, totalValue, found := strings.Cut(strings.TrimPrefix(contentRange, "bytes "), "/")
+	if !found || totalValue == "*" {
+		return 0, errRangeInvalid
+	}
+	startValue, endValue, found := strings.Cut(interval, "-")
+	if !found {
+		return 0, errRangeInvalid
+	}
+	start, startErr := strconv.ParseInt(startValue, 10, 64)
+	end, endErr := strconv.ParseInt(endValue, 10, 64)
+	total, totalErr := strconv.ParseInt(totalValue, 10, 64)
+	if startErr != nil || endErr != nil || totalErr != nil || start < 0 || end < start || total <= end {
+		return 0, errRangeInvalid
+	}
+	expectedStart, expectedEnd := requested.start, requested.end
+	if requested.suffix > 0 {
+		expectedStart = total - requested.suffix
+		if expectedStart < 0 {
+			expectedStart = 0
+		}
+		expectedEnd = total - 1
+	} else if requested.open {
+		expectedEnd = total - 1
+	} else if expectedEnd >= total {
+		expectedEnd = total - 1
+	}
+	if start != expectedStart || end != expectedEnd {
+		return 0, errRangeInvalid
+	}
+	return end - start + 1, nil
+}
+
+func parseRequestedRange(value string) (requestedByteRange, error) {
+	if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+		return requestedByteRange{}, errRangeInvalid
+	}
+	startValue, endValue, found := strings.Cut(strings.TrimPrefix(value, "bytes="), "-")
+	if !found || (startValue == "" && endValue == "") {
+		return requestedByteRange{}, errRangeInvalid
+	}
+	if startValue == "" {
+		suffix, err := strconv.ParseInt(endValue, 10, 64)
+		if err != nil || suffix <= 0 {
+			return requestedByteRange{}, errRangeInvalid
+		}
+		return requestedByteRange{suffix: suffix}, nil
+	}
+	start, err := strconv.ParseInt(startValue, 10, 64)
+	if err != nil || start < 0 {
+		return requestedByteRange{}, errRangeInvalid
+	}
+	if endValue == "" {
+		return requestedByteRange{start: start, open: true}, nil
+	}
+	end, err := strconv.ParseInt(endValue, 10, 64)
+	if err != nil || end < start {
+		return requestedByteRange{}, errRangeInvalid
+	}
+	return requestedByteRange{start: start, end: end}, nil
 }
 
 func copyResponseHeaders(destination http.Header, source http.Header) {
@@ -577,6 +823,8 @@ func writeMappedError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusBadGateway, "UNAUTHORIZED", "registry token exchange failed")
 	case errors.Is(err, errManifestInvalid):
 		writeError(writer, http.StatusBadGateway, "MANIFEST_INVALID", "registry manifest is invalid")
+	case errors.Is(err, errRangeInvalid):
+		writeError(writer, http.StatusBadGateway, "RANGE_INVALID", "registry partial response is invalid")
 	case errors.Is(err, streaming.ErrDigestMismatch), errors.Is(err, streaming.ErrDigestInvalid), errors.Is(err, streaming.ErrLengthMismatch):
 		writeError(writer, http.StatusBadGateway, "DIGEST_INVALID", "registry content integrity check failed")
 	default:
