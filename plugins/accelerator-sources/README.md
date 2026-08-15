@@ -1,13 +1,15 @@
 # Accelerator Sources
 
-This package is a control-plane business model for Docker and GitHub
-accelerator sources. It stores only canonical HTTPS source configuration and
-host-attested probe status. It generates copyable output and never applies
-host configuration, proxies content, resolves DNS, or opens network sockets.
+Accelerator Sources is an Agent-scoped, zero-configuration HTTP backend
+provider. The `default` provider serves Docker Registry-compatible endpoints,
+Docker Hub catalog and offline image export APIs, GitHub and Hugging Face
+proxies, script rewriting, and the embedded web interface.
 
-All probing, scheduling, dynamic UI, and audit operations require future
-canonical typed public SDK handles. The production entrypoint therefore fails
-closed while those handles are absent. The injected adapter interfaces in this
-package are process-local business seams for deterministic tests; they are not
-a Host RPC or wire contract.
+The plugin runs entirely in its own process. The Host owns the private provider
+socket, generation credential, readiness checks, and request authority. The
+plugin owns generation-local DNS, token and manifest caches, upstream
+connection pools, and closes them after the Host drains the generation.
 
+All upstream access uses the shared in-process upstream manager. No Docker
+daemon, container runtime, virtual machine, database, sidecar, or external
+helper application is required.

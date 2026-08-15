@@ -2,14 +2,14 @@ schema_version: 1
 id: accelerator-sources
 version: 0.1.0
 name: Accelerator Sources
-description: Brokered Docker and GitHub accelerator source control plane
+description: Zero-configuration Docker, GitHub, and Hugging Face acceleration provider
 compatibility:
   host: "*"
   agent: "*"
 runtime:
   kind: rpc-service
   abi: nre:rpc/v1
-  host_scope: control-plane
+  host_scope: agent
   entry: accelerator-sources
 artifacts:
   - path: artifacts/linux-amd64/accelerator-sources
@@ -19,14 +19,12 @@ artifacts:
     goos: linux
     goarch: amd64
 extension_points:
-  - container.provider
+  - http.backend-provider
+http_backend_providers:
+  - id: default
+    display_name: Accelerator Sources
 permissions:
-  - name: agent.read
-  - name: agent.configure
-  - name: container.read
-  - name: container.manage
-  - name: event.emit
-  - name: service.revocable-resource-handle
+  - name: http.outbound
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

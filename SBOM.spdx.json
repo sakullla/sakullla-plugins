@@ -25,9 +25,19 @@
       "copyrightText": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-Package-klauspost-compress",
+      "name": "github.com/klauspost/compress",
+      "versionInfo": "v1.19.2",
+      "downloadLocation": "github.com/klauspost/compress",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-Package-plugin-sdk",
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "versionInfo": "v0.3.3",
+      "versionInfo": "v0.3.4-0.20260815184225-cd62e17577bf",
       "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
       "filesAnalyzed": false,
       "licenseConcluded": "GPL-3.0-only",
@@ -55,6 +65,16 @@
       "copyrightText": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-Package-x-net",
+      "name": "golang.org/x/net",
+      "versionInfo": "v0.26.0",
+      "downloadLocation": "https://go.googlesource.com/net",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-Package-x-sys",
       "name": "golang.org/x/sys",
       "versionInfo": "v0.44.0",
@@ -67,11 +87,21 @@
     {
       "SPDXID": "SPDXRef-Package-x-text",
       "name": "golang.org/x/text",
-      "versionInfo": "v0.14.0",
+      "versionInfo": "v0.16.0",
       "downloadLocation": "https://go.googlesource.com/text",
       "filesAnalyzed": false,
       "licenseConcluded": "BSD-3-Clause",
       "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-grpc",
+      "name": "google.golang.org/grpc",
+      "versionInfo": "v1.66.2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION"
     },
     {
@@ -99,17 +129,17 @@
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-klauspost-compress"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-plugin-sdk"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-jsonschema-v6"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-jsonschema-v6",
-      "relationshipType": "DEPENDS_ON",
-      "relatedSpdxElement": "SPDXRef-Package-x-text"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
@@ -119,7 +149,22 @@
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-net"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-x-sys"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-text"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-grpc"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",

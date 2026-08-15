@@ -108,3 +108,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 func (handler *Handler) Close() error {
 	return handler.upstream.Close()
 }
+
+// Metrics returns the generation-local upstream counters.
+func (handler *Handler) Metrics() upstream.Metrics {
+	return handler.upstream.Snapshot()
+}

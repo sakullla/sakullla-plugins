@@ -1,561 +1,432 @@
 package acceleratorsources_test
 
 import (
-	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
-	"errors"
-	"strings"
-	"sync"
-	"sync/atomic"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/protoschema"
 	acceleratorsources "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-func TestProbeControllerRPCGrantsGenerationRevokeAndDefaultFailClosed(t *testing.T) {
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+func TestProductionEntrypointServesLifecycleAndPrivateProvider(t *testing.T) {
+	root := shortTempDir(t)
+	rpcSocket := filepath.Join(root, "rpc.sock")
+	providerSocket := filepath.Join(root, "http.sock")
+	cookie := "0123456789abcdef0123456789abcdef"
+	cookiePath := filepath.Join(root, "cookie")
+	if err := os.WriteFile(cookiePath, []byte(cookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endpointConfig := pluginsdk.HTTPBackendProviderEndpointConfig{Version: pluginsdk.HTTPBackendProviderEndpointConfigVersion, Providers: []pluginsdk.HTTPBackendProviderEndpoint{{InstanceID: "instance-one", ProviderID: acceleratorsources.ProviderID, Generation: "generation-one", Endpoint: filepath.Base(providerSocket), Credential: "abcdef0123456789abcdef0123456789"}}}
+	payload, err := json.Marshal(endpointConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing := handshake([]string{"dynamic-ui", "network-probe", "scheduler"})
-	if _, err := controller.Handshake(context.Background(), missing); err == nil {
-		t.Fatal("missing audit grant was accepted")
+	configPath := filepath.Join(root, "providers.json")
+	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(root, "empty-path"))
+	t.Setenv("NRE_PLUGIN_ENDPOINT", "unix:"+rpcSocket)
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", cookiePath)
+	t.Setenv(pluginsdk.EnvHTTPBackendProviderConfigFile, configPath)
+	t.Setenv(pluginsdk.EnvHTTPBackendProviderEndpointDirectory, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- acceleratorsources.RunEntrypoint(ctx, nil, os.Stdout) }()
+	connection := dialUnixGRPC(t, rpcSocket)
+	defer connection.Close()
+	client := wireClient{connection: connection, cookie: cookie}
+	request := handshakeRequest("generation-one")
+	if _, err := client.handshake(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := client.lifecycle(t.Context(), "Prepare", pluginsdk.LifecycleRequest{Generation: request.Generation, Config: []byte(`{}`)}); err != nil || result.Error != nil {
+		t.Fatalf("prepare = %+v, %v", result, err)
+	}
+	if result, err := client.lifecycle(t.Context(), "Activate", pluginsdk.LifecycleRequest{Generation: request.Generation}); err != nil || result.Error != nil {
+		t.Fatalf("activate = %+v, %v", result, err)
 	}
 
-	controller, err = acceleratorsources.NewController(acceleratorsources.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil || response.ABI != pluginsdk.RPCABIV1 {
-		t.Fatalf("handshake response=%#v err=%v", response, err)
-	}
-	wire := configurationWire(t, "generation-1", 1)
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire}); response.Error != nil || len(controller.Sources()) != 1 {
-		t.Fatalf("prepare response=%#v sources=%v", response, controller.Sources())
-	}
-	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error == nil || len(controller.Sources()) != 0 {
-		t.Fatalf("default admission response=%#v sources=%v", response, controller.Sources())
-	}
-}
-
-func TestProbeControllerInjectedHandlesScheduleAuditAndStopCleanup(t *testing.T) {
-	var commits, aborts, schedules, audits atomic.Int32
-	var activationOperationKey string
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact",
-		ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
-			if record.Action != "activate" {
-				t.Fatalf("activation audit=%#v", record)
-			}
-			if record.Outcome == "started" {
-				activationOperationKey = strings.TrimSuffix(record.OperationKey, ":started")
-			}
-			wantKey := activationOperationKey + ":terminal"
-			if record.Outcome == "started" {
-				wantKey = activationOperationKey + ":started"
-			}
-			if activationOperationKey == "" || record.OperationKey != wantKey {
-				t.Fatalf("unstable activation operation key: %#v", record)
-			}
-			audits.Add(1)
-			return nil
-		}),
-		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(_ context.Context, request pluginsdk.RPCHandshakeRequest, configuration acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-			if request.Generation != configuration.Generation {
-				t.Fatal("admission generation drift")
-			}
-			return acceleratorsources.PreparedAdmissionFuncs{
-				CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
-					commits.Add(1)
-					return acceleratorsources.RuntimeAdapters{
-						Probe: acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
-							return acceleratorsources.ProbeObservation{}, nil
-						}),
-						Scheduler: acceleratorsources.SchedulerFunc(func(_ context.Context, registration acceleratorsources.SchedulerRegistration) error {
-							if registration.Generation != "generation-1" || registration.Interval != time.Minute || registration.MaxConcurrency != 2 || registration.OperationKey != activationOperationKey {
-								t.Fatalf("scheduler registration=%#v", registration)
-							}
-							schedules.Add(1)
-							return nil
-						}),
-						UI:      acceleratorsources.DynamicUIFunc(func(context.Context, acceleratorsources.DynamicEvent) error { return nil }),
-						Auditor: acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
-					}, nil
-				},
-				AbortFunc: func() { aborts.Add(1) },
-			}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 2)}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	if commits.Load() != 1 || schedules.Load() != 1 || audits.Load() != 2 || len(controller.Sources()) != 2 {
-		t.Fatalf("commits=%d schedules=%d audits=%d sources=%v", commits.Load(), schedules.Load(), audits.Load(), controller.Sources())
-	}
-	if response := controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil || aborts.Load() != 1 || len(controller.Sources()) != 0 {
-		t.Fatalf("stop=%#v aborts=%d sources=%v", response, aborts.Load(), controller.Sources())
-	}
-}
-
-func TestProbeControllerLateAdmissionDeadlineAbortsAndCannotCommit(t *testing.T) {
-	var aborts, lasting atomic.Int32
-	trace := &eventTrace{}
-	started, release := make(chan struct{}), make(chan struct{})
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact", ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond,
-		ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
-			trace.add("audit:" + record.Action + ":" + record.Outcome)
-			return nil
-		}),
-		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-			return acceleratorsources.PreparedAdmissionFuncs{
-				CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
-					lasting.Store(1)
-					close(started)
-					<-release
-					return validRuntimeAdapters(), nil
-				},
-				AbortFunc: func() { lasting.Store(0); aborts.Add(1) },
-			}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	result := make(chan pluginsdk.LifecycleResponse, 1)
-	go func() {
-		result <- controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-	}()
-	<-started
-	response := <-result
-	if response.Error == nil || aborts.Load() != 1 || lasting.Load() != 0 || len(controller.Sources()) != 0 {
-		t.Fatalf("deadline response=%#v aborts=%d lasting=%d sources=%v", response, aborts.Load(), lasting.Load(), controller.Sources())
-	}
-	assertTrace(t, trace.snapshot(), []string{"audit:activate:started", "audit:activate:failed"})
-	close(release)
-	time.Sleep(30 * time.Millisecond)
-	if aborts.Load() != 1 || lasting.Load() != 0 || len(controller.Sources()) != 0 {
-		t.Fatalf("late result committed: aborts=%d lasting=%d sources=%v", aborts.Load(), lasting.Load(), controller.Sources())
-	}
-}
-
-func TestProbeControllerStrictBoundsGenerationAndSecretSafeErrors(t *testing.T) {
-	secret := "url-password-material"
-	for name, wire := range map[string][]byte{
-		"unknown":    append(configurationWire(t, "generation-1", 0)[:len(configurationWire(t, "generation-1", 0))-1], []byte(`,"unknown":true}`)...),
-		"generation": configurationWire(t, "other-generation", 0),
-		"bound":      configurationWire(t, "generation-1", acceleratorsources.MaxSources+1),
-		"secret":     unsafeConfigurationWire(t, secret),
+	httpClient := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", providerSocket)
+	}}}
+	for name, mutate := range map[string]func(*http.Request){
+		"credential": func(request *http.Request) {
+			request.Header.Set(pluginsdk.HeaderHTTPBackendProviderCredential, "00000000000000000000000000000000")
+		},
+		"generation": func(request *http.Request) {
+			request.Header.Set(pluginsdk.HeaderHTTPBackendProviderGeneration, "wrong-generation")
+		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-				t.Fatal(err)
-			}
-			response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire})
-			if response.Error == nil || strings.Contains(response.Error.Error(), secret) || len(controller.Sources()) != 0 {
-				t.Fatalf("unsafe config response=%#v sources=%v", response, controller.Sources())
+		t.Run("reject-"+name, func(t *testing.T) {
+			request, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://provider.nre.internal/", nil)
+			setProviderHeaders(request, endpointConfig.Providers[0])
+			mutate(request)
+			response := doEventually(t, httpClient, request)
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d", response.StatusCode)
 			}
 		})
 	}
-}
-
-func TestProbeEntrypointCanonicalRPCHandshakeAndRuntimeFailClosed(t *testing.T) {
-	var output bytes.Buffer
-	if err := acceleratorsources.RunEntrypoint(context.Background(), []string{acceleratorsources.CIHandshakeFlag}, &output); err != nil || strings.TrimSpace(output.String()) != pluginsdk.RPCABIV1 {
-		t.Fatalf("CI handshake output=%q err=%v", output.String(), err)
+	readyRequest, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://provider.nre.internal"+pluginsdk.HTTPBackendProviderReadyPath, nil)
+	setProviderHeaders(readyRequest, endpointConfig.Providers[0])
+	readyRequest.Header.Set(pluginsdk.HeaderHTTPBackendProviderProbe, "ready-v1")
+	readyResponse := doEventually(t, httpClient, readyRequest)
+	_ = readyResponse.Body.Close()
+	if readyResponse.StatusCode != http.StatusNoContent || readyResponse.Header.Get(pluginsdk.HeaderHTTPBackendProviderID) != acceleratorsources.ProviderID {
+		t.Fatalf("provider readiness = %d/%q", readyResponse.StatusCode, readyResponse.Header.Get(pluginsdk.HeaderHTTPBackendProviderID))
 	}
-	if err := acceleratorsources.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, acceleratorsources.ErrTypedHandlesUnavailable) {
-		t.Fatalf("runtime did not fail closed: %v", err)
+	providerRequest, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://provider.nre.internal/", nil)
+	setProviderHeaders(providerRequest, endpointConfig.Providers[0])
+	response := doEventually(t, httpClient, providerRequest)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("provider status = %d", response.StatusCode)
 	}
-}
-
-func TestTerminalActivationAuditSequenceSuccessAndFailures(t *testing.T) {
-	for _, test := range []struct {
-		name                                          string
-		admissionFail, scheduleFail, successAuditFail bool
-		wantError                                     bool
-		want                                          []string
-	}{
-		{name: "success", want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded"}},
-		{name: "admission-failure", admissionFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "audit:activate:failed"}},
-		{name: "scheduler-failure", scheduleFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "admission:abort", "audit:activate:failed"}},
-		{name: "ambiguous-terminal-audit-compensates", successAuditFail: true, wantError: true, want: []string{"audit:activate:started", "admission:prepare", "ui:activate-start", "scheduler:register", "audit:activate:succeeded", "admission:abort", "audit:activate:succeeded"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			trace := &eventTrace{}
-			var lasting atomic.Int32
-			var auditFailed atomic.Bool
-			controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-				PackageDigest: "package", ArtifactDigest: "artifact",
-				ActivationAuditor: acceleratorsources.AuditorFunc(func(_ context.Context, record acceleratorsources.AuditRecord) error {
-					trace.add("audit:" + record.Action + ":" + record.Outcome)
-					if test.successAuditFail && record.Outcome == "succeeded" && auditFailed.CompareAndSwap(false, true) {
-						return errors.New("raw audit secret")
-					}
-					return nil
-				}),
-				Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-					trace.add("admission:prepare")
-					if test.admissionFail {
-						return nil, errors.New("raw admission secret")
-					}
-					return acceleratorsources.PreparedAdmissionFuncs{
-						CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
-							lasting.Store(1)
-							return acceleratorsources.RuntimeAdapters{
-								Probe: acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
-									return acceleratorsources.ProbeObservation{}, nil
-								}),
-								Scheduler: acceleratorsources.SchedulerFunc(func(context.Context, acceleratorsources.SchedulerRegistration) error {
-									trace.add("scheduler:register")
-									if test.scheduleFail {
-										return errors.New("raw scheduler secret")
-									}
-									return nil
-								}),
-								UI: acceleratorsources.DynamicUIFunc(func(_ context.Context, event acceleratorsources.DynamicEvent) error {
-									trace.add("ui:" + event.Action)
-									return nil
-								}),
-								Auditor: acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
-							}, nil
-						},
-						AbortFunc: func() { lasting.Store(0); trace.add("admission:abort") },
-					}, nil
-				}),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-				t.Fatal(err)
-			}
-			if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
-				t.Fatal(response.Error)
-			}
-			response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-			if (response.Error != nil) != test.wantError || (response.Error != nil && strings.Contains(response.Error.Error(), "secret")) {
-				t.Fatalf("activation response=%#v", response)
-			}
-			assertTrace(t, trace.snapshot(), test.want)
-			if test.wantError && lasting.Load() != 0 {
-				t.Fatalf("failed activation left lasting effect=%d", lasting.Load())
-			}
-			if !test.wantError {
-				if response := controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
-					t.Fatal(response.Error)
-				}
-			}
-		})
+	if result, err := client.lifecycle(t.Context(), "Stop", pluginsdk.LifecycleRequest{Generation: request.Generation}); err != nil || result.Error != nil {
+		t.Fatalf("stop = %+v, %v", result, err)
 	}
-}
-
-func TestActivationAmbiguousSucceededAuditRetriesIdempotentRecord(t *testing.T) {
-	auditor := newActivationAuditFixture(true, nil)
-	var lasting, aborts atomic.Int32
-	var schedulerOperationKey string
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
-		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-			return acceleratorsources.PreparedAdmissionFuncs{
-				CommitFunc: func(context.Context) (acceleratorsources.RuntimeAdapters, error) {
-					lasting.Store(1)
-					runtime := validRuntimeAdapters()
-					runtime.Scheduler = acceleratorsources.SchedulerFunc(func(_ context.Context, registration acceleratorsources.SchedulerRegistration) error {
-						schedulerOperationKey = registration.OperationKey
-						return nil
-					})
-					return runtime, nil
-				},
-				AbortFunc: func() { lasting.Store(0); aborts.Add(1) },
-			}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-	if response.Error == nil || strings.Contains(response.Error.Error(), "raw audit secret") {
-		t.Fatalf("ambiguous activation response=%#v", response)
-	}
-	if lasting.Load() != 0 || aborts.Load() != 1 || len(controller.Sources()) != 0 {
-		t.Fatalf("compensation lasting=%d aborts=%d sources=%v", lasting.Load(), aborts.Load(), controller.Sources())
-	}
-	attempts, committed := auditor.snapshot()
-	assertSingleTerminalRecord(t, attempts, committed, "succeeded", schedulerOperationKey+":terminal")
-}
-
-func TestActivationAmbiguousStartedAuditStillWritesFailedTerminal(t *testing.T) {
-	auditor := newActivationAuditFixture(false, nil)
-	auditor.failFirstStarted = true
-	var admissionCalls atomic.Int32
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
-		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-			admissionCalls.Add(1)
-			return acceleratorsources.PreparedAdmissionFuncs{}, nil
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-	if response.Error == nil || strings.Contains(response.Error.Error(), "raw") || admissionCalls.Load() != 0 || len(controller.Sources()) != 0 {
-		t.Fatalf("ambiguous started response=%#v admission=%d sources=%v", response, admissionCalls.Load(), controller.Sources())
-	}
-	attempts, committed := auditor.snapshot()
-	var started, failed []acceleratorsources.AuditRecord
-	for _, record := range attempts {
-		switch record.Outcome {
-		case "started":
-			started = append(started, record)
-		case "failed":
-			failed = append(failed, record)
-		case "succeeded":
-			t.Fatalf("ambiguous started wrote opposite terminal: %#v", attempts)
-		}
-	}
-	if len(started) != 2 || started[0] != started[1] || len(failed) != 1 || started[0].OperationKey == "" || failed[0].OperationKey == "" {
-		t.Fatalf("ambiguous started attempts=%#v", attempts)
-	}
-	if committed[started[0].OperationKey] != started[0] || committed[failed[0].OperationKey] != failed[0] {
-		t.Fatalf("ambiguous started logical records=%#v", committed)
-	}
-}
-
-func TestActivationConcurrentFailureAndRevokeKeepOneTerminalOutcome(t *testing.T) {
-	release := make(chan struct{})
-	auditor := newActivationAuditFixture(true, release)
-	controller, err := acceleratorsources.NewController(acceleratorsources.ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact", ActivationAuditor: auditor,
-		ActivateTimeout: 20 * time.Millisecond, DrainTimeout: 20 * time.Millisecond,
-		Admission: acceleratorsources.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, acceleratorsources.Configuration) (acceleratorsources.PreparedAdmission, error) {
-			return nil, errors.New("raw admission secret")
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, "generation-1", 1)}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	result := make(chan pluginsdk.LifecycleResponse, 1)
-	go func() {
-		result <- controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
-	}()
+	cancel()
 	select {
-	case <-auditor.terminalEntered:
-	case <-time.After(time.Second):
-		t.Fatal("terminal audit was not entered")
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("production entrypoint did not stop")
 	}
-	// Let the lifecycle deadline race generation revoke/close with the hook's
-	// in-flight terminal write, then allow both to finish deterministically.
-	time.Sleep(40 * time.Millisecond)
-	close(release)
-	response := <-result
-	if response.Error == nil || strings.Contains(response.Error.Error(), "raw") || len(controller.Sources()) != 0 {
-		t.Fatalf("concurrent failure response=%#v sources=%v", response, controller.Sources())
-	}
-	attempts, committed := auditor.snapshot()
-	assertSingleTerminalRecord(t, attempts, committed, "failed", "")
 }
 
-type activationAuditFixture struct {
-	mu                  sync.Mutex
-	attempts            []acceleratorsources.AuditRecord
-	committed           map[string]acceleratorsources.AuditRecord
-	failFirstStarted    bool
-	failedStartedOnce   bool
-	failFirstTerminal   bool
-	failedTerminalOnce  bool
-	terminalEntered     chan struct{}
-	terminalEnteredOnce sync.Once
-	terminalRelease     <-chan struct{}
+func TestLifecycleRPCLoopbackMutualTLS(t *testing.T) {
+	serverTLS, clientTLS := newMutualTLS(t)
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := probe.Addr().String()
+	_ = probe.Close()
+	controller := newController(t, func() (acceleratorsources.GenerationService, error) { return &fakeService{}, nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- acceleratorsources.ServeLifecycleRPCConfig(ctx, acceleratorsources.LifecycleServerConfig{Network: "tcp", Address: address, Cookie: "mtls-cookie", TLSConfig: serverTLS}, controller)
+	}()
+	connection := dialTCPGRPC(t, address, clientTLS)
+	request := handshakeRequest("mtls-generation")
+	response, err := (wireClient{connection: connection, cookie: "mtls-cookie"}).handshake(t.Context(), request)
+	_ = connection.Close()
+	if err != nil || len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureHTTPBackendProviderV1 {
+		t.Fatalf("mTLS handshake = %+v, %v", response, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
-func newActivationAuditFixture(failFirstTerminal bool, release <-chan struct{}) *activationAuditFixture {
-	return &activationAuditFixture{committed: make(map[string]acceleratorsources.AuditRecord), failFirstTerminal: failFirstTerminal, terminalEntered: make(chan struct{}), terminalRelease: release}
+func TestSDKProviderPreservesOnlyHostProjectedExternalAuthority(t *testing.T) {
+	root := shortTempDir(t)
+	endpoint := pluginsdk.HTTPBackendProviderEndpoint{InstanceID: "instance-authority", ProviderID: acceleratorsources.ProviderID, Generation: "generation-authority", Endpoint: filepath.Join(root, "authority.sock"), Credential: "0123456789abcdef0123456789abcdef"}
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get(pluginsdk.HeaderHTTPBackendProviderCredential) != "" || request.Header.Get(pluginsdk.HeaderHTTPBackendProviderGeneration) != "" {
+			http.Error(writer, "capability header leaked", http.StatusInternalServerError)
+			return
+		}
+		if values := request.Header.Values("Forwarded"); len(values) != 1 || values[0] != `for=203.0.113.9;proto=https;host=public.example.test` || len(request.Header.Values("X-Forwarded-Proto")) != 1 || len(request.Header.Values("X-Forwarded-Host")) != 1 {
+			http.Error(writer, "authority rejected", http.StatusBadRequest)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- pluginsdk.ServeHTTPBackendProviderConfig(ctx, pluginsdk.HTTPBackendProviderEndpointConfig{Version: pluginsdk.HTTPBackendProviderEndpointConfigVersion, Providers: []pluginsdk.HTTPBackendProviderEndpoint{endpoint}}, map[string]http.Handler{acceleratorsources.ProviderID: handler})
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", endpoint.Endpoint)
+	}}}
+	request, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://provider.nre.internal/check", nil)
+	setProviderHeaders(request, endpoint)
+	request.Header.Set("Forwarded", `for=203.0.113.9;proto=https;host=public.example.test`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "public.example.test")
+	response := doEventually(t, client, request)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("canonical authority status = %d", response.StatusCode)
+	}
+	spoofed := request.Clone(t.Context())
+	spoofed.Header = request.Header.Clone()
+	spoofed.Header.Add("X-Forwarded-Host", "attacker.example")
+	response, err := client.Do(spoofed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("duplicated authority status = %d", response.StatusCode)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
-func (fixture *activationAuditFixture) Audit(ctx context.Context, record acceleratorsources.AuditRecord) error {
-	fixture.mu.Lock()
-	if previous, exists := fixture.committed[record.OperationKey]; exists && previous != record {
-		fixture.mu.Unlock()
-		return errors.New("raw conflicting terminal record")
+func TestLifecycleRPCRejectsWrongCookieAndTCPWithoutMTLS(t *testing.T) {
+	controller := newController(t, func() (acceleratorsources.GenerationService, error) { return &fakeService{}, nil })
+	root := shortTempDir(t)
+	socket := filepath.Join(root, "rpc.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- acceleratorsources.ServeLifecycleRPCConfig(ctx, acceleratorsources.LifecycleServerConfig{Network: "unix", Address: socket, Cookie: "correct-cookie"}, controller)
+	}()
+	connection := dialUnixGRPC(t, socket)
+	defer connection.Close()
+	_, err := (wireClient{connection: connection, cookie: "wrong-cookie"}).handshake(t.Context(), handshakeRequest("generation"))
+	if err == nil || status.Code(err).String() != "Unauthenticated" {
+		t.Fatalf("wrong-cookie error = %v", err)
 	}
-	fixture.attempts = append(fixture.attempts, record)
-	fixture.committed[record.OperationKey] = record
-	if record.Outcome == "started" {
-		shouldFail := fixture.failFirstStarted && !fixture.failedStartedOnce
-		if shouldFail {
-			fixture.failedStartedOnce = true
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := acceleratorsources.ServeLifecycleRPCConfig(t.Context(), acceleratorsources.LifecycleServerConfig{Network: "tcp", Address: "127.0.0.1:0", Cookie: "cookie"}, controller); err == nil {
+		t.Fatal("tcp lifecycle server accepted missing mutual TLS")
+	}
+}
+
+type wireClient struct {
+	connection grpc.ClientConnInterface
+	cookie     string
+}
+
+func (client wireClient) handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
+	wire := newWireMessage(tester{ctx}, "HandshakeRequest")
+	setWireString(wire, "abi", request.ABI)
+	setWireString(wire, "plugin_id", request.PluginID)
+	setWireString(wire, "plugin_version", request.PluginVersion)
+	setWireString(wire, "package_digest", request.PackageDigest)
+	setWireString(wire, "artifact_digest", request.ArtifactDigest)
+	setWireString(wire, "generation", request.Generation)
+	setWireStrings(wire, "granted_scopes", request.GrantedScopes)
+	setWireStrings(wire, "required_features", request.RequiredFeatures)
+	response := newWireMessage(tester{ctx}, "HandshakeResponse")
+	err := client.connection.Invoke(metadata.AppendToOutgoingContext(ctx, "x-nre-plugin-cookie", client.cookie), "/nre.plugin.rpc.v1.PluginRuntime/Handshake", wire, response)
+	return pluginsdk.RPCHandshakeResponse{ABI: wireString(response, "abi"), Capabilities: wireStrings(response, "capabilities"), Features: wireStrings(response, "features")}, err
+}
+
+func (client wireClient) lifecycle(ctx context.Context, method string, request pluginsdk.LifecycleRequest) (pluginsdk.LifecycleResponse, error) {
+	wire := newWireMessage(tester{ctx}, "LifecycleRequest")
+	setWireString(wire, "generation", request.Generation)
+	wire.Set(wireField(wire, "config"), protoreflect.ValueOfBytes(request.Config))
+	response := newWireMessage(tester{ctx}, "LifecycleResponse")
+	err := client.connection.Invoke(metadata.AppendToOutgoingContext(ctx, "x-nre-plugin-cookie", client.cookie), "/nre.plugin.rpc.v1.PluginRuntime/"+method, wire, response)
+	if err != nil {
+		return pluginsdk.LifecycleResponse{}, err
+	}
+	if successField := wireField(response, "success"); response.Has(successField) {
+		return pluginsdk.LifecycleResponse{Success: &pluginsdk.LifecycleSuccess{Ready: response.Get(successField).Message().Get(successField.Message().Fields().ByName("ready")).Bool()}}, nil
+	}
+	errorField := wireField(response, "error")
+	failure := response.Get(errorField).Message()
+	return pluginsdk.LifecycleResponse{Error: &pluginsdk.RuntimeError{Code: pluginsdk.ErrorCode(failure.Get(failure.Descriptor().Fields().ByName("code")).Enum()), Message: failure.Get(failure.Descriptor().Fields().ByName("message")).String(), Retryable: failure.Get(failure.Descriptor().Fields().ByName("retryable")).Bool()}}, nil
+}
+
+type tester struct{ context.Context }
+
+func (tester) Helper()                 {}
+func (value tester) Fatal(args ...any) { panic(args) }
+
+func newWireMessage(t interface {
+	Helper()
+	Fatal(...any)
+}, name string) *dynamicpb.Message {
+	t.Helper()
+	descriptor, err := protoschema.Message(protoreflect.FullName("nre.plugin.rpc.v1." + name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dynamicpb.NewMessage(descriptor)
+}
+func wireField(message *dynamicpb.Message, name protoreflect.Name) protoreflect.FieldDescriptor {
+	return message.Descriptor().Fields().ByName(name)
+}
+func setWireString(message *dynamicpb.Message, name protoreflect.Name, value string) {
+	message.Set(wireField(message, name), protoreflect.ValueOfString(value))
+}
+func setWireStrings(message *dynamicpb.Message, name protoreflect.Name, values []string) {
+	list := message.Mutable(wireField(message, name)).List()
+	for _, value := range values {
+		list.Append(protoreflect.ValueOfString(value))
+	}
+}
+func wireString(message *dynamicpb.Message, name protoreflect.Name) string {
+	return message.Get(wireField(message, name)).String()
+}
+func wireStrings(message *dynamicpb.Message, name protoreflect.Name) []string {
+	list := message.Get(wireField(message, name)).List()
+	result := make([]string, list.Len())
+	for index := range result {
+		result[index] = list.Get(index).String()
+	}
+	return result
+}
+
+func dialUnixGRPC(t *testing.T, socket string) *grpc.ClientConn {
+	t.Helper()
+	var connection *grpc.ClientConn
+	var err error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		connection, err = grpc.NewClient("passthrough:///accelerator-sources", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}))
+		if err == nil {
+			probe, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			connection.Connect()
+			if _, probeErr := (wireClient{connection: connection, cookie: "probe"}).handshake(probe, handshakeRequest("probe")); status.Code(probeErr).String() == "Unauthenticated" {
+				return connection
+			}
+			_ = connection.Close()
 		}
-		fixture.mu.Unlock()
-		if shouldFail {
-			return errors.New("raw started audit secret")
-		}
-		return nil
+		time.Sleep(10 * time.Millisecond)
 	}
-	shouldFail := fixture.failFirstTerminal && !fixture.failedTerminalOnce
-	if shouldFail {
-		fixture.failedTerminalOnce = true
-	}
-	release := fixture.terminalRelease
-	fixture.mu.Unlock()
-	fixture.terminalEnteredOnce.Do(func() { close(fixture.terminalEntered) })
-	if release != nil {
-		select {
-		case <-release:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	if shouldFail {
-		return errors.New("raw audit secret")
-	}
+	t.Fatalf("dial lifecycle socket: %v", err)
 	return nil
 }
 
-func (fixture *activationAuditFixture) snapshot() ([]acceleratorsources.AuditRecord, map[string]acceleratorsources.AuditRecord) {
-	fixture.mu.Lock()
-	defer fixture.mu.Unlock()
-	attempts := append([]acceleratorsources.AuditRecord(nil), fixture.attempts...)
-	committed := make(map[string]acceleratorsources.AuditRecord, len(fixture.committed))
-	for key, record := range fixture.committed {
-		committed[key] = record
-	}
-	return attempts, committed
-}
-
-func assertSingleTerminalRecord(t *testing.T, attempts []acceleratorsources.AuditRecord, committed map[string]acceleratorsources.AuditRecord, outcome, operationKey string) {
+func doEventually(t *testing.T, client *http.Client, request *http.Request) *http.Response {
 	t.Helper()
-	var terminal []acceleratorsources.AuditRecord
-	for _, record := range attempts {
-		if record.Action != "activate" || record.OperationKey == "" {
-			t.Fatalf("unsafe audit record=%#v", record)
+	var response *http.Response
+	var err error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		clone := request.Clone(request.Context())
+		clone.Header = request.Header.Clone()
+		response, err = client.Do(clone)
+		if err == nil {
+			return response
 		}
-		if record.Outcome != "started" {
-			if operationKey == "" {
-				operationKey = record.OperationKey
-			}
-			if record.OperationKey != operationKey {
-				t.Fatalf("unstable terminal operation keys: want %q, record=%#v", operationKey, record)
-			}
-			terminal = append(terminal, record)
-		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if len(terminal) != 2 || terminal[0] != terminal[1] || terminal[0].Outcome != outcome {
-		t.Fatalf("terminal attempts=%#v", terminal)
-	}
-	if committed[operationKey] != terminal[0] {
-		t.Fatalf("logical terminals=%#v operation=%q", committed, operationKey)
-	}
-	for key, record := range committed {
-		if record.Outcome != "started" && key != operationKey {
-			t.Fatalf("conflicting terminal record=%#v", record)
-		}
-	}
+	t.Fatalf("provider request: %v", err)
+	return nil
 }
 
-func requiredGrants() []string {
-	return []string{"audit", "dynamic-ui", "network-probe", "scheduler"}
+func setProviderHeaders(request *http.Request, endpoint pluginsdk.HTTPBackendProviderEndpoint) {
+	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderCredential, endpoint.Credential)
+	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderInstance, endpoint.InstanceID)
+	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderID, endpoint.ProviderID)
+	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderGeneration, endpoint.Generation)
 }
 
-func handshake(grants []string) pluginsdk.RPCHandshakeRequest {
-	return pluginsdk.RPCHandshakeRequest{
-		ABI: pluginsdk.RPCABIV1, PluginID: acceleratorsources.PluginID, PluginVersion: acceleratorsources.PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1",
-	}
-}
-
-func configurationWire(t *testing.T, generation string, count int) []byte {
+func dialTCPGRPC(t *testing.T, address string, tlsConfig *tls.Config) *grpc.ClientConn {
 	t.Helper()
-	sources := make([]acceleratorsources.Source, count)
-	for index := range sources {
-		sources[index] = acceleratorsources.Source{ID: sourceID(index), Category: acceleratorsources.CategoryDocker, URL: "https://mirror-" + sourceID(index) + ".example.com", Enabled: true, ManualPriority: index}
-	}
-	wire, err := json.Marshal(acceleratorsources.Configuration{
-		Generation: generation, ScheduleSeconds: 60,
-		Probe:   acceleratorsources.ProbeConfig{Method: acceleratorsources.ProbeHEAD, MaxRedirects: 2, MaxResponseBytes: 4096, TimeoutMillis: 1000, Concurrency: 2},
-		Sources: sources,
-	})
+	connection, err := grpc.NewClient("passthrough:///accelerator-sources", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wire
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		probe, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		_, probeErr := (wireClient{connection: connection, cookie: "wrong"}).handshake(probe, handshakeRequest("probe"))
+		cancel()
+		if status.Code(probeErr).String() == "Unauthenticated" {
+			return connection
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = connection.Close()
+	t.Fatal("mTLS lifecycle endpoint did not become ready")
+	return nil
 }
 
-func unsafeConfigurationWire(t *testing.T, secret string) []byte {
+func newMutualTLS(t *testing.T) (*tls.Config, *tls.Config) {
 	t.Helper()
-	document := acceleratorsources.Configuration{
-		Generation: "generation-1", ScheduleSeconds: 60,
-		Probe:   acceleratorsources.ProbeConfig{Method: acceleratorsources.ProbeHEAD, MaxRedirects: 2, MaxResponseBytes: 4096, TimeoutMillis: 1000, Concurrency: 2},
-		Sources: []acceleratorsources.Source{{ID: "mirror", Category: acceleratorsources.CategoryDocker, URL: "https://user:" + secret + "@mirror.example.com", Enabled: true}},
-	}
-	wire, err := json.Marshal(document)
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wire
+	caTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "nre-test-ca"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPair := signedPair(t, caCert, caKey, "nre-plugin", true, big.NewInt(2), now)
+	clientPair := signedPair(t, caCert, caKey, "nre-host", false, big.NewInt(3), now)
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	server := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverPair}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}
+	client := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "nre-plugin", Certificates: []tls.Certificate{clientPair}, RootCAs: roots}
+	return server, client
 }
 
-func sourceID(index int) string {
-	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-	if index == 0 {
-		return "source-0"
+func signedPair(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, server bool, serial *big.Int, now time.Time) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	value := ""
-	for index > 0 {
-		value = string(digits[index%len(digits)]) + value
-		index /= len(digits)
+	usage := x509.ExtKeyUsageClientAuth
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}}
+	if server {
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		template.DNSNames = []string{"nre-plugin"}
+		template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
 	}
-	return "source-" + value
+	certificate, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
 }
 
-func validRuntimeAdapters() acceleratorsources.RuntimeAdapters {
-	return acceleratorsources.RuntimeAdapters{
-		Probe: acceleratorsources.NetworkProbeFunc(func(context.Context, acceleratorsources.ProbeRequest) (acceleratorsources.ProbeObservation, error) {
-			return acceleratorsources.ProbeObservation{}, nil
-		}),
-		Scheduler: acceleratorsources.SchedulerFunc(func(context.Context, acceleratorsources.SchedulerRegistration) error { return nil }),
-		UI:        acceleratorsources.DynamicUIFunc(func(context.Context, acceleratorsources.DynamicEvent) error { return nil }),
-		Auditor:   acceleratorsources.AuditorFunc(func(context.Context, acceleratorsources.AuditRecord) error { return nil }),
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp(os.TempDir(), "nre-t3-")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
 }

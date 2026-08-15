@@ -96,11 +96,24 @@ func run(ctx context.Context, args []string) error {
 		}
 		return common.CheckGenerated(ctx, root)
 	case "license":
-		root, err := rootFlag("license", args[1:])
-		if err != nil {
+		flags := flag.NewFlagSet("license", flag.ContinueOnError)
+		root := flags.String("root", ".", "repository root")
+		update := flags.Bool("update", false, "regenerate reviewed dependency inventories")
+		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		return checkLicenses(root)
+		if flags.NArg() != 0 {
+			return fmt.Errorf("unexpected license arguments: %v", flags.Args())
+		}
+		if *update {
+			if err := updateLegalInventory(*root); err != nil {
+				return err
+			}
+		}
+		if err := checkLicenses(*root); err != nil {
+			return err
+		}
+		return cirelease.ValidateLegalInventory(*root)
 	case "secret":
 		root, err := rootFlag("secret", args[1:])
 		if err != nil {
@@ -518,6 +531,9 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 	}
 	if err := pluginmanifest.Validate(manifest, pluginID); err != nil {
 		return pluginArtifactSpec{}, fmt.Errorf("validate %s: %w", manifestPath, err)
+	}
+	if err := pluginsdk.ValidateHTTPBackendProviderManifest(manifest); err != nil {
+		return pluginArtifactSpec{}, fmt.Errorf("validate HTTP backend provider contract in %s: %w", manifestPath, err)
 	}
 	switch pluginID {
 	case "waf", "ip-policy", "rate-limit":
