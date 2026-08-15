@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,6 +197,42 @@ func TestScriptRejectsPartialUpstreamAndClearsRangeHeaders(t *testing.T) {
 	}
 	if recorder.Header().Get("Accept-Ranges") != "" || recorder.Header().Get("Content-Range") != "" {
 		t.Fatalf("partial script leaked range metadata: %v", recorder.Header())
+	}
+}
+
+func TestScriptRejectsOversizedKnownContentLengthForGETAndHEAD(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Length", strconv.Itoa(maxScriptBytes+1))
+				writer.WriteHeader(http.StatusOK)
+			})
+			request := httptest.NewRequest(method, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+			request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+			request.Header.Set("X-Forwarded-Proto", "https")
+			request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("oversized script was accepted: status=%d", recorder.Code)
+			}
+		})
+	}
+}
+
+func TestScriptRejectsOversizedUnknownContentLength(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.(http.Flusher).Flush()
+		_, _ = io.WriteString(writer, strings.Repeat("x", maxScriptBytes+1))
+	})
+	request := httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+	request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("unknown-length oversized script was accepted: status=%d", recorder.Code)
 	}
 }
 

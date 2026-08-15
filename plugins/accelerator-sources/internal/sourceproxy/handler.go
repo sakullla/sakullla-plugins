@@ -245,14 +245,14 @@ func (handler *Handler) serveScript(writer http.ResponseWriter, method string, r
 		writeError(writer, http.StatusBadGateway, "script upstream returned unsupported content encoding")
 		return
 	}
+	if response.ContentLength > maxScriptBytes {
+		writeError(writer, http.StatusBadGateway, "script exceeds rewrite limit")
+		return
+	}
 	if method == http.MethodHead {
 		copyHeaders(writer.Header(), response.Header)
 		clearTransformedHeaders(writer.Header())
 		writer.WriteHeader(response.StatusCode)
-		return
-	}
-	if response.ContentLength > maxScriptBytes {
-		writeError(writer, http.StatusBadGateway, "script exceeds rewrite limit")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxScriptBytes+1))
