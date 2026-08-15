@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Accelerator Sources</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Accelerator Sources</h1>
+    <nav aria-label="工具">
+      <button type="button" data-view="search" aria-pressed="true">镜像搜索</button>
+      <button type="button" data-view="offline" aria-pressed="false">离线镜像</button>
+    </nav>
+  </header>
+  <main>
+    <section id="search-view">
+      <form id="search-form">
+        <label for="query">Docker Hub 镜像</label>
+        <div class="command-row">
+          <input id="query" name="q" required autocomplete="off" placeholder="例如 nginx">
+          <button type="submit">搜索</button>
+        </div>
+      </form>
+      <div id="results" aria-live="polite"></div>
+    </section>
+    <section id="offline-view" hidden>
+      <form id="offline-form">
+        <label for="images">镜像，每行一个</label>
+        <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
+        <label for="platform">平台</label>
+        <select id="platform">
+          <option value="linux/amd64">Linux amd64</option>
+          <option value="linux/arm64">Linux arm64</option>
+          <option value="linux/arm/v7">Linux arm/v7</option>
+        </select>
+        <button type="submit">准备下载</button>
+      </form>
+      <div id="download" aria-live="polite"></div>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

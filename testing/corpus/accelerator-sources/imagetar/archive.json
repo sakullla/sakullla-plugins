@@ -1,0 +1,9 @@
+{
+  "format": "docker-archive",
+  "required_entries": ["manifest.json", "<config-sha256>.json", "<layer-sha256>/layer.tar"],
+  "platforms": ["linux/amd64", "linux/arm64", "linux/arm/v7"],
+  "max_batch_images": 16,
+  "integrity": ["descriptor-size", "compressed-sha256", "manifest-media-type", "config-rootfs-diff-ids", "uncompressed-layer-sha256"],
+  "layer_compression": ["gzip", "zstd", "identity"],
+  "storage": "bounded per-layer temporary spool; the complete archive is never persisted"
+}

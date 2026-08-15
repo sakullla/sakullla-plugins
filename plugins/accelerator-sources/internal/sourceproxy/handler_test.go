@@ -1,0 +1,240 @@
+package sourceproxy
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
+)
+
+type fixtureResolver struct{ address net.IP }
+
+func (resolver fixtureResolver) Lookup(context.Context, string) (upstream.DNSResult, error) {
+	return upstream.DNSResult{Addresses: []net.IPAddr{{IP: resolver.address}}, TTL: time.Minute}, nil
+}
+
+func fixtureHandler(t *testing.T, serve http.HandlerFunc) (*Handler, *upstream.Manager) {
+	t.Helper()
+	server := httptest.NewServer(serve)
+	t.Cleanup(server.Close)
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := upstream.New(upstream.Options{Resolver: fixtureResolver{address: net.ParseIP("127.0.0.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	targets := map[string]*url.URL{}
+	for _, host := range []string{"github.com", "api.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "huggingface.co"} {
+		targets[host] = endpoint
+	}
+	handler, err := NewHandler(Options{Upstream: manager, Targets: targets, AllowHTTP: true, AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler, manager
+}
+
+func TestGitHubBlobToRawStreaming(t *testing.T) {
+	payload := strings.Repeat("release-byte-", 4096)
+	handler, manager := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/owner/project/main/dist.bin" || request.Header.Get("Range") != "bytes=10-" {
+			t.Errorf("unexpected upstream request: path=%q range=%q", request.URL.Path, request.Header.Get("Range"))
+		}
+		writer.Header().Set("Content-Length", "53248")
+		_, _ = io.WriteString(writer, payload)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/github.com/owner/project/blob/main/dist.bin", nil)
+	request.Header.Set("Range", "bytes=10-")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != payload {
+		t.Fatalf("unexpected proxy response: status=%d bytes=%d", recorder.Code, recorder.Body.Len())
+	}
+	if manager.Snapshot().UpstreamCalls != 1 || manager.Snapshot().TransferredBytes != uint64(len(payload)) {
+		t.Fatalf("source request did not use shared metrics: %+v", manager.Snapshot())
+	}
+}
+
+func TestGitHubOriginalURLPrefix(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/owner/project/releases/download/v1/tool" {
+			t.Errorf("unexpected original URL target %q", request.URL.Path)
+		}
+		_, _ = io.WriteString(writer, "release")
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/https://github.com/owner/project/releases/download/v1/tool", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "release" {
+		t.Fatalf("original URL prefix failed: %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGitHubHTTPSHTTP2ConcurrencyReuse(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.ProtoMajor != 2 {
+			t.Errorf("source request did not negotiate HTTP/2: %s", request.Proto)
+		}
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL)
+	manager, err := upstream.New(upstream.Options{Client: server.Client(), Resolver: fixtureResolver{address: net.ParseIP("127.0.0.1")}, MaxConnsPerHost: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	handler, err := NewHandler(Options{Upstream: manager, Targets: map[string]*url.URL{"github.com": endpoint}, AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	errorsFound := make(chan string, 100)
+	for range 100 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/github.com/acme/project/releases/latest", nil))
+			if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
+				errorsFound <- recorder.Body.String()
+			}
+		}()
+	}
+	wait.Wait()
+	close(errorsFound)
+	if len(errorsFound) != 0 {
+		t.Fatalf("concurrent source requests failed: %q", <-errorsFound)
+	}
+	metrics := manager.Snapshot()
+	if metrics.HTTP2Requests != 100 || metrics.NewConnections > 8 || metrics.TLSHandshakes > 8 {
+		t.Fatalf("source path did not reuse bounded HTTP/2 pool: %+v", metrics)
+	}
+}
+
+func TestHuggingFaceLargeFileStreaming(t *testing.T) {
+	payload := strings.Repeat("hf-lfs", 16384)
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/org/model/resolve/main/model.bin" {
+			t.Errorf("unexpected path %q", request.URL.Path)
+		}
+		writer.Header().Set("Content-Length", "114688")
+		_, _ = io.WriteString(writer, payload)
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/huggingface.co/org/model/resolve/main/model.bin", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != payload {
+		t.Fatalf("unexpected Hugging Face response: status=%d bytes=%d", recorder.Code, recorder.Body.Len())
+	}
+}
+
+func TestScriptRewriteRequiresTrustedAuthority(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "curl https://github.com/acme/tool/releases/download/v1/tool\n")
+	})
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil))
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing authority was accepted: %d", missing.Code)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+	request.Header.Set("Forwarded", `for=203.0.113.8;proto=https;host=mirror.example.com`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "https://mirror.example.com/github.com/acme/tool/") {
+		t.Fatalf("script was not safely rewritten: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestScriptRequestsIdentityEncoding(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("script accepted encoded upstream body: %q", request.Header.Get("Accept-Encoding"))
+		}
+		_, _ = io.WriteString(writer, "curl https://github.com/acme/tool/archive/main.tar.gz\n")
+	})
+	request := httptest.NewRequest(http.MethodGet, "/raw.githubusercontent.com/acme/tool/main/install.sh", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	request.Header.Set("Forwarded", `proto=https;host=mirror.example.com`)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "mirror.example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("script failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGitHubRedirectBodyIsDrainedForConnectionReuse(t *testing.T) {
+	var newConnections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/start" {
+			writer.Header().Set("Location", "/final")
+			writer.WriteHeader(http.StatusFound)
+			_, _ = io.WriteString(writer, strings.Repeat("redirect", 1024))
+			return
+		}
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL)
+	manager, err := upstream.New(upstream.Options{Resolver: fixtureResolver{address: net.ParseIP("127.0.0.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	handler, err := NewHandler(Options{Upstream: manager, Targets: map[string]*url.URL{"github.com": endpoint}, AllowHTTP: true, AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/github.com/start", nil))
+		if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
+			t.Fatalf("redirect failed: %d %q", recorder.Code, recorder.Body.String())
+		}
+	}
+	if newConnections.Load() != 1 {
+		t.Fatalf("redirect body prevented connection reuse: connections=%d", newConnections.Load())
+	}
+}
+
+func TestGitHubRejectsUnsupportedAndPrivateTargets(t *testing.T) {
+	manager, err := upstream.New(upstream.Options{Resolver: fixtureResolver{address: net.ParseIP("127.0.0.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	handler, err := NewHandler(Options{Upstream: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/example.com/file", "/proxy/127.0.0.1/file"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("unsupported target %q returned %d", target, recorder.Code)
+		}
+	}
+}

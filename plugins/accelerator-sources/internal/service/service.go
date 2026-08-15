@@ -3,38 +3,108 @@ package service
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/catalog"
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/imagetar"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/registry"
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/sourceproxy"
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
+	webui "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/web"
 )
 
 type Options struct {
-	Registry registry.Options
+	Upstream    *upstream.Manager
+	Registry    registry.Options
+	SourceProxy sourceproxy.Options
+	Catalog     catalog.Options
+	ImageTar    imagetar.Options
 }
 
 type Handler struct {
 	mux      *http.ServeMux
-	registry *registry.Handler
+	source   *sourceproxy.Handler
+	upstream *upstream.Manager
 }
 
 // NewHandler builds the self-contained, zero-configuration HTTP service. The
 // returned handler can run directly in any repository-owned net/http server.
 func NewHandler(options Options) (*Handler, error) {
+	manager := options.Upstream
+	ownedManager := manager == nil
+	if manager == nil {
+		manager = options.Registry.Upstream
+		ownedManager = manager == nil
+	}
+	if manager == nil {
+		var resolver upstream.Resolver
+		if options.Registry.Resolver != nil {
+			resolver = upstream.NetResolverAdapter{Resolver: options.Registry.Resolver, TTL: time.Minute, NegativeTTL: 15 * time.Second}
+		}
+		var err error
+		manager, err = upstream.New(upstream.Options{Client: options.Registry.Client, Resolver: resolver})
+		if err != nil {
+			return nil, err
+		}
+	}
+	options.Registry.Upstream = manager
 	registryHandler, err := registry.NewHandler(options.Registry)
 	if err != nil {
+		if ownedManager {
+			manager.Close()
+		}
 		return nil, err
 	}
+	options.SourceProxy.Upstream = manager
+	sourceHandler, err := sourceproxy.NewHandler(options.SourceProxy)
+	if err != nil {
+		if ownedManager {
+			manager.Close()
+		}
+		return nil, err
+	}
+	options.Catalog.Upstream = manager
+	catalogHandler, err := catalog.NewHandler(options.Catalog)
+	if err != nil {
+		if ownedManager {
+			manager.Close()
+		}
+		return nil, err
+	}
+	options.ImageTar.Upstream = manager
+	imageHandler, err := imagetar.NewHandler(options.ImageTar)
+	if err != nil {
+		if ownedManager {
+			manager.Close()
+		}
+		return nil, err
+	}
+	webHandler := webui.NewHandler()
 	mux := http.NewServeMux()
 	mux.Handle("/v2", registryHandler)
 	mux.Handle("/v2/", registryHandler)
-	return &Handler{mux: mux, registry: registryHandler}, nil
+	mux.Handle("/api/search", catalogHandler)
+	mux.Handle("/api/tags", catalogHandler)
+	mux.Handle("/api/offline", imageHandler)
+	mux.Handle("/api/offline/", imageHandler)
+	for _, prefix := range []string{"/github/", "/github-api/", "/github-raw/", "/github-gist/", "/huggingface/", "/proxy/", "/github.com/", "/api.github.com/", "/codeload.github.com/", "/raw.githubusercontent.com/", "/gist.github.com/", "/gist.githubusercontent.com/", "/objects.githubusercontent.com/", "/release-assets.githubusercontent.com/", "/github.githubassets.com/", "/huggingface.co/"} {
+		mux.Handle(prefix, sourceHandler)
+	}
+	mux.Handle("/", webHandler)
+	return &Handler{mux: mux, source: sourceHandler, upstream: manager}, nil
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if strings.HasPrefix(request.URL.EscapedPath(), "/https://") {
+		handler.source.ServeHTTP(writer, request)
+		return
+	}
 	handler.mux.ServeHTTP(writer, request)
 }
 
 // Close releases generation-owned DNS/cache state and idle upstream
 // connections after the host has drained active sessions.
 func (handler *Handler) Close() error {
-	return handler.registry.Close()
+	return handler.upstream.Close()
 }

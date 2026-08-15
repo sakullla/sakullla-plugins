@@ -1,0 +1,6 @@
+{
+  "entry": "/",
+  "assets": ["/app.js", "/style.css"],
+  "external_dependencies": [],
+  "apis": ["/api/search", "/api/tags", "/api/offline/prepare"]
+}

@@ -1,0 +1,24 @@
+{
+  "github": [
+    "/github.com/owner/repository/releases/download/v1/file.tar.gz",
+    "/github.com/owner/repository/archive/refs/heads/main.tar.gz",
+    "/raw.githubusercontent.com/owner/repository/main/file",
+    "/github.com/owner/repository/blob/main/file",
+    "/github.com/owner/repository.git/info/refs?service=git-upload-pack",
+    "/api.github.com/repos/owner/repository/releases",
+    "/gist.github.com/owner/id",
+    "/gist.githubusercontent.com/owner/id/raw/file",
+    "/codeload.github.com/owner/repository/tar.gz/main",
+    "/objects.githubusercontent.com/github-production-release-asset/file",
+    "/release-assets.githubusercontent.com/github-production-release-asset/file",
+    "/github.githubassets.com/assets/file.js"
+  ],
+  "hugging_face": [
+    "/huggingface.co/organization/model/resolve/main/config.json",
+    "/huggingface.co/organization/model/resolve/main/model.safetensors"
+  ],
+  "rejected": [
+    "/example.com/file",
+    "/proxy/127.0.0.1/file"
+  ]
+}
