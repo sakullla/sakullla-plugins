@@ -382,6 +382,78 @@ func TestDNSCNAMEChainTTLOnlyTargetZeroAndLoop(t *testing.T) {
 	})
 }
 
+func TestDNSCNAMENegativeTTLPropagationAndZeroCache(t *testing.T) {
+	soa := dnsFixtureRecord(6, 60, make([]byte, 20))
+	binary.BigEndian.PutUint32(soa[len(soa)-4:], 60)
+	for _, testCase := range []struct {
+		name  string
+		flags uint16
+	}{
+		{name: "same response NXDOMAIN", flags: 0x8183},
+		{name: "same response NODATA", flags: 0x8180},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			query, id, err := dnsQuery("negative-alias.test", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := dnsFixtureResponseRecords(query, testCase.flags, [][]byte{
+				dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 5, dnsFixtureName("missing.test")),
+			}, [][]byte{soa})
+			_, _, negativeTTL, _, hops, err := parseDNSResponse(response, id, 1, "negative-alias.test")
+			if !errors.Is(err, ErrDNSNotFound) || negativeTTL != 5*time.Second || hops != 1 {
+				t.Fatalf("CNAME negative TTL: ttl=%s hops=%d err=%v", negativeTTL, hops, err)
+			}
+		})
+	}
+
+	t.Run("only CNAME to NXDOMAIN", func(t *testing.T) {
+		var exchanges atomic.Int32
+		resolver := &WireResolver{Servers: []string{"fixture"}}
+		resolver.exchangeHook = func(_ context.Context, _ string, query []byte) ([]byte, error) {
+			exchanges.Add(1)
+			name, _ := dnsFixtureQuestion(t, query)
+			if name == "recursive-negative.test" {
+				return dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+					dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 7, dnsFixtureName("missing-target.test")),
+				}, nil), nil
+			}
+			return dnsFixtureResponseRecords(query, 0x8183, nil, [][]byte{soa}), nil
+		}
+		_, _, negativeTTL, err := resolver.lookupType(context.Background(), "recursive-negative.test", 1)
+		if !errors.Is(err, ErrDNSNotFound) || negativeTTL != 7*time.Second || exchanges.Load() != 2 {
+			t.Fatalf("recursive CNAME negative TTL: ttl=%s exchanges=%d err=%v", negativeTTL, exchanges.Load(), err)
+		}
+	})
+
+	t.Run("zero CNAME negative is not cached", func(t *testing.T) {
+		for _, zeroType := range []uint16{1, 28} {
+			var exchanges atomic.Int32
+			resolver := &WireResolver{Servers: []string{"fixture"}}
+			resolver.exchangeHook = func(_ context.Context, _ string, query []byte) ([]byte, error) {
+				exchanges.Add(1)
+				_, queryType := dnsFixtureQuestion(t, query)
+				ttl := uint32(5)
+				if queryType == zeroType {
+					ttl = 0
+				}
+				return dnsFixtureResponseRecords(query, 0x8183, [][]byte{
+					dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, ttl, dnsFixtureName("zero-missing.test")),
+				}, [][]byte{soa}), nil
+			}
+			cache := NewDNSCache(&fakeClock{now: time.Unix(1, 0)}, resolver, 8)
+			for range 2 {
+				if _, err := cache.Resolve(context.Background(), "zero-negative.test"); !errors.Is(err, ErrDNSNotFound) {
+					t.Fatalf("zero CNAME negative resolve: %v", err)
+				}
+			}
+			if exchanges.Load() != 4 {
+				t.Fatalf("zero CNAME type %d negative was cached: exchanges=%d", zeroType, exchanges.Load())
+			}
+		}
+	})
+}
+
 func listenDNSFixture(t *testing.T) (net.Listener, net.PacketConn) {
 	t.Helper()
 	for port := 20053; port < 40053; port++ {

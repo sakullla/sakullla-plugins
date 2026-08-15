@@ -60,7 +60,7 @@ func (resolver *WireResolver) Lookup(ctx context.Context, host string) (DNSResul
 	var transientErr error
 	for _, queryType := range []uint16{1, 28} {
 		addresses, ttl, negative, err := resolver.lookupType(ctx, host, queryType)
-		if negative > 0 {
+		if errors.Is(err, ErrDNSNotFound) || negative > 0 {
 			negativeTTL, negativeTTLSet = lowerTTL(negativeTTL, negativeTTLSet, negative)
 		}
 		if err != nil {
@@ -115,11 +115,9 @@ func (resolver *WireResolver) lookupTypeChain(ctx context.Context, host string, 
 			var terminalTTL, terminalNegative time.Duration
 			var terminalErr error
 			addresses, terminalTTL, terminalNegative, terminalErr = resolver.lookupTypeChain(ctx, canonical, queryType, path, depth+hops)
-			if terminalNegative > 0 {
-				negative = terminalNegative
-			}
 			if terminalErr != nil {
 				if errors.Is(terminalErr, ErrDNSNotFound) {
+					negative, _ = lowerTTL(terminalNegative, true, ttl)
 					return nil, 0, negative, terminalErr
 				}
 				lastErr = terminalErr
@@ -317,19 +315,13 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16, expectedName 
 				ttl:     time.Duration(ttlSeconds) * time.Second,
 			})
 		}
-		if index >= answers && recordType == 6 && length >= 20 {
+		if index >= answers && recordClass == 1 && recordType == 6 && length >= 20 {
 			authoritativeNODATA = true
 			minimum := binary.BigEndian.Uint32(message[dataOffset+length-4 : dataOffset+length])
 			negative := time.Duration(min(ttlSeconds, minimum)) * time.Second
 			negativeTTL, negativeTTLSet = lowerTTL(negativeTTL, negativeTTLSet, negative)
 		}
 		offset = dataOffset + length
-	}
-	if rcode == 3 {
-		return nil, 0, negativeTTL, "", 0, ErrDNSNotFound
-	}
-	if rcode != 0 {
-		return nil, 0, negativeTTL, "", 0, errDNSWire
 	}
 	current := questionName
 	visited := map[string]bool{current: true}
@@ -349,6 +341,15 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16, expectedName 
 		visited[current] = true
 		hops++
 	}
+	if rcode != 0 && rcode != 3 {
+		return nil, 0, negativeTTL, "", 0, errDNSWire
+	}
+	if rcode == 3 {
+		if len(addressRecords[current]) > 0 {
+			return nil, 0, 0, "", 0, errDNSWire
+		}
+		return nil, 0, effectiveNegativeTTL(negativeTTL, negativeTTLSet, minimumTTL, minimumTTLSet), "", hops, ErrDNSNotFound
+	}
 	if records := addressRecords[current]; len(records) > 0 {
 		addresses := make([]net.IPAddr, 0, len(records))
 		for _, record := range records {
@@ -357,13 +358,24 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16, expectedName 
 		}
 		return addresses, minimumTTL, negativeTTL, "", hops, nil
 	}
+	if authoritativeNODATA {
+		return nil, 0, effectiveNegativeTTL(negativeTTL, negativeTTLSet, minimumTTL, minimumTTLSet), "", hops, ErrDNSNotFound
+	}
 	if hops > 0 {
 		return nil, minimumTTL, negativeTTL, current, hops, nil
 	}
-	if authoritativeNODATA {
-		return nil, 0, negativeTTL, "", 0, ErrDNSNotFound
-	}
 	return nil, 0, negativeTTL, "", 0, errDNSWire
+}
+
+func effectiveNegativeTTL(negativeTTL time.Duration, negativeSet bool, cnameTTL time.Duration, cnameSet bool) time.Duration {
+	if !negativeSet {
+		return 0
+	}
+	if !cnameSet {
+		return negativeTTL
+	}
+	result, _ := lowerTTL(negativeTTL, true, cnameTTL)
+	return result
 }
 
 func lowerTTL(current time.Duration, initialized bool, candidate time.Duration) (time.Duration, bool) {
