@@ -322,7 +322,11 @@ func (handler *Handler) resolveImage(ctx context.Context, value, platformValue s
 	if err := json.Unmarshal(body, &document); err != nil || document.SchemaVersion != 2 {
 		return resolvedImage{}, errors.New("invalid image manifest")
 	}
-	if len(document.Manifests) > 0 {
+	switch {
+	case supportedIndexManifestType(document.MediaType):
+		if len(document.Manifests) == 0 || document.Config != (descriptor{}) || len(document.Layers) != 0 {
+			return resolvedImage{}, errors.New("invalid image index document")
+		}
 		selected, err := selectPlatform(document.Manifests, platformValue)
 		if err != nil {
 			return resolvedImage{}, err
@@ -340,6 +344,15 @@ func (handler *Handler) resolveImage(ctx context.Context, value, platformValue s
 		if document.MediaType != selected.MediaType {
 			return resolvedImage{}, errors.New("selected manifest media type mismatch")
 		}
+		if len(document.Manifests) != 0 {
+			return resolvedImage{}, errors.New("selected image manifest contains index descriptors")
+		}
+	case supportedImageManifestType(document.MediaType):
+		if len(document.Manifests) != 0 {
+			return resolvedImage{}, errors.New("image manifest contains index descriptors")
+		}
+	default:
+		return resolvedImage{}, errors.New("unsupported manifest media type")
 	}
 	if err := validateDescriptor(document.Config); err != nil || !supportedConfigType(document.Config.MediaType) || len(document.Layers) == 0 {
 		return resolvedImage{}, errors.New("manifest lacks config or layers")
@@ -964,6 +977,10 @@ func supportedManifestType(value string) bool {
 
 func supportedImageManifestType(value string) bool {
 	return value == "application/vnd.oci.image.manifest.v1+json" || value == "application/vnd.docker.distribution.manifest.v2+json"
+}
+
+func supportedIndexManifestType(value string) bool {
+	return value == "application/vnd.oci.image.index.v1+json" || value == "application/vnd.docker.distribution.manifest.list.v2+json"
 }
 
 func supportedConfigType(value string) bool {

@@ -20,6 +20,44 @@ func (catalogResolver) Lookup(context.Context, string) (upstream.DNSResult, erro
 	return upstream.DNSResult{Addresses: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, TTL: time.Minute}, nil
 }
 
+func TestSearchTruncatedChunkedUpstreamAbortsClientRead(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		connection, buffer, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack upstream response: %v", err)
+			return
+		}
+		defer connection.Close()
+		_, _ = io.WriteString(buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+		_, _ = io.WriteString(buffer, "5\r\n{\"cou\r\n")
+		_, _ = io.WriteString(buffer, "A\r\nnt\":1")
+		_ = buffer.Flush()
+	}))
+	defer upstreamServer.Close()
+	endpoint, _ := url.Parse(upstreamServer.URL)
+	manager, err := upstream.New(upstream.Options{Resolver: catalogResolver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	handler, err := NewHandler(Options{Upstream: manager, Endpoint: endpoint, AllowHTTP: true, AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := httptest.NewServer(handler)
+	defer service.Close()
+
+	response, err := service.Client().Get(service.URL + "/api/search?q=nginx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr == nil {
+		t.Fatal("truncated chunked upstream completed as a successful downstream response")
+	}
+}
+
 func TestSearchAndTagsUseDockerHubCatalogRoutes(t *testing.T) {
 	requests := make(chan *http.Request, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

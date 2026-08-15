@@ -361,6 +361,73 @@ func TestOfflineIndexDescriptorTypeAndSizeFailClosed(t *testing.T) {
 	}
 }
 
+func TestOfflineManifestDispatchesByValidatedMediaType(t *testing.T) {
+	layerTar, layer := makeLayerFixture(t, []byte("dispatch-layer"))
+	config := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest(layerTar)))
+	configDescriptor := descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}
+	layerDescriptor := descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}
+
+	fixtures := []struct {
+		name     string
+		document manifestDocument
+	}{
+		{
+			name: "index declaring only image fields",
+			document: manifestDocument{
+				SchemaVersion: 2,
+				MediaType:     "application/vnd.oci.image.index.v1+json",
+				Config:        configDescriptor,
+				Layers:        []descriptor{layerDescriptor},
+			},
+		},
+		{
+			name: "image declaring index descriptors",
+			document: manifestDocument{
+				SchemaVersion: 2,
+				MediaType:     "application/vnd.oci.image.manifest.v1+json",
+				Manifests: []descriptor{{
+					MediaType: "application/vnd.oci.image.manifest.v1+json",
+					Digest:    digest([]byte("child")),
+					Size:      5,
+					Platform:  platform{OS: "linux", Architecture: "amd64"},
+				}},
+				Config: configDescriptor,
+				Layers: []descriptor{layerDescriptor},
+			},
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			body, _ := json.Marshal(fixture.document)
+			var blobCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if strings.Contains(request.URL.Path, "/manifests/") {
+					writer.Header().Set("Content-Type", fixture.document.MediaType)
+					_, _ = writer.Write(body)
+					return
+				}
+				blobCalls.Add(1)
+				if strings.HasSuffix(request.URL.Path, configDescriptor.Digest) {
+					_, _ = writer.Write(config)
+					return
+				}
+				_, _ = writer.Write(layer)
+			}))
+			defer server.Close()
+			handler, manager := newOfflineFixture(t, server.URL)
+			defer manager.Close()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest&platform=linux/amd64", nil))
+			if recorder.Code != http.StatusBadGateway || recorder.Header().Get("Content-Type") == "application/x-tar" {
+				t.Fatalf("contradictory document entered archive: status=%d type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+			}
+			if blobCalls.Load() != 0 {
+				t.Fatalf("contradictory document reached blob fetch: calls=%d", blobCalls.Load())
+			}
+		})
+	}
+}
+
 func TestOfflineTokenFakeClockNeverCrossesExpiresAt(t *testing.T) {
 	base := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	clock := &offlineClock{now: base}

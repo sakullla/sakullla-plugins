@@ -93,7 +93,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	writer.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {
-		_, _ = streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: response.ContentLength, Flush: streaming.FlushFunc(writer)})
+		if _, err := streaming.Copy(writer, response.Body, streaming.CopyOptions{ExpectedLength: response.ContentLength, Flush: streaming.FlushFunc(writer)}); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
