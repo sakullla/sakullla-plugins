@@ -22,6 +22,11 @@
       "license": "Apache-2.0"
     },
     {
+      "name": "golang.org/x/mod",
+      "version": "v0.40.0",
+      "license": "BSD-3-Clause"
+    },
+    {
       "name": "golang.org/x/net",
       "version": "v0.26.0",
       "license": "BSD-3-Clause"

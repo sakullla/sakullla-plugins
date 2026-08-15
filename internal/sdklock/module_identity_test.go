@@ -18,14 +18,39 @@ func TestVerifyModuleIdentityRequiresExactModuleAndChecksums(t *testing.T) {
 	}
 }
 
+func TestVerifyModuleIdentityAcceptsQuotedCanonicalRequire(t *testing.T) {
+	lock := moduleIdentityLock()
+	root := t.TempDir()
+	writeIdentityFiles(t, root,
+		"module fixture\n\ngo 1.26.5\n\nrequire \""+lock.SDK.ModulePath+"\" v0.6.0\n",
+		lock.SDK.ModulePath+" v0.6.0 h1:module\n"+lock.SDK.ModulePath+" v0.6.0/go.mod h1:mod\n")
+	if err := VerifyModuleIdentity(root, lock); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyModuleIdentityRejectsDuplicateCanonicalRequire(t *testing.T) {
+	lock := moduleIdentityLock()
+	root := t.TempDir()
+	writeIdentityFiles(t, root,
+		"module fixture\n\ngo 1.26.5\n\nrequire (\n\t"+lock.SDK.ModulePath+" v0.6.0\n\t\""+lock.SDK.ModulePath+"\" v0.6.0\n)\n",
+		lock.SDK.ModulePath+" v0.6.0 h1:module\n"+lock.SDK.ModulePath+" v0.6.0/go.mod h1:mod\n")
+	if err := VerifyModuleIdentity(root, lock); err == nil {
+		t.Fatal("duplicate canonical SDK require was accepted")
+	}
+}
+
 func TestVerifyModuleIdentityFailsClosed(t *testing.T) {
 	lock := moduleIdentityLock()
 	module := lock.SDK.ModulePath
 	tests := map[string]struct{ goMod, goSum, want string }{
-		"wrong require":   {"module fixture\nrequire " + module + " v0.5.0\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "want exactly"},
-		"replace":         {"module fixture\nrequire " + module + " v0.6.0\nreplace " + module + " => ../sdk\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "must not replace"},
-		"stale sum":       {"module fixture\nrequire " + module + " v0.6.0\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n" + module + " v0.5.0/go.mod h1:z\n", "stale SDK identities"},
-		"missing zip sum": {"module fixture\nrequire " + module + " v0.6.0\n", module + " v0.6.0/go.mod h1:y\n", "module and go.mod checksums"},
+		"wrong require":     {"module fixture\nrequire " + module + " v0.5.0\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "want exactly"},
+		"replace":           {"module fixture\nrequire " + module + " v0.6.0\nreplace " + module + " => ../sdk\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "must not replace"},
+		"quoted replace":    {"module fixture\nrequire " + module + " v0.6.0\nreplace \"" + module + "\" => ../sdk\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "must not replace"},
+		"versioned replace": {"module fixture\nrequire " + module + " v0.6.0\nreplace " + module + " v0.6.0 => ../sdk\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "must not replace"},
+		"block replace":     {"module fixture\nrequire " + module + " v0.6.0\nreplace (\n\t\"" + module + "\" v0.6.0 => ../sdk\n)\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n", "must not replace"},
+		"stale sum":         {"module fixture\nrequire " + module + " v0.6.0\n", module + " v0.6.0 h1:x\n" + module + " v0.6.0/go.mod h1:y\n" + module + " v0.5.0/go.mod h1:z\n", "stale SDK identities"},
+		"missing zip sum":   {"module fixture\nrequire " + module + " v0.6.0\n", module + " v0.6.0/go.mod h1:y\n", "module and go.mod checksums"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

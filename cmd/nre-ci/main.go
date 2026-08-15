@@ -141,6 +141,10 @@ func run(ctx context.Context, args []string) error {
 }
 
 func updateSDKLock(ctx context.Context, lockPath, tag string) error {
+	repositoryRoot := filepath.Dir(lockPath)
+	if err := recoverSDKUpdateWithFS(repositoryRoot, osSDKTransactionFS{}); err != nil {
+		return fmt.Errorf("recover interrupted SDK update: %w", err)
+	}
 	lock, err := sdklock.Read(lockPath)
 	if err != nil {
 		return err
@@ -157,7 +161,6 @@ func updateSDKLock(ctx context.Context, lockPath, tag string) error {
 	if err != nil {
 		return err
 	}
-	repositoryRoot := filepath.Dir(lockPath)
 	version, err := sdklock.ModuleVersion(refreshed)
 	if err != nil {
 		return err
@@ -198,12 +201,7 @@ func updateSDKLock(ctx context.Context, lockPath, tag string) error {
 	if _, err := sdklock.Verify(ctx, refreshed, true, stagingRoot); err != nil {
 		return fmt.Errorf("verify staged SDK update: %w", err)
 	}
-	return promoteSDKUpdate(repositoryRoot, stagingRoot, []string{
-		"go.mod",
-		"go.sum",
-		"crates/nre-policy-guest/src/abi_generated.rs",
-		"sdk.lock.json",
-	})
+	return promoteSDKUpdate(repositoryRoot, stagingRoot, sdkUpdateTargets)
 }
 
 func copySDKUpdateFile(sourceRoot, targetRoot, relative string) error {
@@ -234,109 +232,6 @@ func removeModuleSums(path, modulePath string) error {
 		}
 	}
 	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
-}
-
-func promoteSDKUpdate(repositoryRoot, stagingRoot string, relatives []string) error {
-	type replacement struct {
-		target, staged, backup string
-		committed              bool
-	}
-	replacements := make([]replacement, 0, len(relatives))
-	defer func() {
-		for _, current := range replacements {
-			if current.staged != "" {
-				_ = os.Remove(current.staged)
-			}
-		}
-	}()
-	for _, relative := range relatives {
-		target := filepath.Join(repositoryRoot, filepath.FromSlash(relative))
-		info, err := os.Stat(target)
-		if err != nil {
-			return fmt.Errorf("inspect SDK update target %s: %w", relative, err)
-		}
-		data, err := os.ReadFile(filepath.Join(stagingRoot, filepath.FromSlash(relative)))
-		if err != nil {
-			return fmt.Errorf("read staged SDK update %s: %w", relative, err)
-		}
-		staged, err := os.CreateTemp(filepath.Dir(target), ".sdk-update-new-")
-		if err != nil {
-			return err
-		}
-		stagedPath := staged.Name()
-		if err := staged.Chmod(info.Mode().Perm()); err == nil {
-			_, err = staged.Write(data)
-		}
-		if err == nil {
-			err = staged.Sync()
-		}
-		if closeErr := staged.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			_ = os.Remove(stagedPath)
-			return fmt.Errorf("stage atomic SDK update %s: %w", relative, err)
-		}
-		backup, err := os.CreateTemp(filepath.Dir(target), ".sdk-update-old-")
-		if err != nil {
-			_ = os.Remove(stagedPath)
-			return err
-		}
-		backupPath := backup.Name()
-		if err := backup.Close(); err != nil {
-			_ = os.Remove(stagedPath)
-			_ = os.Remove(backupPath)
-			return err
-		}
-		if err := os.Remove(backupPath); err != nil {
-			_ = os.Remove(stagedPath)
-			return err
-		}
-		replacements = append(replacements, replacement{target: target, staged: stagedPath, backup: backupPath})
-	}
-	rollback := func(last int) error {
-		var failures []string
-		for index := last; index >= 0; index-- {
-			current := &replacements[index]
-			if !current.committed {
-				continue
-			}
-			if err := os.Remove(current.target); err != nil && !os.IsNotExist(err) {
-				failures = append(failures, err.Error())
-				continue
-			}
-			if err := os.Rename(current.backup, current.target); err != nil {
-				failures = append(failures, err.Error())
-			} else {
-				current.committed = false
-			}
-		}
-		if len(failures) != 0 {
-			return fmt.Errorf("rollback SDK update: %s", strings.Join(failures, "; "))
-		}
-		return nil
-	}
-	for index := range replacements {
-		current := &replacements[index]
-		if err := os.Rename(current.target, current.backup); err != nil {
-			_ = rollback(index - 1)
-			return fmt.Errorf("backup SDK update target %s: %w", current.target, err)
-		}
-		current.committed = true
-		if err := os.Rename(current.staged, current.target); err != nil {
-			rollbackErr := rollback(index)
-			if rollbackErr != nil {
-				return fmt.Errorf("promote staged SDK update %s: %w (%v)", current.target, err, rollbackErr)
-			}
-			return fmt.Errorf("promote staged SDK update %s: %w", current.target, err)
-		}
-		current.staged = ""
-	}
-	for index := range replacements {
-		_ = os.Remove(replacements[index].backup)
-		replacements[index].committed = false
-	}
-	return nil
 }
 
 func cleanGoEnvironment() []string {

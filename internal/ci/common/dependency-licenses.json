@@ -5,6 +5,7 @@
     "github.com/sakullla/nginx-reverse-emby/plugin-sdk": "GPL-3.0-only",
     "github.com/santhosh-tekuri/jsonschema/v6": "Apache-2.0",
     "github.com/tetratelabs/wazero": "Apache-2.0",
+    "golang.org/x/mod": "BSD-3-Clause",
     "golang.org/x/net": "BSD-3-Clause",
     "golang.org/x/sys": "BSD-3-Clause",
     "golang.org/x/text": "BSD-3-Clause",

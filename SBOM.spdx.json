@@ -65,6 +65,16 @@
       "copyrightText": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-Package-x-mod",
+      "name": "golang.org/x/mod",
+      "versionInfo": "v0.40.0",
+      "downloadLocation": "https://go.googlesource.com/mod",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-Package-x-net",
       "name": "golang.org/x/net",
       "versionInfo": "v0.26.0",
@@ -155,6 +165,11 @@
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-wazero"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-mod"
     },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",

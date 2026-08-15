@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 )
 
 // ModuleVersion returns the public Go module version selected by the immutable
@@ -35,9 +37,9 @@ func VerifyModuleIdentity(repositoryRoot string, lock Lock) error {
 	if err != nil {
 		return fmt.Errorf("read root go.mod for SDK identity: %w", err)
 	}
-	versions, replaced := moduleReferences(goMod, lock.SDK.ModulePath)
-	if replaced {
-		return fmt.Errorf("root go.mod must not replace canonical SDK module %s", lock.SDK.ModulePath)
+	versions, err := moduleReferences(goMod, lock.SDK.ModulePath)
+	if err != nil {
+		return err
 	}
 	if len(versions) != 1 || versions[0] != wantVersion {
 		return fmt.Errorf("root go.mod SDK identity = %v, want exactly %s@%s", versions, lock.SDK.ModulePath, wantVersion)
@@ -80,37 +82,21 @@ func VerifyModuleIdentity(repositoryRoot string, lock Lock) error {
 	return nil
 }
 
-func moduleReferences(goMod []byte, modulePath string) ([]string, bool) {
+func moduleReferences(goMod []byte, modulePath string) ([]string, error) {
+	parsed, err := modfile.Parse("go.mod", goMod, nil)
+	if err != nil {
+		return nil, fmt.Errorf("parse root go.mod for SDK identity: %w", err)
+	}
 	var versions []string
-	block := ""
-	for _, raw := range strings.Split(string(goMod), "\n") {
-		line := strings.TrimSpace(strings.SplitN(raw, "//", 2)[0])
-		if line == "" {
-			continue
-		}
-		if line == ")" {
-			block = ""
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 2 && (fields[0] == "require" || fields[0] == "replace") && fields[1] == "(" {
-			block = fields[0]
-			continue
-		}
-		kind := block
-		if kind == "" && len(fields) > 0 && (fields[0] == "require" || fields[0] == "replace") {
-			kind = fields[0]
-			fields = fields[1:]
-		}
-		if len(fields) == 0 || fields[0] != modulePath {
-			continue
-		}
-		if kind == "replace" {
-			return versions, true
-		}
-		if kind == "require" && len(fields) == 2 {
-			versions = append(versions, fields[1])
+	for _, requirement := range parsed.Require {
+		if requirement.Mod.Path == modulePath {
+			versions = append(versions, requirement.Mod.Version)
 		}
 	}
-	return versions, false
+	for _, replacement := range parsed.Replace {
+		if replacement.Old.Path == modulePath {
+			return nil, fmt.Errorf("root go.mod must not replace canonical SDK module %s", modulePath)
+		}
+	}
+	return versions, nil
 }

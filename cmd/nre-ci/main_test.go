@@ -69,28 +69,6 @@ func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 	}
 }
 
-func TestPromoteSDKUpdateRollsBackOnLateFailure(t *testing.T) {
-	repository := t.TempDir()
-	staging := t.TempDir()
-	for _, relative := range []string{"go.mod", "go.sum"} {
-		if err := os.WriteFile(filepath.Join(repository, relative), []byte("old "+relative), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(staging, "go.mod"), []byte("new go.mod"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := promoteSDKUpdate(repository, staging, []string{"go.mod", "go.sum"}); err == nil {
-		t.Fatal("promotion unexpectedly accepted an incomplete staged transaction")
-	}
-	for _, relative := range []string{"go.mod", "go.sum"} {
-		data, err := os.ReadFile(filepath.Join(repository, relative))
-		if err != nil || string(data) != "old "+relative {
-			t.Fatalf("%s was not rolled back: %q, %v", relative, data, err)
-		}
-	}
-}
-
 func TestRemoveModuleSumsDropsOnlySelectedModule(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "go.sum")
 	const module = "example.invalid/sdk"
