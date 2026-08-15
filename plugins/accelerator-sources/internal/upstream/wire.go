@@ -14,12 +14,15 @@ import (
 
 var errDNSWire = errors.New("invalid DNS wire response")
 
+const maxDNSCNAMEHops = 16
+
 // WireResolver obtains TTLs from DNS resource records using the system's
 // configured recursive resolver. It is entirely in-process and requires no
 // DNS daemon owned by the plugin.
 type WireResolver struct {
-	Servers []string
-	Timeout time.Duration
+	Servers      []string
+	Timeout      time.Duration
+	exchangeHook func(context.Context, string, []byte) ([]byte, error)
 }
 
 func NewWireResolver() Resolver {
@@ -83,24 +86,61 @@ func (resolver *WireResolver) Lookup(ctx context.Context, host string) (DNSResul
 }
 
 func (resolver *WireResolver) lookupType(ctx context.Context, host string, queryType uint16) ([]net.IPAddr, time.Duration, time.Duration, error) {
+	return resolver.lookupTypeChain(ctx, normalizeDNSName(host), queryType, make(map[string]bool), 0)
+}
+
+func (resolver *WireResolver) lookupTypeChain(ctx context.Context, host string, queryType uint16, path map[string]bool, depth int) ([]net.IPAddr, time.Duration, time.Duration, error) {
+	if host == "" || depth > maxDNSCNAMEHops || path[host] {
+		return nil, 0, 0, errDNSWire
+	}
+	path[host] = true
+	defer delete(path, host)
 	query, id, err := dnsQuery(host, queryType)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	var lastErr error
 	for _, server := range resolver.Servers {
-		response, err := resolver.exchange(ctx, server, query)
+		response, err := resolver.exchangeQuery(ctx, server, query)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		addresses, ttl, negative, err := parseDNSResponse(response, id, queryType)
+		addresses, ttl, negative, canonical, hops, err := parseDNSResponse(response, id, queryType, host)
+		if err == nil && len(addresses) == 0 && canonical != "" {
+			if depth+hops > maxDNSCNAMEHops {
+				lastErr = errDNSWire
+				continue
+			}
+			var terminalTTL, terminalNegative time.Duration
+			var terminalErr error
+			addresses, terminalTTL, terminalNegative, terminalErr = resolver.lookupTypeChain(ctx, canonical, queryType, path, depth+hops)
+			if terminalNegative > 0 {
+				negative = terminalNegative
+			}
+			if terminalErr != nil {
+				if errors.Is(terminalErr, ErrDNSNotFound) {
+					return nil, 0, negative, terminalErr
+				}
+				lastErr = terminalErr
+				continue
+			}
+			ttl, _ = lowerTTL(ttl, true, terminalTTL)
+			err = nil
+		}
 		if err == nil || errors.Is(err, ErrDNSNotFound) {
 			return addresses, ttl, negative, err
 		}
 		lastErr = err
 	}
 	return nil, 0, 0, lastErr
+}
+
+func (resolver *WireResolver) exchangeQuery(ctx context.Context, server string, query []byte) ([]byte, error) {
+	if resolver.exchangeHook != nil {
+		return resolver.exchangeHook(ctx, server, query)
+	}
+	return resolver.exchange(ctx, server, query)
 }
 
 func (resolver *WireResolver) exchange(ctx context.Context, server string, query []byte) ([]byte, error) {
@@ -202,45 +242,80 @@ func dnsQuery(host string, queryType uint16) ([]byte, uint16, error) {
 	return message, id, nil
 }
 
-func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr, time.Duration, time.Duration, error) {
+type dnsCNAMERecord struct {
+	target string
+	ttl    time.Duration
+}
+
+type dnsAddressRecord struct {
+	address net.IPAddr
+	ttl     time.Duration
+}
+
+func parseDNSResponse(message []byte, id uint16, queryType uint16, expectedName string) ([]net.IPAddr, time.Duration, time.Duration, string, int, error) {
 	if len(message) < 12 || binary.BigEndian.Uint16(message[:2]) != id || binary.BigEndian.Uint16(message[2:4])&0x8000 == 0 {
-		return nil, 0, 0, errDNSWire
+		return nil, 0, 0, "", 0, errDNSWire
 	}
 	rcode := binary.BigEndian.Uint16(message[2:4]) & 0x000f
 	questions := int(binary.BigEndian.Uint16(message[4:6]))
 	answers := int(binary.BigEndian.Uint16(message[6:8]))
 	authorities := int(binary.BigEndian.Uint16(message[8:10]))
+	if questions != 1 {
+		return nil, 0, 0, "", 0, errDNSWire
+	}
 	offset := 12
+	questionName := ""
 	for range questions {
 		var err error
-		offset, err = skipDNSName(message, offset)
+		questionName, offset, err = readDNSName(message, offset)
 		if err != nil || offset+4 > len(message) {
-			return nil, 0, 0, errDNSWire
+			return nil, 0, 0, "", 0, errDNSWire
+		}
+		if binary.BigEndian.Uint16(message[offset:offset+2]) != queryType || binary.BigEndian.Uint16(message[offset+2:offset+4]) != 1 {
+			return nil, 0, 0, "", 0, errDNSWire
 		}
 		offset += 4
 	}
-	var addresses []net.IPAddr
-	minimumTTL := time.Duration(0)
-	minimumTTLSet := false
+	if questionName != normalizeDNSName(expectedName) {
+		return nil, 0, 0, "", 0, errDNSWire
+	}
+	cnames := make(map[string]dnsCNAMERecord)
+	addressRecords := make(map[string][]dnsAddressRecord)
 	negativeTTL := time.Duration(0)
 	negativeTTLSet := false
 	authoritativeNODATA := false
 	for index := 0; index < answers+authorities; index++ {
-		next, err := skipDNSName(message, offset)
+		owner, next, err := readDNSName(message, offset)
 		if err != nil || next+10 > len(message) {
-			return nil, 0, 0, errDNSWire
+			return nil, 0, 0, "", 0, errDNSWire
 		}
 		recordType := binary.BigEndian.Uint16(message[next : next+2])
+		recordClass := binary.BigEndian.Uint16(message[next+2 : next+4])
 		ttlSeconds := binary.BigEndian.Uint32(message[next+4 : next+8])
 		length := int(binary.BigEndian.Uint16(message[next+8 : next+10]))
 		dataOffset := next + 10
 		if dataOffset+length > len(message) {
-			return nil, 0, 0, errDNSWire
+			return nil, 0, 0, "", 0, errDNSWire
 		}
-		if index < answers && recordType == queryType && ((recordType == 1 && length == 4) || (recordType == 28 && length == 16)) {
-			addresses = append(addresses, net.IPAddr{IP: append(net.IP(nil), message[dataOffset:dataOffset+length]...)})
+		if index < answers && recordClass == 1 && recordType == 5 {
+			target, cnameEnd, cnameErr := readDNSName(message, dataOffset)
+			if cnameErr != nil || cnameEnd != dataOffset+length || target == "" || target == owner {
+				return nil, 0, 0, "", 0, errDNSWire
+			}
 			ttl := time.Duration(ttlSeconds) * time.Second
-			minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, ttl)
+			if previous, found := cnames[owner]; found {
+				if previous.target != target {
+					return nil, 0, 0, "", 0, errDNSWire
+				}
+				ttl, _ = lowerTTL(previous.ttl, true, ttl)
+			}
+			cnames[owner] = dnsCNAMERecord{target: target, ttl: ttl}
+		}
+		if index < answers && recordClass == 1 && recordType == queryType && ((recordType == 1 && length == 4) || (recordType == 28 && length == 16)) {
+			addressRecords[owner] = append(addressRecords[owner], dnsAddressRecord{
+				address: net.IPAddr{IP: append(net.IP(nil), message[dataOffset:dataOffset+length]...)},
+				ttl:     time.Duration(ttlSeconds) * time.Second,
+			})
 		}
 		if index >= answers && recordType == 6 && length >= 20 {
 			authoritativeNODATA = true
@@ -250,16 +325,45 @@ func parseDNSResponse(message []byte, id uint16, queryType uint16) ([]net.IPAddr
 		}
 		offset = dataOffset + length
 	}
-	if rcode == 3 || (rcode == 0 && len(addresses) == 0 && authoritativeNODATA) {
-		return nil, 0, negativeTTL, ErrDNSNotFound
+	if rcode == 3 {
+		return nil, 0, negativeTTL, "", 0, ErrDNSNotFound
 	}
 	if rcode != 0 {
-		return nil, 0, negativeTTL, errDNSWire
+		return nil, 0, negativeTTL, "", 0, errDNSWire
 	}
-	if len(addresses) == 0 {
-		return nil, 0, negativeTTL, errDNSWire
+	current := questionName
+	visited := map[string]bool{current: true}
+	minimumTTL := time.Duration(0)
+	minimumTTLSet := false
+	hops := 0
+	for {
+		cname, found := cnames[current]
+		if !found {
+			break
+		}
+		if len(addressRecords[current]) > 0 || hops >= maxDNSCNAMEHops || visited[cname.target] {
+			return nil, 0, negativeTTL, "", 0, errDNSWire
+		}
+		minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, cname.ttl)
+		current = cname.target
+		visited[current] = true
+		hops++
 	}
-	return addresses, minimumTTL, negativeTTL, nil
+	if records := addressRecords[current]; len(records) > 0 {
+		addresses := make([]net.IPAddr, 0, len(records))
+		for _, record := range records {
+			addresses = append(addresses, record.address)
+			minimumTTL, minimumTTLSet = lowerTTL(minimumTTL, minimumTTLSet, record.ttl)
+		}
+		return addresses, minimumTTL, negativeTTL, "", hops, nil
+	}
+	if hops > 0 {
+		return nil, minimumTTL, negativeTTL, current, hops, nil
+	}
+	if authoritativeNODATA {
+		return nil, 0, negativeTTL, "", 0, ErrDNSNotFound
+	}
+	return nil, 0, negativeTTL, "", 0, errDNSWire
 }
 
 func lowerTTL(current time.Duration, initialized bool, candidate time.Duration) (time.Duration, bool) {
@@ -269,25 +373,53 @@ func lowerTTL(current time.Duration, initialized bool, candidate time.Duration) 
 	return current, true
 }
 
-func skipDNSName(message []byte, offset int) (int, error) {
+func normalizeDNSName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+}
+
+func readDNSName(message []byte, offset int) (string, int, error) {
+	labels := make([]string, 0, 4)
+	next := -1
+	visited := make(map[int]bool)
 	for steps := 0; steps < 128; steps++ {
-		if offset >= len(message) {
-			return 0, errDNSWire
+		if offset >= len(message) || visited[offset] {
+			return "", 0, errDNSWire
 		}
+		visited[offset] = true
 		length := int(message[offset])
 		if length == 0 {
-			return offset + 1, nil
+			if next < 0 {
+				next = offset + 1
+			}
+			name := normalizeDNSName(strings.Join(labels, "."))
+			if len(name) > 253 {
+				return "", 0, errDNSWire
+			}
+			return name, next, nil
 		}
 		if length&0xc0 == 0xc0 {
 			if offset+2 > len(message) {
-				return 0, errDNSWire
+				return "", 0, errDNSWire
 			}
-			return offset + 2, nil
+			pointer := int(binary.BigEndian.Uint16(message[offset:offset+2]) & 0x3fff)
+			if pointer >= offset || pointer >= len(message) {
+				return "", 0, errDNSWire
+			}
+			if next < 0 {
+				next = offset + 2
+			}
+			offset = pointer
+			continue
 		}
-		if length > 63 || offset+1+length > len(message) {
-			return 0, errDNSWire
+		if length&0xc0 != 0 || length > 63 || offset+1+length > len(message) {
+			return "", 0, errDNSWire
 		}
+		label := string(message[offset+1 : offset+1+length])
+		if label == "" {
+			return "", 0, errDNSWire
+		}
+		labels = append(labels, strings.ToLower(label))
 		offset += 1 + length
 	}
-	return 0, errDNSWire
+	return "", 0, errDNSWire
 }

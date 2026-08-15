@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -214,7 +215,7 @@ func TestDNSWireRCODEClassificationAndTCPFallback(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			response := dnsFixtureResponse(query, testCase.flags, nil, testCase.authority)
-			_, _, _, parseErr := parseDNSResponse(response, id, 1)
+			_, _, _, _, _, parseErr := parseDNSResponse(response, id, 1, "fixture.test")
 			if errors.Is(parseErr, ErrDNSNotFound) != testCase.notFound || (testCase.wantWireErr && !errors.Is(parseErr, errDNSWire)) {
 				t.Fatalf("classification: %v", parseErr)
 			}
@@ -267,6 +268,118 @@ func TestDNSWireRCODEClassificationAndTCPFallback(t *testing.T) {
 			t.Fatalf("DNS fixture: %v", err)
 		}
 	}
+}
+
+func TestDNSCNAMEChainTTLOnlyTargetZeroAndLoop(t *testing.T) {
+	t.Run("short chain TTL", func(t *testing.T) {
+		query, id, err := dnsQuery("alias.test", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+			dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 5, dnsFixtureName("target.test")),
+			dnsFixtureNamedRecord(dnsFixtureName("target.test"), 1, 60, []byte{8, 8, 8, 8}),
+		}, nil)
+		addresses, ttl, _, canonical, hops, err := parseDNSResponse(response, id, 1, "alias.test")
+		if err != nil || len(addresses) != 1 || addresses[0].IP.String() != "8.8.8.8" || ttl != 5*time.Second || canonical != "" || hops != 1 {
+			t.Fatalf("CNAME TTL chain: addresses=%v ttl=%s canonical=%q hops=%d err=%v", addresses, ttl, canonical, hops, err)
+		}
+	})
+
+	t.Run("zero chain TTL is not cached", func(t *testing.T) {
+		var exchanges atomic.Int32
+		resolver := &WireResolver{Servers: []string{"fixture"}}
+		resolver.exchangeHook = func(_ context.Context, _ string, query []byte) ([]byte, error) {
+			exchanges.Add(1)
+			_, queryType := dnsFixtureQuestion(t, query)
+			target := "zero-target.test"
+			var terminal []byte
+			if queryType == 1 {
+				terminal = []byte{1, 1, 1, 1}
+			} else {
+				terminal = net.ParseIP("2001:4860:4860::8888").To16()
+			}
+			return dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+				dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 0, dnsFixtureName(target)),
+				dnsFixtureNamedRecord(dnsFixtureName(target), queryType, 60, terminal),
+			}, nil), nil
+		}
+		cache := NewDNSCache(&fakeClock{now: time.Unix(1, 0)}, resolver, 8)
+		for range 2 {
+			addresses, err := cache.Resolve(context.Background(), "zero-alias.test")
+			if err != nil || len(addresses) != 2 {
+				t.Fatalf("zero CNAME resolve: %v %v", addresses, err)
+			}
+		}
+		if exchanges.Load() != 4 {
+			t.Fatalf("zero CNAME TTL was cached: exchanges=%d", exchanges.Load())
+		}
+	})
+
+	t.Run("only CNAME continues in owner context", func(t *testing.T) {
+		type ownerKey struct{}
+		ctx := context.WithValue(context.Background(), ownerKey{}, "owner")
+		var exchanges atomic.Int32
+		resolver := &WireResolver{Servers: []string{"fixture"}}
+		resolver.exchangeHook = func(hookContext context.Context, _ string, query []byte) ([]byte, error) {
+			if hookContext.Value(ownerKey{}) != "owner" {
+				t.Error("canonical query lost owner context")
+			}
+			exchanges.Add(1)
+			name, queryType := dnsFixtureQuestion(t, query)
+			if name == "only-alias.test" {
+				return dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+					dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 7, dnsFixtureName("canonical.test")),
+				}, nil), nil
+			}
+			if name != "canonical.test" || queryType != 1 {
+				t.Fatalf("unexpected canonical query: name=%q type=%d", name, queryType)
+			}
+			return dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+				dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 1, 60, []byte{1, 0, 0, 1}),
+			}, nil), nil
+		}
+		addresses, ttl, _, err := resolver.lookupType(ctx, "only-alias.test", 1)
+		if err != nil || len(addresses) != 1 || addresses[0].IP.String() != "1.0.0.1" || ttl != 7*time.Second || exchanges.Load() != 2 {
+			t.Fatalf("only-CNAME resolution: addresses=%v ttl=%s exchanges=%d err=%v", addresses, ttl, exchanges.Load(), err)
+		}
+	})
+
+	t.Run("loop and hop overflow", func(t *testing.T) {
+		var exchanges atomic.Int32
+		resolver := &WireResolver{Servers: []string{"fixture"}}
+		resolver.exchangeHook = func(_ context.Context, _ string, query []byte) ([]byte, error) {
+			exchanges.Add(1)
+			name, _ := dnsFixtureQuestion(t, query)
+			target := "loop-b.test"
+			if name == target {
+				target = "loop-a.test"
+			}
+			return dnsFixtureResponseRecords(query, 0x8180, [][]byte{
+				dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, 5, 10, dnsFixtureName(target)),
+			}, nil), nil
+		}
+		if _, _, _, err := resolver.lookupType(context.Background(), "loop-a.test", 1); !errors.Is(err, errDNSWire) || exchanges.Load() != 2 {
+			t.Fatalf("CNAME loop: exchanges=%d err=%v", exchanges.Load(), err)
+		}
+
+		query, id, err := dnsQuery("overflow.test", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := []byte{0xc0, 0x0c}
+		records := make([][]byte, 0, maxDNSCNAMEHops+2)
+		for index := 0; index <= maxDNSCNAMEHops; index++ {
+			target := fmt.Sprintf("hop-%d.test", index)
+			records = append(records, dnsFixtureNamedRecord(owner, 5, 60, dnsFixtureName(target)))
+			owner = dnsFixtureName(target)
+		}
+		records = append(records, dnsFixtureNamedRecord(owner, 1, 60, []byte{9, 9, 9, 9}))
+		response := dnsFixtureResponseRecords(query, 0x8180, records, nil)
+		if _, _, _, _, _, err := parseDNSResponse(response, id, 1, "overflow.test"); !errors.Is(err, errDNSWire) {
+			t.Fatalf("overlong CNAME chain accepted: %v", err)
+		}
+	})
 }
 
 func listenDNSFixture(t *testing.T) (net.Listener, net.PacketConn) {
@@ -349,30 +462,65 @@ func TestDNSRCODETransientColdSWRAndSIEBoundaries(t *testing.T) {
 }
 
 func dnsFixtureResponse(query []byte, flags uint16, answers []byte, authority []byte) []byte {
+	var answerRecords, authorityRecords [][]byte
+	if len(answers) > 0 {
+		answerRecords = [][]byte{answers}
+	}
+	if len(authority) > 0 {
+		authorityRecords = [][]byte{authority}
+	}
+	return dnsFixtureResponseRecords(query, flags, answerRecords, authorityRecords)
+}
+
+func dnsFixtureResponseRecords(query []byte, flags uint16, answers [][]byte, authority [][]byte) []byte {
 	response := make([]byte, 12, 12+len(query)-12+len(answers)+len(authority))
 	copy(response[:2], query[:2])
 	binary.BigEndian.PutUint16(response[2:4], flags)
 	binary.BigEndian.PutUint16(response[4:6], 1)
-	if len(answers) > 0 {
-		binary.BigEndian.PutUint16(response[6:8], 1)
-	}
-	if len(authority) > 0 {
-		binary.BigEndian.PutUint16(response[8:10], 1)
-	}
+	binary.BigEndian.PutUint16(response[6:8], uint16(len(answers)))
+	binary.BigEndian.PutUint16(response[8:10], uint16(len(authority)))
 	response = append(response, query[12:]...)
-	response = append(response, answers...)
-	return append(response, authority...)
+	for _, record := range answers {
+		response = append(response, record...)
+	}
+	for _, record := range authority {
+		response = append(response, record...)
+	}
+	return response
 }
 
 func dnsFixtureRecord(recordType uint16, ttl uint32, data []byte) []byte {
-	record := make([]byte, 12+len(data))
-	record[0], record[1] = 0xc0, 0x0c
-	binary.BigEndian.PutUint16(record[2:4], recordType)
-	binary.BigEndian.PutUint16(record[4:6], 1)
-	binary.BigEndian.PutUint32(record[6:10], ttl)
-	binary.BigEndian.PutUint16(record[10:12], uint16(len(data)))
-	copy(record[12:], data)
+	return dnsFixtureNamedRecord([]byte{0xc0, 0x0c}, recordType, ttl, data)
+}
+
+func dnsFixtureNamedRecord(owner []byte, recordType uint16, ttl uint32, data []byte) []byte {
+	record := append([]byte(nil), owner...)
+	header := make([]byte, 10)
+	binary.BigEndian.PutUint16(header[0:2], recordType)
+	binary.BigEndian.PutUint16(header[2:4], 1)
+	binary.BigEndian.PutUint32(header[4:8], ttl)
+	binary.BigEndian.PutUint16(header[8:10], uint16(len(data)))
+	record = append(record, header...)
+	record = append(record, data...)
 	return record
+}
+
+func dnsFixtureName(name string) []byte {
+	result := make([]byte, 0, len(name)+2)
+	for _, label := range strings.Split(name, ".") {
+		result = append(result, byte(len(label)))
+		result = append(result, label...)
+	}
+	return append(result, 0)
+}
+
+func dnsFixtureQuestion(t *testing.T, query []byte) (string, uint16) {
+	t.Helper()
+	name, next, err := readDNSName(query, 12)
+	if err != nil || next+4 > len(query) {
+		t.Fatalf("invalid fixture query: %v", err)
+	}
+	return name, binary.BigEndian.Uint16(query[next : next+2])
 }
 
 func TestTokenCacheAndManifestCacheSingleflightTTLAndBytes(t *testing.T) {
