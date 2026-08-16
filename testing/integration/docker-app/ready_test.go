@@ -133,7 +133,10 @@ func TestDockerRegistryMirrorPrepareAcceptsHTTPSOverlay(t *testing.T) {
 	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: document}); response.Error != nil {
 		t.Fatal(response.Error)
 	}
-	got, err := dockerapp.InstallCommandForDocument(document)
+	if controller.RegistryMirror() != mirror {
+		t.Fatalf("effective registry_mirror = %q", controller.RegistryMirror())
+	}
+	got, err := dockerapp.InstallCommand(controller.RegistryMirror())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,20 +146,6 @@ func TestDockerRegistryMirrorPrepareAcceptsHTTPSOverlay(t *testing.T) {
 }
 
 func TestDockerRegistryMirrorPrepareRejectsInvalidOverlay(t *testing.T) {
-	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
-		t.Fatal(err)
-	}
-	accepted := configWire(t, 1)
-	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: accepted}); response.Error != nil {
-		t.Fatal(response.Error)
-	}
-	if len(controller.Apps()) != 1 {
-		t.Fatalf("accepted apps = %#v", controller.Apps())
-	}
 	for _, document := range []string{
 		`{"apps":[],"registry_mirror":"http://insecure.example"}`,
 		`{"apps":[],"registry_mirror":"ftp://mirror.example"}`,
@@ -165,11 +154,18 @@ func TestDockerRegistryMirrorPrepareRejectsInvalidOverlay(t *testing.T) {
 		`{"apps":[],"registry_mirror":"https://ok.example","extra":true}`,
 		`{"registry_mirror":"https://ok.example"}`,
 	} {
+		controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+			t.Fatal(err)
+		}
 		if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: []byte(document)}); response.Error == nil {
 			t.Fatalf("prepare accepted %s", document)
 		}
-		if len(controller.Apps()) != 1 {
-			t.Fatalf("rejected overlay replaced effective apps: %#v", controller.Apps())
+		if len(controller.Apps()) != 0 || controller.RegistryMirror() != "" {
+			t.Fatalf("rejected overlay became effective: apps=%#v mirror=%q", controller.Apps(), controller.RegistryMirror())
 		}
 	}
 }

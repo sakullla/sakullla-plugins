@@ -1,12 +1,8 @@
 package dockerapp
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,14 +62,15 @@ type ControllerConfig struct {
 }
 
 type Controller struct {
-	mu          sync.Mutex
-	apps        []App
-	request     pluginsdk.RPCHandshakeRequest
-	admission   TypedHandleAdmission
-	prepareGate func(context.Context) error
-	lifecycle   *rpcplugin.Lifecycle
-	commit      *rpcplugin.Handle[*commitEpoch]
-	epoch       *commitEpoch
+	mu             sync.Mutex
+	apps           []App
+	registryMirror string
+	request        pluginsdk.RPCHandshakeRequest
+	admission      TypedHandleAdmission
+	prepareGate    func(context.Context) error
+	lifecycle      *rpcplugin.Lifecycle
+	commit         *rpcplugin.Handle[*commitEpoch]
+	epoch          *commitEpoch
 }
 
 type commitEpoch struct {
@@ -135,27 +132,15 @@ func (controller *Controller) Apps() []App {
 	return cloneApps(controller.apps)
 }
 
+func (controller *Controller) RegistryMirror() string {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.registryMirror
+}
+
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, config []byte) error {
-	if len(config) > MaxConfigBytes {
-		return fmt.Errorf("%w: config exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(config))
-	decoder.DisallowUnknownFields()
-	var document struct {
-		Apps *[]App `json:"apps"`
-	}
-	if err := decoder.Decode(&document); err != nil {
-		return errors.New("config JSON is invalid")
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("config must contain one JSON document")
-	}
-	if document.Apps == nil {
-		return errors.New("config requires apps")
-	}
-	configuration := Configuration{Apps: *document.Apps}
-	if err := configuration.Validate(); err != nil {
+	configuration, err := ParseConfiguration(config)
+	if err != nil {
 		return err
 	}
 	for _, app := range configuration.Apps {
@@ -175,6 +160,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		controller.mu.Lock()
 		if controller.epoch == epoch {
 			controller.apps = nil
+			controller.registryMirror = ""
 			controller.commit = nil
 			controller.epoch = nil
 		}
@@ -192,7 +178,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		if !epoch.live.Load() {
 			return rpcplugin.ErrRevoked
 		}
-		controller.apps, controller.commit, controller.epoch = cloneApps(configuration.Apps), handle, epoch
+		controller.apps, controller.registryMirror, controller.commit, controller.epoch = cloneApps(configuration.Apps), configuration.RegistryMirror, handle, epoch
 		return nil
 	})
 }
@@ -229,6 +215,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
 	controller.mu.Lock()
 	controller.apps = nil
+	controller.registryMirror = ""
 	controller.commit = nil
 	controller.epoch = nil
 	controller.mu.Unlock()
