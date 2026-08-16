@@ -1,6 +1,8 @@
 package dockerapp_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,7 +25,7 @@ func TestDockerReadyInstalledProjectsEngineReady(t *testing.T) {
 	if !got.Status.Ready || got.Status.Version != "27.1.1" || got.Status.RequestsInstall() {
 		t.Fatalf("ready = %#v", got.Status)
 	}
-	if got.Command.Command != "" || got.Command.DaemonJSON != "" {
+	if got.Command.Script != "" || got.Command.DaemonJSON != "" {
 		t.Fatalf("installed engine still projected an install command: %#v", got.Command)
 	}
 	if installer.called {
@@ -40,10 +42,10 @@ func TestDockerReadyMissingEngineDoesNotCallInstallAction(t *testing.T) {
 	if got.Status.Ready || got.Status.Version != "" || got.Status.RequestsInstall() {
 		t.Fatalf("missing engine projected ready: %#v", got.Status)
 	}
-	if got.Command.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command.Command, "get.docker.com") {
+	if got.Command.Script != dockerapp.OfficialInstallScript || !strings.Contains(got.Command.Script, "get.docker.com") {
 		t.Fatalf("command = %#v", got.Command)
 	}
-	if strings.Contains(got.Command.Command, "registry-mirrors") || got.Command.DaemonJSON != "" {
+	if strings.Contains(got.Command.Script, "registry-mirrors") || got.Command.DaemonJSON != "" {
 		t.Fatalf("empty mirror leaked registry-mirrors: %#v", got.Command)
 	}
 	if installer.called {
@@ -52,18 +54,23 @@ func TestDockerReadyMissingEngineDoesNotCallInstallAction(t *testing.T) {
 }
 
 func TestDockerInstallCommandOmitsRegistryMirrorsWithoutAccelerator(t *testing.T) {
+	defaultDocument, err := os.ReadFile(filepath.Join("..", "..", "..", "plugins", "docker-app", "config.default.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, document := range [][]byte{
 		[]byte(`{"apps":[]}`),
 		[]byte(`{"apps":[],"registry_mirror":""}`),
+		defaultDocument,
 	} {
 		got, err := dockerapp.InstallCommandForDocument(document)
 		if err != nil {
 			t.Fatalf("document %s err=%v", document, err)
 		}
-		if got.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command, "get.docker.com") {
+		if got.Script != dockerapp.OfficialInstallScript || !strings.Contains(got.Script, "get.docker.com") {
 			t.Fatalf("document %s command = %#v", document, got)
 		}
-		if strings.Contains(got.Command, "registry-mirrors") || strings.Contains(got.DaemonJSON, "registry-mirrors") || got.DaemonJSON != "" {
+		if strings.Contains(got.Script, "registry-mirrors") || strings.Contains(got.DaemonJSON, "registry-mirrors") || got.DaemonJSON != "" {
 			t.Fatalf("document %s leaked registry-mirrors: %#v", document, got)
 		}
 	}
@@ -75,10 +82,10 @@ func TestDockerInstallCommandIncludesHTTPSRegistryMirror(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command, "get.docker.com") {
+	if got.Script != dockerapp.OfficialInstallScript || !strings.Contains(got.Script, "get.docker.com") {
 		t.Fatalf("command = %#v", got)
 	}
-	if strings.Contains(got.Command, "registry-mirrors") {
+	if strings.Contains(got.Script, "registry-mirrors") {
 		t.Fatalf("official script included registry-mirrors: %#v", got)
 	}
 	if !strings.Contains(got.DaemonJSON, "registry-mirrors") || !strings.Contains(got.DaemonJSON, mirror) {

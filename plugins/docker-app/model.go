@@ -14,13 +14,12 @@ import (
 )
 
 const (
-	PluginID                     = "docker-app"
-	PluginVersion                = "0.1.0"
-	MaxApps                      = 128
-	MaxDiscoveries               = 512
-	MaxComposeServices           = 128
-	MaxCollectionItems           = 256
-	OfficialDockerInstallCommand = "curl -fsSL https://get.docker.com | sh"
+	PluginID           = "docker-app"
+	PluginVersion      = "0.1.0"
+	MaxApps            = 128
+	MaxDiscoveries     = 512
+	MaxComposeServices = 128
+	MaxCollectionItems = 256
 )
 
 var (
@@ -58,11 +57,6 @@ func (app App) Validate() error {
 type Configuration struct {
 	Apps           []App  `json:"apps"`
 	RegistryMirror string `json:"registry_mirror,omitempty"`
-}
-
-type EngineStatus struct {
-	Ready   bool
-	Version string
 }
 
 func (configuration Configuration) Validate() error {
@@ -113,17 +107,6 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 	}
 	return configuration, nil
 }
-
-// ProjectEngine maps a host-supplied observation to readiness. It never
-// requests an install action; an absent engine only yields Ready=false.
-func ProjectEngine(observation EngineObservation) EngineStatus {
-	if !observation.Installed {
-		return EngineStatus{}
-	}
-	return EngineStatus{Ready: true, Version: observation.Version}
-}
-
-func (EngineStatus) RequestsInstall() bool { return false }
 
 func validateRegistryMirror(value string) error {
 	if value == "" {
