@@ -1,39 +1,39 @@
 {
   "schema_version": 1,
-  "title": "Rate limit settings",
-  "description": "Node-local HTTP and L4 admission using bounded GCRA counters",
+  "title": "速率限制设置",
+  "description": "本节点对 HTTP 和四层新建连接使用有界 GCRA 计数器放行",
   "components": [
     {
       "type": "section",
       "id": "general",
-      "label": "Local admission",
+      "label": "本节点放行",
       "children": [
-        {"type": "toggle", "id": "enabled", "label": "Enabled", "binding": "/enabled", "required": true},
-        {"type": "number", "id": "max_keys", "label": "Maximum local keys", "binding": "/max_keys", "required": true, "minimum": 1, "maximum": 65536},
-        {"type": "number", "id": "http_source_interval", "label": "HTTP source interval (ns)", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
-        {"type": "number", "id": "http_source_burst", "label": "HTTP source burst", "binding": "/http/source/burst", "required": true, "minimum": 1, "maximum": 1000000},
-        {"type": "toggle", "id": "http_global_enabled", "label": "HTTP rule-global bucket", "binding": "/http/global/enabled", "required": true},
-        {"type": "number", "id": "l4_source_interval", "label": "L4 new-flow interval (ns)", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
-        {"type": "number", "id": "l4_source_burst", "label": "L4 new-flow burst", "binding": "/l4/source/burst", "required": true, "minimum": 1, "maximum": 1000000}
+        {"type": "toggle", "id": "enabled", "label": "启用", "binding": "/enabled", "required": true},
+        {"type": "number", "id": "max_keys", "label": "本节点最大键数", "binding": "/max_keys", "required": true, "minimum": 1, "maximum": 65536},
+        {"type": "number", "id": "http_source_interval", "label": "HTTP 来源间隔（纳秒）", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "http_source_burst", "label": "HTTP 来源突发", "binding": "/http/source/burst", "required": true, "minimum": 1, "maximum": 1000000},
+        {"type": "toggle", "id": "http_global_enabled", "label": "HTTP 规则全局桶", "binding": "/http/global/enabled", "required": true},
+        {"type": "number", "id": "l4_source_interval", "label": "四层新建连接间隔（纳秒）", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "l4_source_burst", "label": "四层新建连接突发", "binding": "/l4/source/burst", "required": true, "minimum": 1, "maximum": 1000000}
       ]
     },
     {
       "type": "notice",
       "id": "local_scope",
-      "label": "Single-Agent local counters",
-      "description": "These counters apply independently on each Agent. They are not user, resource-group, bandwidth, or traffic quotas.",
+      "label": "单 Agent 本地计数",
+      "description": "这些计数器在每个 Agent 上独立生效，不是用户、资源组、带宽或流量配额。",
       "tone": "info"
     },
     {
       "type": "notice",
       "id": "capability_gate",
-      "label": "Host capabilities required",
-      "description": "Installation remains blocked until the Host provides a monotonic clock and atomic generation-local state mutation.",
+      "label": "需要宿主能力",
+      "description": "在宿主提供单调时钟和代际内原子状态变更前，安装会保持阻止。",
       "tone": "warning"
     }
   ],
   "actions": [
-    {"type": "submit", "id": "save", "label": "Save"},
-    {"type": "reset", "id": "reset", "label": "Reset", "confirm": "Reset rate-limit settings and local counters?"}
+    {"type": "submit", "id": "save", "label": "保存"},
+    {"type": "reset", "id": "reset", "label": "重置", "confirm": "重置速率限制设置和本地计数器？"}
   ]
 }

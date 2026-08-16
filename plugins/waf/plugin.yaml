@@ -25,6 +25,7 @@ permissions:
   - name: event.emit
   - name: policy.trusted-source
 config_schema: config.schema.json
+ui_schema: ui.schema.json
 resource_budget:
   timeout_ms: 2
   memory_bytes: 16777216

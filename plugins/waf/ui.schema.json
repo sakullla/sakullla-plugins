@@ -1,9 +1,76 @@
 {
   "schema_version": 1,
-  "sections": [
-    {"id": "mode", "title": "Enforcement", "fields": ["mode"]},
-    {"id": "rules", "title": "Supported rules", "fields": ["custom_rules", "exclusions"]}
+  "title": "Web 防火墙设置",
+  "description": "使用确定性托管规则和字面量自定义规则检查 HTTP 请求",
+  "components": [
+    {
+      "type": "section",
+      "id": "mode",
+      "label": "执行方式",
+      "children": [
+        {
+          "type": "select",
+          "id": "mode",
+          "label": "模式",
+          "binding": "/mode",
+          "required": true,
+          "options": [
+            {"value": "deny", "label": "拦截"},
+            {"value": "observe", "label": "观察"}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "rules",
+      "label": "支持的规则",
+      "children": [
+        {
+          "type": "array",
+          "id": "custom_rules",
+          "label": "自定义规则",
+          "binding": "/custom_rules",
+          "children": [
+            {"type": "text", "id": "id", "label": "规则 ID", "binding": "/id", "required": true},
+            {
+              "type": "select",
+              "id": "target",
+              "label": "检查目标",
+              "binding": "/target",
+              "required": true,
+              "options": [
+                {"value": "path", "label": "路径"},
+                {"value": "query", "label": "查询"},
+                {"value": "headers", "label": "请求头"},
+                {"value": "body", "label": "请求体"}
+              ]
+            },
+            {"type": "text", "id": "needle", "label": "匹配内容", "binding": "/needle", "required": true}
+          ]
+        },
+        {
+          "type": "array",
+          "id": "exclusions",
+          "label": "排除项",
+          "binding": "/exclusions",
+          "children": [
+            {"type": "text", "id": "rule_id", "label": "规则 ID", "binding": "/rule_id", "required": true},
+            {"type": "text", "id": "path_prefix", "label": "路径前缀", "binding": "/path_prefix", "required": true}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "notice",
+      "id": "compatibility",
+      "label": "规则范围",
+      "description": "只使用确定性支持的规则，不声称完整兼容 CRS 或 PCRE。",
+      "tone": "info"
+    }
   ],
-  "notices": ["Uses deterministic supported rules; does not claim full CRS or PCRE compatibility."]
+  "actions": [
+    {"type": "submit", "id": "save", "label": "保存"},
+    {"type": "reset", "id": "reset", "label": "重置", "confirm": "重置 Web 防火墙设置？"}
+  ]
 }
-

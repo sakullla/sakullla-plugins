@@ -1,39 +1,39 @@
 {
   "schema_version": 1,
-  "title": "IP policy settings",
-  "description": "Host-rendered shared, overlay, and managed GeoIP policy configuration",
+  "title": "IP 策略设置",
+  "description": "由宿主渲染的共享名单、覆盖名单和托管 GeoIP 策略",
   "components": [
     {
       "type": "section",
       "id": "general",
-      "label": "Policy",
+      "label": "策略",
       "children": [
         {
           "type": "select",
           "id": "default_action",
-          "label": "Default action",
+          "label": "默认动作",
           "binding": "/default_action",
           "required": true,
           "options": [
-            {"value": "allow", "label": "Allow"},
-            {"value": "deny", "label": "Deny"}
+            {"value": "allow", "label": "允许"},
+            {"value": "deny", "label": "拒绝"}
           ]
         },
         {
           "type": "select",
           "id": "geo_failure",
-          "label": "Geo data failure action",
+          "label": "地理数据失败时的动作",
           "binding": "/geo/failure_policy",
           "required": true,
           "options": [
-            {"value": "allow", "label": "Allow"},
-            {"value": "deny", "label": "Deny"}
+            {"value": "allow", "label": "允许"},
+            {"value": "deny", "label": "拒绝"}
           ]
         },
         {
           "type": "text",
           "id": "mmdb_handle",
-          "label": "Host MMDB handle",
+          "label": "宿主 MMDB 句柄",
           "binding": "/geo/mmdb_handle",
           "required": true
         }
@@ -42,13 +42,13 @@
     {
       "type": "notice",
       "id": "trusted_source_gate",
-      "label": "Trusted source required",
-      "description": "Installation remains blocked until the Host authenticates socket, PROXY protocol, and Relay source provenance.",
+      "label": "需要可信来源",
+      "description": "在宿主完成套接字、PROXY 协议和中继来源校验前，安装会保持阻止。",
       "tone": "warning"
     }
   ],
   "actions": [
-    {"type": "submit", "id": "save", "label": "Save"},
-    {"type": "reset", "id": "reset", "label": "Reset", "confirm": "Reset IP policy settings?"}
+    {"type": "submit", "id": "save", "label": "保存"},
+    {"type": "reset", "id": "reset", "label": "重置", "confirm": "重置 IP 策略设置？"}
   ]
 }
