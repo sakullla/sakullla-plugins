@@ -937,6 +937,9 @@ func (conn *quicConn) handleDatagram(datagram []byte) error {
 			return ErrUpstreamFailed
 		}
 		offset += consumed
+		if err := conn.drainTLS(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -955,7 +958,7 @@ func (conn *quicConn) handlePacket(packet []byte) (int, error) {
 		_ = rest
 	}
 	readKeys := conn.readKeys[space]
-	header, payload, consumed, pn, err := unprotectQUICPacket(packet, space, readKeys, conn.peerCID)
+	header, payload, consumed, pn, err := unprotectQUICPacket(packet, space, readKeys, conn.scid)
 	if err != nil {
 		return 0, quicFail(fmt.Errorf("unprotect space=%d first=%x len=%d: %v", space, packet[0], len(packet), err))
 	}

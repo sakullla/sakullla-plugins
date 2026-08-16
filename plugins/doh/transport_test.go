@@ -19,6 +19,24 @@ import (
 	"time"
 )
 
+func TestQUICShortHeaderUsesLocalSCID(t *testing.T) {
+	keys := deriveQUICKeys(bytesRepeat(0x11, 32), 16)
+	local := bytesRepeat(0x22, 4)
+	peer := bytesRepeat(0x33, 8)
+	header := encodeShortHeader(local, 7)
+	packet, err := sealQUICPacket(header, []byte{0x01}, 7, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, payload, _, pn, err := unprotectQUICPacket(packet, spaceApplication, keys, local)
+	if err != nil || pn != 7 || len(payload) < 1 || payload[0] != 0x01 {
+		t.Fatalf("local scid payload=%x pn=%d err=%v", payload, pn, err)
+	}
+	if _, _, _, _, err := unprotectQUICPacket(packet, spaceApplication, keys, peer); err == nil {
+		t.Fatal("peer CID length opened a short header addressed to the local scid")
+	}
+}
+
 func TestQUICPacketSealOpen(t *testing.T) {
 	secret := bytesRepeat(0x11, 32)
 	keys := deriveQUICKeys(secret, 16)
