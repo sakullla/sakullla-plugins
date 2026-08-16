@@ -125,7 +125,7 @@ func TestDoHEmptyUpstreamsUseDefault(t *testing.T) {
 	query := dnsQuery(1, "default.example", 1)
 	for name, config := range map[string]doh.PluginConfig{
 		"omitted": {},
-		"empty":   {Upstreams: []doh.UpstreamConfig{}},
+		"empty":   {Upstreams: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var seen []string
@@ -152,7 +152,7 @@ func TestDoHConfiguredUpstreamsOverrideDefault(t *testing.T) {
 	const custom = "https://resolver.example/dns-query"
 	var seen []string
 	service, err := doh.NewService(doh.ConfigurationFromPlugin(doh.PluginConfig{
-		Upstreams: []doh.UpstreamConfig{{ID: "custom", Endpoint: custom, Enabled: true}},
+		Upstreams: custom,
 	}), doh.RuntimeAdapters{
 		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
 			seen = append(seen, request.Endpoint)
@@ -172,7 +172,7 @@ func TestDoHConfiguredUpstreamsOverrideDefault(t *testing.T) {
 
 func TestDoHNoHealthyUpstreamIs5xxNotSuccessDNS(t *testing.T) {
 	var calls atomic.Int32
-	controller := activateController(t, []byte(`{"upstreams":[{"id":"down","endpoint":"https://down.example/dns-query","priority":0,"enabled":true}]}`), func(request doh.ResolveRequest) ([]byte, error) {
+	controller := activateController(t, []byte(`{"upstreams":"https://down.example/dns-query"}`), func(request doh.ResolveRequest) ([]byte, error) {
 		calls.Add(1)
 		return nil, errors.New("upstream down")
 	})
@@ -483,6 +483,54 @@ func TestDoHFailoverUsesConfiguredOrder(t *testing.T) {
 	statuses := service.Statuses()
 	if statuses[0].ID != "first" || statuses[0].Result != "failed" || statuses[1].Result != "healthy" {
 		t.Fatalf("failover statuses=%#v", statuses)
+	}
+}
+
+func TestDoHCommentsAndDomainRouting(t *testing.T) {
+	var seen []string
+	service, err := doh.NewService(doh.ConfigurationFromPlugin(doh.PluginConfig{
+		Upstreams: "# comment\nhttps://default.example/dns-query\n[/example.local/]https://local-a.example/dns-query https://local-b.example/dns-query",
+	}), doh.RuntimeAdapters{
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
+			seen = append(seen, request.Endpoint)
+			if request.Endpoint == "https://local-a.example/dns-query" {
+				return nil, errors.New("local-a down")
+			}
+			return positiveResponse(request.DNSMessage, 10), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "www.example.local", 1), "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "other.example", 1), "")); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 3 || seen[0] != "https://local-a.example/dns-query" || seen[1] != "https://local-b.example/dns-query" || seen[2] != "https://default.example/dns-query" {
+		t.Fatalf("seen=%v", seen)
+	}
+}
+
+func TestDoHDomainListDoesNotFallBackToDefault(t *testing.T) {
+	var seen []string
+	service, err := doh.NewService(doh.ConfigurationFromPlugin(doh.PluginConfig{
+		Upstreams: "https://default.example/dns-query\n[/example.local/]https://local.example/dns-query",
+	}), doh.RuntimeAdapters{
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
+			seen = append(seen, request.Endpoint)
+			return nil, errors.New("down")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "example.local", 1), "")); !errors.Is(err, doh.ErrNoHealthyUpstream) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(seen) != 1 || seen[0] != "https://local.example/dns-query" {
+		t.Fatalf("seen=%v", seen)
 	}
 }
 

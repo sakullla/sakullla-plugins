@@ -17,7 +17,7 @@ func TestDoHRPCEmptyConfigActivatesHTTPBackend(t *testing.T) {
 	if _, err := controller.Handshake(context.Background(), rpcHandshake("generation-1")); err != nil {
 		t.Fatal(err)
 	}
-	for _, config := range [][]byte{nil, []byte("{}"), []byte(`{"upstreams":[]}`)} {
+	for _, config := range [][]byte{nil, []byte("{}"), []byte(`{"upstreams":""}`)} {
 		fresh := newDoHController(t)
 		if _, err := fresh.Handshake(context.Background(), rpcHandshake("generation-1")); err != nil {
 			t.Fatal(err)
@@ -60,7 +60,9 @@ func TestDoHRPCRejectsUnknownConfigAndMissingGrant(t *testing.T) {
 		[]byte(`{"legacy":true}`),
 		[]byte(`{"listener_ref":"listener/doh"}`),
 		[]byte(`[]`),
-		[]byte(`{"upstreams":[{"id":"one","endpoint":"1.1.1.1:53","priority":0,"enabled":true},{"id":"one","endpoint":"8.8.8.8:53","priority":1,"enabled":true}]}`),
+		[]byte(`{"upstreams":[]}`),
+		[]byte(`{"upstreams":[{"id":"one","endpoint":"1.1.1.1:53","priority":0,"enabled":true}]}`),
+		[]byte("{\"upstreams\":\"ftp://example.com\"}"),
 	} {
 		if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: config}); response.Error == nil {
 			t.Fatalf("invalid config accepted: %s", config)

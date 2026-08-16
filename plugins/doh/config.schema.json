@@ -4,19 +4,8 @@
   "additionalProperties": false,
   "properties": {
     "upstreams": {
-      "type": "array",
-      "maxItems": 8,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "endpoint", "priority", "enabled"],
-        "properties": {
-          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "endpoint": {"type": "string", "minLength": 1, "maxLength": 256},
-          "priority": {"type": "integer", "minimum": -1000, "maximum": 1000},
-          "enabled": {"type": "boolean"}
-        }
-      }
+      "type": "string",
+      "maxLength": 16384
     }
   }
 }

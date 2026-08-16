@@ -122,7 +122,7 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		return HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: candidate, CacheHit: true}, nil
 	}
 
-	for _, upstream := range service.configuration.orderedUpstreams() {
+	for _, upstream := range service.configuration.upstreamsForName(questionName(query.question)) {
 		if !upstream.Enabled {
 			continue
 		}
