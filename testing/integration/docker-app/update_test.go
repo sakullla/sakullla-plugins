@@ -78,22 +78,9 @@ func TestDockerAutoUpdateDisabledOnlyProjectsNewVersionUntilConfirm(t *testing.T
 }
 
 func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
-	publish := func(t *testing.T) (*dockerapp.DeploymentStore, *rolloutFake, dockerapp.Rollout, dockerapp.App, dockerapp.Deployment) {
-		t.Helper()
-		store, fake, rollout, app, _ := updateHarness(t, "")
-		if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
-			t.Fatal(err)
-		}
-		published, ok := store.Get(app.ID)
-		if !ok || published.InstanceID != "new" || published.Image == "" || published.RuleRef == "" {
-			t.Fatalf("precondition published=%#v ok=%v", published, ok)
-		}
-		fake.calls = nil
-		return store, fake, rollout, app, published
-	}
-
 	t.Run("cutover-failure", func(t *testing.T) {
-		store, fake, rollout, app, published := publish(t)
+		store, fake, rollout, app, published := publishUpdate(t)
+		historyID := publishedHistoryInstance(t, published)
 		fake.failRestore = true
 		err := rollout.Rollback(context.Background(), app.ID)
 		got, _ := store.Get(app.ID)
@@ -106,13 +93,24 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		if got.Image == "" || got.RuleRef == "" {
 			t.Fatalf("cutover failure persisted empty active: %#v", got)
 		}
-		if contains(fake.calls, "remove:new") || contains(fake.calls, "drain:new") {
-			t.Fatalf("cutover failure touched serving instance: %v", fake.calls)
+		if contains(fake.calls, "remove:new") || contains(fake.calls, "drain:new") || contains(fake.calls, "remove:"+historyID) {
+			t.Fatalf("cutover failure touched serving or history instance: %v", fake.calls)
+		}
+		assertHistoryInstance(t, got, historyID)
+		fake.failRestore = false
+		fake.calls = nil
+		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		restored, _ := store.Get(app.ID)
+		if restored.InstanceID != historyID || restored.Phase != dockerapp.PhaseActive {
+			t.Fatalf("retry after cutover failure did not restore history: %#v", restored)
 		}
 	})
 
 	t.Run("drain-failure", func(t *testing.T) {
-		store, fake, rollout, app, published := publish(t)
+		store, fake, rollout, app, published := publishUpdate(t)
+		historyID := publishedHistoryInstance(t, published)
 		fake.fail = "drain"
 		err := rollout.Rollback(context.Background(), app.ID)
 		got, _ := store.Get(app.ID)
@@ -125,13 +123,92 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		if got.Image == "" || got.RuleRef == "" {
 			t.Fatalf("drain failure persisted empty active: %#v", got)
 		}
-		if contains(fake.calls, "remove:new") {
-			t.Fatalf("drain failure removed serving instance: %v", fake.calls)
+		if contains(fake.calls, "remove:new") || contains(fake.calls, "remove:"+historyID) {
+			t.Fatalf("drain failure removed serving or history instance: %v", fake.calls)
 		}
 		if !contains(fake.calls, "cutover:new") {
 			t.Fatalf("drain failure did not restore current rule: %v", fake.calls)
 		}
+		assertHistoryInstance(t, got, historyID)
+		fake.fail = ""
+		fake.calls = nil
+		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		restored, _ := store.Get(app.ID)
+		if restored.InstanceID != historyID || restored.Phase != dockerapp.PhaseActive {
+			t.Fatalf("retry after drain failure did not restore history: %#v", restored)
+		}
 	})
+}
+
+func TestDockerRollbackLeaseExpireReconcilePreservesHistoryInstance(t *testing.T) {
+	store, fake, rollout, app, published := publishUpdate(t)
+	historyID := publishedHistoryInstance(t, published)
+	intent := published
+	intent.Phase = dockerapp.PhaseCutover
+	intent.PendingInstance = historyID
+	intent.DesiredRuleTarget = historyID
+	intent.PriorInstance = published.InstanceID
+	intent.PriorImage = published.Image
+	intent.PriorGeneration = published.Generation
+	intent.PriorRuleRef = published.RuleRef
+	intent.PriorRuleTarget = published.RuleTarget
+	intent.PriorDigest = published.ImageDigest
+	intent.PriorAbsent = false
+	intent.Image = published.History[0].Image
+	intent.RuleRef = published.History[0].RuleRef
+	intent.Generation = published.History[0].Generation
+	intent.ImageDigest = published.History[0].ImageDigest
+	intent.AvailableDigest = ""
+	intent.Lease = ""
+	store.Put(intent)
+	fake.calls = nil
+
+	if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get(app.ID)
+	if got.InstanceID != published.InstanceID || got.Image != published.Image || got.RuleRef != published.RuleRef || got.RuleTarget != published.RuleTarget || got.Phase != dockerapp.PhaseActive {
+		t.Fatalf("lease-expire reconcile dropped current: %#v", got)
+	}
+	if contains(fake.calls, "remove:"+historyID) || contains(fake.calls, "remove:"+published.InstanceID) {
+		t.Fatalf("lease-expire reconcile removed an instance: %v", fake.calls)
+	}
+	assertHistoryInstance(t, got, historyID)
+
+	fake.calls = nil
+	if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := store.Get(app.ID)
+	if restored.InstanceID != historyID || restored.Image != published.History[0].Image || restored.Phase != dockerapp.PhaseActive {
+		t.Fatalf("later rollback cutovered to a removed instance: %#v calls=%v", restored, fake.calls)
+	}
+	if contains(fake.calls, "pull") {
+		t.Fatalf("history instance still existed but rollback republished: %v", fake.calls)
+	}
+}
+
+func TestDockerRollbackMissingHistoryInstanceRepublishes(t *testing.T) {
+	store, fake, rollout, app, published := publishUpdate(t)
+	historyID := publishedHistoryInstance(t, published)
+	delete(fake.state.Instances, historyID)
+	fake.calls = nil
+
+	if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get(app.ID)
+	if got.Phase != dockerapp.PhaseActive || got.Image == "" || got.RuleRef == "" {
+		t.Fatalf("missing history republish got=%#v", got)
+	}
+	if contains(fake.calls, "cutover:"+historyID) {
+		t.Fatalf("missing history instance was still the cutover target: %v", fake.calls)
+	}
+	if !contains(fake.calls, "pull") || !contains(fake.calls, "start") || !contains(fake.calls, "ready") {
+		t.Fatalf("missing history instance did not republish: %v", fake.calls)
+	}
 }
 
 func TestDockerHealthRecoverRepublishesAndPreservesOldOnFailure(t *testing.T) {
@@ -176,6 +253,35 @@ func TestDockerHealthRecoverRepublishesAndPreservesOldOnFailure(t *testing.T) {
 			t.Fatalf("health recover honored auto_update=false: %#v old=%#v", got, old)
 		}
 	})
+}
+
+func publishUpdate(t *testing.T) (*dockerapp.DeploymentStore, *rolloutFake, dockerapp.Rollout, dockerapp.App, dockerapp.Deployment) {
+	t.Helper()
+	store, fake, rollout, app, _ := updateHarness(t, "")
+	if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+		t.Fatal(err)
+	}
+	published, ok := store.Get(app.ID)
+	if !ok || published.InstanceID != "new" || published.Image == "" || published.RuleRef == "" {
+		t.Fatalf("precondition published=%#v ok=%v", published, ok)
+	}
+	fake.calls = nil
+	return store, fake, rollout, app, published
+}
+
+func publishedHistoryInstance(t *testing.T, published dockerapp.Deployment) string {
+	t.Helper()
+	if len(published.History) == 0 || published.History[0].InstanceID == "" {
+		t.Fatalf("precondition history=%#v", published.History)
+	}
+	return published.History[0].InstanceID
+}
+
+func assertHistoryInstance(t *testing.T, got dockerapp.Deployment, instanceID string) {
+	t.Helper()
+	if len(got.History) == 0 || got.History[0].InstanceID != instanceID {
+		t.Fatalf("history instance not preserved: %#v want=%s", got.History, instanceID)
+	}
 }
 
 func updateHarness(t *testing.T, fail string) (*dockerapp.DeploymentStore, *rolloutFake, dockerapp.Rollout, dockerapp.App, dockerapp.Deployment) {

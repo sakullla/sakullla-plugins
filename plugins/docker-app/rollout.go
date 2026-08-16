@@ -291,6 +291,16 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 	}
 	current := record.Value
 	rev := current.History[len(current.History)-1]
+	if rev.InstanceID != "" {
+		history := r.forgetGoneHistoryInstance(record, current.History, rev.InstanceID)
+		if history[len(history)-1].InstanceID == "" {
+			current.History = history
+			if _, err := r.Store.CompareAndSwap(ctx, appID, record.Version, current.FencingToken, current); err != nil {
+				return ErrReconcilePending
+			}
+			rev.InstanceID = ""
+		}
+	}
 	if rev.InstanceID == "" || rev.Image == "" || rev.RuleRef == "" {
 		app := App{ID: appID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
 		if err := app.Validate(); err != nil {
@@ -299,8 +309,8 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 		}
 		return r.publish(ctx, app, rev.ImageDigest)
 	}
-	// Prior*/PendingInstance must name the rollback target as pending so a later
-	// Reconcile cannot treat the still-serving instance as disposable.
+	// PendingInstance names the history instance so Reconcile cannot treat the
+	// still-serving instance as disposable or Remove the rollback target.
 	leased, err := r.Store.AcquireLease(ctx, appID, record.Version, historicalRollbackIntent(current, rev), r.now().Add(r.leaseDuration()))
 	if err != nil {
 		return ErrReconcilePending
@@ -355,17 +365,75 @@ func historicalRollbackIntent(current Deployment, rev DeploymentRevision) Deploy
 	return intent
 }
 
-func rollbackTargetPending(value, original Deployment) bool {
-	return value.PendingInstance != "" && value.PendingInstance != original.InstanceID &&
-		value.PriorInstance == original.InstanceID && value.PriorImage == original.Image &&
-		value.PriorRuleRef == original.RuleRef
+func historicalRollbackPending(value Deployment) bool {
+	if value.PendingInstance == "" {
+		return false
+	}
+	for _, rev := range value.History {
+		if rev.InstanceID == value.PendingInstance {
+			return true
+		}
+	}
+	return false
+}
+
+func clearHistoryInstance(history []DeploymentRevision, instanceID string) []DeploymentRevision {
+	out := cloneRevisions(history)
+	if instanceID == "" {
+		return out
+	}
+	for i := range out {
+		if out[i].InstanceID == instanceID {
+			out[i].InstanceID = ""
+		}
+	}
+	return out
+}
+
+func (r Rollout) forgetGoneHistoryInstance(record DeploymentRecord, history []DeploymentRevision, instanceID string) []DeploymentRevision {
+	if instanceID == "" || len(history) == 0 {
+		return history
+	}
+	ctx, cancel := r.cleanupContext()
+	state, err := r.Executor.Inspect(ctx, record.Value.FencingToken, record.Value.AppID, record.Value.RuleRef)
+	cancel()
+	if err != nil || state.Instances[instanceID] {
+		return history
+	}
+	return clearHistoryInstance(history, instanceID)
 }
 
 func (r Rollout) abortHistoricalRollback(record DeploymentRecord, original Deployment, routeMayPending bool, cause error) error {
-	if rollbackTargetPending(record.Value, original) {
-		return r.rollback(record, original, true, record.Value.PendingInstance, routeMayPending, cause)
-	}
+	original.History = r.forgetGoneHistoryInstance(record, original.History, record.Value.PendingInstance)
 	return r.restoreActive(record, original, routeMayPending, cause)
+}
+
+func (r Rollout) restoreHistoricalPrior(record DeploymentRecord, state RuntimeState, priorInstance, pending string, pendingExists bool) error {
+	v, fence := record.Value, record.Value.FencingToken
+	if v.PriorAbsent || priorInstance == "" || !state.Instances[priorInstance] {
+		return r.release(record, ErrReconcilePending)
+	}
+	if state.RuleTarget != v.PriorRuleTarget && v.PriorRuleRef != "" && v.PriorRuleTarget != "" {
+		ctx, cancel := r.cleanupContext()
+		err := r.Executor.Cutover(ctx, fence, v.PriorRuleRef, v.PriorRuleTarget)
+		cancel()
+		if err != nil {
+			return r.release(record, safeFailure(ErrOperationFailed, err))
+		}
+	}
+	history := v.History
+	if !pendingExists {
+		history = clearHistoryInstance(history, pending)
+	}
+	prior := Deployment{
+		AppID: v.AppID, InstanceID: priorInstance, Image: v.PriorImage, RuleRef: v.PriorRuleRef,
+		RuleTarget: v.PriorRuleTarget, Generation: v.PriorGeneration, Phase: PhaseActive,
+		FencingToken: fence, ImageDigest: v.PriorDigest, History: history,
+	}
+	ctx, cancel := r.cleanupContext()
+	_, err := r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, prior)
+	cancel()
+	return err
 }
 
 func (r Rollout) restoreActive(record DeploymentRecord, original Deployment, routeMayPending bool, cause error) error {
@@ -597,6 +665,9 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		return r.release(record, ErrReconcilePending)
 	}
 	finishNew := (v.Phase == PhaseCutover || v.Phase == PhaseDraining) && newExists && state.RuleTarget == pending
+	if !finishNew && historicalRollbackPending(v) {
+		return r.restoreHistoricalPrior(record, state, priorInstance, pending, newExists)
+	}
 	if finishNew {
 		if priorExists {
 			ctx, cancel = r.cleanupContext()
