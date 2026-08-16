@@ -63,14 +63,14 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 			rel:   filepath.Join("waf", "ui.schema.json"),
 			title: "Web 防火墙设置",
 			bindings: map[string][]string{
-				"/mode":        {"deny", "observe"},
+				"/mode":         {"deny", "observe"},
 				"/custom_rules": nil,
-				"/id":          nil,
-				"/target":      {"path", "query", "headers", "body"},
-				"/needle":      nil,
-				"/exclusions":  nil,
-				"/rule_id":     nil,
-				"/path_prefix": nil,
+				"/id":           nil,
+				"/target":       {"path", "query", "headers", "body"},
+				"/needle":       nil,
+				"/exclusions":   nil,
+				"/rule_id":      nil,
+				"/path_prefix":  nil,
 			},
 		},
 	}
@@ -100,7 +100,7 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		if document["title"] != test.title {
 			t.Fatalf("%s title = %v, want %s", test.rel, document["title"], test.title)
 		}
-		seen, labels := collectBindings(document)
+		seen, labels, fields := collectBindings(document)
 		for binding, values := range test.bindings {
 			got, ok := seen[binding]
 			if !ok {
@@ -120,13 +120,24 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 			if !strings.Contains(label, "秒") || strings.Contains(label, "纳秒") {
 				t.Fatalf("%s binding %s label = %q, want seconds without nanosecond units", test.rel, binding, label)
 			}
+			field := fields[binding]
+			if jsonInt(field["minimum"]) != 1 || jsonInt(field["maximum"]) != 3600 {
+				t.Fatalf("%s binding %s bounds = %v–%v, want 1–3600", test.rel, binding, field["minimum"], field["maximum"])
+			}
+			if jsonInt(field["scale"]) != 1_000_000_000 {
+				t.Fatalf("%s binding %s scale = %v, want 1000000000", test.rel, binding, field["scale"])
+			}
+			if unit, _ := field["unit"].(string); unit != "s" {
+				t.Fatalf("%s binding %s unit = %v, want s", test.rel, binding, field["unit"])
+			}
 		}
 	}
 }
 
-func collectBindings(node any) (map[string][]string, map[string]string) {
+func collectBindings(node any) (map[string][]string, map[string]string, map[string]map[string]any) {
 	seen := map[string][]string{}
 	labels := map[string]string{}
+	fields := map[string]map[string]any{}
 	var walk func(any)
 	walk = func(value any) {
 		switch typed := value.(type) {
@@ -145,6 +156,7 @@ func collectBindings(node any) (map[string][]string, map[string]string) {
 					}
 				}
 				seen[binding] = values
+				fields[binding] = typed
 				if label, ok := typed["label"].(string); ok {
 					labels[binding] = label
 				}
@@ -159,7 +171,23 @@ func collectBindings(node any) (map[string][]string, map[string]string) {
 		}
 	}
 	walk(node)
-	return seen, labels
+	return seen, labels, fields
+}
+
+func jsonInt(value any) int64 {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	default:
+		return 0
+	}
 }
 
 func sameStrings(got, want []string) bool {

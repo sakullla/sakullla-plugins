@@ -10,10 +10,10 @@
       "children": [
         {"type": "toggle", "id": "enabled", "label": "启用", "binding": "/enabled", "required": true},
         {"type": "number", "id": "max_keys", "label": "本节点最大键数", "binding": "/max_keys", "required": true, "minimum": 1, "maximum": 65536},
-        {"type": "number", "id": "http_source_interval", "label": "HTTP 来源间隔（秒）", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "http_source_interval", "label": "HTTP 来源间隔（秒）", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600, "unit": "s", "scale": 1000000000},
         {"type": "number", "id": "http_source_burst", "label": "HTTP 来源突发", "binding": "/http/source/burst", "required": true, "minimum": 1, "maximum": 1000000},
         {"type": "toggle", "id": "http_global_enabled", "label": "HTTP 规则全局桶", "binding": "/http/global/enabled", "required": true},
-        {"type": "number", "id": "l4_source_interval", "label": "四层新建连接间隔（秒）", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "l4_source_interval", "label": "四层新建连接间隔（秒）", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600, "unit": "s", "scale": 1000000000},
         {"type": "number", "id": "l4_source_burst", "label": "四层新建连接突发", "binding": "/l4/source/burst", "required": true, "minimum": 1, "maximum": 1000000}
       ]
     },
