@@ -38,16 +38,24 @@ The validator uses the committed `release/official-ed25519-public-key.hex`
 rather than deriving trust from the private secret. A missing or mismatched
 secret therefore fails the release instead of silently changing the root.
 
-This is a multi-plugin repository. The generated market points each entry at
-its own signed package root under `packages/<id>/<version>` inside the release
-candidate. The repository root is therefore never presented as a direct
-`purpose=plugin` source, which would incorrectly require a root `plugin.yaml`.
+This is a multi-plugin repository. The release candidate retains each signed
+package under `packages/<id>/<version>` as build evidence and also emits one
+deterministic `tar+gzip-v1` `.nrepkg` object per package. Market schema v2 binds
+the object's immutable GitHub Release URL, raw SHA-256, byte length, format,
+and the existing signed package-tree digest. Consumers refresh only the small
+signed index and fetch one object on demand before revalidating the package.
 
-Every push to `main` runs the complete reproducible release gate and then
-force-publishes only the verified candidate tree to the generated
-`official-market` branch. Consumers track that branch; its provenance retains
-the immutable source `main` commit. The release workflow is not triggered by
-updates to `official-market`, so publication cannot recurse.
+Every push to `main` runs the complete reproducible release gate, publishes the
+content-addressed package objects to the immutable `official-<source-commit>`
+GitHub Release, and only then force-publishes the thin verified index to the
+generated `official-market` branch. Consumers track that branch; its
+provenance retains the immutable source `main` commit. The release workflow is
+not triggered by updates to `official-market`, so publication cannot recurse.
+
+The published index carries `* -text` in `.gitattributes`; the workflow also
+disables `core.autocrlf` and compares every staged worktree object with the
+exact committed Git blob before pushing. This is part of the signature byte
+contract: Git publication must not rewrite LF to CRLF (or vice versa).
 
 The candidate root contains `provenance.signature.json`. Candidate assembly
 finishes and persists `provenance.json`, hashes those exact bytes with SHA-256,

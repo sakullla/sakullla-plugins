@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -418,7 +420,7 @@ func checkRelease(ctx context.Context, args []string) error {
 	result, err := cirelease.AssembleContext(ctx, cirelease.Input{
 		OutputDir: absoluteOutput, RepositoryCommit: repositoryCommit,
 		SDKRepositoryCommit: lock.Repository.Commit, SDKDescriptorSHA256: lock.Artifacts.DescriptorSetSHA256,
-		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity, Signer: signer,
+		SDKABIs: []string{pluginsdk.PolicyABIV1, pluginsdk.RPCABIV1}, SignerIdentity: signer.Identity, Signer: signer, SignerPublicKey: officialReleasePublicKey(filepath.Join(root, "release", "official-ed25519-public-key.hex")),
 		NoticePath: filepath.Join(root, "NOTICE"), ThirdPartyLicensesPath: filepath.Join(root, "THIRD_PARTY_LICENSES.json"),
 		SBOMPath: filepath.Join(root, "SBOM.spdx.json"), GuidePath: filepath.Join(root, "AGENTS.md"), Packages: packages,
 	})
@@ -434,6 +436,18 @@ func checkRelease(ctx context.Context, args []string) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+func officialReleasePublicKey(name string) ed25519.PublicKey {
+	data, err := os.ReadFile(name)
+	if err != nil {
+		return nil
+	}
+	decoded, err := hex.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil
+	}
+	return ed25519.PublicKey(decoded)
 }
 
 func makeReleaseStaging(absoluteOutput string) (string, error) {

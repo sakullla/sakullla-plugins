@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,44 @@ func TestPackageMarketProvenanceIsDeterministicAndTamperEvident(t *testing.T) {
 	if err := Verify(first); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("tampered package was accepted: %v", err)
 	}
+}
+
+func TestPublishedIndexGitBlobsPreserveExactSignedBytes(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	if _, err := Assemble(fixtureInput(candidate, writeLegal(t, root), []Package{writePackage(t, root, "exact-bytes")})); err != nil {
+		t.Fatal(err)
+	}
+	attributes, err := os.ReadFile(filepath.Join(candidate, ".gitattributes"))
+	if err != nil || string(attributes) != "* -text\n" {
+		t.Fatalf("published byte-preservation attributes = %q, %v", attributes, err)
+	}
+	for _, args := range [][]string{{"init", "--quiet"}, {"config", "core.autocrlf", "true"}, {"config", "core.safecrlf", "true"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.invalid"}, {"add", "--all"}, {"commit", "--quiet", "-m", "test"}} {
+		command := exec.Command("git", append([]string{"-C", candidate}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	for _, name := range []string{"market.yaml", "provenance.json", "provenance.signature.json", ".gitattributes"} {
+		work := gitOutput(t, candidate, "hash-object", "--no-filters", "--", name)
+		committed := gitOutput(t, candidate, "rev-parse", "HEAD:"+name)
+		if work != committed {
+			t.Fatalf("Git transformed signed file %s: work=%s commit=%s", name, work, committed)
+		}
+	}
+}
+
+func gitOutput(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestOfficialLockEvidenceBindsSDKCommitABIAndMarket(t *testing.T) {
@@ -270,10 +309,11 @@ func (validator candidateFixtureValidator) Validate(_ context.Context, packageDi
 }
 
 func fixtureInput(output string, legal legalPaths, packages []Package) Input {
+	signer := candidateFixtureSigner{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))}
 	return Input{
 		OutputDir: output, RepositoryCommit: strings.Repeat("a", 40), SDKRepositoryCommit: strings.Repeat("b", 40),
 		SDKDescriptorSHA256: strings.Repeat("c", 64), SDKABIs: []string{"nre:rpc/v1", "nre:policy/v1"}, SignerIdentity: "sakullla-official-root-2026",
-		Signer:     candidateFixtureSigner{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))},
+		Signer: signer, SignerPublicKey: signer.key.Public().(ed25519.PublicKey),
 		NoticePath: legal.notice, ThirdPartyLicensesPath: legal.thirdParty, SBOMPath: legal.sbom, Packages: packages,
 	}
 }

@@ -39,6 +39,17 @@ jobs:
           printf 'NRE_OFFICIAL_SIGNER={"command":"%s/nre-signing-provider","args":["sign","--key-env","NRE_OFFICIAL_ED25519_PRIVATE_KEY"],"identity":"sakullla-official-root-2026","validator_command":"%s/nre-signing-provider","validator_args":["verify","--public-key-file","release/official-ed25519-public-key.hex","--identity","sakullla-official-root-2026"]}\n' "${RUNNER_TEMP}" "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - name: Build and verify official candidate
         run: go run ./cmd/nre-ci release --verify-reproducible --signer env:NRE_OFFICIAL_SIGNER
+      - name: Publish immutable package blobs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "official-${GITHUB_SHA}" dist/release-candidate/blobs/*.nrepkg \
+            --target "${GITHUB_SHA}" \
+            --title "Official plugin packages ${GITHUB_SHA}" \
+            --notes "Immutable content-addressed plugin package objects for ${GITHUB_SHA}." \
+            --latest=false
       - name: Publish verified official market branch
         shell: bash
         env:
@@ -47,13 +58,32 @@ jobs:
           set -euo pipefail
           publish_root="${RUNNER_TEMP}/official-market"
           mkdir -p "${publish_root}"
-          cp -a dist/release-candidate/. "${publish_root}/"
+          cp dist/release-candidate/.gitattributes "${publish_root}/"
+          cp dist/release-candidate/AGENTS.md "${publish_root}/"
+          cp dist/release-candidate/NOTICE "${publish_root}/"
+          cp dist/release-candidate/SBOM.spdx.json "${publish_root}/"
+          cp dist/release-candidate/THIRD_PARTY_LICENSES.json "${publish_root}/"
+          cp dist/release-candidate/market.yaml "${publish_root}/"
+          cp dist/release-candidate/provenance.json "${publish_root}/"
+          cp dist/release-candidate/provenance.signature.json "${publish_root}/"
           git -C "${publish_root}" init --quiet
           git -C "${publish_root}" checkout --quiet --orphan official-market
           git -C "${publish_root}" config user.name github-actions[bot]
           git -C "${publish_root}" config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C "${publish_root}" add --all
+          git -C "${publish_root}" config core.autocrlf false
+          git -C "${publish_root}" config core.safecrlf true
+          git -C "${publish_root}" -c core.autocrlf=false add --all
           git -C "${publish_root}" commit --quiet -m "market: publish ${GITHUB_SHA}"
+          expected="${RUNNER_TEMP}/official-market-expected.txt"
+          committed="${RUNNER_TEMP}/official-market-committed.txt"
+          find "${publish_root}" -type f -not -path '*/.git/*' -printf '%P\n' | LC_ALL=C sort > "${expected}"
+          git -C "${publish_root}" ls-tree -r --name-only HEAD | LC_ALL=C sort > "${committed}"
+          cmp "${expected}" "${committed}"
+          while IFS= read -r relative; do
+            work_oid="$(git -C "${publish_root}" hash-object --no-filters -- "${relative}")"
+            commit_oid="$(git -C "${publish_root}" rev-parse "HEAD:${relative}")"
+            test "${work_oid}" = "${commit_oid}"
+          done < "${expected}"
           auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
           git -C "${publish_root}" config http.https://github.com/.extraheader "AUTHORIZATION: basic ${auth}"
           git -C "${publish_root}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"

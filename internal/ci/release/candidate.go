@@ -43,6 +43,7 @@ type Input struct {
 	SDKABIs                []string
 	SignerIdentity         string
 	Signer                 buildkit.Signer
+	SignerPublicKey        ed25519.PublicKey
 	NoticePath             string
 	ThirdPartyLicensesPath string
 	SBOMPath               string
@@ -61,8 +62,11 @@ type provenanceSignature struct {
 type packageEvidence struct {
 	ID            string `json:"id"`
 	Version       string `json:"version"`
-	Path          string `json:"path"`
 	PackageSHA256 string `json:"package_sha256"`
+	PackageURL    string `json:"package_url"`
+	BlobSHA256    string `json:"blob_sha256"`
+	BlobSize      int64  `json:"blob_size"`
+	BlobFormat    string `json:"blob_format"`
 }
 
 type Provenance struct {
@@ -116,7 +120,7 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 		!fullOID.MatchString(input.SDKRepositoryCommit) || !isSHA256(input.SDKDescriptorSHA256) {
 		return Result{}, fmt.Errorf("release candidate requires output, full repository OIDs, and SDK descriptor digest")
 	}
-	if input.SignerIdentity == "" || input.Signer == nil || len(input.SDKABIs) == 0 || len(input.Packages) == 0 {
+	if input.SignerIdentity == "" || input.Signer == nil || len(input.SignerPublicKey) != ed25519.PublicKeySize || len(input.SDKABIs) == 0 || len(input.Packages) == 0 {
 		return Result{}, fmt.Errorf("release candidate requires signer, SDK ABIs, and packages")
 	}
 	if _, err := os.Lstat(input.OutputDir); !os.IsNotExist(err) {
@@ -136,7 +140,16 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 		}
 		return packages[i].ID < packages[j].ID
 	})
-	market := buildkit.Market{SchemaVersion: 1, Commit: input.RepositoryCommit, SDKABI: strings.Join(input.SDKABIs, ",")}
+	parent := filepath.Dir(input.OutputDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return Result{}, err
+	}
+	temporary, err := os.MkdirTemp(parent, ".official-candidate-")
+	if err != nil {
+		return Result{}, err
+	}
+	defer os.RemoveAll(temporary)
+	market := buildkit.Market{SchemaVersion: 2, Commit: input.RepositoryCommit, SDKABI: strings.Join(input.SDKABIs, ",")}
 	seen := make(map[string]bool)
 	var evidence []packageEvidence
 	for _, pkg := range packages {
@@ -149,12 +162,35 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 		if err != nil || actual != pkg.PackageSHA256 {
 			return Result{}, fmt.Errorf("package %s@%s tree digest mismatch", pkg.ID, pkg.Version)
 		}
-		rel := filepath.ToSlash(filepath.Join("packages", pkg.ID, pkg.Version))
+		manifest, err := pluginmanifest.Load(filepath.Join(pkg.Directory, "plugin.yaml"))
+		if err != nil {
+			return Result{}, err
+		}
+		if manifest.ID != pkg.ID || manifest.Version != pkg.Version || manifest.Runtime.Kind != pkg.Runtime || manifest.Runtime.ABI != pkg.ABI || manifest.Signature.KeyID != pkg.SignerIdentity {
+			return Result{}, fmt.Errorf("package %s@%s differs from its signed plugin contract", pkg.ID, pkg.Version)
+		}
+		artifacts := make([]buildkit.MarketArtifact, 0, len(manifest.Artifacts))
+		for _, artifact := range manifest.Artifacts {
+			artifacts = append(artifacts, buildkit.MarketArtifact{SHA256: artifact.SHA256, Size: artifact.Size, GOOS: artifact.GOOS, GOARCH: artifact.GOARCH})
+		}
+		blob, err := buildkit.BuildPackageBlob(pkg.Directory, filepath.Join(temporary, "blobs", "."+pkg.ID+"-"+pkg.Version+".nrepkg"))
+		if err != nil {
+			return Result{}, fmt.Errorf("package %s@%s transport blob: %w", pkg.ID, pkg.Version, err)
+		}
+		blobName := PackageBlobName(pkg.ID, pkg.Version, blob.SHA256)
+		blobPath := filepath.Join(temporary, "blobs", blobName)
+		if err := os.Rename(blob.Path, blobPath); err != nil {
+			return Result{}, err
+		}
+		blob.Path = blobPath
+		packageURL := PackageBlobURL(input.RepositoryCommit, blobName)
 		market.Packages = append(market.Packages, buildkit.MarketPackage{
-			ID: pkg.ID, Version: pkg.Version, Runtime: pkg.Runtime, ABI: pkg.ABI,
-			PackageSHA256: pkg.PackageSHA256, PackageURL: rel, SignerIdentity: pkg.SignerIdentity,
+			ID: pkg.ID, Version: pkg.Version, Description: manifest.Description, Capabilities: append([]string(nil), manifest.ExtensionPoints...),
+			Compatibility: buildkit.MarketCompatibility{Host: manifest.Compatibility.Host, Agent: manifest.Compatibility.Agent},
+			Runtime:       pkg.Runtime, ABI: pkg.ABI, HostScope: manifest.Runtime.HostScope, PolicyKind: manifest.Runtime.PolicyKind, Artifacts: artifacts,
+			PackageSHA256: pkg.PackageSHA256, PackageURL: packageURL, BlobSHA256: blob.SHA256, BlobSize: blob.Size, BlobFormat: buildkit.PackageBlobFormatV1, SignerIdentity: pkg.SignerIdentity,
 		})
-		evidence = append(evidence, packageEvidence{ID: pkg.ID, Version: pkg.Version, Path: rel, PackageSHA256: pkg.PackageSHA256})
+		evidence = append(evidence, packageEvidence{ID: pkg.ID, Version: pkg.Version, PackageSHA256: pkg.PackageSHA256, PackageURL: packageURL, BlobSHA256: blob.SHA256, BlobSize: blob.Size, BlobFormat: buildkit.PackageBlobFormatV1})
 	}
 	marketBytes, err := buildkit.RenderMarket(market)
 	if err != nil {
@@ -164,26 +200,20 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 	abis := append([]string{}, input.SDKABIs...)
 	sort.Strings(abis)
 	provenance := Provenance{
-		SchemaVersion: 1, RepositoryCommit: input.RepositoryCommit, MarketSHA256: marketDigest,
+		SchemaVersion: 2, RepositoryCommit: input.RepositoryCommit, MarketSHA256: marketDigest,
 		SDKRepositoryCommit: input.SDKRepositoryCommit, SDKDescriptorSHA256: input.SDKDescriptorSHA256,
 		SDKABIs: abis, SignerIdentity: input.SignerIdentity, Packages: evidence,
 	}
 
-	parent := filepath.Dir(input.OutputDir)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return Result{}, err
-	}
-	temporary, err := os.MkdirTemp(parent, ".official-candidate-")
-	if err != nil {
-		return Result{}, err
-	}
-	defer os.RemoveAll(temporary)
 	for _, item := range []struct{ source, destination string }{
 		{input.NoticePath, "NOTICE"}, {input.ThirdPartyLicensesPath, "THIRD_PARTY_LICENSES.json"}, {input.SBOMPath, "SBOM.spdx.json"},
 	} {
 		if err := copyRegularFile(item.source, filepath.Join(temporary, item.destination)); err != nil {
 			return Result{}, err
 		}
+	}
+	if err := os.WriteFile(filepath.Join(temporary, ".gitattributes"), []byte("* -text\n"), 0o644); err != nil {
+		return Result{}, err
 	}
 	if input.GuidePath != "" {
 		if err := copyRegularFile(input.GuidePath, filepath.Join(temporary, "AGENTS.md")); err != nil {
@@ -213,6 +243,9 @@ func AssembleContext(ctx context.Context, input Input) (Result, error) {
 	}
 	if signature.Algorithm != "ed25519" || signature.Identity != input.SignerIdentity || len(signature.Value) != ed25519.SignatureSize {
 		return Result{}, fmt.Errorf("provenance signer returned an invalid Ed25519 signature")
+	}
+	if !ed25519.Verify(input.SignerPublicKey, provenanceDigest[:], signature.Value) {
+		return Result{}, fmt.Errorf("provenance signer returned a signature that does not verify with the official public key")
 	}
 	signatureDocument := provenanceSignature{
 		SchemaVersion: 1, Algorithm: signature.Algorithm, Identity: signature.Identity,
@@ -257,7 +290,7 @@ func Verify(candidate string) error {
 	if err != nil {
 		return err
 	}
-	if provenance.SchemaVersion != 1 || !fullOID.MatchString(provenance.RepositoryCommit) ||
+	if provenance.SchemaVersion != 2 || !fullOID.MatchString(provenance.RepositoryCommit) ||
 		!fullOID.MatchString(provenance.SDKRepositoryCommit) || !isSHA256(provenance.SDKDescriptorSHA256) ||
 		provenance.SignerIdentity == "" || len(provenance.SDKABIs) == 0 || len(provenance.Packages) == 0 {
 		return fmt.Errorf("release provenance is incomplete")
@@ -275,17 +308,22 @@ func Verify(candidate string) error {
 		marketPackages[pkg.ID+"\x00"+pkg.Version] = pkg
 	}
 	for _, pkg := range provenance.Packages {
-		clean := filepath.Clean(filepath.FromSlash(pkg.Path))
-		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || !isSHA256(pkg.PackageSHA256) {
-			return fmt.Errorf("release package evidence path or digest is invalid")
+		if !isSHA256(pkg.PackageSHA256) || !isSHA256(pkg.BlobSHA256) || pkg.BlobSize <= 0 || pkg.BlobFormat != buildkit.PackageBlobFormatV1 {
+			return fmt.Errorf("release package evidence transport or digest is invalid")
 		}
+		clean := filepath.Join("packages", pkg.ID, pkg.Version)
 		actual, err := buildkit.DigestTree(filepath.Join(candidate, clean))
 		if err != nil || actual != pkg.PackageSHA256 {
 			return fmt.Errorf("release package %s@%s digest mismatch", pkg.ID, pkg.Version)
 		}
 		entry, ok := marketPackages[pkg.ID+"\x00"+pkg.Version]
-		if !ok || entry.PackageSHA256 != pkg.PackageSHA256 || entry.PackageURL != pkg.Path || entry.SignerIdentity != provenance.SignerIdentity {
+		if !ok || entry.PackageSHA256 != pkg.PackageSHA256 || entry.PackageURL != pkg.PackageURL || entry.BlobSHA256 != pkg.BlobSHA256 || entry.BlobSize != pkg.BlobSize || entry.BlobFormat != pkg.BlobFormat || entry.SignerIdentity != provenance.SignerIdentity {
 			return fmt.Errorf("release market entry %s@%s differs from package evidence", pkg.ID, pkg.Version)
+		}
+		blobPath := filepath.Join(candidate, "blobs", PackageBlobName(pkg.ID, pkg.Version, pkg.BlobSHA256))
+		blobData, err := os.ReadFile(blobPath)
+		if err != nil || int64(len(blobData)) != pkg.BlobSize || digest(blobData) != pkg.BlobSHA256 {
+			return fmt.Errorf("release package %s@%s transport blob mismatch", pkg.ID, pkg.Version)
 		}
 		packageRoot := filepath.Join(candidate, clean)
 		manifest, err := pluginmanifest.Load(filepath.Join(packageRoot, "plugin.yaml"))
@@ -304,6 +342,14 @@ func Verify(candidate string) error {
 		ThirdPartyLicensesPath: filepath.Join(candidate, "THIRD_PARTY_LICENSES.json"),
 		SBOMPath:               filepath.Join(candidate, "SBOM.spdx.json"),
 	})
+}
+
+func PackageBlobName(id, version, blobSHA256 string) string {
+	return id + "-" + version + "-" + blobSHA256 + ".nrepkg"
+}
+
+func PackageBlobURL(repositoryCommit, blobName string) string {
+	return "https://github.com/sakullla/sakullla-plugins/releases/download/official-" + repositoryCommit + "/" + blobName
 }
 
 func verifyProvenanceSignature(candidate string, provenanceBytes []byte, identity string) error {
