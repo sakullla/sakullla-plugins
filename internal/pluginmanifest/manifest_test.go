@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 func TestLoadRejectsUnknownYAMLField(t *testing.T) {
@@ -136,4 +139,94 @@ func writeTestFile(t *testing.T, root, name string, data []byte, mode os.FileMod
 		t.Fatal(err)
 	}
 	return filename
+}
+
+func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
+	expected := map[string]struct {
+		name       string
+		declaredUI bool
+	}{
+		"accelerator-sources": {name: "资源加速"},
+		"ip-policy":           {name: "IP 策略", declaredUI: true},
+		"rate-limit":          {name: "速率限制", declaredUI: true},
+		"cloudflare-dns":      {name: "Cloudflare DNS"},
+		"docker-app":          {name: "Docker 应用"},
+		"doh":                 {name: "HTTPS 域名解析"},
+		"reverse-l4":          {name: "四层反代"},
+		"shadowsocks-server":  {name: "Shadowsocks 服务"},
+		"waf":                 {name: "Web 防火墙", declaredUI: true},
+	}
+	pluginsRoot := filepath.Join("..", "..", "plugins")
+	for id, want := range expected {
+		manifest, err := Load(filepath.Join(pluginsRoot, id, "plugin.yaml"))
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if err := Validate(manifest, id); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if manifest.Name != want.name {
+			t.Fatalf("%s name = %q, want %q", id, manifest.Name, want.name)
+		}
+		if !containsHan(manifest.Description) {
+			t.Fatalf("%s description must be Chinese user-facing copy: %q", id, manifest.Description)
+		}
+		if want.declaredUI && manifest.UISchema != "ui.schema.json" {
+			t.Fatalf("%s must declare ui_schema: ui.schema.json", id)
+		}
+		if !want.declaredUI && manifest.UISchema != "" {
+			t.Fatalf("%s must not declare a config UI", id)
+		}
+		if id == "accelerator-sources" {
+			if len(manifest.HTTPBackendProviders) != 1 || manifest.HTTPBackendProviders[0].ID != "default" || manifest.HTTPBackendProviders[0].DisplayName != "资源加速" {
+				t.Fatalf("accelerator-sources provider must stay default/资源加速: %#v", manifest.HTTPBackendProviders)
+			}
+		}
+	}
+}
+
+func containsHan(value string) bool {
+	for _, character := range value {
+		if unicode.Is(unicode.Han, character) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPackagingContractBindsDeclaredUIAndMachineIdentity(t *testing.T) {
+	root := t.TempDir()
+	artifactData := []byte("display-contract-artifact")
+	artifactFile := writeTestFile(t, root, "build/example-plugin", artifactData, 0o755)
+	artifactDigest := sha256.Sum256(artifactData)
+	manifest := validRPCManifest(hex.EncodeToString(artifactDigest[:]), int64(len(artifactData)))
+	manifest.Name = "资源加速"
+	manifest.Description = "为零配置发布的自有域名提供加速"
+	manifest.ExtensionPoints = []string{"http.backend-provider"}
+	manifest.HTTPBackendProviders = []pluginsdk.HTTPBackendProviderDescriptor{{ID: "default", DisplayName: "资源加速"}}
+	manifest.UISchema = "ui.schema.json"
+	writeTestFile(t, root, "config.schema.json", []byte(`{"type":"object"}`), 0o644)
+	writeTestFile(t, root, "ui.schema.json", []byte(`{"schema_version":1,"title":"资源加速设置","components":[],"actions":[]}`), 0o644)
+
+	if err := ValidateSource(manifest, root, manifest.ID, artifactFile); err != nil {
+		t.Fatalf("Chinese display fields must validate: %v", err)
+	}
+	if _, ok := ExtraFiles(manifest, root)["ui.schema.json"]; !ok {
+		t.Fatal("declared ui.schema.json must be packaged via ExtraFiles")
+	}
+
+	if err := os.Remove(filepath.Join(root, "ui.schema.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSourceContract(manifest, root, manifest.ID); err == nil || !strings.Contains(err.Error(), "ui.schema.json") {
+		t.Fatalf("missing declared UI file must fail: %v", err)
+	}
+
+	if err := Validate(manifest, "renamed-plugin"); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("renamed plugin id must fail: %v", err)
+	}
+	manifest.Runtime.Entry = "renamed-entry"
+	if err := Validate(manifest, manifest.ID); err == nil {
+		t.Fatal("renamed runtime entry must fail")
+	}
 }
