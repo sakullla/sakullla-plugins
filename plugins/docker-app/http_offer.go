@@ -7,9 +7,10 @@ import (
 )
 
 // HTTPOffer is a managed app that may appear in the host HTTP rule
-// backend-provider catalog. ID is the app id.
+// backend-provider catalog. ProviderID is the app id.
 type HTTPOffer struct {
-	ID, DisplayName, RuleRef, Generation string
+	AppID, ProviderID, RuleRef string
+	Ports                      []uint16
 }
 
 // HTTPRuleHandle switches a rule target. Host http.rule implements this.
@@ -25,31 +26,52 @@ func (function HTTPRuleHandleFunc) Cutover(ctx context.Context, fence uint64, ru
 }
 
 // OffersHTTP reports whether a managed app should be listed as a backend
-// provider. Apps without a rule binding are not HTTP publishers.
-func OffersHTTP(app App) bool {
-	return validID(app.ID) && boundedText(app.Image, 512) && boundedText(app.RuleRef, 128) && boundedText(app.Generation, 128)
+// provider. Apps without an HTTP port on a labeled instance are omitted.
+func OffersHTTP(app App, ports []uint16) bool {
+	return validID(app.ID) && boundedText(app.Image, 512) && boundedText(app.Generation, 128) && len(ports) > 0
 }
 
 // ProjectHTTPOffers lists HTTP-publishing managed apps as backend providers.
-// Non-HTTP apps are omitted. The result is sorted by id.
-func ProjectHTTPOffers(apps []App) ([]HTTPOffer, error) {
+// Missing http.rule grant, unlabeled candidates, and apps without exposed
+// ports are omitted. The result is sorted by app id.
+func ProjectHTTPOffers(apps []App, observations []ContainerObservation, granted bool) ([]HTTPOffer, error) {
 	if len(apps) > MaxApps {
 		return nil, fmt.Errorf("%w: apps maximum is %d", ErrBoundExceeded, MaxApps)
 	}
-	offers := make([]HTTPOffer, 0, len(apps))
-	for _, app := range apps {
-		if !OffersHTTP(app) {
+	if !granted {
+		return []HTTPOffer{}, nil
+	}
+	discoveries, err := Discover(observations)
+	if err != nil {
+		return nil, err
+	}
+	portsByApp := make(map[string][]uint16)
+	for _, discovery := range discoveries {
+		if discovery.Candidate || discovery.AppID == "" || len(discovery.Ports) == 0 {
 			continue
 		}
-		offers = append(offers, HTTPOffer{ID: app.ID, DisplayName: app.ID, RuleRef: app.RuleRef, Generation: app.Generation})
+		portsByApp[discovery.AppID] = mergePorts(portsByApp[discovery.AppID], discovery.Ports)
 	}
-	sort.Slice(offers, func(i, j int) bool { return offers[i].ID < offers[j].ID })
+	offers := make([]HTTPOffer, 0, len(apps))
+	for _, app := range apps {
+		ports := portsByApp[app.ID]
+		if !OffersHTTP(app, ports) {
+			continue
+		}
+		offers = append(offers, HTTPOffer{
+			AppID:      app.ID,
+			ProviderID: app.ID,
+			RuleRef:    app.RuleRef,
+			Ports:      append([]uint16(nil), ports...),
+		})
+	}
+	sort.Slice(offers, func(i, j int) bool { return offers[i].AppID < offers[j].AppID })
 	return offers, nil
 }
 
 // ListHTTPBackendProviders is the backend-provider catalog projection.
-func ListHTTPBackendProviders(apps []App) ([]HTTPOffer, error) {
-	return ProjectHTTPOffers(apps)
+func ListHTTPBackendProviders(apps []App, observations []ContainerObservation, granted bool) ([]HTTPOffer, error) {
+	return ProjectHTTPOffers(apps, observations, granted)
 }
 
 // CutoverHTTPOffer switches the rule target through http.rule only after the
@@ -70,7 +92,10 @@ func CutoverHTTPOffer(ctx context.Context, handle HTTPRuleHandle, fence uint64, 
 		audit(auditor, AuditRecord{Action: "http.rule", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return previous, safeFailure(ErrOperationFailed, err)
 	}
-	detail := offer.ID
+	detail := offer.AppID
+	if detail == "" {
+		detail = offer.ProviderID
+	}
 	if detail == "" {
 		detail = offer.RuleRef
 	}
@@ -88,4 +113,18 @@ type HTTPRuleCutover struct {
 func (cutover HTTPRuleCutover) Cutover(ctx context.Context, fence uint64, ruleRef, target string) error {
 	_, err := CutoverHTTPOffer(ctx, cutover.Handle, fence, HTTPOffer{RuleRef: ruleRef}, "", target, true, cutover.Auditor)
 	return err
+}
+
+func mergePorts(existing, extra []uint16) []uint16 {
+	seen := make(map[uint16]struct{}, len(existing)+len(extra))
+	merged := make([]uint16, 0, len(existing)+len(extra))
+	for _, port := range append(append([]uint16(nil), existing...), extra...) {
+		if _, exists := seen[port]; exists {
+			continue
+		}
+		seen[port] = struct{}{}
+		merged = append(merged, port)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i] < merged[j] })
+	return merged
 }
