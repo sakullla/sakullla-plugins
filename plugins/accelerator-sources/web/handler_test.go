@@ -46,22 +46,22 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	if !strings.Contains(page, ">用法<") || !strings.Contains(page, ">搜索<") || !strings.Contains(page, ">标签<") || !strings.Contains(page, ">离线包<") {
 		t.Fatal("primary navigation is not the Chinese product sections")
 	}
-	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="github"`, `data-example="huggingface"`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`} {
+	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="file-sample"`, `id="convert-input"`, `id="convert-result"`, `id="convert-copy"`, `>复制加速链接<`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("visitor page missing capability markup %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"window.location.origin", "window.location.host", "/api/search?q=", "/api/tags?image=", "/api/offline/prepare", "compressed_layers"} {
+	for _, fragment := range []string{"window.location.origin", "window.location.host", "#convert-input", "#convert-copy", "normalizeSourceUrl", "/api/search?q=", "/api/tags?image=", "/api/offline/prepare", "compressed_layers"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("visitor script missing %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"#17202a", "header { display: flex", "nav button[aria-pressed=\"true\"]"} {
+	for _, fragment := range []string{"#17202a", "header { display: flex", "nav button[aria-pressed=\"true\"]", "--rust", "--paper"} {
 		if strings.Contains(style, fragment) {
-			t.Fatalf("visitor theme still contains old tool-shell rule %q", fragment)
+			t.Fatalf("visitor theme still contains a retired theme rule %q", fragment)
 		}
 	}
-	if !strings.Contains(style, "--rust") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".usage-grid") {
+	if !strings.Contains(style, "--accent") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".usage-grid") || !strings.Contains(style, ".converter-card") {
 		t.Fatal("visitor theme is not the replacement layout")
 	}
 }
@@ -77,7 +77,7 @@ func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`} {
+	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("web corpus missing %q", fragment)
 		}

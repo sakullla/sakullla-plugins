@@ -22,7 +22,19 @@
       <div class="hero">
         <p class="eyebrow">当前入口</p>
         <h1>用正在访问的域名加速镜像、代码与模型</h1>
-        <p class="lede">首页同时给出 Docker、GitHub、Hugging Face 三类用法。示例会按当前来源自动填写，无需记忆插件内部地址。</p>
+        <p class="lede">粘贴原始链接即可一键生成加速地址；Docker 镜像用法见下方示例。全部按当前来源自动填写，无需记忆插件内部地址。</p>
+      </div>
+      <div class="card converter-card">
+        <p class="kicker">链接转换</p>
+        <h2>粘贴原始链接，一键得到加速地址</h2>
+        <p>粘贴 GitHub 或 Hugging Face 的原始地址，自动生成当前入口的加速链接；脚本文件经此入口下载时会自动改写内部链接。</p>
+        <label for="convert-input">原始链接</label>
+        <div class="search-row">
+          <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
+          <button type="button" id="convert-copy" disabled>复制加速链接</button>
+        </div>
+        <pre class="example" id="convert-result" hidden></pre>
+        <p class="hint" id="convert-hint" hidden></p>
       </div>
       <div class="usage-grid">
         <article class="card usage-card">
@@ -35,18 +47,11 @@
           <button type="button" class="ghost" data-copy="docker-mirror">复制镜像配置</button>
         </article>
         <article class="card usage-card">
-          <p class="kicker">GitHub</p>
-          <h2>在原始地址前加上当前入口</h2>
-          <p>仓库、发行包和原始文件都走同一入口，不另做操作台。</p>
-          <pre class="example" data-example="github"></pre>
-          <button type="button" class="ghost" data-copy="github">复制示例</button>
-        </article>
-        <article class="card usage-card">
-          <p class="kicker">Hugging Face</p>
-          <h2>模型与数据集文件同样加前缀</h2>
-          <p>把当前入口放在原始 Hugging Face 路径前面即可下载。</p>
-          <pre class="example" data-example="huggingface"></pre>
-          <button type="button" class="ghost" data-copy="huggingface">复制示例</button>
+          <p class="kicker">GitHub · Hugging Face</p>
+          <h2>文件与脚本下载</h2>
+          <p>在上方「链接转换」粘贴任意 GitHub 或 Hugging Face 原始地址即可得到加速链接；发行包、源码压缩包、模型文件通用，.sh / .ps1 脚本内的链接下载时会自动改写。</p>
+          <pre class="example" data-example="file-sample"></pre>
+          <button type="button" class="ghost" data-copy="file-sample">复制示例</button>
         </article>
       </div>
     </section>

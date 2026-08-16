@@ -5,6 +5,13 @@
   "external_dependencies": [],
   "views": ["usage", "search", "tags", "offline"],
   "apis": ["/api/search", "/api/tags", "/api/offline/prepare"],
+  "converter": {
+    "input": "#convert-input",
+    "output": "#convert-result",
+    "copy": "#convert-copy",
+    "scheme_normalization": "strip any leading scheme, then prefix window.location.origin",
+    "supported_hosts": ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"]
+  },
   "offline_fields": ["images", "platform", "compressed_layers"],
   "example_hosts": ["window.location.origin", "window.location.host"]
 }

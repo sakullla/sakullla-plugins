@@ -3,8 +3,7 @@ const host = window.location.host;
 const examples = {
   "docker-pull": `docker pull ${host}/library/nginx:latest`,
   "docker-mirror": JSON.stringify({ "registry-mirrors": [origin] }, null, 2),
-  github: `${origin}/github.com/owner/repo/archive/refs/heads/main.zip`,
-  huggingface: `${origin}/huggingface.co/org/model/resolve/main/config.json`,
+  "file-sample": `${origin}/github.com/owner/repo/releases/download/v1/file.zip`,
 };
 
 const fill = (name) => {
@@ -40,9 +39,55 @@ document.querySelectorAll("[data-copy]").forEach((button) => {
       await navigator.clipboard.writeText(examples[name]);
       button.textContent = "已复制";
     } catch (error) {
-      button.textContent = error.message || "复制失败";
+      button.textContent = "复制失败";
     }
   });
+});
+
+const supportedHosts = ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"];
+
+const convertInput = document.querySelector("#convert-input");
+const convertResult = document.querySelector("#convert-result");
+const convertCopy = document.querySelector("#convert-copy");
+const convertHint = document.querySelector("#convert-hint");
+
+const normalizeSourceUrl = (value) => value.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/^\/+/, "");
+
+const updateConversion = () => {
+  const target = normalizeSourceUrl(convertInput.value);
+  if (!target) {
+    convertResult.hidden = true;
+    convertHint.hidden = true;
+    convertCopy.disabled = true;
+    return;
+  }
+  convertResult.textContent = `${origin}/${target}`;
+  convertResult.hidden = false;
+  convertCopy.disabled = false;
+  const hostName = target.split("/")[0].toLowerCase();
+  const supported = supportedHosts.some((item) => hostName === item || hostName.endsWith(`.${item}`));
+  convertHint.hidden = supported;
+  if (!supported) {
+    convertHint.textContent = "该域名可能不受支持：当前入口支持 GitHub 与 Hugging Face 的地址。";
+  }
+};
+
+convertInput.addEventListener("input", updateConversion);
+
+convertCopy.addEventListener("click", async () => {
+  if (convertCopy.disabled) {
+    return;
+  }
+  const previous = convertCopy.textContent;
+  try {
+    await navigator.clipboard.writeText(convertResult.textContent);
+    convertCopy.textContent = "已复制";
+  } catch (error) {
+    convertCopy.textContent = "复制失败";
+  }
+  setTimeout(() => {
+    convertCopy.textContent = previous;
+  }, 1600);
 });
 
 const renderStatus = (target, message) => {
