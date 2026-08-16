@@ -5,7 +5,7 @@
   "components": [
     {
       "type": "section",
-      "id": "mode",
+      "id": "enforcement",
       "label": "执行方式",
       "children": [
         {

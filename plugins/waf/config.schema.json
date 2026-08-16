@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["mode"],
   "properties": {
-    "mode": {"enum": ["deny", "observe"]},
+    "mode": {"type": "string", "enum": ["deny", "observe"]},
     "custom_rules": {
       "type": "array",
       "maxItems": 16,
@@ -14,7 +14,7 @@
         "required": ["id", "target", "needle"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
-          "target": {"enum": ["path", "query", "headers", "body"]},
+          "target": {"type": "string", "enum": ["path", "query", "headers", "body"]},
           "needle": {"type": "string", "minLength": 2, "maxLength": 64}
         }
       }
