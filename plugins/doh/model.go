@@ -16,7 +16,7 @@ const (
 	ProviderID               = "default"
 	DNSQueryPath             = "/dns-query"
 	DefaultUpstreamID        = "default"
-	DefaultUpstreamEndpoint  = "https://cloudflare-dns.com/dns-query"
+	DefaultUpstreamEndpoint  = "https://dns.google/dns-query"
 	MaxConfigBytes           = 1 << 20
 	MaxPluginConfigBytes     = 4096
 	MaxUpstreams             = 8

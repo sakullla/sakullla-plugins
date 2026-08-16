@@ -119,6 +119,9 @@ func TestDoHHandlerInvalidRFC8484Is4xxWithoutOutbound(t *testing.T) {
 }
 
 func TestDoHEmptyUpstreamsUseDefault(t *testing.T) {
+	if doh.DefaultUpstreamEndpoint != "https://dns.google/dns-query" {
+		t.Fatalf("default upstream=%q", doh.DefaultUpstreamEndpoint)
+	}
 	query := dnsQuery(1, "default.example", 1)
 	for name, config := range map[string]doh.PluginConfig{
 		"omitted": {},
