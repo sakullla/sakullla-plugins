@@ -1,11 +1,13 @@
 package dockerapp_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
 )
 
@@ -115,5 +117,59 @@ func TestDockerRegistryMirrorInvalidOverlayIsRejected(t *testing.T) {
 	}
 	if installer.called {
 		t.Fatal("rejected overlay invoked install action")
+	}
+}
+
+func TestDockerRegistryMirrorPrepareAcceptsHTTPSOverlay(t *testing.T) {
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	const mirror = "https://mirror.example"
+	document := []byte(`{"apps":[],"registry_mirror":"https://mirror.example"}`)
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: document}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	got, err := dockerapp.InstallCommandForDocument(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Script != dockerapp.OfficialInstallScript || !strings.Contains(got.DaemonJSON, mirror) {
+		t.Fatalf("accepted overlay did not yield agent-effective install command: %#v", got)
+	}
+}
+
+func TestDockerRegistryMirrorPrepareRejectsInvalidOverlay(t *testing.T) {
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	accepted := configWire(t, 1)
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: accepted}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if len(controller.Apps()) != 1 {
+		t.Fatalf("accepted apps = %#v", controller.Apps())
+	}
+	for _, document := range []string{
+		`{"apps":[],"registry_mirror":"http://insecure.example"}`,
+		`{"apps":[],"registry_mirror":"ftp://mirror.example"}`,
+		`{"apps":[],"registry_mirror":"https://user:pass@mirror.example"}`,
+		`{"apps":[],"registry_mirror":"https://mirror.example?q=1"}`,
+		`{"apps":[],"registry_mirror":"https://ok.example","extra":true}`,
+		`{"registry_mirror":"https://ok.example"}`,
+	} {
+		if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: []byte(document)}); response.Error == nil {
+			t.Fatalf("prepare accepted %s", document)
+		}
+		if len(controller.Apps()) != 1 {
+			t.Fatalf("rejected overlay replaced effective apps: %#v", controller.Apps())
+		}
 	}
 }
