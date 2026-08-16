@@ -2,7 +2,7 @@ schema_version: 1
 id: cloudflare-dns
 version: 0.1.0
 name: Cloudflare DNS
-description: 在指定 Cloudflare 区域管理 DNS 记录
+description: 按域名后缀解析 Cloudflare DNS Token
 compatibility:
   host: "*"
   agent: "*"

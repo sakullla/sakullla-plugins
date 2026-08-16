@@ -608,6 +608,9 @@ func (vault materialCaptureVault) Enroll(ctx context.Context, ref string, materi
 func (vault materialCaptureVault) Rotate(ctx context.Context, ref, version string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
 	return vault.fakeVault.Rotate(ctx, ref, version, material, operation)
 }
+func (vault materialCaptureVault) Reveal(ctx context.Context, ref string) ([]byte, error) {
+	return vault.fakeVault.Reveal(ctx, ref)
+}
 
 func (vault blockingVault) Verify(ctx context.Context, ref string) (cloudflaredns.TokenAttestation, error) {
 	if err := vault.block(); err != nil {
@@ -620,6 +623,12 @@ func (vault blockingVault) Enroll(ctx context.Context, ref string, material []by
 }
 func (vault blockingVault) Rotate(ctx context.Context, ref, version string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
 	return vault.fakeVault.Rotate(ctx, ref, version, material, operation)
+}
+func (vault blockingVault) Reveal(ctx context.Context, ref string) ([]byte, error) {
+	if err := vault.block(); err != nil {
+		return nil, err
+	}
+	return vault.fakeVault.Reveal(ctx, ref)
 }
 
 type blockingDNS struct {
@@ -683,6 +692,11 @@ func TestCloudflareAuditRedactsRawAPIErrorsAndBounds(t *testing.T) {
 	}
 }
 
+type fakeSecret struct {
+	version  int
+	material []byte
+}
+
 type fakeVault struct {
 	mu                   sync.Mutex
 	version              int
@@ -692,29 +706,46 @@ type fakeVault struct {
 	effects              atomic.Int32
 	verifyCalls          atomic.Int32
 	operations           map[string]cloudflaredns.TokenMetadata
+	secrets              map[string]fakeSecret
 }
 
 func newFakeVault() *fakeVault {
-	return &fakeVault{version: 1, exists: true, permissions: []string{cloudflaredns.PermissionZoneRead, cloudflaredns.PermissionDNSEdit}, zoneIDs: []string{"zone/allowed"}, material: "vault-only-token-material", operations: make(map[string]cloudflaredns.TokenMetadata)}
+	return &fakeVault{version: 1, exists: true, permissions: []string{cloudflaredns.PermissionZoneRead, cloudflaredns.PermissionDNSEdit}, zoneIDs: []string{"zone/allowed"}, material: "vault-only-token-material", operations: make(map[string]cloudflaredns.TokenMetadata), secrets: make(map[string]fakeSecret)}
 }
 func (vault *fakeVault) currentVersion() string {
 	vault.mu.Lock()
 	defer vault.mu.Unlock()
 	return fmt.Sprintf("version-%d", vault.version)
 }
-func (vault *fakeVault) Verify(context.Context, string) (cloudflaredns.TokenAttestation, error) {
+func (vault *fakeVault) acceptedRef(ref string) bool {
+	return ref == "vault/cloudflare" || strings.HasPrefix(ref, "vault/cloudflare/")
+}
+func (vault *fakeVault) Verify(_ context.Context, ref string) (cloudflaredns.TokenAttestation, error) {
 	vault.verifyCalls.Add(1)
 	vault.mu.Lock()
 	defer vault.mu.Unlock()
+	if ref != "vault/cloudflare" {
+		secret, ok := vault.secrets[ref]
+		if !ok {
+			return cloudflaredns.TokenAttestation{}, errors.New("raw missing token")
+		}
+		return cloudflaredns.TokenAttestation{SecretRef: ref, Version: fmt.Sprintf("version-%d", secret.version), Permissions: append([]string(nil), vault.permissions...), ZoneIDs: append([]string(nil), vault.zoneIDs...), LastUsed: 42}, nil
+	}
 	if !vault.exists {
 		return cloudflaredns.TokenAttestation{}, errors.New("raw missing token")
 	}
 	return cloudflaredns.TokenAttestation{SecretRef: "vault/cloudflare", Version: fmt.Sprintf("version-%d", vault.version), Permissions: append([]string(nil), vault.permissions...), ZoneIDs: append([]string(nil), vault.zoneIDs...), LastUsed: 42}, nil
 }
 func (vault *fakeVault) Enroll(_ context.Context, ref string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
+	if strings.HasPrefix(ref, "vault/cloudflare/") {
+		return vault.enrollMapping(ref, material, operation)
+	}
 	return vault.change(ref, material, operation, true)
 }
 func (vault *fakeVault) Rotate(_ context.Context, ref, expectedVersion string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
+	if strings.HasPrefix(ref, "vault/cloudflare/") {
+		return vault.rotateMapping(ref, expectedVersion, material, operation)
+	}
 	vault.mu.Lock()
 	defer vault.mu.Unlock()
 	if expectedVersion != fmt.Sprintf("version-%d", vault.version) {
@@ -728,6 +759,60 @@ func (vault *fakeVault) Rotate(_ context.Context, ref, expectedVersion string, m
 	}
 	vault.version++
 	metadata := cloudflaredns.TokenMetadata{SecretRef: ref, Version: fmt.Sprintf("version-%d", vault.version)}
+	vault.operations[operation] = metadata
+	vault.effects.Add(1)
+	return metadata, nil
+}
+func (vault *fakeVault) Reveal(_ context.Context, ref string) ([]byte, error) {
+	vault.mu.Lock()
+	defer vault.mu.Unlock()
+	if ref != "vault/cloudflare" {
+		secret, ok := vault.secrets[ref]
+		if !ok || len(secret.material) == 0 {
+			return nil, errors.New("raw missing token")
+		}
+		return append([]byte(nil), secret.material...), nil
+	}
+	if !vault.exists {
+		return nil, errors.New("raw missing token")
+	}
+	return append([]byte(nil), vault.material...), nil
+}
+func (vault *fakeVault) enrollMapping(ref string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
+	if !vault.acceptedRef(ref) || len(material) == 0 {
+		return cloudflaredns.TokenMetadata{}, errors.New("raw Vault failure")
+	}
+	vault.mu.Lock()
+	defer vault.mu.Unlock()
+	if previous, exists := vault.operations[operation]; exists {
+		return previous, nil
+	}
+	if _, exists := vault.secrets[ref]; exists {
+		return cloudflaredns.TokenMetadata{}, errors.New("raw token already exists")
+	}
+	vault.secrets[ref] = fakeSecret{version: 1, material: append([]byte(nil), material...)}
+	metadata := cloudflaredns.TokenMetadata{SecretRef: ref, Version: "version-1"}
+	vault.operations[operation] = metadata
+	vault.effects.Add(1)
+	return metadata, nil
+}
+func (vault *fakeVault) rotateMapping(ref, expectedVersion string, material []byte, operation string) (cloudflaredns.TokenMetadata, error) {
+	if !vault.acceptedRef(ref) || len(material) == 0 {
+		return cloudflaredns.TokenMetadata{}, errors.New("raw Vault failure")
+	}
+	vault.mu.Lock()
+	defer vault.mu.Unlock()
+	if previous, exists := vault.operations[operation]; exists {
+		return previous, nil
+	}
+	secret, ok := vault.secrets[ref]
+	if !ok || expectedVersion != fmt.Sprintf("version-%d", secret.version) {
+		return cloudflaredns.TokenMetadata{}, cloudflaredns.ErrTokenStale
+	}
+	secret.version++
+	secret.material = append([]byte(nil), material...)
+	vault.secrets[ref] = secret
+	metadata := cloudflaredns.TokenMetadata{SecretRef: ref, Version: fmt.Sprintf("version-%d", secret.version)}
 	vault.operations[operation] = metadata
 	vault.effects.Add(1)
 	return metadata, nil

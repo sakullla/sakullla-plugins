@@ -2,6 +2,7 @@ package cloudflaredns
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"sort"
@@ -17,6 +18,7 @@ const (
 	MaxConfigBytes = 1 << 20
 	MaxZones       = 256
 	MaxRecords     = 1024
+	MaxMappings    = 256
 	MaxTokenBytes  = 8192
 	MaxActiveCalls = 64
 )
@@ -44,6 +46,10 @@ var (
 	ErrReconcilePending        = errors.New("Cloudflare effect committed; reconciliation pending")
 	ErrTypedHandlesUnavailable = errors.New("canonical typed Cloudflare handles unavailable")
 	ErrRevoked                 = errors.New("Cloudflare generation revoked")
+	ErrMappingConflict         = errors.New("Cloudflare mapping suffix already exists")
+	ErrMappingNotFound         = errors.New("Cloudflare mapping not found")
+	ErrTokenUnavailable        = errors.New("Cloudflare domain has no available token")
+	ErrMappedTokenUnavailable  = errors.New("Cloudflare mapped token unavailable")
 )
 
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
@@ -87,6 +93,46 @@ func (attestation TokenAttestation) hasZone(zoneID string) bool {
 
 type TokenMetadata struct{ SecretRef, Version string }
 
+type TokenMapping struct {
+	Suffix     string `json:"suffix"`
+	SecretRef  string `json:"secret_ref"`
+	Version    string `json:"version"`
+	Configured bool   `json:"configured"`
+	UpdatedAt  uint64 `json:"updated_at"`
+}
+
+type IssuedToken struct {
+	Domain    string
+	Suffix    string
+	SecretRef string
+	Version   string
+	Fallback  bool
+	material  []byte
+}
+
+func (token IssuedToken) Token() []byte {
+	return append([]byte(nil), token.material...)
+}
+
+func (token IssuedToken) MarshalJSON() ([]byte, error) {
+	type issuedTokenJSON struct {
+		Domain    string `json:"domain"`
+		Suffix    string `json:"suffix"`
+		SecretRef string `json:"secret_ref"`
+		Version   string `json:"version"`
+		Fallback  bool   `json:"fallback"`
+	}
+	return json.Marshal(issuedTokenJSON{Domain: token.Domain, Suffix: token.Suffix, SecretRef: token.SecretRef, Version: token.Version, Fallback: token.Fallback})
+}
+
+func (token *IssuedToken) Clear() {
+	if token == nil {
+		return
+	}
+	clear(token.material)
+	token.material = nil
+}
+
 type Vault interface {
 	Verify(context.Context, string) (TokenAttestation, error)
 	// Enroll and Rotate must be capability-backed and exactly-once for the
@@ -95,6 +141,8 @@ type Vault interface {
 	// Rotate atomically compares expectedVersion with the current Vault
 	// version before applying the exactly-once operation.
 	Rotate(context.Context, string, string, []byte, string) (TokenMetadata, error)
+	// Reveal returns a copy of stored token material for an enrolled secret_ref.
+	Reveal(context.Context, string) ([]byte, error)
 }
 
 type Zone struct{ ID, Name string }
@@ -168,9 +216,9 @@ func (function AuthorizerFunc) Authorize(ctx context.Context, action ActionConte
 }
 
 type UIProjection struct {
-	Kind, Outcome, OperationKey, ZoneID, RecordID, RecordType, RecordName string
-	VisibleZones, MissingPermissions                                      []string
-	LastUsed                                                              uint64
+	Kind, Outcome, OperationKey, ZoneID, RecordID, RecordType, RecordName, Suffix, Domain string
+	VisibleZones, MissingPermissions                                                      []string
+	LastUsed                                                                              uint64
 }
 
 type DynamicUI interface {
@@ -182,7 +230,9 @@ func (function DynamicUIFunc) Emit(ctx context.Context, projection UIProjection)
 	return function(ctx, projection)
 }
 
-type AuditRecord struct{ Action, Outcome, OperationKey, Actor, ResourceGroupRef, ZoneID, RecordID string }
+type AuditRecord struct {
+	Action, Outcome, OperationKey, Actor, ResourceGroupRef, ZoneID, RecordID, Suffix, Domain string
+}
 type Auditor interface {
 	Audit(context.Context, AuditRecord) error
 }
@@ -192,7 +242,7 @@ func (function AuditorFunc) Audit(ctx context.Context, record AuditRecord) error
 	return function(ctx, record)
 }
 
-type EventRecord struct{ Action, Outcome, ZoneID, RecordID, ErrorClass string }
+type EventRecord struct{ Action, Outcome, ZoneID, RecordID, Suffix, Domain, ErrorClass string }
 type EventLogger interface {
 	Log(context.Context, EventRecord) error
 }
@@ -261,6 +311,8 @@ type Service struct {
 	live          atomic.Bool
 	mu            sync.Mutex
 	status        TokenAttestation
+	mappings      map[string]storedMapping
+	revision      uint64
 	rootCtx       context.Context
 	cancel        context.CancelFunc
 	active        sync.WaitGroup

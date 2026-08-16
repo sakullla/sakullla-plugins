@@ -10,7 +10,9 @@ import (
 	"strconv"
 )
 
-type ActionRequest struct{ Actor, ResourceGroupRef, ZoneID, OperationKey string }
+type ActionRequest struct {
+	Actor, ResourceGroupRef, ZoneID, OperationKey, Suffix, Domain string
+}
 
 func (service *Service) operationKey(action string, request ActionRequest) string {
 	return stableOperationKey(service.configuration.Generation, action, request.OperationKey, request.Actor, request.ResourceGroupRef, request.ZoneID)
@@ -43,6 +45,7 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 	service := &Service{
 		configuration: configuration,
 		runtime:       runtime,
+		mappings:      make(map[string]storedMapping),
 		rootCtx:       rootCtx,
 		cancel:        cancel,
 		slots:         make(chan struct{}, MaxActiveCalls),
@@ -455,7 +458,7 @@ func (service *Service) authorize(ctx context.Context, action string, request Ac
 	if err := service.validateAction(request); err != nil {
 		return TokenAttestation{}, ErrInvalidInput
 	}
-	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID}); err != nil {
+	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Suffix: request.Suffix, Domain: request.Domain}); err != nil {
 		return TokenAttestation{}, err
 	}
 	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
@@ -517,7 +520,7 @@ func (service *Service) authorizeBootstrap(ctx context.Context, action string, r
 	if err := service.validateAction(request); err != nil {
 		return err
 	}
-	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef}); err != nil {
+	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, Suffix: request.Suffix, Domain: request.Domain}); err != nil {
 		return err
 	}
 	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
@@ -628,9 +631,9 @@ func (service *Service) success(ctx context.Context, action, operation string, r
 }
 func (service *Service) successRecord(ctx context.Context, action, operation string, request ActionRequest, recordID string) error {
 	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
-		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "succeeded", ZoneID: request.ZoneID, RecordID: recordID})
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "succeeded", ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain})
 	})
-	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "succeeded", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
+	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "succeeded", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain})
 	if logErr != nil || auditErr != nil {
 		var failures []error
 		failures = append(failures, ErrReconcilePending)
@@ -649,9 +652,9 @@ func (service *Service) fail(ctx context.Context, action, operation string, requ
 }
 func (service *Service) failRecord(ctx context.Context, action, operation string, request ActionRequest, recordID, class string, failure error) error {
 	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
-		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "failed", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "failed", ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain, ErrorClass: class})
 	})
-	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "failed", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
+	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "failed", OperationKey: operation + ":terminal", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain})
 	if auditErr != nil || logErr != nil {
 		failures := []error{failure}
 		if logErr != nil {
@@ -669,9 +672,9 @@ func (service *Service) pending(ctx context.Context, action, operation string, r
 }
 func (service *Service) pendingRecord(ctx context.Context, action, operation string, request ActionRequest, recordID, class string, failure error) error {
 	_, logErr := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
-		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "pending", ZoneID: request.ZoneID, RecordID: recordID, ErrorClass: class})
+		return struct{}{}, service.runtime.Logger.Log(callCtx, EventRecord{Action: action, Outcome: "pending", ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain, ErrorClass: class})
 	})
-	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "pending", OperationKey: operation + ":progress", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID})
+	auditErr := service.audit(ctx, AuditRecord{Action: action, Outcome: "pending", OperationKey: operation + ":progress", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, RecordID: recordID, Suffix: request.Suffix, Domain: request.Domain})
 	failures := []error{ErrReconcilePending}
 	if logErr != nil {
 		failures = append(failures, safeExternal(logErr, ErrLogUnavailable))
@@ -723,6 +726,7 @@ func (service *Service) Cancel() {
 		revoke = true
 	})
 	service.status = TokenAttestation{}
+	service.mappings = nil
 	service.mu.Unlock()
 	if revoke {
 		service.runtime.Lease.Revoke()
