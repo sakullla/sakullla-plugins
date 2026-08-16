@@ -13,12 +13,14 @@ import (
 )
 
 const (
-	PluginID            = "doh"
-	PluginVersion       = "0.1.0"
-	MaxConfigBytes      = 1 << 20
-	MaxUpstreams        = 8
-	MaxDNSRequestBytes  = 4096
-	MaxDNSResponseBytes = 65535
+	PluginID             = "doh"
+	PluginVersion        = "0.1.0"
+	ProviderID           = "default"
+	MaxConfigBytes       = 1 << 20
+	MaxPluginConfigBytes = 4096
+	MaxUpstreams         = 8
+	MaxDNSRequestBytes   = 4096
+	MaxDNSResponseBytes  = 65535
 )
 
 var (
@@ -48,6 +50,17 @@ type Upstream struct {
 	EndpointRef string `json:"endpoint_ref"`
 	Priority    int    `json:"priority"`
 	Enabled     bool   `json:"enabled"`
+}
+
+type PluginConfig struct {
+	Upstreams []UpstreamConfig `json:"upstreams,omitempty"`
+}
+
+type UpstreamConfig struct {
+	ID       string `json:"id"`
+	Endpoint string `json:"endpoint"`
+	Priority int    `json:"priority"`
+	Enabled  bool   `json:"enabled"`
 }
 
 type Configuration struct {

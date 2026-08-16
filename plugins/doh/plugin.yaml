@@ -2,7 +2,7 @@ schema_version: 1
 id: doh
 version: 0.1.0
 name: HTTPS 域名解析
-description: 提供可鉴权的 DNS over HTTPS 解析服务
+description: 为零配置发布的自有域名提供 DNS over HTTPS 解析
 compatibility:
   host: "*"
   agent: "*"
@@ -19,14 +19,12 @@ artifacts:
     goos: linux
     goarch: amd64
 extension_points:
-  - dns.provider
+  - http.backend-provider
+http_backend_providers:
+  - id: default
+    display_name: HTTPS 域名解析
 permissions:
-  - name: policy.read
-  - name: secret.use
-  - name: storage.read
-  - name: storage.write
-  - name: event.emit
-  - name: service.revocable-resource-handle
+  - name: http.outbound
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

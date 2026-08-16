@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -16,280 +17,245 @@ import (
 
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
-	Admission                                                  TypedHandleAdmission
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 }
 
-type controllerEpoch struct{ live atomic.Bool }
+type generationState struct {
+	config PluginConfig
+	once   sync.Once
+}
+
+func (value *generationState) close() {
+	value.once.Do(func() {})
+}
 
 type Controller struct {
-	mu            sync.Mutex
-	request       pluginsdk.RPCHandshakeRequest
-	configuration Configuration
-	epoch         *controllerEpoch
-	commit        *rpcplugin.Handle[*controllerEpoch]
-	service       *rpcplugin.Handle[*Service]
-	published     *Service
-	transaction   *rpcplugin.Handle[PreparedAdmission]
-	admission     TypedHandleAdmission
+	mu sync.RWMutex
+
+	config        ControllerConfig
 	lifecycle     *rpcplugin.Lifecycle
+	prepared      *rpcplugin.Handle[*generationState]
+	active        *rpcplugin.Handle[*generationState]
+	preparedState *generationState
+	activeState   *generationState
+	generation    string
+	pluginConfig  PluginConfig
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
-	if config.Admission == nil {
-		config.Admission = unavailableAdmission{}
-	}
 	if config.PrepareTimeout <= 0 {
-		config.PrepareTimeout = time.Second
+		config.PrepareTimeout = 10 * time.Second
 	}
 	if config.ActivateTimeout <= 0 {
 		config.ActivateTimeout = time.Second
 	}
 	if config.StopTimeout <= 0 {
-		config.StopTimeout = time.Second
+		config.StopTimeout = 5 * time.Second
 	}
 	if config.DrainTimeout <= 0 {
-		config.DrainTimeout = time.Second
+		config.DrainTimeout = 30 * time.Second
 	}
-	controller := &Controller{admission: config.Admission}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
-		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:   []string{"doh.business-model"},
-		RequiredGrants: []string{"audit", "cache", "ip-policy", "listener", "log", "monotonic-clock", "network", "secret"},
-		Timeouts:       rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
-	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
-	if err != nil {
-		return nil, err
-	}
-	controller.lifecycle = lifecycle
-	return controller, nil
+	return &Controller{config: config}, nil
 }
 
 func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	response, err := controller.lifecycle.Handshake(ctx, request)
-	if err == nil {
-		controller.mu.Lock()
-		controller.request = request
-		controller.mu.Unlock()
+	if err := pluginsdk.ValidateRPCFeatures(request.RequiredFeatures, []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}); err != nil {
+		return pluginsdk.RPCHandshakeResponse{}, err
 	}
-	return response, err
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.lifecycle != nil {
+		return pluginsdk.RPCHandshakeResponse{}, errors.New("lifecycle handshake is already complete")
+	}
+	packageDigest := controller.config.PackageDigest
+	if packageDigest == "" {
+		packageDigest = request.PackageDigest
+	}
+	artifactDigest := controller.config.ArtifactDigest
+	if artifactDigest == "" {
+		artifactDigest = request.ArtifactDigest
+	}
+	lifecycle, err := rpcplugin.New(rpcplugin.Config{
+		PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: packageDigest, ArtifactDigest: artifactDigest,
+		Capabilities:   []string{pluginsdk.PermissionHTTPOutbound},
+		RequiredGrants: []string{pluginsdk.PermissionHTTPOutbound},
+		Timeouts: rpcplugin.Timeouts{
+			Prepare:  controller.config.PrepareTimeout,
+			Activate: controller.config.ActivateTimeout,
+			Stop:     controller.config.StopTimeout,
+			Drain:    controller.config.DrainTimeout,
+		},
+	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
+	if err != nil {
+		return pluginsdk.RPCHandshakeResponse{}, err
+	}
+	response, err := lifecycle.Handshake(ctx, request)
+	if err != nil {
+		return pluginsdk.RPCHandshakeResponse{}, err
+	}
+	response.Features = []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}
+	controller.lifecycle = lifecycle
+	controller.generation = request.Generation
+	return response, nil
 }
 
 func (controller *Controller) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Prepare(ctx, request)
+	controller.mu.RLock()
+	lifecycle := controller.lifecycle
+	controller.mu.RUnlock()
+	if lifecycle == nil {
+		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
+	}
+	return lifecycle.Prepare(ctx, request)
 }
+
 func (controller *Controller) Activate(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Activate(ctx, request)
+	controller.mu.RLock()
+	lifecycle := controller.lifecycle
+	controller.mu.RUnlock()
+	if lifecycle == nil {
+		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
+	}
+	return lifecycle.Activate(ctx, request)
 }
+
 func (controller *Controller) Stop(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Stop(ctx, request)
-}
-
-func (controller *Controller) Serve(ctx context.Context, request HTTPRequest) (HTTPResponse, error) {
-	controller.mu.Lock()
-	service := controller.service
-	controller.mu.Unlock()
-	if service == nil {
-		return HTTPResponse{}, ErrRevoked
+	controller.mu.RLock()
+	lifecycle := controller.lifecycle
+	controller.mu.RUnlock()
+	if lifecycle == nil {
+		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
 	}
-	var response HTTPResponse
-	err := service.Use(ctx, func(ctx context.Context, current *Service) error {
-		var err error
-		response, err = current.serve(ctx, request)
-		return err
-	})
-	return response, safeServeError(err)
+	return lifecycle.Stop(ctx, request)
 }
 
-func (controller *Controller) Statuses() []UpstreamStatus {
-	controller.mu.Lock()
-	service := controller.service
-	controller.mu.Unlock()
-	if service == nil {
+func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	controller.mu.RLock()
+	active := controller.active
+	controller.mu.RUnlock()
+	if active == nil {
+		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
+		return
+	}
+	err := active.Use(request.Context(), func(_ context.Context, _ *generationState) error {
+		http.NotFound(writer, request)
 		return nil
+	})
+	if err != nil {
+		http.Error(writer, "provider generation is unavailable", http.StatusServiceUnavailable)
 	}
-	var statuses []UpstreamStatus
-	_ = service.Use(context.Background(), func(_ context.Context, current *Service) error { statuses = current.Statuses(); return nil })
-	return statuses
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, wire []byte) error {
-	if len(wire) > MaxConfigBytes {
-		return ErrInvalidRequest
-	}
-	decoder := json.NewDecoder(bytes.NewReader(wire))
-	decoder.DisallowUnknownFields()
-	var configuration Configuration
-	if err := decoder.Decode(&configuration); err != nil {
-		return ErrInvalidRequest
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return ErrInvalidRequest
-	}
-	if err := configuration.Validate(); err != nil {
-		return err
-	}
-	if configuration.Generation != generation.ID() {
-		return rpcplugin.ErrGenerationMismatch
-	}
-	epoch := &controllerEpoch{}
-	epoch.live.Store(true)
-	handle, err := rpcplugin.BindHandle(generation, "listener", epoch, func(epoch *controllerEpoch) {
-		epoch.live.Store(false)
-		controller.mu.Lock()
-		if controller.epoch == epoch {
-			controller.configuration = Configuration{}
-			controller.epoch, controller.commit, controller.service, controller.published, controller.transaction = nil, nil, nil, nil, nil
-		}
-		controller.mu.Unlock()
-	})
+	config, err := parsePluginConfig(wire)
 	if err != nil {
 		return err
 	}
-	return handle.Use(ctx, func(ctx context.Context, value *controllerEpoch) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !value.live.Load() {
-			return rpcplugin.ErrRevoked
-		}
-		controller.mu.Lock()
-		controller.configuration, controller.epoch, controller.commit = cloneConfiguration(configuration), epoch, handle
-		controller.service, controller.published, controller.transaction = nil, nil, nil
-		controller.mu.Unlock()
-		return nil
-	})
-}
-
-func (controller *Controller) activate(ctx context.Context, generation *rpcplugin.Generation) error {
-	controller.mu.Lock()
-	request, configuration, epoch, commit := controller.request, cloneConfiguration(controller.configuration), controller.epoch, controller.commit
-	controller.mu.Unlock()
-	if epoch == nil || commit == nil {
-		return rpcplugin.ErrRevoked
-	}
-	return commit.Use(ctx, func(ctx context.Context, value *controllerEpoch) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if value != epoch || !value.live.Load() {
-			return rpcplugin.ErrRevoked
-		}
-		prepared, err := controller.admission.Prepare(ctx, request, configuration)
-		if err != nil {
-			return safeControllerError(err)
-		}
-		if prepared == nil {
-			return ErrTypedHandlesUnavailable
-		}
-		transaction, err := rpcplugin.BindHandle(generation, "network", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
-		if err != nil {
-			prepared.Abort()
-			return err
-		}
-		var runtime RuntimeAdapters
-		if err = transaction.Use(ctx, func(ctx context.Context, prepared PreparedAdmission) error {
-			var commitErr error
-			runtime, commitErr = prepared.Commit(ctx)
-			return commitErr
-		}); err != nil {
-			transaction.Revoke()
-			return safeControllerError(err)
-		}
-		if !runtime.valid() {
-			transaction.Revoke()
-			return ErrTypedHandlesUnavailable
-		}
-		service, err := NewService(configuration, runtime)
-		if err != nil {
-			transaction.Revoke()
-			return err
-		}
-		serviceHandle, err := rpcplugin.BindHandle(generation, "listener", service, func(service *Service) {
-			go func() {
-				closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				_ = service.Close(closeCtx)
-			}()
-		})
-		if err != nil {
-			transaction.Revoke()
-			return err
-		}
-		service.bindRequestLease(func(ctx context.Context, request HTTPRequest) (HTTPResponse, error) {
-			var response HTTPResponse
-			err := serviceHandle.Use(ctx, func(ctx context.Context, current *Service) error {
-				var err error
-				response, err = current.serve(ctx, request)
-				return err
-			})
-			return response, safeServeError(err)
-		})
-		if err = serviceHandle.Use(ctx, func(ctx context.Context, service *Service) error {
-			return runtime.Listener.Register(ctx, configuration.ListenerRef, service)
-		}); err != nil {
-			serviceHandle.Revoke()
-			transaction.Revoke()
-			return safeControllerError(err)
-		}
-		if err := ctx.Err(); err != nil || !epoch.live.Load() {
-			serviceHandle.Revoke()
-			transaction.Revoke()
-			if err != nil {
-				return err
-			}
-			return rpcplugin.ErrRevoked
-		}
-		controller.mu.Lock()
-		if controller.epoch != epoch || !epoch.live.Load() {
-			controller.mu.Unlock()
-			serviceHandle.Revoke()
-			transaction.Revoke()
-			return rpcplugin.ErrRevoked
-		}
-		controller.service, controller.published, controller.transaction = serviceHandle, service, transaction
-		controller.mu.Unlock()
-		return nil
-	})
-}
-
-func (controller *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
-	controller.mu.Lock()
-	service := controller.published
-	controller.service, controller.published = nil, nil
-	controller.mu.Unlock()
-	var closeErr error
-	if service != nil {
-		closeErr = service.Close(ctx)
-	}
-	controller.mu.Lock()
-	controller.configuration = Configuration{}
-	controller.epoch, controller.commit, controller.transaction = nil, nil, nil
-	controller.mu.Unlock()
-	return closeErr
-}
-
-func safeServeError(err error) error {
-	switch {
-	case errors.Is(err, rpcplugin.ErrDraining), errors.Is(err, rpcplugin.ErrRevoked):
-		return ErrRevoked
-	default:
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	owned := &generationState{config: config}
+	handle, err := rpcplugin.BindHandle(generation, pluginsdk.PermissionHTTPOutbound, owned, controller.revokeState)
+	if err != nil {
+		owned.close()
+		return err
+	}
+	controller.mu.Lock()
+	controller.prepared = handle
+	controller.preparedState = owned
+	controller.pluginConfig = config
+	controller.generation = generation.ID()
+	controller.mu.Unlock()
+	return nil
 }
 
-func safeControllerError(err error) error {
-	switch {
-	case errors.Is(err, context.Canceled):
-		return context.Canceled
-	case errors.Is(err, context.DeadlineExceeded):
-		return context.DeadlineExceeded
-	case errors.Is(err, rpcplugin.ErrRevoked):
-		return rpcplugin.ErrRevoked
-	case errors.Is(err, ErrTypedHandlesUnavailable):
-		return ErrTypedHandlesUnavailable
-	default:
-		return ErrTypedHandlesUnavailable
+func (controller *Controller) revokeState(value *generationState) {
+	controller.mu.Lock()
+	if controller.activeState == value {
+		controller.active = nil
+		controller.activeState = nil
 	}
+	if controller.preparedState == value {
+		controller.prepared = nil
+		controller.preparedState = nil
+	}
+	controller.mu.Unlock()
+	value.close()
+}
+
+func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.prepared == nil {
+		return rpcplugin.ErrRevoked
+	}
+	controller.active = controller.prepared
+	controller.activeState = controller.preparedState
+	return nil
+}
+
+func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
+	controller.mu.Lock()
+	instance := controller.activeState
+	if instance == nil {
+		instance = controller.preparedState
+	}
+	controller.active = nil
+	controller.prepared = nil
+	controller.activeState = nil
+	controller.preparedState = nil
+	controller.pluginConfig = PluginConfig{}
+	controller.mu.Unlock()
+	if instance != nil {
+		instance.close()
+	}
+	return nil
+}
+
+func parsePluginConfig(wire []byte) (PluginConfig, error) {
+	if len(wire) == 0 {
+		wire = []byte("{}")
+	}
+	if len(wire) > MaxPluginConfigBytes {
+		return PluginConfig{}, errors.New("plugin configuration exceeds the canonical bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(wire))
+	decoder.DisallowUnknownFields()
+	var config PluginConfig
+	if err := decoder.Decode(&config); err != nil {
+		return PluginConfig{}, errors.New("doh configuration must be an object with optional upstreams")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return PluginConfig{}, errors.New("doh configuration must contain one object")
+	}
+	if err := validatePluginConfig(config); err != nil {
+		return PluginConfig{}, err
+	}
+	return config, nil
+}
+
+func validatePluginConfig(config PluginConfig) error {
+	if len(config.Upstreams) > MaxUpstreams {
+		return ErrInvalidRequest
+	}
+	seen := make(map[string]struct{}, len(config.Upstreams))
+	for _, upstream := range config.Upstreams {
+		if !opaqueRefPattern.MatchString(upstream.ID) || strings.TrimSpace(upstream.Endpoint) == "" || upstream.Priority < -1000 || upstream.Priority > 1000 {
+			return ErrInvalidRequest
+		}
+		if _, exists := seen[upstream.ID]; exists {
+			return ErrInvalidRequest
+		}
+		seen[upstream.ID] = struct{}{}
+	}
+	return nil
+}
+
+func lifecycleFailure(code pluginsdk.ErrorCode, message string) pluginsdk.LifecycleResponse {
+	return pluginsdk.LifecycleResponse{Error: &pluginsdk.RuntimeError{Code: code, Message: message}}
 }
