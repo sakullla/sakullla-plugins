@@ -22,3 +22,7 @@ require (
 	google.golang.org/grpc v1.66.2
 	google.golang.org/protobuf v1.34.2
 )
+
+// Temporary: consume the authorized host worktree until plugin-sdk publishes
+// container.compose, http.rule, and ui.dynamic.
+replace github.com/sakullla/nginx-reverse-emby/plugin-sdk => ../nginx-reverse-emby-zh-display/plugin-sdk

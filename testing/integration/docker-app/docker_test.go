@@ -366,7 +366,7 @@ func TestDockerEntrypointCanonicalRPCAndDefaultFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(manifest)
-	for _, required := range []string{"container.compose", "http.rule", "ui.dynamic", "container.provider", "http.backend-provider"} {
+	for _, required := range []string{"container.compose", "http.rule", "ui.dynamic", "container.provider", "http.backend-provider", "http.outbound", "http_backend_providers"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("plugin.yaml missing %q", required)
 		}
