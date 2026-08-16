@@ -1,18 +1,21 @@
 package doh_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/sakullla-plugins/plugins/doh"
 )
 
@@ -20,9 +23,10 @@ func TestDoHRFC8484GETPOSTAndStrictGrammar(t *testing.T) {
 	query := dnsQuery(7, "Example.COM", 1)
 	for _, method := range []string{"GET", "POST"} {
 		t.Run(method, func(t *testing.T) {
-			service, resolverCalls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
-			request := validHTTPRequest(method, query, []byte("valid-token"))
-			response, err := service.Serve(context.Background(), request)
+			service, resolverCalls := testService(t, func(request doh.ResolveRequest) ([]byte, error) {
+				return positiveResponse(request.DNSMessage, 30), nil
+			})
+			response, err := service.Serve(context.Background(), validHTTPRequest(method, query, ""))
 			if err != nil || response.Status != "200" || response.ContentType != "application/dns-message" || binary.BigEndian.Uint16(response.Body[:2]) != 7 || resolverCalls.Load() != 1 {
 				t.Fatalf("RFC8484 response=%#v calls=%d err=%v", response, resolverCalls.Load(), err)
 			}
@@ -35,8 +39,8 @@ func TestDoHRFC8484GETPOSTAndStrictGrammar(t *testing.T) {
 		"media-list":           "application/json, application/dns-message; q=0.5",
 	} {
 		t.Run("accept-"+name, func(t *testing.T) {
-			service, calls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
-			request := validHTTPRequest("POST", query, []byte("valid-token"))
+			service, calls := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
+			request := validHTTPRequest("POST", query, "")
 			request.Accept = accept
 			if response, err := service.Serve(context.Background(), request); err != nil || response.Status != "200" || calls.Load() != 1 {
 				t.Fatalf("Accept %q response=%#v calls=%d err=%v", accept, response, calls.Load(), err)
@@ -46,89 +50,240 @@ func TestDoHRFC8484GETPOSTAndStrictGrammar(t *testing.T) {
 	for _, method := range []string{"GET", "POST"} {
 		t.Run(method+"-edns-do-padding", func(t *testing.T) {
 			ednsQuery := withEDNS(query, true, 12, []byte{0, 0, 0, 0})
-			service, calls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
-			request := validHTTPRequest(method, ednsQuery, []byte("valid-token"))
-			request.Accept = ""
-			if response, err := service.Serve(context.Background(), request); err != nil || response.Status != "200" || calls.Load() != 1 {
+			service, calls := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
+			if response, err := service.Serve(context.Background(), validHTTPRequest(method, ednsQuery, "")); err != nil || response.Status != "200" || calls.Load() != 1 {
 				t.Fatalf("EDNS response=%#v calls=%d err=%v", response, calls.Load(), err)
 			}
 		})
 	}
 
 	invalid := []doh.HTTPRequest{
-		{Method: "PUT", Accept: "application/dns-message", Token: []byte("valid-token")},
-		{Method: "GET", Query: "dns=" + base64.RawURLEncoding.EncodeToString(query) + "&x=1", Accept: "application/dns-message", Token: []byte("valid-token")},
-		{Method: "GET", Query: "dns=bad=padding", Accept: "application/dns-message", Token: []byte("valid-token")},
-		{Method: "POST", ContentType: "application/json", Accept: "application/dns-message", Body: query, Token: []byte("valid-token")},
-		{Method: "POST", ContentType: "application/dns-message", Accept: "application/json", Body: query, Token: []byte("valid-token")},
-		{Method: "POST", ContentType: "application/dns-message", Accept: "application/dns-message", Body: make([]byte, doh.MaxDNSRequestBytes+1), Token: []byte("valid-token")},
+		{Method: "PUT", Accept: "application/dns-message"},
+		{Method: "GET", Query: "dns=" + base64.RawURLEncoding.EncodeToString(query) + "&x=1", Accept: "application/dns-message"},
+		{Method: "GET", Query: "dns=bad=padding", Accept: "application/dns-message"},
+		{Method: "POST", ContentType: "application/json", Accept: "application/dns-message", Body: query},
+		{Method: "POST", ContentType: "application/dns-message", Accept: "application/json", Body: query},
+		{Method: "POST", ContentType: "application/dns-message", Accept: "application/dns-message", Body: make([]byte, doh.MaxDNSRequestBytes+1)},
 	}
 	for index, request := range invalid {
-		service, calls, _, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
+		service, calls := testService(t, func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 30), nil })
 		if _, err := service.Serve(context.Background(), request); err == nil || calls.Load() != 0 {
 			t.Fatalf("invalid RFC8484 case %d err=%v calls=%d", index, err, calls.Load())
 		}
 	}
 }
 
-func TestDoHTokenRotationIPPolicyAndRevokeBeforeCacheOrUpstream(t *testing.T) {
-	query := dnsQuery(1, "secret-name.example", 1)
-	cache := &countingCache{Cache: doh.NewMemoryCache(8, 1<<20)}
-	var resolverCalls, tokenCalls, policyCalls atomic.Int32
-	currentToken := atomic.Value{}
-	currentToken.Store("new-token")
-	runtime := testRuntime(cache, func(request doh.ResolveRequest) ([]byte, error) {
-		resolverCalls.Add(1)
-		return positiveResponse(request.DNSMessage, 10), nil
+func TestDoHHandlerAnswersWithoutTokenOrIPPolicy(t *testing.T) {
+	var calls atomic.Int32
+	controller := activateController(t, nil, func(request doh.ResolveRequest) ([]byte, error) {
+		calls.Add(1)
+		return positiveResponse(request.DNSMessage, 30), nil
 	})
-	runtime.Tokens = doh.TokenVerifierFunc(func(_ context.Context, ref string, credential []byte) error {
-		tokenCalls.Add(1)
-		if ref != "secret/token" || string(credential) != currentToken.Load().(string) {
-			return errors.New("raw token backend secret")
-		}
-		return nil
-	})
-	runtime.Policy = doh.IPPolicyEvaluatorFunc(func(_ context.Context, ref string, source doh.SourceIdentity) error {
-		policyCalls.Add(1)
-		if ref != "policy/shared" || source.Attestation != "allowed-source" {
-			return errors.New("raw CIDR material")
-		}
-		return nil
-	})
-	service, err := doh.NewService(testConfiguration(), runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
-		name, token, source string
-		want                error
+		method string
+		query  []byte
 	}{
-		{name: "rotated", token: "old-token", source: "allowed-source", want: doh.ErrInvalidToken},
-		{name: "policy", token: "new-token", source: "denied-source", want: doh.ErrIPPolicyDenied},
+		{method: http.MethodGet, query: dnsQuery(3, "open-get.example", 1)},
+		{method: http.MethodPost, query: dnsQuery(4, "open-post.example", 1)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			request := validHTTPRequest("POST", query, []byte(test.token))
-			request.Source.Attestation = test.source
-			_, err := service.Serve(context.Background(), request)
-			if !errors.Is(err, test.want) || strings.Contains(fmt.Sprint(err), "raw") || resolverCalls.Load() != 0 || cache.gets.Load() != 0 {
-				t.Fatalf("admission err=%v upstream=%d cache=%d", err, resolverCalls.Load(), cache.gets.Load())
-			}
-		})
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, dnsHTTPRequest(test.method, test.query, ""))
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/dns-message" || !bytes.Equal(recorder.Body.Bytes()[:2], test.query[:2]) {
+			t.Fatalf("%s status=%d body=%q", test.method, recorder.Code, recorder.Body.Bytes())
+		}
 	}
-	if tokenCalls.Load() != 2 || policyCalls.Load() != 1 {
-		t.Fatalf("token=%d policy=%d", tokenCalls.Load(), policyCalls.Load())
-	}
-	if err := service.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	request := validHTTPRequest("POST", query, []byte("new-token"))
-	request.Source.Attestation = "allowed-source"
-	if _, err := service.Serve(context.Background(), request); !errors.Is(err, doh.ErrRevoked) || resolverCalls.Load() != 0 {
-		t.Fatalf("revoke err=%v calls=%d", err, resolverCalls.Load())
+	if calls.Load() != 2 {
+		t.Fatalf("calls=%d", calls.Load())
 	}
 }
 
-func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
+func TestDoHHandlerInvalidRFC8484Is4xxWithoutOutbound(t *testing.T) {
+	var calls atomic.Int32
+	controller := activateController(t, nil, func(request doh.ResolveRequest) ([]byte, error) {
+		calls.Add(1)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	cases := []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/dns-query", nil),
+		httptest.NewRequest(http.MethodPut, "/dns-query", nil),
+		dnsHTTPRequest(http.MethodPost, dnsQuery(1, "bad-media.example", 1), ""),
+	}
+	cases[2].Header.Set("Content-Type", "application/json")
+	for index, request := range cases {
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, request)
+		if recorder.Code < 400 || recorder.Code >= 500 || calls.Load() != 0 {
+			t.Fatalf("case %d status=%d calls=%d", index, recorder.Code, calls.Load())
+		}
+	}
+}
+
+func TestDoHEmptyUpstreamsUseDefault(t *testing.T) {
+	query := dnsQuery(1, "default.example", 1)
+	for name, config := range map[string]doh.PluginConfig{
+		"omitted": {},
+		"empty":   {Upstreams: []doh.UpstreamConfig{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var seen []string
+			service, err := doh.NewService(doh.ConfigurationFromPlugin(config), doh.RuntimeAdapters{
+				Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
+					seen = append(seen, request.Endpoint)
+					return positiveResponse(request.DNSMessage, 30), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, "")); err != nil {
+				t.Fatal(err)
+			}
+			if len(seen) != 1 || seen[0] != doh.DefaultUpstreamEndpoint {
+				t.Fatalf("upstreams=%v", seen)
+			}
+		})
+	}
+}
+
+func TestDoHConfiguredUpstreamsOverrideDefault(t *testing.T) {
+	const custom = "https://resolver.example/dns-query"
+	var seen []string
+	service, err := doh.NewService(doh.ConfigurationFromPlugin(doh.PluginConfig{
+		Upstreams: []doh.UpstreamConfig{{ID: "custom", Endpoint: custom, Enabled: true}},
+	}), doh.RuntimeAdapters{
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
+			seen = append(seen, request.Endpoint)
+			return positiveResponse(request.DNSMessage, 30), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "custom.example", 1), "")); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != custom {
+		t.Fatalf("upstreams=%v", seen)
+	}
+}
+
+func TestDoHNoHealthyUpstreamIs5xxNotSuccessDNS(t *testing.T) {
+	var calls atomic.Int32
+	controller := activateController(t, []byte(`{"upstreams":[{"id":"down","endpoint":"https://down.example/dns-query","priority":0,"enabled":true}]}`), func(request doh.ResolveRequest) ([]byte, error) {
+		calls.Add(1)
+		return nil, errors.New("upstream down")
+	})
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, dnsHTTPRequest(http.MethodPost, dnsQuery(1, "fail.example", 1), ""))
+	if recorder.Code < 500 || recorder.Header().Get("Content-Type") == "application/dns-message" || calls.Load() != 1 {
+		t.Fatalf("status=%d type=%q calls=%d body=%q", recorder.Code, recorder.Header().Get("Content-Type"), calls.Load(), recorder.Body.Bytes())
+	}
+}
+
+func TestDoHQueryECSIsNotOverwrittenByForwarded(t *testing.T) {
+	queryIP := net.ParseIP("198.51.100.10")
+	query := withECS(dnsQuery(4, "ecs-query.example", 1), queryIP, 24)
+	var outbound []byte
+	service, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) {
+		outbound = append([]byte(nil), request.DNSMessage...)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	request := validHTTPRequest("POST", query, `for=203.0.113.20;proto=https;host=dns.example`)
+	if _, err := service.Serve(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	family, prefix, address, ok := extractECS(outbound)
+	if !ok || family != 1 || prefix != 24 || !address.Equal(net.ParseIP("198.51.100.0")) {
+		t.Fatalf("outbound ECS family=%d prefix=%d ip=%v ok=%v", family, prefix, address, ok)
+	}
+}
+
+func TestDoHForwardedForInjectsECSWhenQueryHasNone(t *testing.T) {
+	query := dnsQuery(5, "ecs-forwarded.example", 1)
+	var outbound []byte
+	service, _ := testService(t, func(request doh.ResolveRequest) ([]byte, error) {
+		outbound = append([]byte(nil), request.DNSMessage...)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, `for=203.0.113.40`)); err != nil {
+		t.Fatal(err)
+	}
+	family, prefix, address, ok := extractECS(outbound)
+	if !ok || family != 1 || prefix == 0 || !address.Equal(net.ParseIP("203.0.113.0")) {
+		t.Fatalf("injected ECS family=%d prefix=%d ip=%v ok=%v", family, prefix, address, ok)
+	}
+}
+
+func TestDoHResolvesWithoutECSWhenNeitherPresent(t *testing.T) {
+	query := dnsQuery(6, "no-ecs.example", 1)
+	var outbound []byte
+	service, calls := testService(t, func(request doh.ResolveRequest) ([]byte, error) {
+		outbound = append([]byte(nil), request.DNSMessage...)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	request := validHTTPRequest("POST", query, "")
+	request.Forwarded = "proto=https;host=dns.example"
+	if response, err := service.Serve(context.Background(), request); err != nil || response.Status != "200" || calls.Load() != 1 {
+		t.Fatalf("response=%#v calls=%d err=%v", response, calls.Load(), err)
+	}
+	if _, _, _, ok := extractECS(outbound); ok {
+		t.Fatalf("unexpected ECS in outbound")
+	}
+}
+
+func TestDoHIgnoresXForwardedFor(t *testing.T) {
+	query := dnsQuery(8, "xff.example", 1)
+	var outbound []byte
+	controller := activateController(t, nil, func(request doh.ResolveRequest) ([]byte, error) {
+		outbound = append([]byte(nil), request.DNSMessage...)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	httpRequest := dnsHTTPRequest(http.MethodPost, query, "")
+	httpRequest.Header.Set("X-Forwarded-For", "203.0.113.99")
+	httpRequest.RemoteAddr = "192.0.2.10:443"
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, httpRequest)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	if _, _, _, ok := extractECS(outbound); ok {
+		t.Fatalf("X-Forwarded-For leaked into ECS")
+	}
+}
+
+func TestDoHCacheIsolatesECSSources(t *testing.T) {
+	query := dnsQuery(9, "shared.example", 1)
+	var calls atomic.Int32
+	service, err := doh.NewService(testConfiguration(), doh.RuntimeAdapters{
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
+			calls.Add(1)
+			return positiveResponse(request.DNSMessage, 30), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, `for=203.0.113.10`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", withECS(query, net.ParseIP("198.51.100.1"), 24), `for=203.0.113.10`)); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("ecs sources shared cache calls=%d", calls.Load())
+	}
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, `for=203.0.113.10`)); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("forwarded ECS cache missed calls=%d", calls.Load())
+	}
+}
+
+func TestDoHTTLNegativeCacheAndPoisoning(t *testing.T) {
 	clock := &fakeClock{now: uint64(time.Second)}
 	cache := doh.NewMemoryCache(2, 1<<20)
 	var resolverCalls atomic.Int32
@@ -141,7 +296,7 @@ func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := validHTTPRequest("POST", dnsQuery(1, "cache.example", 1), []byte("valid-token"))
+	request := validHTTPRequest("POST", dnsQuery(1, "cache.example", 1), "")
 	if _, err := service.Serve(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -155,23 +310,6 @@ func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
 		t.Fatalf("TTL expiry=%#v calls=%d err=%v", response, resolverCalls.Load(), err)
 	}
 
-	negativeRuntime := testRuntime(doh.NewMemoryCache(2, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-		return negativeResponse(request.DNSMessage, 60, 5), nil
-	})
-	negativeRuntime.Clock = &fakeClock{now: uint64(time.Second)}
-	negative, err := doh.NewService(testConfiguration(), negativeRuntime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	negativeRequest := validHTTPRequest("GET", dnsQuery(8, "missing.example", 1), []byte("valid-token"))
-	if _, err := negative.Serve(context.Background(), negativeRequest); err != nil {
-		t.Fatal(err)
-	}
-	negativeRequest.Query = "dns=" + base64.RawURLEncoding.EncodeToString(dnsQuery(9, "missing.example", 1))
-	if response, err := negative.Serve(context.Background(), negativeRequest); err != nil || !response.CacheHit {
-		t.Fatalf("negative cache response=%#v err=%v", response, err)
-	}
-
 	poisonRuntime := testRuntime(doh.NewMemoryCache(2, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
 		return positiveResponse(dnsQuery(999, "other.example", 1), 10), nil
 	})
@@ -179,136 +317,49 @@ func TestDoHTTLNegativeCacheCapacityAndPoisoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := poison.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "victim.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrNoHealthyUpstream) {
+	if _, err := poison.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "victim.example", 1), "")); !errors.Is(err, doh.ErrNoHealthyUpstream) {
 		t.Fatalf("poisoning err=%v", err)
 	}
+}
 
-	for name, ttls := range map[string][]uint32{
-		"zero-first": {0, 30},
-		"zero-last":  {30, 0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var calls atomic.Int32
-			runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-				calls.Add(1)
-				return multiAnswerResponse(request.DNSMessage, ttls...), nil
-			})
-			zeroService, err := doh.NewService(testConfiguration(), runtime)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request := validHTTPRequest("POST", dnsQuery(1, name+".example", 1), []byte("valid-token"))
-			for range 2 {
-				if response, err := zeroService.Serve(context.Background(), request); err != nil || response.CacheHit {
-					t.Fatalf("TTL zero response=%#v err=%v", response, err)
-				}
-			}
-			if calls.Load() != 2 {
-				t.Fatalf("TTL zero cached calls=%d", calls.Load())
-			}
-		})
-	}
-
-	t.Run("zero-negative-SOA-is-valid-not-cacheable", func(t *testing.T) {
-		var calls atomic.Int32
-		runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+func TestDoHDefaultClockAllowsRepeatedQueries(t *testing.T) {
+	var calls atomic.Int32
+	service, err := doh.NewService(testConfiguration(), doh.RuntimeAdapters{
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) {
 			calls.Add(1)
-			return negativeResponse(request.DNSMessage, 0, 0), nil
-		})
-		zeroNegative, err := doh.NewService(testConfiguration(), runtime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request := validHTTPRequest("POST", dnsQuery(1, "zero-negative.example", 1), []byte("valid-token"))
-		for range 2 {
-			if response, err := zeroNegative.Serve(context.Background(), request); err != nil || response.CacheHit {
-				t.Fatalf("zero negative response=%#v err=%v", response, err)
-			}
-		}
-		if calls.Load() != 2 {
-			t.Fatalf("zero negative cached calls=%d", calls.Load())
-		}
+			return positiveResponse(request.DNSMessage, 30), nil
+		}),
 	})
-
-	t.Run("malformed-negative-SOA-fails-closed", func(t *testing.T) {
-		runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-			response := negativeResponse(request.DNSMessage, 30, 10)
-			response[len(response)-22] = 0xc0
-			response[len(response)-21] = 0xff
-			return response, nil
-		})
-		malformed, err := doh.NewService(testConfiguration(), runtime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := malformed.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "malformed-soa.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrNoHealthyUpstream) {
-			t.Fatalf("malformed SOA err=%v", err)
-		}
-	})
-
-	bounded := doh.NewMemoryCache(1, doh.MaxDNSResponseBytes+128)
-	capacityRuntime := testRuntime(bounded, func(request doh.ResolveRequest) ([]byte, error) {
-		resolverCalls.Add(1)
-		return positiveResponse(request.DNSMessage, 30), nil
-	})
-	capacity, err := doh.NewService(testConfiguration(), capacityRuntime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"one.example", "two.example", "one.example"} {
-		if _, err := capacity.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(3, name, 1), []byte("valid-token"))); err != nil {
-			t.Fatal(err)
-		}
+	request := validHTTPRequest("POST", dnsQuery(1, "monotonic.example", 1), "")
+	if _, err := service.Serve(context.Background(), request); err != nil {
+		t.Fatal(err)
 	}
-	if entries, bytes := bounded.Stats(); entries != 1 || bytes > doh.MaxDNSResponseBytes+128 {
-		t.Fatalf("cache entries=%d bytes=%d", entries, bytes)
+	if _, err := service.Serve(context.Background(), request); err != nil || calls.Load() != 1 {
+		t.Fatalf("default clock second serve err=%v calls=%d", err, calls.Load())
 	}
+}
 
-	t.Run("TTL-boundaries-and-monotonic-clock", func(t *testing.T) {
-		configuration := testConfiguration()
-		configuration.MinTTLSeconds, configuration.MaxTTLSeconds = 5, 10
-		boundaryClock := &fakeClock{now: uint64(time.Second)}
-		var shortCalls atomic.Int32
-		shortRuntime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-			shortCalls.Add(1)
-			return positiveResponse(request.DNSMessage, 3), nil
-		})
-		shortRuntime.Clock = boundaryClock
-		shortService, err := doh.NewService(configuration, shortRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		shortRequest := validHTTPRequest("POST", dnsQuery(1, "short.example", 1), []byte("valid-token"))
-		if _, err := shortService.Serve(context.Background(), shortRequest); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := shortService.Serve(context.Background(), shortRequest); err != nil || shortCalls.Load() != 2 {
-			t.Fatalf("below-min TTL was cached calls=%d err=%v", shortCalls.Load(), err)
-		}
-
-		var longCalls atomic.Int32
-		longRuntime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-			longCalls.Add(1)
-			return positiveResponse(request.DNSMessage, 100), nil
-		})
-		longRuntime.Clock = boundaryClock
-		longService, err := doh.NewService(configuration, longRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		longRequest := validHTTPRequest("POST", dnsQuery(1, "long.example", 1), []byte("valid-token"))
-		if _, err := longService.Serve(context.Background(), longRequest); err != nil {
-			t.Fatal(err)
-		}
-		boundaryClock.now = uint64(11 * time.Second)
-		if response, err := longService.Serve(context.Background(), longRequest); err != nil || response.CacheHit || longCalls.Load() != 2 {
-			t.Fatalf("max TTL cap response=%#v calls=%d err=%v", response, longCalls.Load(), err)
-		}
-		boundaryClock.now = uint64(10 * time.Second)
-		if _, err := longService.Serve(context.Background(), longRequest); !errors.Is(err, doh.ErrClockUnavailable) {
-			t.Fatalf("monotonic regression err=%v", err)
-		}
+func TestDoHInjectedClockBackwardFailsClosed(t *testing.T) {
+	clock := &fakeClock{now: uint64(2 * time.Second)}
+	runtime := testRuntime(doh.NewMemoryCache(2, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+		return positiveResponse(request.DNSMessage, 30), nil
 	})
+	runtime.Clock = clock
+	service, err := doh.NewService(testConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validHTTPRequest("POST", dnsQuery(1, "backward.example", 1), "")
+	if _, err := service.Serve(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	clock.now = uint64(time.Second)
+	if _, err := service.Serve(context.Background(), request); !errors.Is(err, doh.ErrClockUnavailable) {
+		t.Fatalf("backward clock err=%v", err)
+	}
 }
 
 func TestDoHCacheHitPayloadValidation(t *testing.T) {
@@ -334,7 +385,7 @@ func TestDoHCacheHitPayloadValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) || resolverCalls.Load() != 0 {
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, "")); !errors.Is(err, doh.ErrCacheUnavailable) || resolverCalls.Load() != 0 {
 				t.Fatalf("cache payload err=%v resolver=%d", err, resolverCalls.Load())
 			}
 		})
@@ -356,7 +407,7 @@ func TestDoHCacheHitRemainingTTLAndExpiryBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token")))
+		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, ""))
 		if err != nil || !response.CacheHit || firstAnswerTTL(response.Body) != 5 {
 			t.Fatalf("late hit response=%#v TTL=%d err=%v", response, firstAnswerTTL(response.Body), err)
 		}
@@ -369,7 +420,7 @@ func TestDoHCacheHitRemainingTTLAndExpiryBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token")))
+		response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, ""))
 		soaTTL, minimum := negativeSOATTLs(response.Body)
 		if err != nil || !response.CacheHit || soaTTL != 10 || minimum != 10 {
 			t.Fatalf("negative hit response=%#v SOA=%d minimum=%d err=%v", response, soaTTL, minimum, err)
@@ -386,7 +437,7 @@ func TestDoHCacheHitRemainingTTLAndExpiryBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) {
+			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, "")); !errors.Is(err, doh.ErrCacheUnavailable) {
 				t.Fatalf("cache binding err=%v", err)
 			}
 		})
@@ -401,18 +452,21 @@ func TestDoHCacheHitRemainingTTLAndExpiryBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, []byte("valid-token"))); !errors.Is(err, doh.ErrCacheUnavailable) {
+		if _, err := service.Serve(context.Background(), validHTTPRequest("POST", query, "")); !errors.Is(err, doh.ErrCacheUnavailable) {
 			t.Fatalf("minimum binding err=%v", err)
 		}
 	})
 }
 
-func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
+func TestDoHFailoverUsesConfiguredOrder(t *testing.T) {
 	configuration := testConfiguration()
-	configuration.Upstreams = []doh.Upstream{{ID: "first", EndpointRef: "upstream/first", Priority: 0, Enabled: true}, {ID: "second", EndpointRef: "upstream/second", Priority: 1, Enabled: true}}
+	configuration.Upstreams = []doh.Upstream{
+		{ID: "first", Endpoint: "https://first.example/dns-query", Priority: 0, Enabled: true},
+		{ID: "second", Endpoint: "https://second.example/dns-query", Priority: 1, Enabled: true},
+	}
 	runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-		if request.EndpointRef == "upstream/first" {
-			return nil, errors.New("raw upstream secret")
+		if request.Endpoint == "https://first.example/dns-query" {
+			return nil, errors.New("first down")
 		}
 		return positiveResponse(request.DNSMessage, 10), nil
 	})
@@ -420,227 +474,29 @@ func TestDoHFailoverTimeoutConcurrencyIsolationAndLateResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "failover.example", 1), []byte("valid-token"))); err != nil {
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "failover.example", 1), "")); err != nil {
 		t.Fatal(err)
 	}
 	statuses := service.Statuses()
 	if statuses[0].ID != "first" || statuses[0].Result != "failed" || statuses[1].Result != "healthy" {
 		t.Fatalf("failover statuses=%#v", statuses)
 	}
+}
 
-	configuration.MaxConcurrency, configuration.UpstreamTimeoutMS, configuration.RequestTimeoutMS = 1, 20, 100
-	started, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	blockingRuntime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-		if calls.Add(1) == 1 {
-			close(started)
-			<-release
-		}
+func TestDoHRevokeBeforeUpstream(t *testing.T) {
+	var resolverCalls atomic.Int32
+	service, err := doh.NewService(testConfiguration(), testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+		resolverCalls.Add(1)
 		return positiveResponse(request.DNSMessage, 10), nil
-	})
-	blocking, err := doh.NewService(configuration, blockingRuntime)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	type serveOutcome struct {
-		response doh.HTTPResponse
-		err      error
-	}
-	result := make(chan serveOutcome, 1)
-	go func() {
-		response, err := blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "slow.example", 1), []byte("valid-token")))
-		result <- serveOutcome{response: response, err: err}
-	}()
-	<-started
-	if outcome := <-result; outcome.err != nil || outcome.response.Status != "200" {
-		t.Fatalf("failover outcome=%#v err=%v", outcome.response, outcome.err)
-	}
-	if _, err := blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "parallel.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrConcurrencyExhausted) {
-		t.Fatalf("pool saturation err=%v", err)
-	}
-	if statuses := blocking.Statuses(); statuses[0].Result != "timeout" || statuses[1].Result != "healthy" {
-		t.Fatalf("timeout failover statuses=%#v", statuses)
-	}
-	close(release)
-	time.Sleep(20 * time.Millisecond)
-	if statuses := blocking.Statuses(); statuses[0].Result != "timeout" || statuses[1].Result != "healthy" {
-		t.Fatalf("late result corrupted status=%#v", statuses)
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		_, err = blocking.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(3, "recovered.example", 1), []byte("valid-token")))
-		if !errors.Is(err, doh.ErrConcurrencyExhausted) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("slot did not recover after timed-out upstream exited")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("recovered request err=%v", err)
-	}
-}
-
-func TestDoHHostAdapterDeadlineIsolationAndSlotRecovery(t *testing.T) {
-	for _, adapter := range []string{"audit", "token", "policy", "clock", "cache-get", "cache-put", "logger"} {
-		t.Run(adapter, func(t *testing.T) {
-			configuration := testConfiguration()
-			configuration.MaxConcurrency, configuration.UpstreamTimeoutMS, configuration.RequestTimeoutMS = 1, 10, 30
-			started, release := make(chan struct{}), make(chan struct{})
-			var once sync.Once
-			block := func() {
-				once.Do(func() { close(started) })
-				<-release
-			}
-			memory := doh.NewMemoryCache(8, 1<<20)
-			runtime := testRuntime(memory, func(request doh.ResolveRequest) ([]byte, error) {
-				return positiveResponse(request.DNSMessage, 10), nil
-			})
-			switch adapter {
-			case "audit":
-				runtime.Auditor = doh.AuditorFunc(func(context.Context, doh.AuditRecord) error { block(); return nil })
-			case "token":
-				runtime.Tokens = doh.TokenVerifierFunc(func(context.Context, string, []byte) error { block(); return nil })
-			case "policy":
-				runtime.Policy = doh.IPPolicyEvaluatorFunc(func(context.Context, string, doh.SourceIdentity) error { block(); return nil })
-			case "clock":
-				runtime.Clock = doh.MonotonicClockFunc(func(context.Context) (uint64, error) { block(); return uint64(time.Second), nil })
-			case "cache-get":
-				runtime.Cache = &functionalCache{Cache: memory, get: func(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
-					block()
-					return doh.CacheEntry{}, false, nil
-				}}
-			case "cache-put":
-				runtime.Cache = &functionalCache{Cache: memory, put: func(ctx context.Context, key string, entry doh.CacheEntry) error {
-					block()
-					return memory.Put(ctx, key, entry)
-				}}
-			case "logger":
-				runtime.Logger = doh.QueryLoggerFunc(func(context.Context, doh.QueryLog) error { block(); return nil })
-			}
-			service, err := doh.NewService(configuration, runtime)
-			if err != nil {
-				t.Fatal(err)
-			}
-			serveResult := make(chan error, 1)
-			go func() {
-				_, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, adapter+".example", 1), []byte("valid-token")))
-				serveResult <- err
-			}()
-			<-started
-			select {
-			case err := <-serveResult:
-				if !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("deadline err=%v", err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("Serve remained blocked behind host adapter")
-			}
-			if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(2, "bounded.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrConcurrencyExhausted) {
-				t.Fatalf("transferred slot err=%v", err)
-			}
-			close(release)
-			deadline := time.Now().Add(time.Second)
-			for {
-				_, err = service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(3, "recovered.example", 1), []byte("valid-token")))
-				if !errors.Is(err, doh.ErrConcurrencyExhausted) {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("concurrency slot did not recover after adapter completion")
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if err != nil {
-				t.Fatalf("recovered request err=%v", err)
-			}
-			if err := service.Close(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if entries, bytes := memory.Stats(); entries != 0 || bytes != 0 {
-				t.Fatalf("late cache effect survived Reset: entries=%d bytes=%d", entries, bytes)
-			}
-		})
-	}
-}
-
-func TestDoHTokenSnapshotSurvivesPostDeadlineCallerMutation(t *testing.T) {
-	configuration := testConfiguration()
-	configuration.MaxConcurrency, configuration.UpstreamTimeoutMS, configuration.RequestTimeoutMS = 1, 10, 20
-	started, release := make(chan struct{}), make(chan struct{})
-	observed := make(chan string, 1)
-	runtime := testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
-		return positiveResponse(request.DNSMessage, 10), nil
-	})
-	runtime.Tokens = doh.TokenVerifierFunc(func(_ context.Context, _ string, credential []byte) error {
-		close(started)
-		<-release
-		observed <- string(credential)
-		return nil
-	})
-	service, err := doh.NewService(configuration, runtime)
-	if err != nil {
+	if err := service.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	token := []byte("valid-token")
-	serveResult := make(chan error, 1)
-	go func() {
-		_, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "snapshot.example", 1), token))
-		serveResult <- err
-	}()
-	<-started
-	if err := <-serveResult; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("deadline err=%v", err)
-	}
-	for index := range token {
-		token[index] = 'x'
-	}
-	close(release)
-	if credential := <-observed; credential != "valid-token" {
-		t.Fatalf("verifier observed caller mutation: %q", credential)
-	}
-}
-
-func TestDoHRedactedAuditLogAndBackendFailures(t *testing.T) {
-	secret := "super-secret-token-and-qname"
-	var logs []doh.QueryLog
-	var audits []doh.AuditRecord
-	var mu sync.Mutex
-	runtime := testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
-	runtime.Logger = doh.QueryLoggerFunc(func(_ context.Context, record doh.QueryLog) error {
-		mu.Lock()
-		logs = append(logs, record)
-		mu.Unlock()
-		return nil
-	})
-	runtime.Auditor = doh.AuditorFunc(func(_ context.Context, record doh.AuditRecord) error {
-		mu.Lock()
-		audits = append(audits, record)
-		mu.Unlock()
-		return nil
-	})
-	service, err := doh.NewService(testConfiguration(), runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := validHTTPRequest("POST", dnsQuery(1, secret+".example", 1), []byte(secret))
-	if _, err := service.Serve(context.Background(), request); !errors.Is(err, doh.ErrInvalidToken) {
-		t.Fatal(err)
-	}
-	wire, _ := json.Marshal(struct {
-		Logs   []doh.QueryLog
-		Audits []doh.AuditRecord
-	}{logs, audits})
-	if strings.Contains(string(wire), secret) || len(logs) != 1 || len(audits) != 2 {
-		t.Fatalf("unsafe logs/audits=%s", wire)
-	}
-
-	runtime = testRuntime(doh.NewMemoryCache(4, 1<<20), func(request doh.ResolveRequest) ([]byte, error) { return positiveResponse(request.DNSMessage, 10), nil })
-	runtime.Logger = doh.QueryLoggerFunc(func(context.Context, doh.QueryLog) error { return errors.New("raw log material") })
-	service, _ = doh.NewService(testConfiguration(), runtime)
-	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "log.example", 1), []byte("valid-token"))); !errors.Is(err, doh.ErrLogUnavailable) || strings.Contains(fmt.Sprint(err), "raw") {
-		t.Fatalf("log failure=%v", err)
+	if _, err := service.Serve(context.Background(), validHTTPRequest("POST", dnsQuery(1, "revoked.example", 1), "")); !errors.Is(err, doh.ErrRevoked) || resolverCalls.Load() != 0 {
+		t.Fatalf("revoke err=%v calls=%d", err, resolverCalls.Load())
 	}
 }
 
@@ -648,89 +504,90 @@ type fakeClock struct{ now uint64 }
 
 func (clock *fakeClock) Now(context.Context) (uint64, error) { return clock.now, nil }
 
-type countingCache struct {
-	doh.Cache
-	gets atomic.Int32
-}
-
-type fixedHitCache struct{ entry doh.CacheEntry }
-
-type functionalCache struct {
-	doh.Cache
-	get func(context.Context, string, uint64) (doh.CacheEntry, bool, error)
-	put func(context.Context, string, doh.CacheEntry) error
-}
-
-func (cache *functionalCache) Get(ctx context.Context, key string, now uint64) (doh.CacheEntry, bool, error) {
-	if cache.get != nil {
-		return cache.get(ctx, key, now)
-	}
-	return cache.Cache.Get(ctx, key, now)
-}
-
-func (cache *functionalCache) Put(ctx context.Context, key string, entry doh.CacheEntry) error {
-	if cache.put != nil {
-		return cache.put(ctx, key, entry)
-	}
-	return cache.Cache.Put(ctx, key, entry)
-}
-
-func (cache *fixedHitCache) Get(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
-	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), StoredAt: cache.entry.StoredAt, ExpiresAt: cache.entry.ExpiresAt}, true, nil
-}
-func (*fixedHitCache) Put(context.Context, string, doh.CacheEntry) error { return nil }
-func (*fixedHitCache) Reset(context.Context, string) error               { return nil }
-
-func (cache *countingCache) Get(ctx context.Context, key string, now uint64) (doh.CacheEntry, bool, error) {
-	cache.gets.Add(1)
-	return cache.Cache.Get(ctx, key, now)
-}
-
-func testService(t *testing.T, resolve func(doh.ResolveRequest) ([]byte, error)) (*doh.Service, *atomic.Int32, *[]doh.QueryLog, *[]doh.AuditRecord) {
+func testService(t *testing.T, resolve func(doh.ResolveRequest) ([]byte, error)) (*doh.Service, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
-	var logs []doh.QueryLog
-	var audits []doh.AuditRecord
-	runtime := testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) { calls.Add(1); return resolve(request) })
-	runtime.Logger = doh.QueryLoggerFunc(func(_ context.Context, record doh.QueryLog) error { logs = append(logs, record); return nil })
-	runtime.Auditor = doh.AuditorFunc(func(_ context.Context, record doh.AuditRecord) error { audits = append(audits, record); return nil })
-	service, err := doh.NewService(testConfiguration(), runtime)
+	service, err := doh.NewService(testConfiguration(), testRuntime(doh.NewMemoryCache(8, 1<<20), func(request doh.ResolveRequest) ([]byte, error) {
+		calls.Add(1)
+		return resolve(request)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, &calls, &logs, &audits
+	return service, &calls
 }
 
 func testRuntime(cache doh.Cache, resolve func(doh.ResolveRequest) ([]byte, error)) doh.RuntimeAdapters {
 	return doh.RuntimeAdapters{
-		Listener: doh.ListenerFunc(func(context.Context, string, *doh.Service) error { return nil }),
-		Tokens: doh.TokenVerifierFunc(func(_ context.Context, _ string, credential []byte) error {
-			if string(credential) != "valid-token" {
-				return errors.New("raw token")
-			}
-			return nil
-		}),
-		Policy: doh.IPPolicyEvaluatorFunc(func(_ context.Context, _ string, source doh.SourceIdentity) error {
-			if source.Attestation != "allowed-source" {
-				return errors.New("raw source")
-			}
-			return nil
-		}),
-		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) { return resolve(request) }), Clock: &fakeClock{now: uint64(time.Second)}, Cache: cache,
-		Logger: doh.QueryLoggerFunc(func(context.Context, doh.QueryLog) error { return nil }), Auditor: doh.AuditorFunc(func(context.Context, doh.AuditRecord) error { return nil }),
+		Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) { return resolve(request) }),
+		Clock:    &fakeClock{now: uint64(time.Second)},
+		Cache:    cache,
 	}
 }
 
 func testConfiguration() doh.Configuration {
-	return doh.Configuration{Generation: "generation-1", ListenerRef: "listener/doh", TokenSecretRef: "secret/token", IPPolicyRef: "policy/shared", RequestTimeoutMS: 1000, UpstreamTimeoutMS: 100, MaxConcurrency: 4, CacheEntries: 8, CacheBytes: 1 << 20, MinTTLSeconds: 1, MaxTTLSeconds: 3600, Upstreams: []doh.Upstream{{ID: "primary", EndpointRef: "upstream/primary", Enabled: true}}}
+	return doh.Configuration{
+		RequestTimeoutMS: 1000, UpstreamTimeoutMS: 100, MaxConcurrency: 4,
+		CacheEntries: 8, CacheBytes: 1 << 20, MinTTLSeconds: 1, MaxTTLSeconds: 3600,
+		Upstreams: []doh.Upstream{{ID: "primary", Endpoint: "https://primary.example/dns-query", Enabled: true}},
+	}
 }
 
-func validHTTPRequest(method string, query, token []byte) doh.HTTPRequest {
-	request := doh.HTTPRequest{Method: method, Accept: "application/dns-message", Token: token, Source: doh.SourceIdentity{Attestation: "allowed-source"}}
+func activateController(t *testing.T, config []byte, resolve func(doh.ResolveRequest) ([]byte, error)) *doh.Controller {
+	t.Helper()
+	controller, err := doh.NewController(doh.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		NewService: func(plugin doh.PluginConfig) (*doh.Service, error) {
+			return doh.NewService(doh.ConfigurationFromPlugin(plugin), doh.RuntimeAdapters{
+				Resolver: doh.ResolverFunc(func(_ context.Context, request doh.ResolveRequest) ([]byte, error) { return resolve(request) }),
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: doh.PluginID, PluginVersion: doh.PluginVersion,
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound}, Generation: "generation-1",
+		RequiredFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: config}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	return controller
+}
+
+func validHTTPRequest(method string, query []byte, forwarded string) doh.HTTPRequest {
+	request := doh.HTTPRequest{Method: method, Accept: "application/dns-message", Forwarded: forwarded}
 	if method == "GET" {
 		request.Query = "dns=" + base64.RawURLEncoding.EncodeToString(query)
 	} else {
 		request.ContentType, request.Body = "application/dns-message", query
+	}
+	return request
+}
+
+func dnsHTTPRequest(method string, query []byte, forwarded string) *http.Request {
+	var body io.Reader
+	target := "/dns-query"
+	if method == http.MethodGet {
+		target += "?dns=" + base64.RawURLEncoding.EncodeToString(query)
+	} else {
+		body = bytes.NewReader(query)
+	}
+	request := httptest.NewRequest(method, target, body)
+	request.Header.Set("Accept", "application/dns-message")
+	if method == http.MethodPost {
+		request.Header.Set("Content-Type", "application/dns-message")
+	}
+	if forwarded != "" {
+		request.Header.Set("Forwarded", forwarded)
 	}
 	return request
 }
@@ -760,21 +617,68 @@ func withEDNS(query []byte, dnssecOK bool, optionCode uint16, option []byte) []b
 	return append(wire, option...)
 }
 
-func positiveResponse(query []byte, ttl uint32) []byte {
-	return multiAnswerResponse(query, ttl)
+func withECS(query []byte, ip net.IP, prefix uint8) []byte {
+	v4 := ip.To4()
+	if v4 == nil {
+		panic("withECS requires IPv4")
+	}
+	nbytes := int((prefix + 7) / 8)
+	payload := []byte{0, 1, prefix, 0}
+	payload = append(payload, v4[:nbytes]...)
+	return withEDNS(query, false, 8, payload)
 }
 
-func multiAnswerResponse(query []byte, ttls ...uint32) []byte {
-	questionEnd := dnsQuestionEnd(query)
-	response := append([]byte(nil), query[:questionEnd]...)
-	binary.BigEndian.PutUint16(response[2:4], 0x8180)
-	binary.BigEndian.PutUint16(response[6:8], uint16(len(ttls)))
-	for _, ttl := range ttls {
-		response = append(response, 0xc0, 0x0c, 0, 1, 0, 1, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl), 0, 4, 192, 0, 2, 1)
+func extractECS(wire []byte) (uint16, uint8, net.IP, bool) {
+	if len(wire) < 17 {
+		return 0, 0, nil, false
 	}
-	response = append(response, query[questionEnd:]...)
-	return response
+	if binary.BigEndian.Uint16(wire[10:12]) == 0 {
+		return 0, 0, nil, false
+	}
+	offset := dnsQuestionEnd(wire)
+	if offset+11 > len(wire) || wire[offset] != 0 || binary.BigEndian.Uint16(wire[offset+1:offset+3]) != 41 {
+		return 0, 0, nil, false
+	}
+	rdataLength := int(binary.BigEndian.Uint16(wire[offset+9 : offset+11]))
+	rdataStart, rdataEnd := offset+11, offset+11+rdataLength
+	if rdataEnd > len(wire) {
+		return 0, 0, nil, false
+	}
+	for rdataStart < rdataEnd {
+		if rdataStart+4 > rdataEnd {
+			return 0, 0, nil, false
+		}
+		code := binary.BigEndian.Uint16(wire[rdataStart : rdataStart+2])
+		length := int(binary.BigEndian.Uint16(wire[rdataStart+2 : rdataStart+4]))
+		payload := wire[rdataStart+4 : rdataStart+4+length]
+		if code == 8 && length >= 4 {
+			family := binary.BigEndian.Uint16(payload[:2])
+			prefix := payload[2]
+			addr := payload[4:]
+			var ip net.IP
+			if family == 1 {
+				full := make(net.IP, 4)
+				copy(full, addr)
+				ip = net.IP(full)
+			} else {
+				full := make(net.IP, 16)
+				copy(full, addr)
+				ip = net.IP(full)
+			}
+			return family, prefix, ip, true
+		}
+		rdataStart += 4 + length
+	}
+	return 0, 0, nil, false
 }
+
+type fixedHitCache struct{ entry doh.CacheEntry }
+
+func (cache *fixedHitCache) Get(context.Context, string, uint64) (doh.CacheEntry, bool, error) {
+	return doh.CacheEntry{Response: append([]byte(nil), cache.entry.Response...), StoredAt: cache.entry.StoredAt, ExpiresAt: cache.entry.ExpiresAt}, true, nil
+}
+func (*fixedHitCache) Put(context.Context, string, doh.CacheEntry) error { return nil }
+func (*fixedHitCache) Reset(context.Context, string) error               { return nil }
 
 func negativeResponse(query []byte, ttl, minimum uint32) []byte {
 	questionEnd := dnsQuestionEnd(query)
@@ -790,14 +694,6 @@ func negativeResponse(query []byte, ttl, minimum uint32) []byte {
 	return append(response, query[questionEnd:]...)
 }
 
-func dnsQuestionEnd(query []byte) int {
-	offset := 12
-	for query[offset] != 0 {
-		offset += int(query[offset]) + 1
-	}
-	return offset + 5
-}
-
 func firstAnswerTTL(response []byte) uint32 {
 	offset := dnsQuestionEnd(response)
 	return binary.BigEndian.Uint32(response[offset+6 : offset+10])
@@ -808,4 +704,21 @@ func negativeSOATTLs(response []byte) (uint32, uint32) {
 	ttl := binary.BigEndian.Uint32(response[offset+6 : offset+10])
 	rdataLength := int(binary.BigEndian.Uint16(response[offset+10 : offset+12]))
 	return ttl, binary.BigEndian.Uint32(response[offset+12+rdataLength-4 : offset+12+rdataLength])
+}
+
+func positiveResponse(query []byte, ttl uint32) []byte {
+	questionEnd := dnsQuestionEnd(query)
+	response := append([]byte(nil), query[:questionEnd]...)
+	binary.BigEndian.PutUint16(response[2:4], 0x8180)
+	binary.BigEndian.PutUint16(response[6:8], 1)
+	response = append(response, 0xc0, 0x0c, 0, 1, 0, 1, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl), 0, 4, 192, 0, 2, 1)
+	return append(response, query[questionEnd:]...)
+}
+
+func dnsQuestionEnd(query []byte) int {
+	offset := 12
+	for query[offset] != 0 {
+		offset += int(query[offset]) + 1
+	}
+	return offset + 5
 }

@@ -1,10 +1,9 @@
 # DoH plugin
 
-This agent-scoped Go RPC plugin models RFC 8484 GET/POST handling, token and
-shared IP-policy admission, deterministic upstream failover, trusted DNS TTL
-caching, and redacted aggregate logs.
+DoH is an Agent-scoped, zero-configuration HTTP backend provider. The `default`
+provider serves RFC 8484 DNS over HTTPS. Optional `upstreams` override the
+built-in default resolver.
 
-The plugin never opens a listener or network connection itself. Production
-activation requires canonical generation-owned listener, network, Secret,
-monotonic clock, cache, IP-policy, log, and audit handles. The current public
-SDK does not expose those typed handles, so the default entrypoint fails closed.
+The plugin runs entirely in its own process. The Host owns the private provider
+socket, generation credential, readiness checks, request authority, and the
+public HTTP+TLS listener. The plugin does not open a public HTTP or TLS port.

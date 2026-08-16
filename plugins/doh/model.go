@@ -8,17 +8,27 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 const (
-	PluginID            = "doh"
-	PluginVersion       = "0.1.0"
-	MaxConfigBytes      = 1 << 20
-	MaxUpstreams        = 8
-	MaxDNSRequestBytes  = 4096
-	MaxDNSResponseBytes = 65535
+	PluginID                 = "doh"
+	PluginVersion            = "0.1.0"
+	ProviderID               = "default"
+	DNSQueryPath             = "/dns-query"
+	DefaultUpstreamID        = "default"
+	DefaultUpstreamEndpoint  = "https://cloudflare-dns.com/dns-query"
+	MaxConfigBytes           = 1 << 20
+	MaxPluginConfigBytes     = 4096
+	MaxUpstreams             = 8
+	MaxDNSRequestBytes       = 4096
+	MaxDNSResponseBytes      = 65535
+	defaultRequestTimeoutMS  = 2000
+	defaultUpstreamTimeoutMS = 1000
+	defaultMaxConcurrency    = 8
+	defaultCacheEntries      = 256
+	defaultCacheBytes        = 1 << 20
+	defaultMinTTLSeconds     = 1
+	defaultMaxTTLSeconds     = 3600
 )
 
 var (
@@ -28,15 +38,11 @@ var (
 	ErrResponseTooLarge        = errors.New("DNS response exceeds bound")
 	ErrInvalidDNSMessage       = errors.New("invalid DNS message")
 	ErrResponseMismatch        = errors.New("DNS response does not match request")
-	ErrInvalidToken            = errors.New("token rejected")
-	ErrIPPolicyDenied          = errors.New("source policy denied")
 	ErrConcurrencyExhausted    = errors.New("request concurrency exhausted")
 	ErrNoHealthyUpstream       = errors.New("no healthy upstream")
 	ErrUpstreamFailed          = errors.New("upstream failed")
 	ErrClockUnavailable        = errors.New("monotonic clock unavailable")
 	ErrCacheUnavailable        = errors.New("cache unavailable")
-	ErrLogUnavailable          = errors.New("query log unavailable")
-	ErrAuditUnavailable        = errors.New("audit unavailable")
 	ErrTypedHandlesUnavailable = errors.New("canonical typed DoH handles unavailable")
 	ErrRevoked                 = errors.New("DoH generation revoked")
 )
@@ -44,17 +50,24 @@ var (
 var opaqueRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 
 type Upstream struct {
-	ID          string `json:"id"`
-	EndpointRef string `json:"endpoint_ref"`
-	Priority    int    `json:"priority"`
-	Enabled     bool   `json:"enabled"`
+	ID       string `json:"id"`
+	Endpoint string `json:"endpoint"`
+	Priority int    `json:"priority"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type PluginConfig struct {
+	Upstreams []UpstreamConfig `json:"upstreams,omitempty"`
+}
+
+type UpstreamConfig struct {
+	ID       string `json:"id"`
+	Endpoint string `json:"endpoint"`
+	Priority int    `json:"priority"`
+	Enabled  bool   `json:"enabled"`
 }
 
 type Configuration struct {
-	Generation        string     `json:"generation"`
-	ListenerRef       string     `json:"listener_ref"`
-	TokenSecretRef    string     `json:"token_secret_ref"`
-	IPPolicyRef       string     `json:"ip_policy_ref"`
 	RequestTimeoutMS  int64      `json:"request_timeout_ms"`
 	UpstreamTimeoutMS int64      `json:"upstream_timeout_ms"`
 	MaxConcurrency    int        `json:"max_concurrency"`
@@ -65,20 +78,59 @@ type Configuration struct {
 	Upstreams         []Upstream `json:"upstreams"`
 }
 
-func (configuration Configuration) Validate() error {
-	if !opaqueRefPattern.MatchString(configuration.Generation) || !opaqueRefPattern.MatchString(configuration.ListenerRef) ||
-		!opaqueRefPattern.MatchString(configuration.TokenSecretRef) || !opaqueRefPattern.MatchString(configuration.IPPolicyRef) {
-		return ErrInvalidRequest
+func ConfigurationFromPlugin(config PluginConfig) Configuration {
+	configuration := Configuration{}
+	for _, upstream := range config.Upstreams {
+		configuration.Upstreams = append(configuration.Upstreams, Upstream{
+			ID:       upstream.ID,
+			Endpoint: upstream.Endpoint,
+			Priority: upstream.Priority,
+			Enabled:  upstream.Enabled,
+		})
 	}
+	return configuration
+}
+
+func applyConfigurationDefaults(configuration Configuration) Configuration {
+	if configuration.RequestTimeoutMS == 0 {
+		configuration.RequestTimeoutMS = defaultRequestTimeoutMS
+	}
+	if configuration.UpstreamTimeoutMS == 0 {
+		configuration.UpstreamTimeoutMS = defaultUpstreamTimeoutMS
+	}
+	if configuration.MaxConcurrency == 0 {
+		configuration.MaxConcurrency = defaultMaxConcurrency
+	}
+	if configuration.CacheEntries == 0 {
+		configuration.CacheEntries = defaultCacheEntries
+	}
+	if configuration.CacheBytes == 0 {
+		configuration.CacheBytes = defaultCacheBytes
+	}
+	if configuration.MinTTLSeconds == 0 && configuration.MaxTTLSeconds == 0 {
+		configuration.MinTTLSeconds = defaultMinTTLSeconds
+		configuration.MaxTTLSeconds = defaultMaxTTLSeconds
+	}
+	if len(configuration.Upstreams) == 0 {
+		configuration.Upstreams = []Upstream{{
+			ID:       DefaultUpstreamID,
+			Endpoint: DefaultUpstreamEndpoint,
+			Enabled:  true,
+		}}
+	}
+	return configuration
+}
+
+func (configuration Configuration) Validate() error {
 	if configuration.RequestTimeoutMS < 1 || configuration.RequestTimeoutMS > 10000 || configuration.UpstreamTimeoutMS < 1 || configuration.UpstreamTimeoutMS > configuration.RequestTimeoutMS ||
 		configuration.MaxConcurrency < 1 || configuration.MaxConcurrency > 256 || configuration.CacheEntries < 1 || configuration.CacheEntries > 4096 ||
 		configuration.CacheBytes < MaxDNSResponseBytes || configuration.CacheBytes > 64<<20 || configuration.MinTTLSeconds > configuration.MaxTTLSeconds || configuration.MaxTTLSeconds > 86400 ||
-		len(configuration.Upstreams) == 0 || len(configuration.Upstreams) > MaxUpstreams {
+		len(configuration.Upstreams) > MaxUpstreams {
 		return ErrInvalidRequest
 	}
 	seen := make(map[string]struct{}, len(configuration.Upstreams))
 	for _, upstream := range configuration.Upstreams {
-		if !opaqueRefPattern.MatchString(upstream.ID) || !opaqueRefPattern.MatchString(upstream.EndpointRef) || upstream.Priority < -1000 || upstream.Priority > 1000 {
+		if !opaqueRefPattern.MatchString(upstream.ID) || len(upstream.Endpoint) == 0 || len(upstream.Endpoint) > 256 || upstream.Priority < -1000 || upstream.Priority > 1000 {
 			return ErrInvalidRequest
 		}
 		if _, exists := seen[upstream.ID]; exists {
@@ -101,9 +153,8 @@ func (configuration Configuration) orderedUpstreams() []Upstream {
 }
 
 type HTTPRequest struct {
-	Method, Query, ContentType, Accept string
-	Body, Token                        []byte
-	Source                             SourceIdentity
+	Method, Query, ContentType, Accept, Forwarded string
+	Body                                          []byte
 }
 
 type HTTPResponse struct {
@@ -112,32 +163,10 @@ type HTTPResponse struct {
 	CacheHit            bool
 }
 
-type SourceIdentity struct{ Attestation string }
-
-type TokenVerifier interface {
-	Verify(context.Context, string, []byte) error
-}
-
-type TokenVerifierFunc func(context.Context, string, []byte) error
-
-func (function TokenVerifierFunc) Verify(ctx context.Context, secretRef string, credential []byte) error {
-	return function(ctx, secretRef, credential)
-}
-
-type IPPolicyEvaluator interface {
-	Allow(context.Context, string, SourceIdentity) error
-}
-
-type IPPolicyEvaluatorFunc func(context.Context, string, SourceIdentity) error
-
-func (function IPPolicyEvaluatorFunc) Allow(ctx context.Context, policyRef string, source SourceIdentity) error {
-	return function(ctx, policyRef, source)
-}
-
 type ResolveRequest struct {
-	EndpointRef string
-	DNSMessage  []byte
-	MaxBytes    int
+	Endpoint   string
+	DNSMessage []byte
+	MaxBytes   int
 }
 
 type Resolver interface {
@@ -158,6 +187,22 @@ type MonotonicClockFunc func(context.Context) (uint64, error)
 
 func (function MonotonicClockFunc) Now(ctx context.Context) (uint64, error) { return function(ctx) }
 
+type processClock struct {
+	origin time.Time
+}
+
+func newProcessClock() processClock {
+	return processClock{origin: time.Now()}
+}
+
+func (clock processClock) Now(context.Context) (uint64, error) {
+	elapsed := time.Since(clock.origin)
+	if elapsed < 0 {
+		return 0, ErrClockUnavailable
+	}
+	return uint64(elapsed), nil
+}
+
 type CacheEntry struct {
 	Response  []byte
 	StoredAt  uint64
@@ -170,92 +215,23 @@ type Cache interface {
 	Reset(context.Context, string) error
 }
 
-type QueryLog struct {
-	QueryDigest, QType, Result, UpstreamID string
-	CacheHit                               bool
-}
-
-type QueryLogger interface {
-	Log(context.Context, QueryLog) error
-}
-type QueryLoggerFunc func(context.Context, QueryLog) error
-
-func (function QueryLoggerFunc) Log(ctx context.Context, record QueryLog) error {
-	return function(ctx, record)
-}
-
-type AuditRecord struct {
-	Action, Outcome, OperationKey, QueryDigest string
-}
-
-type Auditor interface {
-	Audit(context.Context, AuditRecord) error
-}
-type AuditorFunc func(context.Context, AuditRecord) error
-
-func (function AuditorFunc) Audit(ctx context.Context, record AuditRecord) error {
-	return function(ctx, record)
-}
-
-type Listener interface {
-	Register(context.Context, string, *Service) error
-}
-type ListenerFunc func(context.Context, string, *Service) error
-
-func (function ListenerFunc) Register(ctx context.Context, listenerRef string, service *Service) error {
-	return function(ctx, listenerRef, service)
-}
-
 type RuntimeAdapters struct {
-	Listener Listener
-	Tokens   TokenVerifier
-	Policy   IPPolicyEvaluator
 	Resolver Resolver
 	Clock    MonotonicClock
 	Cache    Cache
-	Logger   QueryLogger
-	Auditor  Auditor
 }
 
-func (runtime RuntimeAdapters) valid() bool {
-	return runtime.Listener != nil && runtime.Tokens != nil && runtime.Policy != nil && runtime.Resolver != nil && runtime.Clock != nil && runtime.Cache != nil && runtime.Logger != nil && runtime.Auditor != nil
-}
-
-type PreparedAdmission interface {
-	Commit(context.Context) (RuntimeAdapters, error)
-	Abort()
-}
-
-type PreparedAdmissionFuncs struct {
-	CommitFunc func(context.Context) (RuntimeAdapters, error)
-	AbortFunc  func()
-}
-
-func (prepared PreparedAdmissionFuncs) Commit(ctx context.Context) (RuntimeAdapters, error) {
-	if prepared.CommitFunc == nil {
-		return RuntimeAdapters{}, ErrTypedHandlesUnavailable
+func (runtime RuntimeAdapters) withDefaults(configuration Configuration) RuntimeAdapters {
+	if runtime.Cache == nil {
+		runtime.Cache = NewMemoryCache(configuration.CacheEntries, configuration.CacheBytes)
 	}
-	return prepared.CommitFunc(ctx)
-}
-func (prepared PreparedAdmissionFuncs) Abort() {
-	if prepared.AbortFunc != nil {
-		prepared.AbortFunc()
+	if runtime.Clock == nil {
+		runtime.Clock = newProcessClock()
 	}
-}
-
-type TypedHandleAdmission interface {
-	Prepare(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error)
-}
-type TypedHandleAdmissionFunc func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error)
-
-func (function TypedHandleAdmissionFunc) Prepare(ctx context.Context, request pluginsdk.RPCHandshakeRequest, configuration Configuration) (PreparedAdmission, error) {
-	return function(ctx, request, configuration)
-}
-
-type unavailableAdmission struct{}
-
-func (unavailableAdmission) Prepare(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
-	return nil, ErrTypedHandlesUnavailable
+	if runtime.Resolver == nil {
+		runtime.Resolver = newHTTPUpstreamResolver()
+	}
+	return runtime
 }
 
 type UpstreamStatus struct {
@@ -268,15 +244,11 @@ type Service struct {
 	runtime       RuntimeAdapters
 	semaphore     chan struct{}
 	live          atomic.Bool
-	operation     atomic.Uint64
 	requestCtx    context.Context
 	requestCancel context.CancelFunc
 	requestMu     sync.Mutex
 	requestCount  uint64
 	requestZero   chan struct{}
-	effectMu      sync.Mutex
-	effectCount   uint64
-	effectZero    chan struct{}
 	leaseMu       sync.RWMutex
 	requestLease  func(context.Context, HTTPRequest) (HTTPResponse, error)
 	closeOnce     sync.Once
@@ -293,6 +265,7 @@ type Service struct {
 func requestTimeout(configuration Configuration) time.Duration {
 	return time.Duration(configuration.RequestTimeoutMS) * time.Millisecond
 }
+
 func upstreamTimeout(configuration Configuration) time.Duration {
 	return time.Duration(configuration.UpstreamTimeoutMS) * time.Millisecond
 }

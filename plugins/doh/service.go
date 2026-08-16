@@ -3,23 +3,19 @@ package doh
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
 
 func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service, error) {
+	configuration = applyConfigurationDefaults(configuration)
 	if err := configuration.Validate(); err != nil {
 		return nil, err
 	}
-	if !runtime.valid() {
-		return nil, ErrTypedHandlesUnavailable
-	}
+	runtime = runtime.withDefaults(configuration)
 	requestCtx, requestCancel := context.WithCancel(context.Background())
 	requestZero := make(chan struct{})
 	close(requestZero)
-	effectZero := make(chan struct{})
-	close(effectZero)
 	service := &Service{
 		configuration: cloneConfiguration(configuration),
 		runtime:       runtime,
@@ -27,7 +23,6 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 		requestCtx:    requestCtx,
 		requestCancel: requestCancel,
 		requestZero:   requestZero,
-		effectZero:    effectZero,
 		closeDone:     make(chan struct{}),
 	}
 	for _, upstream := range configuration.orderedUpstreams() {
@@ -66,6 +61,7 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 	if err != nil {
 		return HTTPResponse{}, err
 	}
+	outbound, ecsSource := applyOutboundECS(query, parseForwardedFor(request.Forwarded))
 	select {
 	case service.semaphore <- struct{}{}:
 	default:
@@ -79,65 +75,23 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 	if err := ctx.Err(); err != nil {
 		return HTTPResponse{}, err
 	}
-	operationKey := fmt.Sprintf("doh:%s:%d", service.configuration.Generation, service.operation.Add(1))
-	if err := service.audit(ctx, slot, AuditRecord{Action: "query", Outcome: "started", OperationKey: operationKey, QueryDigest: query.digest}); err != nil {
-		return HTTPResponse{}, err
-	}
-	if err := service.ensureLive(ctx); err != nil {
-		return HTTPResponse{}, err
-	}
-	fail := func(result string, failure error) (HTTPResponse, error) {
-		if err := service.ensureLive(ctx); err != nil {
-			return HTTPResponse{}, err
-		}
-		logErr := service.log(ctx, slot, QueryLog{QueryDigest: query.digest, QType: query.qtype, Result: result})
-		if err := service.ensureLive(ctx); err != nil {
-			return HTTPResponse{}, err
-		}
-		if auditErr := service.audit(ctx, slot, AuditRecord{Action: "query", Outcome: "failed", OperationKey: operationKey + ":terminal", QueryDigest: query.digest}); auditErr != nil {
-			return HTTPResponse{}, auditErr
-		}
-		if logErr != nil {
-			return HTTPResponse{}, ErrLogUnavailable
-		}
-		return HTTPResponse{}, failure
-	}
-	if len(request.Token) == 0 {
-		return fail("token-denied", ErrInvalidToken)
-	}
-	token := append([]byte(nil), request.Token...)
-	_, tokenErr, _ := boundedHostCall(ctx, slot, nil, func() (struct{}, error) {
-		return struct{}{}, service.runtime.Tokens.Verify(ctx, service.configuration.TokenSecretRef, token)
-	})
-	if tokenErr != nil {
-		return fail("token-denied", safeRuntimeError(tokenErr, ErrInvalidToken))
-	}
-	if err := service.ensureLive(ctx); err != nil {
-		return HTTPResponse{}, err
-	}
-	_, policyErr, _ := boundedHostCall(ctx, slot, nil, func() (struct{}, error) {
-		return struct{}{}, service.runtime.Policy.Allow(ctx, service.configuration.IPPolicyRef, request.Source)
-	})
-	if policyErr != nil {
-		return fail("policy-denied", safeRuntimeError(policyErr, ErrIPPolicyDenied))
-	}
 	if err := service.ensureLive(ctx); err != nil {
 		return HTTPResponse{}, err
 	}
 	now, err := service.now(ctx, slot)
 	if err != nil {
-		return fail("clock-failed", ErrClockUnavailable)
+		return HTTPResponse{}, err
 	}
 	if err := service.ensureLive(ctx); err != nil {
 		return HTTPResponse{}, err
 	}
-	cacheKey := service.configuration.Generation + ":" + query.key
-	cacheResult, err, _ := boundedHostCall(ctx, slot, nil, func() (cacheGetResult, error) {
+	cacheKey := query.key + ":" + ecsSource
+	cacheResult, err, _ := boundedHostCall(ctx, slot, func() (cacheGetResult, error) {
 		entry, hit, err := service.runtime.Cache.Get(ctx, cacheKey, now)
 		return cacheGetResult{entry: entry, hit: hit}, err
 	})
 	if err != nil {
-		return fail("cache-failed", safeRuntimeError(err, ErrCacheUnavailable))
+		return HTTPResponse{}, safeRuntimeError(err, ErrCacheUnavailable)
 	}
 	entry, hit := cacheResult.entry, cacheResult.hit
 	if err := service.ensureLive(ctx); err != nil {
@@ -147,7 +101,7 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		candidate := responseWithID(entry.Response, query.id)
 		metadata, _, validateErr := validateDNSResponse(query, candidate)
 		if validateErr != nil || !metadata.cacheable || metadata.ttl < service.configuration.MinTTLSeconds {
-			return fail("cache-invalid", ErrCacheUnavailable)
+			return HTTPResponse{}, ErrCacheUnavailable
 		}
 		effectiveTTL := metadata.ttl
 		if effectiveTTL > service.configuration.MaxTTLSeconds {
@@ -156,20 +110,16 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		maxLifetime := uint64(effectiveTTL) * uint64(time.Second)
 		maxExpiry := entry.StoredAt + maxLifetime
 		if maxLifetime == 0 || maxExpiry < entry.StoredAt || entry.StoredAt > now || entry.ExpiresAt <= now || entry.ExpiresAt <= entry.StoredAt || entry.ExpiresAt > maxExpiry {
-			return fail("cache-invalid", ErrCacheUnavailable)
+			return HTTPResponse{}, ErrCacheUnavailable
 		}
 		candidate, err = clampDNSResponseTTLs(candidate, uint32((entry.ExpiresAt-now)/uint64(time.Second)))
 		if err != nil {
-			return fail("cache-invalid", ErrCacheUnavailable)
+			return HTTPResponse{}, ErrCacheUnavailable
 		}
 		if err := service.ensureLive(ctx); err != nil {
 			return HTTPResponse{}, err
 		}
-		response := HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: candidate, CacheHit: true}
-		if err := service.finish(ctx, slot, operationKey, query, QueryLog{QueryDigest: query.digest, QType: query.qtype, Result: "cache-hit", CacheHit: true}); err != nil {
-			return HTTPResponse{}, err
-		}
-		return response, nil
+		return HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: candidate, CacheHit: true}, nil
 	}
 
 	for _, upstream := range service.configuration.orderedUpstreams() {
@@ -177,12 +127,12 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 			continue
 		}
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, upstreamTimeout(service.configuration))
-		wire, resolveErr, timedOut := service.resolve(attemptCtx, slot, upstream, query.wire)
+		wire, resolveErr, timedOut := service.resolve(attemptCtx, slot, upstream, outbound)
 		attemptCancel()
 		if timedOut {
 			service.updateStatus(upstream.ID, "timeout", true)
 			if err := ctx.Err(); err != nil {
-				return fail("upstream-timeout", err)
+				return HTTPResponse{}, err
 			}
 			continue
 		}
@@ -197,9 +147,9 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 		}
 		if err := ctx.Err(); err != nil || !service.live.Load() {
 			if err != nil {
-				return fail("canceled", err)
+				return HTTPResponse{}, err
 			}
-			return fail("revoked", ErrRevoked)
+			return HTTPResponse{}, ErrRevoked
 		}
 		service.updateStatus(upstream.ID, "healthy", false)
 		if metadata.cacheable && metadata.ttl >= service.configuration.MinTTLSeconds && service.configuration.MaxTTLSeconds > 0 {
@@ -209,79 +159,32 @@ func (service *Service) serve(parent context.Context, request HTTPRequest) (HTTP
 			}
 			cacheNow, clockErr := service.now(ctx, slot)
 			if clockErr != nil {
-				return fail("clock-failed", ErrClockUnavailable)
+				return HTTPResponse{}, ErrClockUnavailable
 			}
 			if err := service.ensureLive(ctx); err != nil {
 				return HTTPResponse{}, err
 			}
 			expires := cacheNow + uint64(ttl)*uint64(time.Second)
 			if expires < cacheNow {
-				return fail("clock-failed", ErrClockUnavailable)
+				return HTTPResponse{}, ErrClockUnavailable
 			}
-			_, putErr, _ := boundedHostCall(ctx, slot, service.beginEffect, func() (struct{}, error) {
+			_, putErr, _ := boundedHostCall(ctx, slot, func() (struct{}, error) {
 				return struct{}{}, service.runtime.Cache.Put(ctx, cacheKey, CacheEntry{Response: append([]byte(nil), normalized...), StoredAt: cacheNow, ExpiresAt: expires})
 			})
 			if putErr != nil {
-				return fail("cache-failed", safeRuntimeError(putErr, ErrCacheUnavailable))
+				return HTTPResponse{}, safeRuntimeError(putErr, ErrCacheUnavailable)
 			}
 			if err := service.ensureLive(ctx); err != nil {
 				return HTTPResponse{}, err
 			}
 		}
-		result := "positive"
-		if metadata.negative {
-			result = "negative"
-		}
-		logRecord := QueryLog{QueryDigest: query.digest, QType: query.qtype, Result: result, UpstreamID: upstream.ID}
-		if err := service.finish(ctx, slot, operationKey, query, logRecord); err != nil {
-			return HTTPResponse{}, err
-		}
 		return HTTPResponse{Status: "200", ContentType: dnsMediaType, Body: responseWithID(normalized, query.id)}, nil
 	}
-	return fail("upstream-failed", ErrNoHealthyUpstream)
-}
-
-func (service *Service) finish(ctx context.Context, slot *requestSlot, operationKey string, query parsedQuery, record QueryLog) error {
-	if err := service.ensureLive(ctx); err != nil {
-		return err
-	}
-	if err := service.log(ctx, slot, record); err != nil {
-		if service.ensureLive(ctx) == nil {
-			_ = service.audit(ctx, slot, AuditRecord{Action: "query", Outcome: "failed", OperationKey: operationKey + ":terminal", QueryDigest: query.digest})
-		}
-		return safeRuntimeError(err, ErrLogUnavailable)
-	}
-	if err := service.ensureLive(ctx); err != nil {
-		return err
-	}
-	if err := service.audit(ctx, slot, AuditRecord{Action: "query", Outcome: "succeeded", OperationKey: operationKey + ":terminal", QueryDigest: query.digest}); err != nil {
-		return err
-	}
-	return service.ensureLive(ctx)
-}
-
-func (service *Service) audit(ctx context.Context, slot *requestSlot, record AuditRecord) error {
-	_, err, _ := boundedHostCall(ctx, slot, service.beginEffect, func() (struct{}, error) {
-		return struct{}{}, service.runtime.Auditor.Audit(ctx, record)
-	})
-	if err != nil {
-		return safeRuntimeError(err, ErrAuditUnavailable)
-	}
-	return nil
-}
-
-func (service *Service) log(ctx context.Context, slot *requestSlot, record QueryLog) error {
-	_, err, _ := boundedHostCall(ctx, slot, service.beginEffect, func() (struct{}, error) {
-		return struct{}{}, service.runtime.Logger.Log(ctx, record)
-	})
-	if err != nil {
-		return safeRuntimeError(err, ErrLogUnavailable)
-	}
-	return nil
+	return HTTPResponse{}, ErrNoHealthyUpstream
 }
 
 func (service *Service) now(ctx context.Context, slot *requestSlot) (uint64, error) {
-	now, err, _ := boundedHostCall(ctx, slot, nil, func() (uint64, error) {
+	now, err, _ := boundedHostCall(ctx, slot, func() (uint64, error) {
 		return service.runtime.Clock.Now(ctx)
 	})
 	if err != nil {
@@ -397,28 +300,15 @@ type cacheGetResult struct {
 	hit   bool
 }
 
-// boundedHostCall lets the request return at its deadline while retaining the
-// request's concurrency slot until a non-cooperative host adapter really exits.
-func boundedHostCall[T any](ctx context.Context, slot *requestSlot, beginEffect func() (func(), error), invoke func() (T, error)) (T, error, bool) {
+func boundedHostCall[T any](ctx context.Context, slot *requestSlot, invoke func() (T, error)) (T, error, bool) {
 	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err, false
-	}
-	var endEffect func()
-	if beginEffect != nil {
-		var err error
-		endEffect, err = beginEffect()
-		if err != nil {
-			return zero, err, false
-		}
 	}
 	endCall := slot.beginCall()
 	result := make(chan hostCallResult[T], 1)
 	go func() {
 		value, err := invoke()
-		if endEffect != nil {
-			endEffect()
-		}
 		endCall()
 		result <- hostCallResult[T]{value: value, err: err}
 	}()
@@ -430,33 +320,9 @@ func boundedHostCall[T any](ctx context.Context, slot *requestSlot, beginEffect 
 	}
 }
 
-func (service *Service) beginEffect() (func(), error) {
-	service.effectMu.Lock()
-	if !service.live.Load() {
-		service.effectMu.Unlock()
-		return nil, ErrRevoked
-	}
-	if service.effectCount == 0 {
-		service.effectZero = make(chan struct{})
-	}
-	service.effectCount++
-	service.effectMu.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			service.effectMu.Lock()
-			service.effectCount--
-			if service.effectCount == 0 {
-				close(service.effectZero)
-			}
-			service.effectMu.Unlock()
-		})
-	}, nil
-}
-
 func (service *Service) resolve(ctx context.Context, slot *requestSlot, upstream Upstream, query []byte) ([]byte, error, bool) {
-	return boundedHostCall(ctx, slot, nil, func() ([]byte, error) {
-		return service.runtime.Resolver.Resolve(ctx, ResolveRequest{EndpointRef: upstream.EndpointRef, DNSMessage: append([]byte(nil), query...), MaxBytes: MaxDNSResponseBytes})
+	return boundedHostCall(ctx, slot, func() ([]byte, error) {
+		return service.runtime.Resolver.Resolve(ctx, ResolveRequest{Endpoint: upstream.Endpoint, DNSMessage: append([]byte(nil), query...), MaxBytes: MaxDNSResponseBytes})
 	})
 }
 
@@ -500,13 +366,9 @@ func (service *Service) Close(ctx context.Context) error {
 			service.requestMu.Lock()
 			requestZero := service.requestZero
 			service.requestMu.Unlock()
-			service.effectMu.Lock()
-			effectZero := service.effectZero
-			service.effectMu.Unlock()
 			<-requestZero
-			<-effectZero
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
-			cleanupErr := service.runtime.Cache.Reset(cleanupCtx, service.configuration.Generation)
+			cleanupErr := service.runtime.Cache.Reset(cleanupCtx, "")
 			cleanupCancel()
 			if cleanupErr != nil {
 				cleanupErr = safeRuntimeError(cleanupErr, ErrCacheUnavailable)

@@ -11,8 +11,8 @@ type memoryCacheRecord struct {
 	order uint64
 }
 
-// MemoryCache is a deterministic bounded model for tests. Production still
-// requires a generation-owned typed cache adapter from the host admission.
+// MemoryCache is the process-owned TTL cache. Keys must include the actual ECS
+// source so answers from request ECS, forwarded IP, and no-ECS stay isolated.
 type MemoryCache struct {
 	mu         sync.Mutex
 	entries    map[string]memoryCacheRecord

@@ -2,27 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generation", "listener_ref", "token_secret_ref", "ip_policy_ref", "request_timeout_ms", "upstream_timeout_ms", "max_concurrency", "cache_entries", "cache_bytes", "min_ttl_seconds", "max_ttl_seconds", "upstreams"],
   "properties": {
-    "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "listener_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "token_secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "ip_policy_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "request_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 10000},
-    "upstream_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 10000},
-    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
-    "cache_entries": {"type": "integer", "minimum": 1, "maximum": 4096},
-    "cache_bytes": {"type": "integer", "minimum": 65535, "maximum": 67108864},
-    "min_ttl_seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
-    "max_ttl_seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
     "upstreams": {
-      "type": "array", "minItems": 1, "maxItems": 8,
+      "type": "array",
+      "maxItems": 8,
       "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["id", "endpoint_ref", "priority", "enabled"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "endpoint", "priority", "enabled"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "endpoint_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+          "endpoint": {"type": "string", "minLength": 1, "maxLength": 256},
           "priority": {"type": "integer", "minimum": -1000, "maximum": 1000},
           "enabled": {"type": "boolean"}
         }

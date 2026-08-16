@@ -6,8 +6,17 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"mime"
+	"net"
 	"strconv"
 	"strings"
+)
+
+const (
+	ednsOptionECS      = 8
+	ecsFamilyIPv4      = 1
+	ecsFamilyIPv6      = 2
+	defaultECSv4Prefix = 24
+	defaultECSv6Prefix = 56
 )
 
 const dnsMediaType = "application/dns-message"
@@ -16,6 +25,7 @@ type parsedQuery struct {
 	wire, normalized, question []byte
 	key, digest, qtype         string
 	id                         uint16
+	hasECS                     bool
 }
 
 func parseHTTPRequest(request HTTPRequest) (parsedQuery, error) {
@@ -130,17 +140,19 @@ func parseDNSQuery(wire []byte) (parsedQuery, error) {
 	if additionalCount == 0 && questionEnd+4 != len(wire) {
 		return parsedQuery{}, ErrInvalidDNSMessage
 	}
+	hasECS := false
 	if additionalCount == 1 {
 		if err := validateEDNSQuery(wire, questionEnd+4); err != nil {
 			return parsedQuery{}, err
 		}
+		hasECS = ednsHasOption(wire, questionEnd+4, ednsOptionECS)
 	}
 	normalized := append([]byte(nil), wire...)
 	normalized[0], normalized[1] = 0, 0
 	copy(normalized[12:questionEnd], canonicalName)
 	digest := sha256.Sum256(normalized)
 	question := append([]byte(nil), normalized[12:questionEnd+4]...)
-	return parsedQuery{wire: append([]byte(nil), wire...), normalized: normalized, question: question, key: hex.EncodeToString(digest[:]), digest: hex.EncodeToString(digest[:8]), qtype: strconv.Itoa(int(qtype)), id: binary.BigEndian.Uint16(wire[:2])}, nil
+	return parsedQuery{wire: append([]byte(nil), wire...), normalized: normalized, question: question, key: hex.EncodeToString(digest[:]), digest: hex.EncodeToString(digest[:8]), qtype: strconv.Itoa(int(qtype)), id: binary.BigEndian.Uint16(wire[:2]), hasECS: hasECS}, nil
 }
 
 func validateEDNSQuery(wire []byte, offset int) error {
@@ -172,6 +184,172 @@ func validateEDNSQuery(wire []byte, offset int) error {
 		rdataStart += optionLength
 	}
 	return nil
+}
+
+func ednsHasOption(wire []byte, offset int, code uint16) bool {
+	if offset+11 > len(wire) || wire[offset] != 0 {
+		return false
+	}
+	next := offset + 1
+	rdataLength := int(binary.BigEndian.Uint16(wire[next+8 : next+10]))
+	rdataStart, rdataEnd := next+10, next+10+rdataLength
+	if rdataEnd > len(wire) {
+		return false
+	}
+	for rdataStart < rdataEnd {
+		if rdataStart+4 > rdataEnd {
+			return false
+		}
+		optionCode := binary.BigEndian.Uint16(wire[rdataStart : rdataStart+2])
+		optionLength := int(binary.BigEndian.Uint16(wire[rdataStart+2 : rdataStart+4]))
+		if optionCode == code {
+			return true
+		}
+		rdataStart += 4 + optionLength
+	}
+	return false
+}
+
+func applyOutboundECS(query parsedQuery, forwarded net.IP) (wire []byte, ecsSource string) {
+	if query.hasECS {
+		return append([]byte(nil), query.wire...), "query"
+	}
+	if forwarded == nil {
+		return append([]byte(nil), query.wire...), "none"
+	}
+	injected, err := injectECS(query.wire, forwarded)
+	if err != nil {
+		return append([]byte(nil), query.wire...), "none"
+	}
+	return injected, "forwarded:" + forwarded.String()
+}
+
+func injectECS(wire []byte, ip net.IP) ([]byte, error) {
+	if len(wire) < 12 {
+		return nil, ErrInvalidDNSMessage
+	}
+	option, err := encodeECSOption(ip)
+	if err != nil {
+		return nil, err
+	}
+	additionalCount := binary.BigEndian.Uint16(wire[10:12])
+	if additionalCount == 0 {
+		result := append(append([]byte(nil), wire...), encodeOPT(option)...)
+		if len(result) > MaxDNSRequestBytes {
+			return nil, ErrRequestTooLarge
+		}
+		binary.BigEndian.PutUint16(result[10:12], 1)
+		return result, nil
+	}
+	questionEnd, _, err := parseQuestionName(wire, 12)
+	if err != nil || questionEnd+4+11 > len(wire) || wire[questionEnd+4] != 0 {
+		return nil, ErrInvalidDNSMessage
+	}
+	optStart := questionEnd + 4
+	rdlengthOff := optStart + 9
+	rdlength := int(binary.BigEndian.Uint16(wire[rdlengthOff : rdlengthOff+2]))
+	if rdlengthOff+2+rdlength != len(wire) {
+		return nil, ErrInvalidDNSMessage
+	}
+	result := append(append([]byte(nil), wire...), option...)
+	if len(result) > MaxDNSRequestBytes {
+		return nil, ErrRequestTooLarge
+	}
+	binary.BigEndian.PutUint16(result[rdlengthOff:rdlengthOff+2], uint16(rdlength+len(option)))
+	return result, nil
+}
+
+func encodeOPT(option []byte) []byte {
+	out := []byte{0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, byte(len(option) >> 8), byte(len(option))}
+	return append(out, option...)
+}
+
+func encodeECSOption(ip net.IP) ([]byte, error) {
+	family, prefix, addr := ecsAddress(ip)
+	if family == 0 {
+		return nil, ErrInvalidRequest
+	}
+	optionLen := 4 + len(addr)
+	out := make([]byte, 4+optionLen)
+	binary.BigEndian.PutUint16(out[0:2], ednsOptionECS)
+	binary.BigEndian.PutUint16(out[2:4], uint16(optionLen))
+	binary.BigEndian.PutUint16(out[4:6], family)
+	out[6] = prefix
+	out[7] = 0
+	copy(out[8:], addr)
+	return out, nil
+}
+
+func ecsAddress(ip net.IP) (uint16, uint8, []byte) {
+	if ip == nil {
+		return 0, 0, nil
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return ecsFamilyIPv4, defaultECSv4Prefix, truncateIP(v4, defaultECSv4Prefix)
+	}
+	if v6 := ip.To16(); v6 != nil {
+		return ecsFamilyIPv6, defaultECSv6Prefix, truncateIP(v6, defaultECSv6Prefix)
+	}
+	return 0, 0, nil
+}
+
+func truncateIP(ip []byte, prefix uint8) []byte {
+	bits := int(prefix)
+	if bits <= 0 {
+		return []byte{}
+	}
+	nbytes := (bits + 7) / 8
+	if nbytes > len(ip) {
+		nbytes = len(ip)
+	}
+	out := make([]byte, nbytes)
+	copy(out, ip[:nbytes])
+	if rem := bits % 8; rem != 0 {
+		out[nbytes-1] &= byte(0xff << (8 - rem))
+	}
+	return out
+}
+
+func parseForwardedFor(value string) net.IP {
+	if value == "" || strings.Contains(value, ",") {
+		return nil
+	}
+	var forValue string
+	for _, item := range strings.Split(value, ";") {
+		key, raw, found := strings.Cut(strings.TrimSpace(item), "=")
+		if !found {
+			continue
+		}
+		if !strings.EqualFold(key, "for") {
+			continue
+		}
+		if forValue != "" {
+			return nil
+		}
+		forValue = strings.Trim(raw, `"`)
+	}
+	if forValue == "" {
+		return nil
+	}
+	return parseForwardedForIP(forValue)
+}
+
+func parseForwardedForIP(value string) net.IP {
+	if strings.HasPrefix(value, "[") {
+		host, _, err := net.SplitHostPort(value)
+		if err != nil {
+			host = strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")
+		}
+		return net.ParseIP(host)
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 func parseQuestionName(wire []byte, offset int) (int, []byte, error) {
