@@ -1,9 +1,18 @@
 {
   "format": "docker-archive",
   "required_entries": ["manifest.json", "<config-sha256>.json", "<layer-sha256>/layer.tar"],
+  "request": {
+    "fields": ["images", "image", "platform", "compressed_layers"],
+    "unknown_fields": "rejected",
+    "default_platform": "linux/amd64",
+    "missing_platform_fallback": "first valid index descriptor",
+    "compressed_layers_default": true,
+    "compressed_layers_true": "store the upstream layer bytes verbatim under the layer entry",
+    "compressed_layers_false": "store the decompressed layer tar under the layer entry"
+  },
   "platforms": ["linux/amd64", "linux/arm64", "linux/arm/v7"],
   "max_batch_images": 16,
-  "integrity": ["descriptor-size", "compressed-sha256", "manifest-media-type", "config-rootfs-diff-ids", "uncompressed-layer-sha256"],
+  "integrity": ["descriptor-size", "compressed-sha256", "manifest-media-type", "config-rootfs-diff-ids", "uncompressed-layer-sha256", "stored-layer-sha256"],
   "layer_compression": ["gzip", "zstd", "identity"],
   "storage": "bounded per-layer temporary spool; the complete archive is never persisted",
   "index_descriptor": ["supported-media-type", "digest", "exact-size"],

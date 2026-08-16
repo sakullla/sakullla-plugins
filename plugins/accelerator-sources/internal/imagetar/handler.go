@@ -20,7 +20,6 @@ import (
 	"os"
 	"path"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +38,9 @@ const (
 	planTTL          = 5 * time.Minute
 	maxConfigBytes   = 16 << 20
 	maxLayerBytes    = int64(64 << 30)
+	// defaultPlatform is used whenever an offline request leaves the
+	// platform empty. It deliberately ignores the host running the service.
+	defaultPlatform = "linux/amd64"
 )
 
 const manifestAccept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
@@ -69,9 +71,10 @@ type Handler struct {
 }
 
 type downloadPlan struct {
-	Images   []string
-	Platform string
-	Expires  time.Time
+	Images           []string
+	Platform         string
+	CompressedLayers bool
+	Expires          time.Time
 }
 
 type tokenLease struct {
@@ -83,6 +86,14 @@ type requestPayload struct {
 	Images   []string `json:"images"`
 	Image    string   `json:"image"`
 	Platform string   `json:"platform"`
+	// CompressedLayers keeps the upstream layer bytes verbatim inside the
+	// docker archive. It is optional and defaults to enabled; a nil value
+	// means the caller did not state a preference.
+	CompressedLayers *bool `json:"compressed_layers,omitempty"`
+}
+
+func (payload requestPayload) keepCompressedLayers() bool {
+	return payload.CompressedLayers == nil || *payload.CompressedLayers
 }
 
 type imageRef struct {
@@ -203,7 +214,7 @@ func (handler *Handler) prepare(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusServiceUnavailable, "too many prepared downloads")
 		return
 	}
-	handler.plans[token] = downloadPlan{Images: append([]string(nil), payload.Images...), Platform: payload.Platform, Expires: handler.upstream.Now().Add(planTTL)}
+	handler.plans[token] = downloadPlan{Images: append([]string(nil), payload.Images...), Platform: payload.Platform, CompressedLayers: payload.keepCompressedLayers(), Expires: handler.upstream.Now().Add(planTTL)}
 	handler.plansMu.Unlock()
 	// Keep the prepared URL same-origin. The public authority can be rewritten
 	// by any number of reverse proxies between prepare and download.
@@ -234,7 +245,7 @@ func (handler *Handler) downloadPrepared(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusNotFound, "download token not found")
 		return
 	}
-	handler.stream(writer, request, requestPayload{Images: plan.Images, Platform: plan.Platform})
+	handler.stream(writer, request, requestPayload{Images: plan.Images, Platform: plan.Platform, CompressedLayers: &plan.CompressedLayers})
 }
 
 func (handler *Handler) expirePlansLocked() {
@@ -252,6 +263,13 @@ func parsePayload(request *http.Request) (requestPayload, error) {
 	case http.MethodGet, http.MethodHead:
 		payload.Images = request.URL.Query()["image"]
 		payload.Platform = request.URL.Query().Get("platform")
+		if raw := request.URL.Query().Get("compressed_layers"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				return payload, errors.New("compressed_layers must be a boolean")
+			}
+			payload.CompressedLayers = &value
+		}
 	case http.MethodPost:
 		decoder := json.NewDecoder(io.LimitReader(request.Body, 64<<10))
 		decoder.DisallowUnknownFields()
@@ -268,10 +286,7 @@ func parsePayload(request *http.Request) (requestPayload, error) {
 		return payload, fmt.Errorf("offline request requires 1-%d images", maxImages)
 	}
 	if payload.Platform == "" {
-		payload.Platform = runtime.GOOS + "/" + runtime.GOARCH
-		if runtime.GOOS != "linux" {
-			payload.Platform = "linux/amd64"
-		}
+		payload.Platform = defaultPlatform
 	}
 	if _, err := parsePlatform(payload.Platform); err != nil {
 		return payload, err
@@ -297,7 +312,7 @@ func (handler *Handler) stream(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	archive := tar.NewWriter(writer)
-	if err := handler.writeArchive(request.Context(), archive, writer, resolved); err != nil {
+	if err := handler.writeArchive(request.Context(), archive, writer, resolved, payload.keepCompressedLayers()); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 	if err := archive.Close(); err != nil {
@@ -376,7 +391,7 @@ func (handler *Handler) resolveImage(ctx context.Context, value, platformValue s
 	return resolvedImage{ref: ref, manifest: document, config: document.Config, configBody: configBody, diffIDs: append([]string(nil), config.RootFS.DiffIDs...), layers: document.Layers, paths: paths}, nil
 }
 
-func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, response http.ResponseWriter, images []resolvedImage) error {
+func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, response http.ResponseWriter, images []resolvedImage, keepCompressed bool) error {
 	type archiveManifest struct {
 		Config   string   `json:"Config"`
 		RepoTags []string `json:"RepoTags"`
@@ -426,7 +441,7 @@ func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, r
 				}
 				continue
 			}
-			spool, size, diffID, err := handler.spoolLayer(ctx, image.ref, layer)
+			spool, size, diffID, err := handler.spoolLayer(ctx, image.ref, layer, keepCompressed)
 			if err != nil {
 				return err
 			}
@@ -435,6 +450,10 @@ func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, r
 				os.Remove(spool.Name())
 				return streaming.ErrDigestMismatch
 			}
+			storedDigest := diffID
+			if keepCompressed {
+				storedDigest = layer.Digest
+			}
 			verified[layer.Digest] = verifiedLayer{diffID: diffID, size: size, path: image.paths[index], compressedSize: layer.Size, mediaType: layer.MediaType}
 			written[layer.Digest] = true
 			if err := archive.WriteHeader(&tar.Header{Name: image.paths[index], Mode: 0o644, Size: size, ModTime: time.Unix(0, 0)}); err != nil {
@@ -442,7 +461,7 @@ func (handler *Handler) writeArchive(ctx context.Context, archive *tar.Writer, r
 				os.Remove(spool.Name())
 				return err
 			}
-			_, copyErr := streaming.Copy(archive, spool, streaming.CopyOptions{ExpectedLength: size, ExpectedDigest: diffID, Flush: streaming.FlushFunc(response)})
+			_, copyErr := streaming.Copy(archive, spool, streaming.CopyOptions{ExpectedLength: size, ExpectedDigest: storedDigest, Flush: streaming.FlushFunc(response)})
 			closeErr := spool.Close()
 			removeErr := os.Remove(spool.Name())
 			if copyErr != nil {
@@ -481,7 +500,7 @@ func (handler *Handler) fetchSmallObject(ctx context.Context, ref imageRef, obje
 	return value, nil
 }
 
-func (handler *Handler) spoolLayer(ctx context.Context, ref imageRef, layer descriptor) (*os.File, int64, string, error) {
+func (handler *Handler) spoolLayer(ctx context.Context, ref imageRef, layer descriptor, keepCompressed bool) (*os.File, int64, string, error) {
 	body, length, err := handler.fetchBlob(ctx, ref, layer.Digest)
 	if err != nil {
 		return nil, 0, "", err
@@ -491,47 +510,79 @@ func (handler *Handler) spoolLayer(ctx context.Context, ref imageRef, layer desc
 		return nil, 0, "", streaming.ErrLengthMismatch
 	}
 	compressed := &digestReader{reader: body, hasher: sha256.New()}
-	reader, closeReader, err := layerReader(compressed, layer.MediaType)
+	// stored receives the bytes that will be copied into the archive; verify
+	// receives the decompressed tar so the diff ID and tar structure stay
+	// verified in both storage modes.
+	var stored, verify *os.File
+	stored, err = os.CreateTemp("", "accelerator-layer-*.tar")
 	if err != nil {
 		return nil, 0, "", err
 	}
-	temporary, err := os.CreateTemp("", "accelerator-layer-*.tar")
+	storedCleanup := func() {
+		stored.Close()
+		os.Remove(stored.Name())
+	}
+	payloadSource := io.Reader(compressed)
+	verify = stored
+	if keepCompressed {
+		payloadSource = io.TeeReader(compressed, stored)
+		verify, err = os.CreateTemp("", "accelerator-layer-*.tar")
+		if err != nil {
+			storedCleanup()
+			return nil, 0, "", err
+		}
+	}
+	verifyCleanup := func() {
+		if keepCompressed {
+			verify.Close()
+			os.Remove(verify.Name())
+		}
+	}
+	reader, closeReader, err := layerReader(payloadSource, layer.MediaType)
 	if err != nil {
 		_ = closeReader()
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", err
-	}
-	cleanup := func() {
-		temporary.Close()
-		os.Remove(temporary.Name())
 	}
 	uncompressedHash := sha256.New()
-	written, err := io.CopyBuffer(io.MultiWriter(temporary, uncompressedHash), io.LimitReader(reader, maxLayerBytes+1), make([]byte, 64*1024))
+	written, err := io.CopyBuffer(io.MultiWriter(verify, uncompressedHash), io.LimitReader(reader, maxLayerBytes+1), make([]byte, 64*1024))
 	if err != nil || written > maxLayerBytes {
 		_ = closeReader()
-		cleanup()
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", errors.New("unable to unpack image layer")
 	}
 	if err := closeReader(); err != nil {
-		cleanup()
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", err
 	}
 	if compressed.read != layer.Size || "sha256:"+hex.EncodeToString(compressed.hasher.Sum(nil)) != strings.ToLower(layer.Digest) {
-		cleanup()
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", streaming.ErrDigestMismatch
 	}
-	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
-		cleanup()
+	if _, err := verify.Seek(0, io.SeekStart); err != nil {
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", err
 	}
-	if err := validateLayerTar(temporary); err != nil {
-		cleanup()
+	if err := validateLayerTar(verify); err != nil {
+		verifyCleanup()
+		storedCleanup()
 		return nil, 0, "", err
 	}
-	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
-		cleanup()
+	storedSize := written
+	if keepCompressed {
+		storedSize = compressed.read
+		verifyCleanup()
+	}
+	if _, err := stored.Seek(0, io.SeekStart); err != nil {
+		storedCleanup()
 		return nil, 0, "", err
 	}
-	return temporary, written, "sha256:" + hex.EncodeToString(uncompressedHash.Sum(nil)), nil
+	return stored, storedSize, "sha256:" + hex.EncodeToString(uncompressedHash.Sum(nil)), nil
 }
 
 type digestReader struct {
@@ -923,21 +974,38 @@ func selectPlatform(descriptors []descriptor, value string) (descriptor, error) 
 	if err != nil {
 		return descriptor{}, err
 	}
-	for _, descriptor := range descriptors {
-		if descriptor.Platform.OS == want.OS && descriptor.Platform.Architecture == want.Architecture && (want.Variant == "" || descriptor.Platform.Variant == want.Variant) {
-			if err := validateDescriptor(descriptor); err != nil {
-				return descriptor, err
+	for index := range descriptors {
+		candidate := descriptors[index]
+		if candidate.Platform.OS == want.OS && candidate.Platform.Architecture == want.Architecture && (want.Variant == "" || candidate.Platform.Variant == want.Variant) {
+			if err := validIndexDescriptor(candidate); err != nil {
+				return descriptor{}, err
 			}
-			if descriptor.Size <= 0 {
-				return descriptor, errors.New("selected manifest descriptor size is invalid")
-			}
-			if !supportedImageManifestType(descriptor.MediaType) {
-				return descriptor, errors.New("selected manifest descriptor media type is unsupported")
-			}
-			return descriptor, nil
+			return candidate, nil
 		}
 	}
-	return descriptor{}, errors.New("requested platform is unavailable")
+	// The exact platform is not listed. Mirror indices are ordered by
+	// preference, so fall back to the first descriptor that survives the
+	// regular validation instead of failing the request.
+	for index := range descriptors {
+		candidate := descriptors[index]
+		if err := validIndexDescriptor(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return descriptor{}, errors.New("no usable platform in image index")
+}
+
+func validIndexDescriptor(value descriptor) error {
+	if err := validateDescriptor(value); err != nil {
+		return err
+	}
+	if value.Size <= 0 {
+		return errors.New("selected manifest descriptor size is invalid")
+	}
+	if !supportedImageManifestType(value.MediaType) {
+		return errors.New("selected manifest descriptor media type is unsupported")
+	}
+	return nil
 }
 
 func parsePlatform(value string) (platform, error) {

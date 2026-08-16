@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -97,7 +99,7 @@ func TestOfflinePlatformSelectionBatchTarAndDigest(t *testing.T) {
 	if !bytes.Equal(entries[digestHex(configDescriptor.Digest)+".json"], config) {
 		t.Fatal("config entry was truncated or changed")
 	}
-	if !bytes.Equal(entries[digestHex(layerDescriptor.Digest)+"/layer.tar"], layerTar) {
+	if !bytes.Equal(entries[digestHex(layerDescriptor.Digest)+"/layer.tar"], layer) {
 		t.Fatal("layer entry was truncated or changed")
 	}
 	if countTarEntry(t, recorder.Body.Bytes(), digestHex(layerDescriptor.Digest)+"/layer.tar") != 1 {
@@ -116,6 +118,236 @@ func TestOfflinePlatformSelectionBatchTarAndDigest(t *testing.T) {
 	}
 	if manager.Snapshot().TransferredBytes < uint64(len(layer)) {
 		t.Fatalf("offline layers bypassed shared upstream metrics: %+v", manager.Snapshot())
+	}
+}
+
+func TestOfflineCorpusArchiveContractPlatformSelection(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "testing", "corpus", "accelerator-sources", "imagetar", "archive.json"))
+	if err != nil {
+		t.Fatalf("read archive corpus: %v", err)
+	}
+	var corpus struct {
+		Platforms []string `json:"platforms"`
+		Request   struct {
+			DefaultPlatform string `json:"default_platform"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(data, &corpus); err != nil {
+		t.Fatalf("decode archive corpus: %v", err)
+	}
+	if len(corpus.Platforms) == 0 || corpus.Request.DefaultPlatform == "" {
+		t.Fatal("archive corpus lacks platforms or default platform")
+	}
+	layerTar, layer := makeLayerFixture(t, []byte("corpus-platform-layer"))
+	layerDescriptor := descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}
+	children := make(map[string]descriptor, len(corpus.Platforms))
+	childBodies := make(map[string][]byte, len(corpus.Platforms))
+	childPlatforms := make(map[string]string, len(corpus.Platforms))
+	configBodies := make(map[string][]byte, len(corpus.Platforms))
+	for _, value := range corpus.Platforms {
+		want, err := parsePlatform(value)
+		if err != nil {
+			t.Fatalf("corpus platform %q is invalid: %v", value, err)
+		}
+		config := []byte(fmt.Sprintf(`{"architecture":%q,"os":%q,"comment":%q,"rootfs":{"type":"layers","diff_ids":[%q]}}`, want.Architecture, want.OS, value, digest(layerTar)))
+		configDescriptor := descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}
+		body, err := json.Marshal(manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: configDescriptor, Layers: []descriptor{layerDescriptor}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		children[value] = descriptor{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: digest(body), Size: int64(len(body)), Platform: want}
+		childBodies[digest(body)] = body
+		childPlatforms[digest(body)] = value
+		configBodies[configDescriptor.Digest] = config
+	}
+	corrupt := descriptor{MediaType: "application/json", Digest: digest([]byte("corrupt-index-entry")), Size: 3, Platform: platform{OS: "linux", Architecture: "mips64le"}}
+	var index manifestDocument
+	var mu sync.Mutex
+	fetched := ""
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/manifests/latest"):
+			body, _ := json.Marshal(index)
+			writer.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
+			_, _ = writer.Write(body)
+		case strings.Contains(request.URL.Path, "/manifests/"):
+			childDigest := strings.TrimPrefix(request.URL.Path, "/v2/example/app/manifests/")
+			body, found := childBodies[childDigest]
+			if !found {
+				http.NotFound(writer, request)
+				return
+			}
+			mu.Lock()
+			fetched = childPlatforms[childDigest]
+			mu.Unlock()
+			writer.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = writer.Write(body)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+layerDescriptor.Digest):
+			_, _ = writer.Write(layer)
+		default:
+			for configDigest, config := range configBodies {
+				if strings.HasSuffix(request.URL.Path, "/blobs/"+configDigest) {
+					_, _ = writer.Write(config)
+					return
+				}
+			}
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	// ordered keeps the corpus default platform last so a passing default
+	// selection cannot be explained by picking the first index entry.
+	ordered := make([]descriptor, 0, len(corpus.Platforms))
+	orderedValues := make([]string, 0, len(corpus.Platforms))
+	for _, value := range corpus.Platforms {
+		if value != corpus.Request.DefaultPlatform {
+			ordered = append(ordered, children[value])
+			orderedValues = append(orderedValues, value)
+		}
+	}
+	ordered = append(ordered, children[corpus.Request.DefaultPlatform])
+	orderedValues = append(orderedValues, corpus.Request.DefaultPlatform)
+	run := func(t *testing.T, manifests []descriptor, query string) (int, string, map[string][]byte) {
+		t.Helper()
+		index = manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.index.v1+json", Manifests: manifests}
+		handler, manager := newOfflineFixture(t, server.URL)
+		defer manager.Close()
+		mu.Lock()
+		fetched = ""
+		mu.Unlock()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest"+query, nil))
+		var entries map[string][]byte
+		if recorder.Code == http.StatusOK && recorder.Header().Get("Content-Type") == "application/x-tar" {
+			entries = readTar(t, recorder.Body.Bytes())
+		}
+		mu.Lock()
+		selected := fetched
+		mu.Unlock()
+		return recorder.Code, selected, entries
+	}
+	t.Run("empty platform resolves corpus default", func(t *testing.T) {
+		status, selected, entries := run(t, ordered, "")
+		if status != http.StatusOK || selected != corpus.Request.DefaultPlatform {
+			t.Fatalf("default platform was not selected: status=%d selected=%q", status, selected)
+		}
+		if !bytes.Equal(entries[digestHex(layerDescriptor.Digest)+"/layer.tar"], layer) {
+			t.Fatal("default request did not store the upstream layer bytes")
+		}
+	})
+	for _, value := range corpus.Platforms {
+		t.Run("explicit platform "+value, func(t *testing.T) {
+			status, selected, _ := run(t, ordered, "&platform="+url.QueryEscape(value))
+			if status != http.StatusOK || selected != value {
+				t.Fatalf("platform %q was not selected: status=%d selected=%q", value, status, selected)
+			}
+		})
+	}
+	t.Run("missing platform falls back to first valid descriptor", func(t *testing.T) {
+		status, selected, _ := run(t, ordered, "&platform=linux/ppc64le")
+		if status != http.StatusOK || selected != orderedValues[0] {
+			t.Fatalf("fallback did not use the first valid index entry: status=%d selected=%q", status, selected)
+		}
+	})
+	t.Run("fallback skips invalid leading descriptor", func(t *testing.T) {
+		status, selected, _ := run(t, []descriptor{corrupt, children[corpus.Platforms[0]]}, "&platform=linux/ppc64le")
+		if status != http.StatusOK || selected != corpus.Platforms[0] {
+			t.Fatalf("fallback did not skip the invalid leading entry: status=%d selected=%q", status, selected)
+		}
+	})
+	t.Run("index without valid descriptors fails closed", func(t *testing.T) {
+		status, selected, entries := run(t, []descriptor{corrupt}, "&platform=linux/ppc64le")
+		if status != http.StatusBadGateway || selected != "" || entries != nil {
+			t.Fatalf("invalid-only index produced an archive: status=%d selected=%q entries=%v", status, selected, entries)
+		}
+	})
+}
+
+func TestOfflineCompressedLayersRequestContract(t *testing.T) {
+	layerTar, layer := makeLayerFixture(t, []byte("compression-option"))
+	config := []byte(fmt.Sprintf(`{"rootfs":{"type":"layers","diff_ids":[%q]}}`, digest(layerTar)))
+	layerDescriptor := descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}
+	document := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}, Layers: []descriptor{layerDescriptor}}
+	manifestBody, _ := json.Marshal(document)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.Contains(request.URL.Path, "/manifests/"):
+			writer.Header().Set("Content-Type", document.MediaType)
+			_, _ = writer.Write(manifestBody)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+document.Config.Digest):
+			_, _ = writer.Write(config)
+		case strings.HasSuffix(request.URL.Path, "/blobs/"+layerDescriptor.Digest):
+			_, _ = writer.Write(layer)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	handler, manager := newOfflineFixture(t, server.URL)
+	defer manager.Close()
+	entry := digestHex(layerDescriptor.Digest) + "/layer.tar"
+	cases := []struct {
+		name    string
+		request *http.Request
+		expect  []byte
+	}{
+		{"post default keeps upstream layer bytes", httptest.NewRequest(http.MethodPost, "/api/offline", strings.NewReader(`{"image":"example/app:latest"}`)), layer},
+		{"post explicit true keeps upstream layer bytes", httptest.NewRequest(http.MethodPost, "/api/offline", strings.NewReader(`{"image":"example/app:latest","compressed_layers":true}`)), layer},
+		{"post false stores decompressed layer tar", httptest.NewRequest(http.MethodPost, "/api/offline", strings.NewReader(`{"image":"example/app:latest","compressed_layers":false}`)), layerTar},
+		{"get default keeps upstream layer bytes", httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest", nil), layer},
+		{"get false stores decompressed layer tar", httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest&compressed_layers=false", nil), layerTar},
+	}
+	for _, fixture := range cases {
+		t.Run(fixture.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, fixture.request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("offline request failed: %d %s", recorder.Code, recorder.Body.String())
+			}
+			entries := readTar(t, recorder.Body.Bytes())
+			if !bytes.Equal(entries[entry], fixture.expect) {
+				t.Fatalf("stored layer bytes mismatch: got %d bytes want %d bytes", len(entries[entry]), len(fixture.expect))
+			}
+			var archiveManifest []struct {
+				Layers []string
+			}
+			if err := json.Unmarshal(entries["manifest.json"], &archiveManifest); err != nil || len(archiveManifest) != 1 || len(archiveManifest[0].Layers) != 1 || archiveManifest[0].Layers[0] != entry {
+				t.Fatalf("layer path changed with the compression option: %s", entries["manifest.json"])
+			}
+		})
+	}
+	for _, fixture := range []struct {
+		name    string
+		request *http.Request
+	}{
+		{"post unknown field still rejected", httptest.NewRequest(http.MethodPost, "/api/offline", strings.NewReader(`{"image":"example/app:latest","compression":"gzip"}`))},
+		{"post wrong type still rejected", httptest.NewRequest(http.MethodPost, "/api/offline", strings.NewReader(`{"image":"example/app:latest","compressed_layers":"yes"}`))},
+		{"get invalid value still rejected", httptest.NewRequest(http.MethodGet, "/api/offline?image=example/app:latest&compressed_layers=maybe", nil)},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, fixture.request)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("invalid compressed_layers request accepted: %d %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/offline/prepare", strings.NewReader(`{"image":"example/app:latest","compressed_layers":false}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("prepare failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || !strings.HasPrefix(payload["download_url"], "/api/offline/") {
+		t.Fatalf("invalid prepare response: err=%v payload=%v", err, payload)
+	}
+	download := httptest.NewRecorder()
+	handler.ServeHTTP(download, httptest.NewRequest(http.MethodGet, payload["download_url"], nil))
+	if download.Code != http.StatusOK {
+		t.Fatalf("prepared download failed: %d %s", download.Code, download.Body.String())
+	}
+	if entries := readTar(t, download.Body.Bytes()); !bytes.Equal(entries[entry], layerTar) {
+		t.Fatal("prepared download ignored the compressed_layers choice")
 	}
 }
 
