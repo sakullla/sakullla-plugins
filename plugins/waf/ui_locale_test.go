@@ -27,30 +27,36 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 	}
 
 	cases := []struct {
-		rel      string
-		title    string
-		bindings map[string][]string
+		rel             string
+		title           string
+		bindings        map[string][]string
+		absent          []string
+		secondsBindings []string
 	}{
 		{
 			rel:   filepath.Join("ip-policy", "ui.schema.json"),
 			title: "IP 策略设置",
 			bindings: map[string][]string{
-				"/default_action":      {"allow", "deny"},
-				"/geo/failure_policy":  {"allow", "deny"},
-				"/geo/mmdb_handle":     nil,
+				"/default_action":     {"allow", "deny"},
+				"/geo/failure_policy": {"allow", "deny"},
 			},
+			absent: []string{"/geo/mmdb_handle"},
 		},
 		{
 			rel:   filepath.Join("rate-limit", "ui.schema.json"),
 			title: "速率限制设置",
 			bindings: map[string][]string{
-				"/enabled":                         nil,
-				"/max_keys":                        nil,
+				"/enabled":                          nil,
+				"/max_keys":                         nil,
 				"/http/source/emission_interval_ns": nil,
-				"/http/source/burst":               nil,
-				"/http/global/enabled":             nil,
-				"/l4/source/emission_interval_ns":  nil,
-				"/l4/source/burst":                 nil,
+				"/http/source/burst":                nil,
+				"/http/global/enabled":              nil,
+				"/l4/source/emission_interval_ns":   nil,
+				"/l4/source/burst":                  nil,
+			},
+			secondsBindings: []string{
+				"/http/source/emission_interval_ns",
+				"/l4/source/emission_interval_ns",
 			},
 		},
 		{
@@ -69,7 +75,7 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		},
 	}
 
-	englishLabel := regexp.MustCompile(`\b(Save|Reset|Allow|Deny|Enabled|Policy|Enforcement|Settings)\b`)
+	englishLabel := regexp.MustCompile(`\b(Save|Reset|Allow|Deny|Enabled|Policy|Enforcement|Settings|Handle)\b`)
 	for _, test := range cases {
 		data, err := os.ReadFile(filepath.Join(pluginsDir, test.rel))
 		if err != nil {
@@ -78,6 +84,15 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		if englishLabel.Match(data) {
 			t.Fatalf("%s still contains English user-facing copy", test.rel)
 		}
+		if strings.Contains(string(data), "mmdb_handle") {
+			t.Fatalf("%s still contains mmdb_handle", test.rel)
+		}
+		if strings.Contains(string(data), "句柄") {
+			t.Fatalf("%s still exposes host handle copy", test.rel)
+		}
+		if strings.Contains(string(data), "纳秒") {
+			t.Fatalf("%s still contains nanosecond units in form copy", test.rel)
+		}
 		var document map[string]any
 		if err := json.Unmarshal(data, &document); err != nil {
 			t.Fatalf("%s: %v", test.rel, err)
@@ -85,7 +100,7 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		if document["title"] != test.title {
 			t.Fatalf("%s title = %v, want %s", test.rel, document["title"], test.title)
 		}
-		seen := collectBindings(document)
+		seen, labels := collectBindings(document)
 		for binding, values := range test.bindings {
 			got, ok := seen[binding]
 			if !ok {
@@ -95,11 +110,23 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 				t.Fatalf("%s binding %s values = %v, want %v", test.rel, binding, got, values)
 			}
 		}
+		for _, binding := range test.absent {
+			if _, ok := seen[binding]; ok {
+				t.Fatalf("%s still exposes binding %s", test.rel, binding)
+			}
+		}
+		for _, binding := range test.secondsBindings {
+			label := labels[binding]
+			if !strings.Contains(label, "秒") || strings.Contains(label, "纳秒") {
+				t.Fatalf("%s binding %s label = %q, want seconds without nanosecond units", test.rel, binding, label)
+			}
+		}
 	}
 }
 
-func collectBindings(node any) map[string][]string {
+func collectBindings(node any) (map[string][]string, map[string]string) {
 	seen := map[string][]string{}
+	labels := map[string]string{}
 	var walk func(any)
 	walk = func(value any) {
 		switch typed := value.(type) {
@@ -118,6 +145,9 @@ func collectBindings(node any) map[string][]string {
 					}
 				}
 				seen[binding] = values
+				if label, ok := typed["label"].(string); ok {
+					labels[binding] = label
+				}
 			}
 			for _, child := range typed {
 				walk(child)
@@ -129,7 +159,7 @@ func collectBindings(node any) map[string][]string {
 		}
 	}
 	walk(node)
-	return seen
+	return seen, labels
 }
 
 func sameStrings(got, want []string) bool {

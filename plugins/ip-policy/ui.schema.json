@@ -29,13 +29,6 @@
             {"value": "allow", "label": "允许"},
             {"value": "deny", "label": "拒绝"}
           ]
-        },
-        {
-          "type": "text",
-          "id": "mmdb_handle",
-          "label": "宿主 MMDB 句柄",
-          "binding": "/geo/mmdb_handle",
-          "required": true
         }
       ]
     },

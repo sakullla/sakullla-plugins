@@ -10,25 +10,25 @@
       "children": [
         {"type": "toggle", "id": "enabled", "label": "启用", "binding": "/enabled", "required": true},
         {"type": "number", "id": "max_keys", "label": "本节点最大键数", "binding": "/max_keys", "required": true, "minimum": 1, "maximum": 65536},
-        {"type": "number", "id": "http_source_interval", "label": "HTTP 来源间隔（纳秒）", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "http_source_interval", "label": "HTTP 来源间隔（秒）", "binding": "/http/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
         {"type": "number", "id": "http_source_burst", "label": "HTTP 来源突发", "binding": "/http/source/burst", "required": true, "minimum": 1, "maximum": 1000000},
         {"type": "toggle", "id": "http_global_enabled", "label": "HTTP 规则全局桶", "binding": "/http/global/enabled", "required": true},
-        {"type": "number", "id": "l4_source_interval", "label": "四层新建连接间隔（纳秒）", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
+        {"type": "number", "id": "l4_source_interval", "label": "四层新建连接间隔（秒）", "binding": "/l4/source/emission_interval_ns", "required": true, "minimum": 1, "maximum": 3600000000000},
         {"type": "number", "id": "l4_source_burst", "label": "四层新建连接突发", "binding": "/l4/source/burst", "required": true, "minimum": 1, "maximum": 1000000}
       ]
     },
     {
       "type": "notice",
       "id": "local_scope",
-      "label": "单 Agent 本地计数",
-      "description": "这些计数器在每个 Agent 上独立生效，不是用户、资源组、带宽或流量配额。",
+      "label": "只在本机计数",
+      "description": "每台机器各自计数，不会在多台机器之间共享，也不是按用户或流量的配额。",
       "tone": "info"
     },
     {
       "type": "notice",
       "id": "capability_gate",
-      "label": "需要宿主能力",
-      "description": "在宿主提供单调时钟和代际内原子状态变更前，安装会保持阻止。",
+      "label": "当前环境可能无法启用",
+      "description": "宿主尚未提供计时和状态能力时，安装会被阻止。",
       "tone": "warning"
     }
   ],
