@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -104,6 +105,40 @@ func TestUpstreamResolverTLS(t *testing.T) {
 	})
 	if err != nil || binary.BigEndian.Uint16(got[:2]) != 2 {
 		t.Fatalf("tls got=%x err=%v", got, err)
+	}
+}
+
+func TestDoQZerosMessageID(t *testing.T) {
+	query := testDNSQuery(9, "doq-id.example")
+	if binary.BigEndian.Uint16(query[:2]) != 9 {
+		t.Fatal(query)
+	}
+	outbound := append([]byte(nil), query...)
+	outbound[0], outbound[1] = 0, 0
+	if binary.BigEndian.Uint16(outbound[:2]) != 0 {
+		t.Fatal(outbound)
+	}
+}
+
+func TestQUICSkipsHandshakeDoneAndMaxData(t *testing.T) {
+	conn := &quicConn{streams: map[uint64]*quicStream{}}
+	payload := []byte{0x1e, 0x10, 0x20, 0x01}
+	if err := conn.handleFrames(spaceApplication, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDNSCryptISO7816Padding(t *testing.T) {
+	query := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	padded := padDNSCryptQuery(query)
+	if padded[len(query)] != 0x80 {
+		t.Fatalf("missing 0x80 marker: %x", padded)
+	}
+	if len(padded)%64 != 0 || len(padded) < 256 {
+		t.Fatalf("len=%d", len(padded))
+	}
+	if got := trimDNSCryptPadding(padded); string(got) != string(query) {
+		t.Fatalf("unpad=%x", got)
 	}
 }
 
@@ -299,8 +334,12 @@ func startQUICDNSServer(t *testing.T, alpns []string) string {
 			return
 		}
 		body, err := conn.readStream(ctx, 0)
-		if err != nil || len(body) < 2 {
+		if err != nil || len(body) < 4 {
 			errc <- err
+			return
+		}
+		if containsString(alpns, "doq") && (body[2] != 0 || body[3] != 0) {
+			errc <- fmt.Errorf("doq query id=%x", body[2:4])
 			return
 		}
 		errc <- conn.writeStream(0, body, true)

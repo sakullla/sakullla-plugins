@@ -436,9 +436,13 @@ func exchangeDoQ(ctx context.Context, spec transportSpec, query []byte, limit in
 	if err := conn.handshake(ctx); err != nil {
 		return nil, err
 	}
-	framed := make([]byte, 2+len(query))
-	binary.BigEndian.PutUint16(framed[:2], uint16(len(query)))
-	copy(framed[2:], query)
+	outbound := append([]byte(nil), query...)
+	if len(outbound) >= 2 {
+		outbound[0], outbound[1] = 0, 0
+	}
+	framed := make([]byte, 2+len(outbound))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(outbound)))
+	copy(framed[2:], outbound)
 	if err := conn.writeStream(0, framed, true); err != nil {
 		return nil, err
 	}
@@ -450,7 +454,11 @@ func exchangeDoQ(ctx context.Context, spec transportSpec, query []byte, limit in
 	if length == 0 || length > limit || len(body) < 2+length {
 		return nil, ErrResponseTooLarge
 	}
-	return append([]byte(nil), body[2:2+length]...), nil
+	response := append([]byte(nil), body[2:2+length]...)
+	if len(response) >= 2 && len(query) >= 2 {
+		response[0], response[1] = query[0], query[1]
+	}
+	return response, nil
 }
 
 func http3Settings() []byte {
@@ -1105,10 +1113,69 @@ func (conn *quicConn) handleFrames(space quicSpace, payload []byte) error {
 		case kind == 0x1c || kind == 0x1d:
 			return ErrUpstreamFailed
 		default:
-			return ErrUpstreamFailed
+			next, err := skipQUICFrame(kind, payload, offset)
+			if err != nil {
+				return err
+			}
+			offset = next
 		}
 	}
 	return nil
+}
+
+func skipQUICFrame(kind byte, payload []byte, offset int) (int, error) {
+	switch kind {
+	case 0x04:
+		return skipVarints(payload, offset, 3)
+	case 0x05, 0x11, 0x15:
+		return skipVarints(payload, offset, 2)
+	case 0x07, 0x30:
+		length, next, err := readVarint(payload, offset)
+		if err != nil || next+int(length) > len(payload) {
+			return 0, ErrUpstreamFailed
+		}
+		return next + int(length), nil
+	case 0x10, 0x12, 0x13, 0x14, 0x16, 0x17, 0x19:
+		return skipVarints(payload, offset, 1)
+	case 0x18:
+		_, next, err := readVarint(payload, offset)
+		if err != nil {
+			return 0, err
+		}
+		_, next, err = readVarint(payload, next)
+		if err != nil || next >= len(payload) {
+			return 0, ErrUpstreamFailed
+		}
+		cidLen := int(payload[next])
+		next++
+		if next+cidLen+16 > len(payload) {
+			return 0, ErrUpstreamFailed
+		}
+		return next + cidLen + 16, nil
+	case 0x1a, 0x1b:
+		if offset+8 > len(payload) {
+			return 0, ErrUpstreamFailed
+		}
+		return offset + 8, nil
+	case 0x1e:
+		return offset, nil
+	case 0x31:
+		return len(payload), nil
+	default:
+		return 0, ErrUpstreamFailed
+	}
+}
+
+func skipVarints(payload []byte, offset int, count int) (int, error) {
+	next := offset
+	for i := 0; i < count; i++ {
+		_, after, err := readVarint(payload, next)
+		if err != nil {
+			return 0, err
+		}
+		next = after
+	}
+	return next, nil
 }
 
 func encodeACK(largest uint64) []byte {
@@ -1537,7 +1604,7 @@ func concatTXT(rdata []byte) []byte {
 }
 
 func padDNSCryptQuery(query []byte) []byte {
-	padded := append([]byte(nil), query...)
+	padded := append(append([]byte(nil), query...), 0x80)
 	if len(padded) < dnsCryptMinPad {
 		padded = append(padded, make([]byte, dnsCryptMinPad-len(padded))...)
 	}
@@ -1548,8 +1615,14 @@ func padDNSCryptQuery(query []byte) []byte {
 }
 
 func trimDNSCryptPadding(plain []byte) []byte {
-	for len(plain) > 12 && plain[len(plain)-1] == 0 {
-		plain = plain[:len(plain)-1]
+	for index := len(plain) - 1; index >= 0; index-- {
+		if plain[index] == 0 {
+			continue
+		}
+		if plain[index] == 0x80 {
+			return plain[:index]
+		}
+		break
 	}
 	return plain
 }
