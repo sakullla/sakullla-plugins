@@ -1,8 +1,8 @@
 schema_version: 1
 id: shadowsocks-server
 version: 0.1.0
-name: Shadowsocks Server
-description: Brokered TCP and UDP Shadowsocks service with generation-owned credentials and accounting
+name: Shadowsocks 服务
+description: 提供可管理账号的 Shadowsocks 代理服务
 compatibility:
   host: "*"
   agent: "*"

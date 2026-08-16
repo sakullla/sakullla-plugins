@@ -1,8 +1,8 @@
 schema_version: 1
 id: reverse-l4
 version: 0.1.0
-name: Reverse L4
-description: Brokered reverse TCP and UDP mappings using core-owned service handles
+name: 四层反代
+description: 把 TCP 与 UDP 流量反代到后端服务
 compatibility:
   host: "*"
   agent: "*"

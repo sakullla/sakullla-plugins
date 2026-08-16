@@ -1,8 +1,8 @@
 schema_version: 1
 id: doh
 version: 0.1.0
-name: DNS over HTTPS
-description: Brokered RFC 8484 forwarding with token and shared IP-policy admission
+name: HTTPS 域名解析
+description: 提供可鉴权的 DNS over HTTPS 解析服务
 compatibility:
   host: "*"
   agent: "*"

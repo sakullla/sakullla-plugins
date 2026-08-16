@@ -1,8 +1,8 @@
 schema_version: 1
 id: accelerator-sources
 version: 0.1.0
-name: Accelerator Sources
-description: Zero-configuration Docker, GitHub, and Hugging Face acceleration provider
+name: 资源加速
+description: 为零配置发布的自有域名提供 Docker、GitHub 与 Hugging Face 加速
 compatibility:
   host: "*"
   agent: "*"
@@ -22,7 +22,7 @@ extension_points:
   - http.backend-provider
 http_backend_providers:
   - id: default
-    display_name: Accelerator Sources
+    display_name: 资源加速
 permissions:
   - name: http.outbound
 config_schema: config.schema.json

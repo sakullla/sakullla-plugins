@@ -1,8 +1,8 @@
 schema_version: 1
 id: waf
 version: 0.1.0
-name: Sakullla WAF
-description: Deterministic bounded HTTP request inspection with managed and custom rules
+name: Web 防火墙
+description: 用托管规则和自定义规则检查 HTTP 请求
 compatibility:
   host: "*"
   agent: "*"

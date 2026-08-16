@@ -1,8 +1,8 @@
 schema_version: 1
 id: rate-limit
 version: 0.1.0
-name: Rate Limit
-description: Node-local bounded GCRA admission for HTTP sources, HTTP rules, and new L4 flows
+name: 速率限制
+description: 限制本节点 HTTP 来源、规则和新建四层连接的速率
 compatibility:
   host: "*"
   agent: "*"

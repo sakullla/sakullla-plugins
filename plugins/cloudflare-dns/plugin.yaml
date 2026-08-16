@@ -2,7 +2,7 @@ schema_version: 1
 id: cloudflare-dns
 version: 0.1.0
 name: Cloudflare DNS
-description: Vault-backed, zone-scoped Cloudflare DNS control plane
+description: 在指定 Cloudflare 区域管理 DNS 记录
 compatibility:
   host: "*"
   agent: "*"

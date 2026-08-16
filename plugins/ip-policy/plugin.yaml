@@ -1,8 +1,8 @@
 schema_version: 1
 id: ip-policy
 version: 0.1.0
-name: IP Policy
-description: Authenticated HTTP and L4 IPv4/IPv6 and host-managed GeoIP policy
+name: IP 策略
+description: 按 IP 与 GeoIP 控制 HTTP 和四层访问
 compatibility:
   host: "*"
   agent: "*"

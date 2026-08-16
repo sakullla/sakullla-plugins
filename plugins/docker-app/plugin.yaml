@@ -1,8 +1,8 @@
 schema_version: 1
 id: docker-app
 version: 0.1.0
-name: Docker App
-description: Brokered Docker and Compose application lifecycle with core-owned HTTP rules
+name: Docker 应用
+description: 通过面板管理 Docker 与 Compose 应用的发布和访问
 compatibility:
   host: "*"
   agent: "*"
