@@ -3,41 +3,109 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Accelerator Sources</title>
+  <title>资源加速</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>Accelerator Sources</h1>
-    <nav aria-label="工具">
-      <button type="button" data-view="search" aria-pressed="true">镜像搜索</button>
-      <button type="button" data-view="offline" aria-pressed="false">离线镜像</button>
+  <header class="masthead">
+    <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
+    <nav class="primary" aria-label="资源加速">
+      <button type="button" data-view="usage" aria-pressed="true">用法</button>
+      <button type="button" data-view="search" aria-pressed="false">搜索</button>
+      <button type="button" data-view="tags" aria-pressed="false">标签</button>
+      <button type="button" data-view="offline" aria-pressed="false">离线包</button>
     </nav>
   </header>
+
   <main>
-    <section id="search-view">
-      <form id="search-form">
-        <label for="query">Docker Hub 镜像</label>
-        <div class="command-row">
-          <input id="query" name="q" required autocomplete="off" placeholder="例如 nginx">
+    <section class="panel" id="usage" data-panel="usage">
+      <div class="hero">
+        <p class="eyebrow">当前入口</p>
+        <h1>用正在访问的域名加速镜像、代码与模型</h1>
+        <p class="lede">首页同时给出 Docker、GitHub、Hugging Face 三类用法。示例会按当前来源自动填写，无需记忆插件内部地址。</p>
+      </div>
+      <div class="usage-grid">
+        <article class="card usage-card">
+          <p class="kicker">Docker</p>
+          <h2>镜像拉取与仓库镜像</h2>
+          <p>把当前入口当作 Registry 前缀，或写入 Docker 的仓库镜像列表。</p>
+          <pre class="example" data-example="docker-pull"></pre>
+          <button type="button" class="ghost" data-copy="docker-pull">复制拉取命令</button>
+          <pre class="example" data-example="docker-mirror"></pre>
+          <button type="button" class="ghost" data-copy="docker-mirror">复制镜像配置</button>
+        </article>
+        <article class="card usage-card">
+          <p class="kicker">GitHub</p>
+          <h2>在原始地址前加上当前入口</h2>
+          <p>仓库、发行包和原始文件都走同一入口，不另做操作台。</p>
+          <pre class="example" data-example="github"></pre>
+          <button type="button" class="ghost" data-copy="github">复制示例</button>
+        </article>
+        <article class="card usage-card">
+          <p class="kicker">Hugging Face</p>
+          <h2>模型与数据集文件同样加前缀</h2>
+          <p>把当前入口放在原始 Hugging Face 路径前面即可下载。</p>
+          <pre class="example" data-example="huggingface"></pre>
+          <button type="button" class="ghost" data-copy="huggingface">复制示例</button>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" id="search" data-panel="search" hidden>
+      <div class="section-head">
+        <h1>搜索 Docker Hub 镜像</h1>
+        <p>从结果进入标签列表，查看该镜像的可用标签。</p>
+      </div>
+      <form id="search-form" class="card search-card">
+        <label for="query">镜像名称</label>
+        <div class="search-row">
+          <input id="query" name="q" required autocomplete="off" placeholder="例如 nginx 或 library/redis">
           <button type="submit">搜索</button>
         </div>
       </form>
-      <div id="results" aria-live="polite"></div>
+      <div id="results" class="result-list" aria-live="polite"></div>
     </section>
-    <section id="offline-view" hidden>
-      <form id="offline-form">
-        <label for="images">镜像，每行一个</label>
-        <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
-        <label for="platform">平台</label>
-        <select id="platform">
-          <option value="linux/amd64">Linux amd64</option>
-          <option value="linux/arm64">Linux arm64</option>
-          <option value="linux/arm/v7">Linux arm/v7</option>
-        </select>
-        <button type="submit">准备下载</button>
+
+    <section class="panel" id="tags" data-panel="tags" hidden>
+      <div class="section-head">
+        <h1>浏览镜像标签</h1>
+        <p>输入镜像名，或从搜索结果进入。点选标签可加入离线包。</p>
+      </div>
+      <form id="tags-form" class="card search-card">
+        <label for="tag-image">镜像</label>
+        <div class="search-row">
+          <input id="tag-image" name="image" required autocomplete="off" placeholder="例如 alpine 或 library/nginx">
+          <button type="submit">查看标签</button>
+        </div>
       </form>
-      <div id="download" aria-live="polite"></div>
+      <div id="tag-results" class="tag-board" aria-live="polite"></div>
+    </section>
+
+    <section class="panel" id="offline" data-panel="offline" hidden>
+      <div class="section-head">
+        <h1>准备离线镜像包</h1>
+        <p>可填写一个或多个镜像引用。架构可留空，默认按 linux/amd64；压缩层默认开启，可按需关闭。</p>
+      </div>
+      <form id="offline-form" class="card offline-card">
+        <label for="images">镜像引用，每行一个</label>
+        <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
+        <div class="offline-options">
+          <label for="platform">架构（可留空）</label>
+          <select id="platform">
+            <option value="">留空，默认 linux/amd64</option>
+            <option value="linux/amd64">linux/amd64</option>
+            <option value="linux/arm64">linux/arm64</option>
+            <option value="linux/arm/v7">linux/arm/v7</option>
+          </select>
+          <label class="check">
+            <input id="compressed-layers" type="checkbox" checked>
+            <span>压缩层（默认开启）</span>
+          </label>
+        </div>
+        <p class="hint">未选择架构时按 linux/amd64 处理；所选平台不存在时回退到多架构索引中的第一个合法平台。</p>
+        <button type="submit">准备并下载</button>
+      </form>
+      <div id="download" class="download-box" aria-live="polite"></div>
     </section>
   </main>
   <script src="/app.js" defer></script>

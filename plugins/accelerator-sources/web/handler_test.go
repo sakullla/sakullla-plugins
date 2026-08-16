@@ -3,26 +3,83 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	handler := NewHandler()
+	bodies := map[string]string{}
 	for _, route := range []string{"/", "/app.js", "/style.css"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
 			t.Fatalf("embedded route %q failed: status=%d", route, recorder.Code)
 		}
-		if strings.Contains(recorder.Body.String(), "http://") || strings.Contains(recorder.Body.String(), "https://") {
+		body := recorder.Body.String()
+		if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
 			t.Fatalf("embedded asset %q contains an external absolute dependency", route)
 		}
+		bodies[route] = body
 	}
 	if policy := httptest.NewRecorder(); func() bool {
 		handler.ServeHTTP(policy, httptest.NewRequest(http.MethodGet, "/", nil))
 		return !strings.Contains(policy.Header().Get("Content-Security-Policy"), "default-src 'self'")
 	}() {
 		t.Fatal("embedded page lacks self-contained content policy")
+	}
+
+	page := bodies["/"]
+	script := bodies["/app.js"]
+	style := bodies["/style.css"]
+	for _, fragment := range []string{"资源加速", `data-panel="usage"`, `data-panel="search"`, `data-panel="tags"`, `data-panel="offline"`} {
+		if !strings.Contains(page, fragment) {
+			t.Fatalf("visitor page missing %q", fragment)
+		}
+	}
+	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, "id=\"search-view\"") || strings.Contains(page, "id=\"offline-view\"") {
+		t.Fatal("visitor page still uses the old tool-shell markup")
+	}
+	if !strings.Contains(page, ">用法<") || !strings.Contains(page, ">搜索<") || !strings.Contains(page, ">标签<") || !strings.Contains(page, ">离线包<") {
+		t.Fatal("primary navigation is not the Chinese product sections")
+	}
+	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="github"`, `data-example="huggingface"`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`} {
+		if !strings.Contains(page, fragment) {
+			t.Fatalf("visitor page missing capability markup %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"window.location.origin", "window.location.host", "/api/search?q=", "/api/tags?image=", "/api/offline/prepare", "compressed_layers"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("visitor script missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"#17202a", "header { display: flex", "nav button[aria-pressed=\"true\"]"} {
+		if strings.Contains(style, fragment) {
+			t.Fatalf("visitor theme still contains old tool-shell rule %q", fragment)
+		}
+	}
+	if !strings.Contains(style, "--rust") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".usage-grid") {
+		t.Fatal("visitor theme is not the replacement layout")
+	}
+}
+
+func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("unable to locate web package")
+	}
+	corpus := filepath.Join(filepath.Dir(file), "..", "..", "..", "testing", "corpus", "accelerator-sources", "web", "assets.json")
+	body, err := os.ReadFile(corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("web corpus missing %q", fragment)
+		}
 	}
 }

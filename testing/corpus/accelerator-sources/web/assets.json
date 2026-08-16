@@ -1,6 +1,10 @@
 {
   "entry": "/",
+  "title": "资源加速",
   "assets": ["/app.js", "/style.css"],
   "external_dependencies": [],
-  "apis": ["/api/search", "/api/tags", "/api/offline/prepare"]
+  "views": ["usage", "search", "tags", "offline"],
+  "apis": ["/api/search", "/api/tags", "/api/offline/prepare"],
+  "offline_fields": ["images", "platform", "compressed_layers"],
+  "example_hosts": ["window.location.origin", "window.location.host"]
 }
