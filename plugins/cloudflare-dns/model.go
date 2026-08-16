@@ -312,6 +312,7 @@ type Service struct {
 	mu            sync.Mutex
 	status        TokenAttestation
 	mappings      map[string]storedMapping
+	retired       map[string]uint64
 	revision      uint64
 	rootCtx       context.Context
 	cancel        context.CancelFunc

@@ -46,6 +46,7 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 		configuration: configuration,
 		runtime:       runtime,
 		mappings:      make(map[string]storedMapping),
+		retired:       make(map[string]uint64),
 		rootCtx:       rootCtx,
 		cancel:        cancel,
 		slots:         make(chan struct{}, MaxActiveCalls),
@@ -726,7 +727,8 @@ func (service *Service) Cancel() {
 		revoke = true
 	})
 	service.status = TokenAttestation{}
-	service.mappings = nil
+	service.mappings = make(map[string]storedMapping)
+	service.retired = make(map[string]uint64)
 	service.mu.Unlock()
 	if revoke {
 		service.runtime.Lease.Revoke()

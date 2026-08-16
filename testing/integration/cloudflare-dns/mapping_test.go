@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	cloudflaredns "github.com/sakullla/sakullla-plugins/plugins/cloudflare-dns"
 )
@@ -162,6 +163,143 @@ func TestResolveAfterDeleteAndRotate(t *testing.T) {
 		t.Fatalf("after delete=%#v token=%q err=%v", afterDelete, afterDelete.Token(), err)
 	}
 	afterDelete.Clear()
+	recreate := validAction("")
+	recreated, err := service.CreateMapping(context.Background(), recreate, "example.com", []byte("token-recreated"))
+	if err != nil || recreated.SecretRef == "" {
+		t.Fatalf("recreate=%#v err=%v", recreated, err)
+	}
+	afterRecreate, err := service.ResolveToken(context.Background(), validAction(""), "www.example.com", []byte("token-fallback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRecreate.Fallback || !bytes.Equal(afterRecreate.Token(), []byte("token-recreated")) || afterRecreate.SecretRef != recreated.SecretRef {
+		t.Fatalf("after recreate=%#v token=%q", afterRecreate, afterRecreate.Token())
+	}
+	afterRecreate.Clear()
+}
+
+func TestCreateMappingRetryKeepsCommittedIdentity(t *testing.T) {
+	service, _ := newMappingService(t)
+	create := validAction("")
+	create.OperationKey = "operation/create-example"
+	first, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-retry"))
+	if err != nil || retry.SecretRef != first.SecretRef || retry.Version != first.Version {
+		t.Fatalf("retry=%#v first=%#v err=%v", retry, first, err)
+	}
+	resolved, err := service.ResolveToken(context.Background(), validAction(""), "example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if !bytes.Equal(resolved.Token(), []byte("token-first")) {
+		t.Fatalf("retry resolved token=%q", resolved.Token())
+	}
+}
+
+func TestCreateAfterDeleteRebindsVaultIdentity(t *testing.T) {
+	service, _ := newMappingService(t)
+	create := validAction("")
+	create.OperationKey = "operation/create-example"
+	first, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteMapping(context.Background(), validAction(""), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-after"))
+	if err != nil || second.SecretRef == "" || second.SecretRef == first.SecretRef {
+		t.Fatalf("second=%#v first=%#v err=%v", second, first, err)
+	}
+	resolved, err := service.ResolveToken(context.Background(), validAction(""), "example.com", []byte("token-fallback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if resolved.Fallback || !bytes.Equal(resolved.Token(), []byte("token-after")) || resolved.SecretRef != second.SecretRef {
+		t.Fatalf("resolved=%#v token=%q", resolved, resolved.Token())
+	}
+}
+
+func TestCreateAfterRenameRebindsVacatedSuffix(t *testing.T) {
+	service, _ := newMappingService(t)
+	create := validAction("")
+	create.OperationKey = "operation/create-example"
+	first, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-original"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := service.RenameMapping(context.Background(), validAction(""), "example.com", "other.test")
+	if err != nil || renamed.SecretRef != first.SecretRef {
+		t.Fatalf("rename=%#v first=%#v err=%v", renamed, first, err)
+	}
+	second, err := service.CreateMapping(context.Background(), create, "example.com", []byte("token-new"))
+	if err != nil || second.SecretRef == "" || second.SecretRef == first.SecretRef {
+		t.Fatalf("second=%#v first=%#v err=%v", second, first, err)
+	}
+	original, err := service.ResolveToken(context.Background(), validAction(""), "www.other.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Clear()
+	recreated, err := service.ResolveToken(context.Background(), validAction(""), "www.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recreated.Clear()
+	if !bytes.Equal(original.Token(), []byte("token-original")) || !bytes.Equal(recreated.Token(), []byte("token-new")) {
+		t.Fatalf("original=%q recreated=%q", original.Token(), recreated.Token())
+	}
+}
+
+func TestMappingWriteAfterCancelFailsClosed(t *testing.T) {
+	vault := newFakeVault()
+	started, release := make(chan struct{}), make(chan struct{})
+	capture := materialCaptureVault{fakeVault: vault, started: started, release: release, observed: make(chan string, 1)}
+	service := newTestServiceWithRuntime(t, cloudflaredns.RuntimeAdapters{
+		Vault:      capture,
+		DNS:        newFakeDNS(vault),
+		Operations: fakeInspector{vault: vault},
+		Lease:      cloudflaredns.GenerationLeaseFunc(func() {}),
+		Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }),
+		UI:         cloudflaredns.DynamicUIFunc(func(context.Context, cloudflaredns.UIProjection) error { return nil }),
+		Auditor:    cloudflaredns.AuditorFunc(func(context.Context, cloudflaredns.AuditRecord) error { return nil }),
+		Logger:     cloudflaredns.EventLoggerFunc(func(context.Context, cloudflaredns.EventRecord) error { return nil }),
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.CreateMapping(context.Background(), validAction(""), "example.com", []byte("token-inflight"))
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("mapping enroll did not start")
+	}
+	service.Cancel()
+	close(release)
+	if err := <-result; !errors.Is(err, cloudflaredns.ErrRevoked) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("in-flight create after cancel err=%v", err)
+	}
+	if _, err := service.CreateMapping(context.Background(), validAction(""), "other.test", []byte("token-late")); !errors.Is(err, cloudflaredns.ErrRevoked) {
+		t.Fatalf("create after cancel err=%v", err)
+	}
+	if _, err := service.ShareMapping(context.Background(), validAction(""), "shared.test", "example.com"); !errors.Is(err, cloudflaredns.ErrRevoked) {
+		t.Fatalf("share after cancel err=%v", err)
+	}
+	if _, err := service.RenameMapping(context.Background(), validAction(""), "example.com", "renamed.test"); !errors.Is(err, cloudflaredns.ErrRevoked) {
+		t.Fatalf("rename after cancel err=%v", err)
+	}
+	if _, err := service.RotateMappingToken(context.Background(), validAction(""), "example.com", []byte("token-rotate")); !errors.Is(err, cloudflaredns.ErrRevoked) {
+		t.Fatalf("rotate after cancel err=%v", err)
+	}
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatalf("close after cancel err=%v", err)
+	}
 }
 
 func TestResolveFallbackOnlyOnMiss(t *testing.T) {
