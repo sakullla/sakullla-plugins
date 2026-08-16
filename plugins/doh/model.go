@@ -187,10 +187,20 @@ type MonotonicClockFunc func(context.Context) (uint64, error)
 
 func (function MonotonicClockFunc) Now(ctx context.Context) (uint64, error) { return function(ctx) }
 
-type systemClock struct{}
+type processClock struct {
+	origin time.Time
+}
 
-func (systemClock) Now(context.Context) (uint64, error) {
-	return uint64(time.Now().UnixNano()), nil
+func newProcessClock() processClock {
+	return processClock{origin: time.Now()}
+}
+
+func (clock processClock) Now(context.Context) (uint64, error) {
+	elapsed := time.Since(clock.origin)
+	if elapsed < 0 {
+		return 0, ErrClockUnavailable
+	}
+	return uint64(elapsed), nil
 }
 
 type CacheEntry struct {
@@ -216,7 +226,7 @@ func (runtime RuntimeAdapters) withDefaults(configuration Configuration) Runtime
 		runtime.Cache = NewMemoryCache(configuration.CacheEntries, configuration.CacheBytes)
 	}
 	if runtime.Clock == nil {
-		runtime.Clock = systemClock{}
+		runtime.Clock = newProcessClock()
 	}
 	if runtime.Resolver == nil {
 		runtime.Resolver = newHTTPUpstreamResolver()
