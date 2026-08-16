@@ -155,6 +155,9 @@ func (service *Service) ShareMapping(ctx context.Context, request ActionRequest,
 	service.mappings[normalized] = stored
 	current := stored.public()
 	service.mu.Unlock()
+	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		return TokenMapping{}, err
+	}
 	return service.finishMapping(ctx, action, operation, request, current)
 }
 
@@ -206,6 +209,9 @@ func (service *Service) RenameMapping(ctx context.Context, request ActionRequest
 	service.mappings[renamed] = current
 	public := current.public()
 	service.mu.Unlock()
+	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		return TokenMapping{}, err
+	}
 	return service.finishMapping(ctx, action, operation, request, public)
 }
 
@@ -312,6 +318,9 @@ func (service *Service) DeleteMapping(ctx context.Context, request ActionRequest
 	service.retireSuffixLocked(normalized, current.Epoch)
 	delete(service.mappings, normalized)
 	service.mu.Unlock()
+	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		return err
+	}
 	if err := service.emitUI(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation, Suffix: normalized, Domain: request.Domain}); err != nil {
 		_ = service.success(ctx, action, operation, request)
 		return ErrReconcilePending
@@ -607,6 +616,9 @@ func (service *Service) storeMapping(ctx context.Context, action, operation stri
 	service.mappings[mapping.Suffix] = mapping
 	current := mapping.public()
 	service.mu.Unlock()
+	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		return TokenMapping{}, err
+	}
 	return service.finishMapping(ctx, action, operation, request, current)
 }
 
@@ -656,6 +668,9 @@ func (service *Service) applyRotatedMapping(ctx context.Context, action, operati
 	service.mu.Unlock()
 	if !found {
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+	}
+	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		return TokenMapping{}, err
 	}
 	return service.finishMapping(ctx, action, operation, request, current)
 }

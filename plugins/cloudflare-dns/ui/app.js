@@ -11,10 +11,19 @@ const showStatus = (message, isError) => {
 
 const confirmAction = (suffix, action) => window.confirm(`确认对 ${suffix} 执行${action}？取消不会更改映射。`);
 
+const newOperationKey = () => {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `operation/ui/${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+};
+
 const sendJSON = async (path, body) => {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-NRE-Operation-Key": newOperationKey(),
+    },
     body: JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({}));

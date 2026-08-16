@@ -263,6 +263,10 @@ type RuntimeAdapters struct {
 	UI         DynamicUI
 	Auditor    Auditor
 	Logger     EventLogger
+	// Catalog reloads last-saved suffix mappings across Service reconstruction.
+	// When nil, NewService starts empty; Controller.activate supplies a Vault
+	// catalog so Stop/Activate and process restart keep the last save.
+	Catalog mappingCatalog
 }
 
 func (runtime RuntimeAdapters) valid() bool {
@@ -314,6 +318,8 @@ type Service struct {
 	mappings      map[string]storedMapping
 	retired       map[string]uint64
 	revision      uint64
+	catalog       mappingCatalog
+	catalogMu     sync.Mutex
 	rootCtx       context.Context
 	cancel        context.CancelFunc
 	active        sync.WaitGroup

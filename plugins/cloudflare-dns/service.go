@@ -47,10 +47,19 @@ func NewService(configuration Configuration, runtime RuntimeAdapters) (*Service,
 		runtime:       runtime,
 		mappings:      make(map[string]storedMapping),
 		retired:       make(map[string]uint64),
+		catalog:       runtime.Catalog,
 		rootCtx:       rootCtx,
 		cancel:        cancel,
 		slots:         make(chan struct{}, MaxActiveCalls),
 		hostCalls:     make(chan struct{}, MaxActiveCalls),
+	}
+	if service.catalog != nil {
+		snapshot, err := service.catalog.Load(rootCtx)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		service.restoreCatalog(snapshot)
 	}
 	service.live.Store(true)
 	return service, nil

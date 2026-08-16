@@ -183,6 +183,9 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			transaction.Revoke()
 			return safeControllerError(err)
 		}
+		if runtime.Catalog == nil && runtime.Vault != nil {
+			runtime.Catalog = newVaultMappingCatalog(runtime.Vault, configuration.SecretRef)
+		}
 		service, err := NewService(configuration, runtime)
 		if err != nil {
 			transaction.Revoke()

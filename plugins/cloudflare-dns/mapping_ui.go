@@ -2,14 +2,19 @@ package cloudflaredns
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed ui/*
@@ -299,21 +304,33 @@ func mappingActionFromRequest(request *http.Request, action, suffix string) (Act
 	group := strings.TrimSpace(request.Header.Get(mappingGroupHeader))
 	key := strings.TrimSpace(request.Header.Get(mappingOperationHeader))
 	if key == "" {
-		key = "operation/ui/" + action
-		if suffix != "" {
-			key += "/" + strings.Map(func(value rune) rune {
-				if value == '.' {
-					return '-'
-				}
-				return value
-			}, suffix)
-		}
+		key = newMappingUIOperationKey(action)
 	}
 	identity := ActionRequest{Actor: actor, ResourceGroupRef: group, OperationKey: key}
 	if !refPattern.MatchString(identity.Actor) || !refPattern.MatchString(identity.ResourceGroupRef) || !refPattern.MatchString(identity.OperationKey) {
 		return ActionRequest{}, ErrAuthorizationDenied
 	}
 	return identity, nil
+}
+
+func newMappingUIOperationKey(action string) string {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		sum := sha256.Sum256([]byte(action + "\x00" + strconv.FormatInt(time.Now().UnixNano(), 10)))
+		copy(nonce[:], sum[:])
+	}
+	sanitized := strings.Map(func(value rune) rune {
+		switch {
+		case value >= 'a' && value <= 'z', value >= '0' && value <= '9', value == '-':
+			return value
+		default:
+			return -1
+		}
+	}, strings.ToLower(action))
+	if sanitized == "" {
+		sanitized = "action"
+	}
+	return "operation/ui/" + sanitized + "/" + hex.EncodeToString(nonce[:])
 }
 
 func mappingViews(mappings []TokenMapping) []MappingView {

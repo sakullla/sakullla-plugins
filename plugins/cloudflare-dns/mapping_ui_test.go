@@ -8,16 +8,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 func TestMappingUIAuthorizedCRUDPersistsAcrossRefresh(t *testing.T) {
 	t.Parallel()
-	service, trace := newUIService(t, nil)
+	service, trace, runtime := newUIHarness(t, nil)
 	create := uiJSONRequest(http.MethodPost, "/api/mappings", `{"suffix":"Example.COM.","token":"super-secret-cf-token-ui"}`, "operation/ui-create")
 	created := httptest.NewRecorder()
 	service.ServeHTTP(created, create)
@@ -63,24 +66,100 @@ func TestMappingUIAuthorizedCRUDPersistsAcrossRefresh(t *testing.T) {
 		t.Fatalf("rotate status=%d body=%s", rotated.Code, rotated.Body.String())
 	}
 
-	restarted := newMappingHandler(service)
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
 	refreshed := httptest.NewRecorder()
 	restarted.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-list"))
 	if refreshed.Code != http.StatusOK || !strings.Contains(refreshed.Body.String(), `"suffix":"other.test"`) || strings.Contains(refreshed.Body.String(), "rotated-secret-cf-token-ui") {
 		t.Fatalf("restarted list=%s status=%d", refreshed.Body.String(), refreshed.Code)
 	}
+	resolved, err := restarted.ResolveToken(context.Background(), uiAction("operation/ui-resolve"), "www.other.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(resolved.Token(), []byte("rotated-secret-cf-token-ui")) || resolved.Fallback {
+		t.Fatalf("restarted token=%q fallback=%v", resolved.Token(), resolved.Fallback)
+	}
+	resolved.Clear()
 
 	deleted := httptest.NewRecorder()
-	service.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/mappings/other.test/delete", `{"confirm":"other.test"}`, "operation/ui-delete"))
+	restarted.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/mappings/other.test/delete", `{"confirm":"other.test"}`, "operation/ui-delete"))
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 	empty := httptest.NewRecorder()
-	service.ServeHTTP(empty, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-list-empty"))
+	restarted.ServeHTTP(empty, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-list-empty"))
 	if empty.Code != http.StatusOK || strings.Contains(empty.Body.String(), `"suffix"`) {
 		t.Fatalf("after delete list=%s", empty.Body.String())
 	}
 	assertUITraceRedacted(t, trace, []string{"super-secret-cf-token-ui", "rotated-secret-cf-token-ui"})
+}
+
+func TestMappingUISecondRotateWithoutOperationKeyStoresNewToken(t *testing.T) {
+	t.Parallel()
+	service, _, runtime := newUIHarness(t, nil)
+	created := httptest.NewRecorder()
+	service.ServeHTTP(created, uiAnonymousJSON(http.MethodPost, "/api/mappings", `{"suffix":"example.com","token":"first-secret-cf-token"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	first := httptest.NewRecorder()
+	service.ServeHTTP(first, uiAnonymousJSON(http.MethodPost, "/api/mappings/example.com/rotate", `{"token":"second-secret-cf-token","confirm":"example.com"}`))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first rotate status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	service.ServeHTTP(second, uiAnonymousJSON(http.MethodPost, "/api/mappings/example.com/rotate", `{"token":"third-secret-cf-token","confirm":"example.com"}`))
+	if second.Code != http.StatusOK || strings.Contains(second.Body.String(), "third-secret-cf-token") {
+		t.Fatalf("second rotate status=%d body=%s", second.Code, second.Body.String())
+	}
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := restarted.ResolveToken(context.Background(), uiAction("operation/ui-resolve"), "example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if !bytes.Equal(resolved.Token(), []byte("third-secret-cf-token")) {
+		t.Fatalf("second rotate token=%q", resolved.Token())
+	}
+}
+
+func TestMappingUILongSuffixWriteWithoutOperationKey(t *testing.T) {
+	t.Parallel()
+	service, _, _ := newUIHarness(t, nil)
+	suffix := strings.Repeat("a", 50) + "." + strings.Repeat("b", 50) + ".example.com"
+	create := httptest.NewRecorder()
+	service.ServeHTTP(create, uiAnonymousJSON(http.MethodPost, "/api/mappings", `{"suffix":"`+suffix+`","token":"long-secret-cf-token"}`))
+	if create.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	path := "/api/mappings/" + url.PathEscape(suffix)
+	detail := httptest.NewRecorder()
+	service.ServeHTTP(detail, uiAnonymousRequest(http.MethodGet, path, ""))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), suffix) {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	rotate := httptest.NewRecorder()
+	service.ServeHTTP(rotate, uiAnonymousJSON(http.MethodPost, path+"/rotate", `{"token":"long-rotated-secret","confirm":"`+suffix+`"}`))
+	if rotate.Code != http.StatusOK {
+		t.Fatalf("rotate status=%d body=%s", rotate.Code, rotate.Body.String())
+	}
+	deleted := httptest.NewRecorder()
+	service.ServeHTTP(deleted, uiAnonymousJSON(http.MethodPost, path+"/delete", `{"confirm":"`+suffix+`"}`))
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
 }
 
 func TestMappingUIUnauthorizedIsExplicitRejection(t *testing.T) {
@@ -198,6 +277,17 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 			t.Fatalf("asset %s has external dependency", route)
 		}
 	}
+	script, err := mappingUIAssets.ReadFile("ui/app.js")
+	if err != nil || !bytes.Contains(script, []byte("X-NRE-Operation-Key")) || !bytes.Contains(script, []byte("getRandomValues")) {
+		t.Fatalf("script missing unique operation key: %s", script)
+	}
+	page, err := mappingUIAssets.ReadFile("ui/index.html")
+	if err != nil || !bytes.Contains(page, []byte(`id="create-form" method="post"`)) || !bytes.Contains(page, []byte(`data-action="rotate"`)) || !bytes.Contains(page, []byte(`method="post"`)) {
+		t.Fatalf("token forms missing post method: %s", page)
+	}
+	if bytes.Count(page, []byte(`method="post"`)) < 2 {
+		t.Fatalf("expected token-bearing forms to post: %s", page)
+	}
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +296,40 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), "unavailable") || inactive.Body.Len() == 0 {
 		t.Fatalf("inactive controller status=%d body=%s", inactive.Code, inactive.Body.String())
+	}
+}
+
+func TestMappingUIPersistsAcrossControllerStopActivate(t *testing.T) {
+	t.Parallel()
+	_, _, runtime := newUIHarness(t, nil)
+	runtime.Catalog = nil
+	first := newUIController(t, runtime)
+	created := httptest.NewRecorder()
+	first.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/mappings", `{"suffix":"example.com","token":"controller-secret-token"}`, "operation/ui-create"))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	if response := first.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	second := newUIController(t, runtime)
+	listed := httptest.NewRecorder()
+	second.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-list"))
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"suffix":"example.com"`) || strings.Contains(listed.Body.String(), "controller-secret-token") {
+		t.Fatalf("reactivated list=%s status=%d", listed.Body.String(), listed.Code)
+	}
+	if err := second.Use(context.Background(), func(ctx context.Context, service *Service) error {
+		resolved, err := service.ResolveToken(ctx, uiAction("operation/ui-resolve"), "www.example.com", nil)
+		if err != nil {
+			return err
+		}
+		defer resolved.Clear()
+		if !bytes.Equal(resolved.Token(), []byte("controller-secret-token")) || resolved.Fallback {
+			t.Fatalf("reactivated token=%q fallback=%v", resolved.Token(), resolved.Fallback)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -228,11 +352,13 @@ func assertUITraceRedacted(t *testing.T, trace *uiTrace, secrets []string) {
 	}
 }
 
-func newMappingHandler(service *Service) http.Handler {
-	return service
+func uiRequest(method, path, body, operation string) *http.Request {
+	request := uiAnonymousRequest(method, path, body)
+	request.Header.Set(mappingOperationHeader, operation)
+	return request
 }
 
-func uiRequest(method, path, body, operation string) *http.Request {
+func uiAnonymousRequest(method, path, body string) *http.Request {
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
@@ -240,7 +366,6 @@ func uiRequest(method, path, body, operation string) *http.Request {
 	request := httptest.NewRequest(method, path, reader)
 	request.Header.Set(mappingActorHeader, "actor/admin")
 	request.Header.Set(mappingGroupHeader, "group/main")
-	request.Header.Set(mappingOperationHeader, operation)
 	return request
 }
 
@@ -250,18 +375,34 @@ func uiJSONRequest(method, path, body, operation string) *http.Request {
 	return request
 }
 
+func uiAnonymousJSON(method, path, body string) *http.Request {
+	request := uiAnonymousRequest(method, path, body)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
 func uiAction(operation string) ActionRequest {
 	return ActionRequest{Actor: "actor/admin", ResourceGroupRef: "group/main", OperationKey: operation}
 }
 
+func uiConfiguration() Configuration {
+	return Configuration{Generation: "generation-1", SecretRef: "vault/cloudflare", ResourceGroupRef: "group/main"}
+}
+
 func newUIService(t *testing.T, authorize func(ActionContext) error) (*Service, *uiTrace) {
+	t.Helper()
+	service, trace, _ := newUIHarness(t, authorize)
+	return service, trace
+}
+
+func newUIHarness(t *testing.T, authorize func(ActionContext) error) (*Service, *uiTrace, RuntimeAdapters) {
 	t.Helper()
 	if authorize == nil {
 		authorize = func(ActionContext) error { return nil }
 	}
 	vault := newUIVault()
 	trace := &uiTrace{}
-	service, err := NewService(Configuration{Generation: "generation-1", SecretRef: "vault/cloudflare", ResourceGroupRef: "group/main"}, RuntimeAdapters{
+	runtime := RuntimeAdapters{
 		Vault:      vault,
 		DNS:        uiFakeDNS{},
 		Operations: uiInspector{vault: vault},
@@ -270,11 +411,45 @@ func newUIService(t *testing.T, authorize func(ActionContext) error) (*Service, 
 		UI:         DynamicUIFunc(func(_ context.Context, projection UIProjection) error { trace.addUI(projection); return nil }),
 		Auditor:    AuditorFunc(func(_ context.Context, record AuditRecord) error { trace.addAudit(record); return nil }),
 		Logger:     EventLoggerFunc(func(_ context.Context, record EventRecord) error { trace.addLog(record); return nil }),
-	})
+		Catalog:    newMemoryMappingCatalog(),
+	}
+	service, err := NewService(uiConfiguration(), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, trace
+	return service, trace, runtime
+}
+
+func newUIController(t *testing.T, runtime RuntimeAdapters) *Controller {
+	t.Helper()
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
+		return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) { return runtime, nil }}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI:            pluginsdk.RPCABIV1,
+		PluginID:       PluginID,
+		PluginVersion:  PluginVersion,
+		PackageDigest:  "package",
+		ArtifactDigest: "artifact",
+		GrantedScopes:  requiredGrants(),
+		Generation:     "generation-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := json.Marshal(uiConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: config}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	return controller
 }
 
 type uiTrace struct {

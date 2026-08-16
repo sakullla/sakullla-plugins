@@ -17,7 +17,11 @@ create, rename, rotate, and delete suffix mappings. Unauthorized callers
 receive an explicit denial instead of a blank page, write controls are hidden
 without enroll/rotate permission, and saved Token values are never prefilled.
 Delete and rotate require an object confirmation; cancel leaves state unchanged.
-The host may mount this page; this plugin does not declare `ui.schema.json`.
+Each write mints a unique operation key so a second rotate stores the new Token
+instead of replaying the previous Vault outcome. The last successful save is
+reloaded when the service is reconstructed or a new generation activates
+against the same Vault catalog. The host may mount this page; this plugin does
+not declare `ui.schema.json`.
 
 Existing zone-scoped DNS record adapters remain for injected test brokers. They
 are not the product face of this plugin.

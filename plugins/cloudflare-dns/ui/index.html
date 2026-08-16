@@ -37,16 +37,16 @@
               {{if or $.CanWrite $.CanRotate}}
               <td class="actions">
                 {{if $.CanWrite}}
-                <form class="inline" data-action="rename" data-suffix="{{.Suffix}}">
+                <form class="inline" method="post" data-action="rename" data-suffix="{{.Suffix}}">
                   <label>新后缀 <input name="suffix" required autocomplete="off"></label>
                   <button type="submit">改后缀</button>
                 </form>
-                <form class="inline" data-action="delete" data-suffix="{{.Suffix}}">
+                <form class="inline" method="post" data-action="delete" data-suffix="{{.Suffix}}">
                   <button type="submit">删除</button>
                 </form>
                 {{end}}
                 {{if $.CanRotate}}
-                <form class="inline" data-action="rotate" data-suffix="{{.Suffix}}">
+                <form class="inline" method="post" data-action="rotate" data-suffix="{{.Suffix}}">
                   <label>新 Token <input name="token" type="password" autocomplete="new-password" required></label>
                   <button type="submit">轮换 Token</button>
                 </form>
@@ -65,7 +65,7 @@
     {{if .CanWrite}}
     <section class="card" id="mapping-create" aria-labelledby="mapping-create-title">
       <h2 id="mapping-create-title">新增映射</h2>
-      <form id="create-form" data-action="create">
+      <form id="create-form" method="post" data-action="create">
         <label>域名后缀 <input name="suffix" required autocomplete="off"></label>
         <label>Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
         <button type="submit">保存</button>
