@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -33,6 +34,66 @@ func safeFailure(class error, err error) error {
 		return nil
 	}
 	return &SafeError{Class: class, Message: class.Error()}
+}
+
+// TransientCredential is a parsed secret from compose or docker run.
+// BindSecretRefs keeps Name as an opaque secret_ref and wipes Material.
+type TransientCredential struct {
+	Name     string
+	Material []byte
+}
+
+// BindSecretRefs converts transient credentials into opaque secret_refs.
+// Material is wiped before return and is never copied into refs or errors.
+func BindSecretRefs(credentials []TransientCredential) ([]string, error) {
+	defer wipeCredentials(credentials)
+	if len(credentials) > 32 {
+		return nil, fmt.Errorf("%w: secret refs", ErrBoundExceeded)
+	}
+	refs := make([]string, 0, len(credentials))
+	for _, credential := range credentials {
+		if !boundedText(credential.Name, 128) {
+			return nil, errors.New("secret reference is invalid")
+		}
+		refs = append(refs, credential.Name)
+	}
+	normalized, err := sortedUnique(refs, 32)
+	if err != nil {
+		if errors.Is(err, ErrBoundExceeded) {
+			return nil, err
+		}
+		return nil, errors.New("secret reference is invalid")
+	}
+	return normalized, nil
+}
+
+// AppWithBoundSecrets attaches bound secret_refs to an app and rejects any
+// validation failure with a class error that cannot unwrap to material.
+func AppWithBoundSecrets(app App, credentials []TransientCredential) (App, error) {
+	refs, err := BindSecretRefs(credentials)
+	if err != nil {
+		return App{}, err
+	}
+	combined := append(append([]string(nil), app.SecretRefs...), refs...)
+	normalized, err := sortedUnique(combined, 32)
+	if err != nil {
+		if errors.Is(err, ErrBoundExceeded) {
+			return App{}, err
+		}
+		return App{}, errors.New("secret reference is invalid")
+	}
+	app.SecretRefs = normalized
+	if err := app.Validate(); err != nil {
+		return App{}, safeFailure(ErrInvalidPreview, err)
+	}
+	return app, nil
+}
+
+func wipeCredentials(credentials []TransientCredential) {
+	for index := range credentials {
+		clear(credentials[index].Material)
+		credentials[index].Material = nil
+	}
 }
 
 func canonicalDigest(value any) (string, error) {

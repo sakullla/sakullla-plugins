@@ -1,0 +1,598 @@
+package dockerapp
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+var (
+	ErrInvalidAdoptSource = errors.New("adopt source is invalid")
+	ErrNotCandidate       = errors.New("container is not an adoptable candidate")
+)
+
+type AppStatus string
+
+const (
+	AppStatusRunning AppStatus = "running"
+	AppStatusStopped AppStatus = "stopped"
+)
+
+type RuntimeObservation struct {
+	ContainerID string
+	Running     bool
+}
+
+type CatalogItem struct {
+	App     App
+	Running bool
+	Status  AppStatus
+}
+
+type CatalogView struct {
+	Managed    []CatalogItem
+	Candidates []Discovery
+}
+
+type StopExecutor interface {
+	Stop(context.Context, string) error
+}
+type StopExecutorFunc func(context.Context, string) error
+
+func (function StopExecutorFunc) Stop(ctx context.Context, appID string) error {
+	return function(ctx, appID)
+}
+
+// ParseComposeDocument turns pasted compose YAML into a risk plan and app.
+// Environment values become secret_refs via BindSecretRefs and are wiped.
+func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposePlan, App, error) {
+	if len(document) > MaxConfigBytes {
+		return ComposePlan{}, App{}, fmt.Errorf("%w: adopt source exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+	}
+	if !validID(appID) || !boundedText(generation, 128) || !boundedText(ruleRef, 128) {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader([]byte(document)))
+	var file composeDocument
+	if err := decoder.Decode(&file); err != nil {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	if len(file.Services) == 0 || len(file.Services) > MaxComposeServices {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	plan := ComposePlan{AppID: appID, Generation: generation, Project: appID, RuleImpacts: []string{ruleRef}}
+	var credentials []TransientCredential
+	var image string
+	for name, service := range file.Services {
+		parsed, serviceCreds, err := composeServiceFromYAML(name, service)
+		if err != nil {
+			wipeCredentials(serviceCreds)
+			wipeCredentials(credentials)
+			return ComposePlan{}, App{}, err
+		}
+		if image == "" {
+			image = parsed.image
+		}
+		plan.Services = append(plan.Services, parsed.service)
+		credentials = append(credentials, serviceCreds...)
+	}
+	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, RuleRef: ruleRef, Generation: generation}, credentials)
+	if err != nil {
+		return ComposePlan{}, App{}, err
+	}
+	return plan, app, nil
+}
+
+// ParseDockerRun turns a docker run command into a risk plan and app.
+// Flag values that carry credentials become secret_refs and are wiped.
+func ParseDockerRun(command, generation, ruleRef string) (ComposePlan, App, error) {
+	if len(command) > MaxConfigBytes {
+		return ComposePlan{}, App{}, fmt.Errorf("%w: adopt source exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+	}
+	if !boundedText(generation, 128) || !boundedText(ruleRef, 128) {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	tokens, err := splitCommandLine(command)
+	if err != nil {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	if len(tokens) < 3 || tokens[0] != "docker" || tokens[1] != "run" {
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	parsed, credentials, err := parseDockerRunTokens(tokens[2:])
+	if err != nil {
+		wipeCredentials(credentials)
+		return ComposePlan{}, App{}, err
+	}
+	if !validID(parsed.name) || !boundedText(parsed.image, 512) {
+		wipeCredentials(credentials)
+		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+	}
+	parsed.service.Name = parsed.name
+	plan := ComposePlan{
+		AppID: parsed.name, Generation: generation, Project: parsed.name,
+		Services:    []ComposeService{parsed.service},
+		RuleImpacts: []string{ruleRef},
+	}
+	app, err := AppWithBoundSecrets(App{ID: parsed.name, Image: parsed.image, RuleRef: ruleRef, Generation: generation}, credentials)
+	if err != nil {
+		return ComposePlan{}, App{}, err
+	}
+	return plan, app, nil
+}
+
+// AdoptCandidate appends an unlabeled exposed-port container to the managed
+// app list. Discoveries without Candidate remain excluded.
+func AdoptCandidate(observations []ContainerObservation, apps []App, containerID string, app App) ([]App, error) {
+	if !boundedText(containerID, 128) {
+		return nil, ErrNotCandidate
+	}
+	found := false
+	for _, observation := range observations {
+		if observation.ID == containerID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, ErrNotCandidate
+	}
+	discoveries, err := Discover(observations)
+	if err != nil {
+		return nil, err
+	}
+	for _, discovery := range discoveries {
+		if discovery.ContainerID == containerID && discovery.Candidate && discovery.AppID == "" {
+			return RegisterManaged(apps, app)
+		}
+	}
+	return nil, ErrNotCandidate
+}
+
+// RegisterManaged appends a validated app to the managed list. Candidates are
+// not inserted here; callers must go through AdoptCandidate or authorized apply.
+func RegisterManaged(apps []App, app App) ([]App, error) {
+	if err := app.Validate(); err != nil {
+		return nil, err
+	}
+	if len(apps)+1 > MaxApps {
+		return nil, fmt.Errorf("%w: apps maximum is %d", ErrBoundExceeded, MaxApps)
+	}
+	for _, existing := range apps {
+		if existing.ID == app.ID {
+			return nil, errors.New("app id is duplicated")
+		}
+	}
+	return append(cloneApps(apps), cloneApp(app)), nil
+}
+
+func RemoveManaged(apps []App, appID string) []App {
+	result := make([]App, 0, len(apps))
+	for _, app := range apps {
+		if app.ID == appID {
+			continue
+		}
+		result = append(result, cloneApp(app))
+	}
+	return result
+}
+
+// ProjectCatalog keeps managed apps and candidates in separate lists.
+// Unlabeled exposed ports stay candidates until AdoptCandidate plus a label.
+func ProjectCatalog(observations []ContainerObservation, runtimes []RuntimeObservation, apps []App) (CatalogView, error) {
+	discoveries, err := Discover(observations)
+	if err != nil {
+		return CatalogView{}, err
+	}
+	runningByContainer := make(map[string]bool, len(runtimes))
+	for _, runtime := range runtimes {
+		if runtime.ContainerID == "" {
+			continue
+		}
+		runningByContainer[runtime.ContainerID] = runtime.Running
+	}
+	view := CatalogView{Managed: make([]CatalogItem, 0, len(apps))}
+	for _, app := range apps {
+		item := CatalogItem{App: cloneApp(app), Status: AppStatusStopped}
+		for _, observation := range observations {
+			if observation.Labels[AppLabel] != app.ID {
+				continue
+			}
+			if runningByContainer[observation.ID] {
+				item.Running = true
+				item.Status = AppStatusRunning
+				break
+			}
+		}
+		view.Managed = append(view.Managed, item)
+	}
+	for _, discovery := range discoveries {
+		if discovery.Candidate {
+			view.Candidates = append(view.Candidates, discovery)
+		}
+	}
+	return view, nil
+}
+
+func LabelObservation(observation ContainerObservation, appID string) ContainerObservation {
+	labels := make(map[string]string, len(observation.Labels)+1)
+	for key, value := range observation.Labels {
+		labels[key] = value
+	}
+	labels[AppLabel] = appID
+	observation.Labels = labels
+	observation.ExposedPorts = append([]uint16(nil), observation.ExposedPorts...)
+	return observation
+}
+
+func StopManaged(ctx context.Context, app App, executor StopExecutor, auditor Auditor) error {
+	if auditor == nil {
+		return ErrAuditRequired
+	}
+	if executor == nil {
+		audit(auditor, AuditRecord{Action: "app.stop", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+		return ErrTypedHandlesUnavailable
+	}
+	if err := executor.Stop(ctx, app.ID); err != nil {
+		audit(auditor, AuditRecord{Action: "app.stop", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+		return safeFailure(ErrOperationFailed, err)
+	}
+	audit(auditor, AuditRecord{Action: "app.stop", Outcome: "succeeded", Detail: app.ID})
+	return nil
+}
+
+func cloneApp(app App) App {
+	app.SecretRefs = append([]string(nil), app.SecretRefs...)
+	return app
+}
+
+type composeDocument struct {
+	Name     string                    `yaml:"name"`
+	Services map[string]composeService `yaml:"services"`
+}
+
+type composeService struct {
+	Image       string   `yaml:"image"`
+	Privileged  bool     `yaml:"privileged"`
+	CapAdd      []string `yaml:"cap_add"`
+	Volumes     []string `yaml:"volumes"`
+	Networks    any      `yaml:"networks"`
+	Environment any      `yaml:"environment"`
+}
+
+type parsedComposeService struct {
+	service ComposeService
+	image   string
+}
+
+func composeServiceFromYAML(name string, raw composeService) (parsedComposeService, []TransientCredential, error) {
+	if !validID(name) || !boundedText(raw.Image, 512) {
+		return parsedComposeService{}, nil, ErrInvalidAdoptSource
+	}
+	networks, err := collectNames(raw.Networks)
+	if err != nil {
+		return parsedComposeService{}, nil, ErrInvalidAdoptSource
+	}
+	hosts, volumes := classifyVolumes(raw.Volumes)
+	credentials, err := collectEnvironment(raw.Environment)
+	if err != nil {
+		wipeCredentials(credentials)
+		return parsedComposeService{}, nil, ErrInvalidAdoptSource
+	}
+	return parsedComposeService{
+		service: ComposeService{
+			Name:            name,
+			Privileged:      raw.Privileged,
+			HostMounts:      hosts,
+			AddCapabilities: append([]string(nil), raw.CapAdd...),
+			Networks:        networks,
+			Volumes:         volumes,
+		},
+		image: raw.Image,
+	}, credentials, nil
+}
+
+type parsedDockerRun struct {
+	name, image string
+	service     ComposeService
+}
+
+func parseDockerRunTokens(tokens []string) (parsedDockerRun, []TransientCredential, error) {
+	var parsed parsedDockerRun
+	var credentials []TransientCredential
+	index := 0
+	for index < len(tokens) {
+		token := tokens[index]
+		if token == "--" {
+			index++
+			break
+		}
+		if token == "" || token[0] != '-' {
+			break
+		}
+		flag, attached, hasAttached := cutFlag(token)
+		switch flag {
+		case "-d", "--detach", "--rm", "-i", "--interactive", "-t", "--tty", "-it", "-P", "--publish-all", "--read-only", "--init":
+			if hasAttached {
+				return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+			}
+			index++
+		case "--privileged":
+			if hasAttached {
+				return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+			}
+			parsed.service.Privileged = true
+			index++
+		case "--name", "-e", "--env", "-v", "--volume", "--cap-add", "--network", "--net", "-p", "--publish", "--env-file", "-l", "--label":
+			value := attached
+			if !hasAttached {
+				index++
+				if index >= len(tokens) || tokens[index] == "" || (tokens[index][0] == '-' && tokens[index] != "-") {
+					return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+				}
+				value = tokens[index]
+			}
+			switch flag {
+			case "--name":
+				if parsed.name != "" {
+					return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+				}
+				parsed.name = value
+			case "-e", "--env":
+				name, material, _ := strings.Cut(value, "=")
+				credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+			case "-v", "--volume":
+				host, named := classifyVolume(value)
+				if host != "" {
+					parsed.service.HostMounts = append(parsed.service.HostMounts, host)
+				}
+				if named != "" {
+					parsed.service.Volumes = append(parsed.service.Volumes, named)
+				}
+			case "--cap-add":
+				parsed.service.AddCapabilities = append(parsed.service.AddCapabilities, value)
+			case "--network", "--net":
+				parsed.service.Networks = append(parsed.service.Networks, value)
+			}
+			index++
+		default:
+			if !hasAttached && strings.HasPrefix(flag, "--") && index+1 < len(tokens) && tokens[index+1] != "" && tokens[index+1][0] != '-' {
+				index += 2
+				continue
+			}
+			index++
+		}
+	}
+	if index >= len(tokens) || tokens[index] == "" || tokens[index][0] == '-' {
+		return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+	}
+	parsed.image = tokens[index]
+	return parsed, credentials, nil
+}
+
+func cutFlag(token string) (flag, value string, hasValue bool) {
+	if strings.HasPrefix(token, "--") {
+		flag, value, hasValue = strings.Cut(token, "=")
+		return flag, value, hasValue
+	}
+	if len(token) > 2 {
+		if boolShortCluster(token[1:]) {
+			return token, "", false
+		}
+		return token[:2], token[2:], true
+	}
+	return token, "", false
+}
+
+func boolShortCluster(letters string) bool {
+	if letters == "" {
+		return false
+	}
+	for _, letter := range letters {
+		switch letter {
+		case 'd', 'i', 't', 'P', 'q':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func splitCommandLine(command string) ([]string, error) {
+	var tokens []string
+	var current strings.Builder
+	quote := byte(0)
+	escaped := false
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		tokens = append(tokens, current.String())
+		current.Reset()
+	}
+	for index := 0; index < len(command); index++ {
+		ch := command[index]
+		if escaped {
+			if ch == '\n' || ch == '\r' {
+				escaped = false
+				continue
+			}
+			current.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+				continue
+			}
+			current.WriteByte(ch)
+			continue
+		}
+		switch ch {
+		case '\'', '"':
+			quote = ch
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, ErrInvalidAdoptSource
+	}
+	flush()
+	if len(tokens) > MaxCollectionItems {
+		return nil, ErrBoundExceeded
+	}
+	return tokens, nil
+}
+
+func collectNames(value any) ([]string, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if typed == "" {
+			return nil, nil
+		}
+		return []string{typed}, nil
+	case []string:
+		return append([]string(nil), typed...), nil
+	case []any:
+		names := make([]string, 0, len(typed))
+		for _, item := range typed {
+			name, ok := item.(string)
+			if !ok {
+				return nil, ErrInvalidAdoptSource
+			}
+			names = append(names, name)
+		}
+		return names, nil
+	case map[string]any:
+		names := make([]string, 0, len(typed))
+		for name := range typed {
+			names = append(names, name)
+		}
+		return names, nil
+	default:
+		return nil, ErrInvalidAdoptSource
+	}
+}
+
+func collectEnvironment(value any) ([]TransientCredential, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case map[string]any:
+		credentials := make([]TransientCredential, 0, len(typed))
+		for name, raw := range typed {
+			credentials = append(credentials, TransientCredential{Name: name, Material: materialBytes(raw)})
+		}
+		return credentials, nil
+	case map[string]string:
+		credentials := make([]TransientCredential, 0, len(typed))
+		for name, raw := range typed {
+			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(raw)})
+		}
+		return credentials, nil
+	case []any:
+		credentials := make([]TransientCredential, 0, len(typed))
+		for _, item := range typed {
+			entry, ok := item.(string)
+			if !ok {
+				return credentials, ErrInvalidAdoptSource
+			}
+			name, material, _ := strings.Cut(entry, "=")
+			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+		}
+		return credentials, nil
+	case []string:
+		credentials := make([]TransientCredential, 0, len(typed))
+		for _, entry := range typed {
+			name, material, _ := strings.Cut(entry, "=")
+			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+		}
+		return credentials, nil
+	default:
+		return nil, ErrInvalidAdoptSource
+	}
+}
+
+func materialBytes(value any) []byte {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return []byte(typed)
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		return []byte(fmt.Sprint(typed))
+	}
+}
+
+func classifyVolumes(specs []string) (hosts, named []string) {
+	for _, spec := range specs {
+		host, volume := classifyVolume(spec)
+		if host != "" {
+			hosts = append(hosts, host)
+		}
+		if volume != "" {
+			named = append(named, volume)
+		}
+	}
+	return hosts, named
+}
+
+func classifyVolume(spec string) (hostMount, namedVolume string) {
+	source := volumeSource(spec)
+	if isHostSource(source) {
+		return spec, ""
+	}
+	if source == "" {
+		return "", ""
+	}
+	return "", source
+}
+
+func volumeSource(spec string) string {
+	if drive, rest, ok := windowsDrive(spec); ok {
+		if index := strings.IndexByte(rest, ':'); index >= 0 {
+			return drive + rest[:index]
+		}
+		return spec
+	}
+	if index := strings.IndexByte(spec, ':'); index >= 0 {
+		return spec[:index]
+	}
+	return spec
+}
+
+func windowsDrive(spec string) (string, string, bool) {
+	if len(spec) < 2 || spec[1] != ':' {
+		return "", "", false
+	}
+	letter := spec[0]
+	if (letter < 'A' || letter > 'Z') && (letter < 'a' || letter > 'z') {
+		return "", "", false
+	}
+	return spec[:2], spec[2:], true
+}
+
+func isHostSource(source string) bool {
+	return strings.ContainsAny(source, `/\`) || strings.HasPrefix(source, ".") || strings.HasPrefix(source, "~")
+}
