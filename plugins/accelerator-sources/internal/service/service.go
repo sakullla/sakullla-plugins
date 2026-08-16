@@ -20,6 +20,7 @@ type Options struct {
 	SourceProxy sourceproxy.Options
 	Catalog     catalog.Options
 	ImageTar    imagetar.Options
+	Config      []byte
 }
 
 type Handler struct {
@@ -28,9 +29,23 @@ type Handler struct {
 	upstream *upstream.Manager
 }
 
-// NewHandler builds the self-contained, zero-configuration HTTP service. The
-// returned handler can run directly in any repository-owned net/http server.
+// NewHandler builds the HTTP service. Omitted or empty sources keep
+// DefaultSources. A valid Config overlay replaces the entire source list
+// used to pull images; an invalid document is rejected wholesale.
 func NewHandler(options Options) (*Handler, error) {
+	if len(options.Registry.Document) == 0 {
+		options.Registry.Document = options.Config
+	}
+	if len(options.Registry.Sources) == 0 {
+		sources, err := registry.SourcesFromDocument(options.Registry.Document)
+		if err != nil {
+			return nil, err
+		}
+		options.Registry.Sources = sources
+	}
+	if len(options.ImageTar.Sources) == 0 {
+		options.ImageTar.Sources = imageTarSources(options.Registry.Sources)
+	}
 	manager := options.Upstream
 	ownedManager := manager == nil
 	if manager == nil {
@@ -112,4 +127,21 @@ func (handler *Handler) Close() error {
 // Metrics returns the generation-local upstream counters.
 func (handler *Handler) Metrics() upstream.Metrics {
 	return handler.upstream.Snapshot()
+}
+
+func imageTarSources(sources []registry.Source) map[string]imagetar.Source {
+	projected := make(map[string]imagetar.Source, len(sources))
+	for _, source := range sources {
+		item := imagetar.Source{
+			Endpoint:     source.Endpoint,
+			TokenHosts:   append([]string(nil), source.TokenHosts...),
+			AllowHTTP:    source.AllowHTTP,
+			AllowPrivate: source.AllowPrivate,
+		}
+		names := append([]string{source.Name}, source.Aliases...)
+		for _, name := range names {
+			projected[strings.ToLower(name)] = item
+		}
+	}
+	return projected
 }

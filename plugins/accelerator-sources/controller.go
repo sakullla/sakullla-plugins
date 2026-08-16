@@ -5,13 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/imagetar"
+	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/registry"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/service"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
 )
@@ -21,6 +27,9 @@ const (
 	PluginVersion  = "0.1.0"
 	ProviderID     = "default"
 	MaxConfigBytes = 4096
+	maxSources     = 32
+	maxSourceName  = 253
+	maxEndpointLen = 512
 )
 
 type GenerationService interface {
@@ -65,12 +74,10 @@ type Controller struct {
 	activeService   *generationService
 	generation      string
 	lastMetrics     upstream.Metrics
+	sources         []registry.Source
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
-	if config.NewService == nil {
-		config.NewService = func() (GenerationService, error) { return service.NewHandler(service.Options{}) }
-	}
 	if config.PrepareTimeout <= 0 {
 		config.PrepareTimeout = 10 * time.Second
 	}
@@ -83,7 +90,19 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if config.DrainTimeout <= 0 {
 		config.DrainTimeout = 30 * time.Second
 	}
-	return &Controller{config: config}, nil
+	controller := &Controller{config: config}
+	if controller.config.NewService == nil {
+		controller.config.NewService = controller.newConfiguredService
+	}
+	return controller, nil
+}
+
+func (controller *Controller) newConfiguredService() (GenerationService, error) {
+	sources := controller.snapshotSources()
+	return service.NewHandler(service.Options{
+		Registry: registry.Options{Sources: sources},
+		ImageTar: imagetar.Options{Sources: imageTarSources(sources)},
+	})
 }
 
 func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
@@ -186,12 +205,16 @@ func (controller *Controller) Status() Status {
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, wire []byte) error {
-	if err := validateEmptyConfig(wire); err != nil {
+	sources, err := loadSources(wire)
+	if err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	controller.mu.Lock()
+	controller.sources = sources
+	controller.mu.Unlock()
 	instance, err := controller.config.NewService()
 	if err != nil {
 		return err
@@ -256,24 +279,136 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	return nil
 }
 
-func validateEmptyConfig(wire []byte) error {
+type sourceDocument struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+}
+
+func loadSources(wire []byte) ([]registry.Source, error) {
 	if len(wire) == 0 {
 		wire = []byte("{}")
 	}
 	if len(wire) > MaxConfigBytes {
-		return errors.New("plugin configuration exceeds the canonical bound")
+		return nil, errors.New("plugin configuration exceeds the canonical bound")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(wire))
 	decoder.DisallowUnknownFields()
-	var config map[string]json.RawMessage
-	if err := decoder.Decode(&config); err != nil || config == nil || len(config) != 0 {
-		return errors.New("accelerator-sources configuration must be an empty object")
+	var document struct {
+		Sources *[]sourceDocument `json:"sources"`
+	}
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("accelerator-sources configuration is invalid: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("accelerator-sources configuration must contain one object")
+		return nil, errors.New("accelerator-sources configuration must contain one object")
 	}
-	return nil
+	if document.Sources == nil || len(*document.Sources) == 0 {
+		return registry.DefaultSources(), nil
+	}
+	if len(*document.Sources) > maxSources {
+		return nil, errors.New("sources exceeds the canonical bound")
+	}
+	known := knownSources()
+	sources := make([]registry.Source, 0, len(*document.Sources))
+	seen := make(map[string]int, len(*document.Sources))
+	for index, item := range *document.Sources {
+		source, err := parseSourceDocument(index, item, known)
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range append([]string{source.Name}, source.Aliases...) {
+			key = strings.ToLower(key)
+			if previous, exists := seen[key]; exists {
+				return nil, fmt.Errorf("sources[%d] duplicates sources[%d] name %q", index, previous, key)
+			}
+			seen[key] = index
+		}
+		sources = append(sources, source)
+	}
+	return sources, nil
+}
+
+func parseSourceDocument(index int, item sourceDocument, known map[string]registry.Source) (registry.Source, error) {
+	name := strings.TrimSpace(item.Name)
+	if name == "" || len(name) > maxSourceName || strings.ContainsAny(name, "/\\\t\r\n ") {
+		return registry.Source{}, fmt.Errorf("sources[%d].name is invalid", index)
+	}
+	endpointRaw := strings.TrimSpace(item.Endpoint)
+	if endpointRaw == "" || len(endpointRaw) > maxEndpointLen {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint is invalid", index)
+	}
+	endpoint, err := url.Parse(endpointRaw)
+	if err != nil || endpoint.Hostname() == "" {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint is invalid", index)
+	}
+	if endpoint.Scheme != "https" || (endpoint.Port() != "" && endpoint.Port() != "443") {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint must be an https URL", index)
+	}
+	if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint contains unsupported components", index)
+	}
+	host := strings.TrimSuffix(strings.ToLower(endpoint.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint must not target a private network", index)
+	}
+	if address := net.ParseIP(host); address != nil && !upstream.IsPublicIP(address) {
+		return registry.Source{}, fmt.Errorf("sources[%d].endpoint must not target a private network", index)
+	}
+	source := registry.Source{Name: name, Endpoint: endpoint}
+	if matched, ok := known[strings.ToLower(name)]; ok {
+		source.Aliases = append([]string(nil), matched.Aliases...)
+		source.TokenHosts = append([]string(nil), matched.TokenHosts...)
+	}
+	return source, nil
+}
+
+func knownSources() map[string]registry.Source {
+	known := make(map[string]registry.Source)
+	for _, source := range registry.DefaultSources() {
+		known[strings.ToLower(source.Name)] = source
+	}
+	return known
+}
+
+func (controller *Controller) snapshotSources() []registry.Source {
+	controller.mu.RLock()
+	defer controller.mu.RUnlock()
+	return cloneRegistrySources(controller.sources)
+}
+
+func cloneRegistrySources(sources []registry.Source) []registry.Source {
+	if sources == nil {
+		return nil
+	}
+	cloned := make([]registry.Source, len(sources))
+	for index, source := range sources {
+		cloned[index] = source
+		if source.Endpoint != nil {
+			endpoint := *source.Endpoint
+			cloned[index].Endpoint = &endpoint
+		}
+		cloned[index].Aliases = append([]string(nil), source.Aliases...)
+		cloned[index].TokenHosts = append([]string(nil), source.TokenHosts...)
+	}
+	return cloned
+}
+
+func imageTarSources(sources []registry.Source) map[string]imagetar.Source {
+	mapped := make(map[string]imagetar.Source, len(sources))
+	for _, source := range sources {
+		item := imagetar.Source{
+			Endpoint:     source.Endpoint,
+			TokenHosts:   append([]string(nil), source.TokenHosts...),
+			AllowHTTP:    source.AllowHTTP,
+			AllowPrivate: source.AllowPrivate,
+		}
+		mapped[strings.ToLower(source.Name)] = item
+		for _, alias := range source.Aliases {
+			mapped[strings.ToLower(alias)] = item
+		}
+	}
+	return mapped
 }
 
 func lifecycleFailure(code pluginsdk.ErrorCode, message string) pluginsdk.LifecycleResponse {

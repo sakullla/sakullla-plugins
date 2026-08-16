@@ -1,8 +1,9 @@
-// Package registry implements the zero-configuration public Registry v2 data
-// plane for accelerator-sources.
+// Package registry implements the public Registry v2 data plane for
+// accelerator-sources.
 package registry
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,9 +37,10 @@ var (
 	digestPattern         = regexp.MustCompile(`^sha256:[a-fA-F0-9]{64}$`)
 )
 
-// Source is a repository-owned Registry mapping. Callers should use
-// DefaultSources in production. AllowPrivate exists only so deterministic
-// local fixtures can exercise the exact production handler.
+// Source is a Registry mapping. Production overlays come from
+// SourcesFromDocument, which copies TokenHosts and Aliases for known public
+// names. AllowHTTP and AllowPrivate exist only so deterministic local
+// fixtures can exercise the exact production handler.
 type Source struct {
 	Name         string
 	Aliases      []string
@@ -48,12 +50,13 @@ type Source struct {
 	AllowPrivate bool
 }
 
-// Options supplies infrastructure owned by the plugin binary. Sources is not
-// user configuration; an empty value installs the fixed product defaults.
+// Options supplies infrastructure owned by the plugin binary. An empty
+// Sources value installs DefaultSources, or the list decoded from Document.
 type Options struct {
 	Client   *http.Client
 	Resolver Resolver
 	Sources  []Source
+	Document []byte
 	Upstream *upstreamclient.Manager
 }
 
@@ -89,9 +92,90 @@ func mustSource(name string, rawURL string, aliases []string, tokenHosts []strin
 	return Source{Name: name, Aliases: aliases, Endpoint: endpoint, TokenHosts: tokenHosts}
 }
 
+type sourceDocumentEntry struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+}
+
+// SourcesFromDocument decodes a user overlay. Omitted or empty sources return
+// DefaultSources. Unknown fields or a non-https endpoint reject the entire
+// document so no partial list can be installed.
+func SourcesFromDocument(wire []byte) ([]Source, error) {
+	if len(wire) == 0 {
+		wire = []byte("{}")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(wire))
+	decoder.DisallowUnknownFields()
+	var document struct {
+		Sources []sourceDocumentEntry `json:"sources"`
+	}
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("accelerator-sources configuration: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("accelerator-sources configuration must contain one object")
+	}
+	if len(document.Sources) == 0 {
+		return DefaultSources(), nil
+	}
+	defaults := defaultSourcesByName()
+	sources := make([]Source, 0, len(document.Sources))
+	seen := make(map[string]struct{}, len(document.Sources))
+	for index, entry := range document.Sources {
+		source, err := sourceFromDocumentEntry(entry, defaults)
+		if err != nil {
+			return nil, fmt.Errorf("sources[%d]: %w", index, err)
+		}
+		keys := append([]string{source.Name}, source.Aliases...)
+		for _, key := range keys {
+			key = strings.ToLower(key)
+			if _, exists := seen[key]; exists {
+				return nil, fmt.Errorf("sources[%d]: duplicate registry alias %q", index, key)
+			}
+			seen[key] = struct{}{}
+		}
+		sources = append(sources, source)
+	}
+	return sources, nil
+}
+
+func defaultSourcesByName() map[string]Source {
+	defaults := DefaultSources()
+	index := make(map[string]Source, len(defaults))
+	for _, source := range defaults {
+		index[strings.ToLower(source.Name)] = source
+	}
+	return index
+}
+
+func sourceFromDocumentEntry(entry sourceDocumentEntry, defaults map[string]Source) (Source, error) {
+	name := strings.ToLower(strings.TrimSpace(entry.Name))
+	if name == "" {
+		return Source{}, errors.New("name is required")
+	}
+	endpoint, err := url.Parse(entry.Endpoint)
+	if err != nil {
+		return Source{}, errors.New("registry source requires https")
+	}
+	source := Source{Name: name, Endpoint: endpoint}
+	if known, found := defaults[name]; found {
+		source.Aliases = append([]string(nil), known.Aliases...)
+		source.TokenHosts = append([]string(nil), known.TokenHosts...)
+	}
+	if err := validateSource(&source); err != nil {
+		return Source{}, err
+	}
+	return source, nil
+}
+
 func NewHandler(options Options) (*Handler, error) {
 	if len(options.Sources) == 0 {
-		options.Sources = DefaultSources()
+		sources, err := SourcesFromDocument(options.Document)
+		if err != nil {
+			return nil, err
+		}
+		options.Sources = sources
 	}
 	manager := options.Upstream
 	if manager == nil {
