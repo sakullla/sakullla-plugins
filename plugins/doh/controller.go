@@ -15,18 +15,26 @@ import (
 	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
 )
 
+type ServiceFactory func(PluginConfig) (*Service, error)
+
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
+	NewService                                                 ServiceFactory
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 }
 
 type generationState struct {
-	config PluginConfig
-	once   sync.Once
+	config  PluginConfig
+	service *Service
+	once    sync.Once
 }
 
 func (value *generationState) close() {
-	value.once.Do(func() {})
+	value.once.Do(func() {
+		if value.service != nil {
+			_ = value.service.Close(context.Background())
+		}
+	})
 }
 
 type Controller struct {
@@ -138,8 +146,12 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
-	err := active.Use(request.Context(), func(_ context.Context, _ *generationState) error {
-		http.NotFound(writer, request)
+	err := active.Use(request.Context(), func(_ context.Context, state *generationState) error {
+		if state == nil || state.service == nil {
+			http.Error(writer, "provider generation is unavailable", http.StatusServiceUnavailable)
+			return nil
+		}
+		state.service.ServeHTTP(writer, request)
 		return nil
 	})
 	if err != nil {
@@ -155,7 +167,11 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	owned := &generationState{config: config}
+	service, err := controller.newService(config)
+	if err != nil {
+		return err
+	}
+	owned := &generationState{config: config, service: service}
 	handle, err := rpcplugin.BindHandle(generation, pluginsdk.PermissionHTTPOutbound, owned, controller.revokeState)
 	if err != nil {
 		owned.close()
@@ -214,6 +230,13 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 		instance.close()
 	}
 	return nil
+}
+
+func (controller *Controller) newService(config PluginConfig) (*Service, error) {
+	if controller.config.NewService != nil {
+		return controller.config.NewService(config)
+	}
+	return NewService(ConfigurationFromPlugin(config), RuntimeAdapters{})
 }
 
 func parsePluginConfig(wire []byte) (PluginConfig, error) {
