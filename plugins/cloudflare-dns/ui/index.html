@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cloudflare 域名 Token 映射</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="masthead">
+    <h1>Cloudflare 域名 Token 映射</h1>
+  </header>
+  <main>
+    {{if .Denied}}
+    <p id="mapping-denied" role="alert">无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
+    {{else}}
+    <p class="lede">按域名后缀绑定 Cloudflare DNS Token。保存后列表、详情和编辑框都不会回显 Token。未命中时由宿主环境变量全局 Token 兜底；本页不配置区域 Token，也不管理 DNS 记录。</p>
+    <section class="card" aria-labelledby="mapping-list-title">
+      <h2 id="mapping-list-title">已保存映射</h2>
+      <div id="mapping-list">
+        {{if .Mappings}}
+        <table>
+          <thead>
+            <tr>
+              <th>域名后缀</th>
+              <th>已配置</th>
+              <th>最近更新</th>
+              {{if or .CanWrite .CanRotate}}<th>操作</th>{{end}}
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Mappings}}
+            <tr data-suffix="{{.Suffix}}">
+              <td>{{.Suffix}}</td>
+              <td>{{if .Configured}}是{{else}}否{{end}}</td>
+              <td>{{.UpdatedAt}}</td>
+              {{if or $.CanWrite $.CanRotate}}
+              <td class="actions">
+                {{if $.CanWrite}}
+                <form class="inline" data-action="rename" data-suffix="{{.Suffix}}">
+                  <label>新后缀 <input name="suffix" required autocomplete="off"></label>
+                  <button type="submit">改后缀</button>
+                </form>
+                <form class="inline" data-action="delete" data-suffix="{{.Suffix}}">
+                  <button type="submit">删除</button>
+                </form>
+                {{end}}
+                {{if $.CanRotate}}
+                <form class="inline" data-action="rotate" data-suffix="{{.Suffix}}">
+                  <label>新 Token <input name="token" type="password" autocomplete="new-password" required></label>
+                  <button type="submit">轮换 Token</button>
+                </form>
+                {{end}}
+              </td>
+              {{end}}
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <p id="mapping-empty">还没有映射。</p>
+        {{end}}
+      </div>
+    </section>
+    {{if .CanWrite}}
+    <section class="card" id="mapping-create" aria-labelledby="mapping-create-title">
+      <h2 id="mapping-create-title">新增映射</h2>
+      <form id="create-form" data-action="create">
+        <label>域名后缀 <input name="suffix" required autocomplete="off"></label>
+        <label>Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
+        <button type="submit">保存</button>
+      </form>
+    </section>
+    {{end}}
+    <p id="mapping-status" role="status" hidden></p>
+    {{end}}
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

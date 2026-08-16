@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,6 +87,16 @@ func (controller *Controller) Use(ctx context.Context, function func(context.Con
 		return ErrRevoked
 	}
 	return service.Use(ctx, function)
+}
+
+func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	err := controller.Use(request.Context(), func(_ context.Context, service *Service) error {
+		service.ServeHTTP(writer, request)
+		return nil
+	})
+	if err != nil {
+		http.Error(writer, "Cloudflare DNS mapping page is unavailable", http.StatusServiceUnavailable)
+	}
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, wire []byte) error {
