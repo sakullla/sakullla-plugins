@@ -289,7 +289,8 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 	if rolloutBusy(record.Value, true, r.now()) {
 		return ErrReconcilePending
 	}
-	rev := record.Value.History[len(record.Value.History)-1]
+	current := record.Value
+	rev := current.History[len(current.History)-1]
 	if rev.InstanceID == "" || rev.Image == "" || rev.RuleRef == "" {
 		app := App{ID: appID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
 		if err := app.Validate(); err != nil {
@@ -298,24 +299,23 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 		}
 		return r.publish(ctx, app, rev.ImageDigest)
 	}
-	intent := record.Value
-	intent.Phase = PhaseCutover
-	intent.DesiredRuleTarget = rev.InstanceID
-	leased, err := r.Store.AcquireLease(ctx, appID, record.Version, intent, r.now().Add(r.leaseDuration()))
+	// Prior*/PendingInstance must name the rollback target as pending so a later
+	// Reconcile cannot treat the still-serving instance as disposable.
+	leased, err := r.Store.AcquireLease(ctx, appID, record.Version, historicalRollbackIntent(current, rev), r.now().Add(r.leaseDuration()))
 	if err != nil {
 		return ErrReconcilePending
 	}
 	r.progress(App{ID: appID}, PhaseCutover)
 	if err := r.Executor.Cutover(ctx, leased.Value.FencingToken, rev.RuleRef, rev.InstanceID); err != nil {
-		return r.rollback(leased, record.Value, true, "", true, err)
+		return r.abortHistoricalRollback(leased, current, false, err)
 	}
-	if leased.Value.InstanceID != "" && leased.Value.InstanceID != rev.InstanceID {
+	if current.InstanceID != "" && current.InstanceID != rev.InstanceID {
 		r.progress(App{ID: appID}, PhaseDraining)
-		if err := r.Executor.Drain(ctx, leased.Value.FencingToken, leased.Value.InstanceID); err != nil {
-			return r.rollback(leased, record.Value, true, "", true, err)
+		if err := r.Executor.Drain(ctx, leased.Value.FencingToken, current.InstanceID); err != nil {
+			return r.abortHistoricalRollback(leased, current, true, err)
 		}
 	}
-	history := cloneRevisions(record.Value.History)
+	history := cloneRevisions(current.History)
 	if n := len(history); n > 0 {
 		history = history[:n-1]
 	}
@@ -333,6 +333,69 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 	}
 	audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "succeeded", Detail: appID})
 	return nil
+}
+
+func historicalRollbackIntent(current Deployment, rev DeploymentRevision) Deployment {
+	intent := current
+	intent.Phase = PhaseCutover
+	intent.PendingInstance = rev.InstanceID
+	intent.DesiredRuleTarget = rev.InstanceID
+	intent.PriorInstance = current.InstanceID
+	intent.PriorImage = current.Image
+	intent.PriorGeneration = current.Generation
+	intent.PriorRuleRef = current.RuleRef
+	intent.PriorRuleTarget = current.RuleTarget
+	intent.PriorDigest = current.ImageDigest
+	intent.PriorAbsent = false
+	intent.Image = rev.Image
+	intent.RuleRef = rev.RuleRef
+	intent.Generation = rev.Generation
+	intent.ImageDigest = rev.ImageDigest
+	intent.AvailableDigest = ""
+	return intent
+}
+
+func rollbackTargetPending(value, original Deployment) bool {
+	return value.PendingInstance != "" && value.PendingInstance != original.InstanceID &&
+		value.PriorInstance == original.InstanceID && value.PriorImage == original.Image &&
+		value.PriorRuleRef == original.RuleRef
+}
+
+func (r Rollout) abortHistoricalRollback(record DeploymentRecord, original Deployment, routeMayPending bool, cause error) error {
+	if rollbackTargetPending(record.Value, original) {
+		return r.rollback(record, original, true, record.Value.PendingInstance, routeMayPending, cause)
+	}
+	return r.restoreActive(record, original, routeMayPending, cause)
+}
+
+func (r Rollout) restoreActive(record DeploymentRecord, original Deployment, routeMayPending bool, cause error) error {
+	target := original.RuleTarget
+	if target == "" {
+		target = original.InstanceID
+	}
+	if routeMayPending && original.RuleRef != "" && target != "" {
+		ctx, cancel := r.cleanupContext()
+		err := r.Executor.Cutover(ctx, record.Value.FencingToken, original.RuleRef, target)
+		cancel()
+		if err != nil {
+			cause = errors.Join(cause, err)
+		}
+	}
+	restored := original
+	restored.AppID = record.Value.AppID
+	restored.Phase = PhaseActive
+	restored.FencingToken = record.Value.FencingToken
+	restored.Lease = ""
+	restored.LeaseUntil = time.Time{}
+	restored.PendingInstance = ""
+	restored.DesiredRuleTarget = ""
+	ctx, cancel := r.cleanupContext()
+	_, persistErr := r.Store.CompareAndSwap(ctx, restored.AppID, record.Version, record.Value.FencingToken, restored)
+	cancel()
+	if persistErr != nil {
+		return r.fail(errors.Join(cause, persistErr))
+	}
+	return r.fail(cause)
 }
 
 func (r Rollout) HealthRecover(ctx context.Context, app App) error {

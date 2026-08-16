@@ -77,6 +77,63 @@ func TestDockerAutoUpdateDisabledOnlyProjectsNewVersionUntilConfirm(t *testing.T
 	}
 }
 
+func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
+	publish := func(t *testing.T) (*dockerapp.DeploymentStore, *rolloutFake, dockerapp.Rollout, dockerapp.App, dockerapp.Deployment) {
+		t.Helper()
+		store, fake, rollout, app, _ := updateHarness(t, "")
+		if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+			t.Fatal(err)
+		}
+		published, ok := store.Get(app.ID)
+		if !ok || published.InstanceID != "new" || published.Image == "" || published.RuleRef == "" {
+			t.Fatalf("precondition published=%#v ok=%v", published, ok)
+		}
+		fake.calls = nil
+		return store, fake, rollout, app, published
+	}
+
+	t.Run("cutover-failure", func(t *testing.T) {
+		store, fake, rollout, app, published := publish(t)
+		fake.failRestore = true
+		err := rollout.Rollback(context.Background(), app.ID)
+		got, _ := store.Get(app.ID)
+		if err == nil || !errors.Is(err, dockerapp.ErrOperationFailed) || strings.Contains(err.Error(), "update-secret") {
+			t.Fatalf("rollback cutover err=%v", err)
+		}
+		if got.InstanceID != published.InstanceID || got.Image != published.Image || got.RuleRef != published.RuleRef || got.RuleTarget != published.RuleTarget || got.Phase != dockerapp.PhaseActive {
+			t.Fatalf("cutover failure dropped current: %#v", got)
+		}
+		if got.Image == "" || got.RuleRef == "" {
+			t.Fatalf("cutover failure persisted empty active: %#v", got)
+		}
+		if contains(fake.calls, "remove:new") || contains(fake.calls, "drain:new") {
+			t.Fatalf("cutover failure touched serving instance: %v", fake.calls)
+		}
+	})
+
+	t.Run("drain-failure", func(t *testing.T) {
+		store, fake, rollout, app, published := publish(t)
+		fake.fail = "drain"
+		err := rollout.Rollback(context.Background(), app.ID)
+		got, _ := store.Get(app.ID)
+		if err == nil || !errors.Is(err, dockerapp.ErrOperationFailed) || strings.Contains(err.Error(), "update-secret") {
+			t.Fatalf("rollback drain err=%v", err)
+		}
+		if got.InstanceID != published.InstanceID || got.Image != published.Image || got.RuleRef != published.RuleRef || got.RuleTarget != published.RuleTarget || got.Phase != dockerapp.PhaseActive {
+			t.Fatalf("drain failure dropped current: %#v", got)
+		}
+		if got.Image == "" || got.RuleRef == "" {
+			t.Fatalf("drain failure persisted empty active: %#v", got)
+		}
+		if contains(fake.calls, "remove:new") {
+			t.Fatalf("drain failure removed serving instance: %v", fake.calls)
+		}
+		if !contains(fake.calls, "cutover:new") {
+			t.Fatalf("drain failure did not restore current rule: %v", fake.calls)
+		}
+	})
+}
+
 func TestDockerHealthRecoverRepublishesAndPreservesOldOnFailure(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		store, fake, rollout, app, _ := updateHarness(t, "")
