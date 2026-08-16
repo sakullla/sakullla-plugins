@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/sourceproxy"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/streaming"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/upstream"
 )
@@ -191,11 +190,6 @@ func (handler *Handler) prepare(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	authority, err := sourceproxy.ExternalAuthority(request)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "trusted external authority is required")
-		return
-	}
 	var tokenBytes [24]byte
 	if _, err := rand.Read(tokenBytes[:]); err != nil {
 		writeError(writer, http.StatusInternalServerError, "download token unavailable")
@@ -211,7 +205,9 @@ func (handler *Handler) prepare(writer http.ResponseWriter, request *http.Reques
 	}
 	handler.plans[token] = downloadPlan{Images: append([]string(nil), payload.Images...), Platform: payload.Platform, Expires: handler.upstream.Now().Add(planTTL)}
 	handler.plansMu.Unlock()
-	download := strings.TrimSuffix(authority.String(), "/") + "/api/offline/" + token
+	// Keep the prepared URL same-origin. The public authority can be rewritten
+	// by any number of reverse proxies between prepare and download.
+	download := "/api/offline/" + token
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]string{"download_url": download, "expires_at": handler.upstream.Now().Add(planTTL).UTC().Format(time.RFC3339)})
 }

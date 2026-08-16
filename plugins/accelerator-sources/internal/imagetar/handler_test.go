@@ -119,7 +119,7 @@ func TestOfflinePlatformSelectionBatchTarAndDigest(t *testing.T) {
 	}
 }
 
-func TestOfflinePreparedDownloadUsesTrustedAuthorityAndOneTimeToken(t *testing.T) {
+func TestOfflinePreparedDownloadUsesSameOriginPath(t *testing.T) {
 	handler, manager := newOfflineFixture(t, "http://127.0.0.1:1")
 	defer manager.Close()
 	request := httptest.NewRequest(http.MethodPost, "/api/offline/prepare", strings.NewReader(`{"image":"alpine:latest","platform":"linux/amd64"}`))
@@ -132,13 +132,13 @@ func TestOfflinePreparedDownloadUsesTrustedAuthorityAndOneTimeToken(t *testing.T
 		t.Fatalf("prepare failed: %d %s", recorder.Code, recorder.Body.String())
 	}
 	var payload map[string]string
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || !strings.HasPrefix(payload["download_url"], "https://mirror.example.com/api/offline/") {
-		t.Fatalf("untrusted download URL: err=%v payload=%v", err, payload)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || !strings.HasPrefix(payload["download_url"], "/api/offline/") {
+		t.Fatalf("cross-origin download URL: err=%v payload=%v", err, payload)
 	}
-	missing := httptest.NewRecorder()
-	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodPost, "/api/offline/prepare", strings.NewReader(`{"image":"alpine"}`)))
-	if missing.Code != http.StatusBadRequest {
-		t.Fatalf("missing authority accepted: %d", missing.Code)
+	download := httptest.NewRecorder()
+	handler.ServeHTTP(download, httptest.NewRequest(http.MethodHead, payload["download_url"], nil))
+	if download.Code == http.StatusNotFound {
+		t.Fatalf("prepared same-origin URL was not routed to its download plan: %s", download.Body.String())
 	}
 }
 
