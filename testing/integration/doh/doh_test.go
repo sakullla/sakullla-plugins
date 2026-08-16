@@ -170,6 +170,34 @@ func TestDoHConfiguredUpstreamsOverrideDefault(t *testing.T) {
 	}
 }
 
+func TestDoHBareIPUpstreamUsesUDP(t *testing.T) {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		buffer := make([]byte, doh.MaxDNSResponseBytes)
+		read, addr, readErr := conn.ReadFrom(buffer)
+		if readErr != nil {
+			return
+		}
+		_, _ = conn.WriteTo(positiveResponse(buffer[:read], 30), addr)
+	}()
+	host, port, _ := net.SplitHostPort(conn.LocalAddr().String())
+	service, err := doh.NewService(doh.ConfigurationFromPlugin(doh.PluginConfig{
+		Upstreams: host + ":" + port,
+	}), doh.RuntimeAdapters{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := dnsQuery(11, "bare-ip.example", 1)
+	response, err := service.Serve(context.Background(), validHTTPRequest("POST", query, ""))
+	if err != nil || response.Status != "200" || binary.BigEndian.Uint16(response.Body[:2]) != 11 {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+}
+
 func TestDoHNoHealthyUpstreamIs5xxNotSuccessDNS(t *testing.T) {
 	var calls atomic.Int32
 	controller := activateController(t, []byte(`{"upstreams":"https://down.example/dns-query"}`), func(request doh.ResolveRequest) ([]byte, error) {
