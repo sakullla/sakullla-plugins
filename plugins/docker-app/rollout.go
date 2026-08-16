@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +19,12 @@ type Deployment struct {
 	LeaseUntil                                                time.Time
 	FencingToken                                              uint64
 	PriorAbsent                                               bool
+	ImageDigest, AvailableDigest, PriorDigest                 string
+	History                                                   []DeploymentRevision
+}
+
+type DeploymentRevision struct {
+	InstanceID, Image, RuleRef, RuleTarget, Generation, ImageDigest string
 }
 
 type RolloutPhase string
@@ -31,6 +38,12 @@ const (
 	PhaseActive         RolloutPhase = "active"
 	PhaseCleanupPending RolloutPhase = "cleanup-pending"
 	PhaseRouteReconcile RolloutPhase = "route-reconcile"
+
+	AppStatusUpdateAvailable AppStatus = "update-available"
+	AppStatusPublishing      AppStatus = "publishing"
+	AppStatusUnhealthy       AppStatus = "unhealthy"
+
+	DefaultAutoUpdate = true
 )
 
 const DefaultCleanupTimeout = time.Second
@@ -139,7 +152,166 @@ type Rollout struct {
 	Clock                         func() time.Time
 }
 
+// UpdatePolicy decides whether a newer image digest is published automatically.
+// A nil AutoUpdate means DefaultAutoUpdate (true).
+type UpdatePolicy struct {
+	AutoUpdate *bool
+}
+
+func (policy UpdatePolicy) Automatic() bool {
+	if policy.AutoUpdate == nil {
+		return DefaultAutoUpdate
+	}
+	return *policy.AutoUpdate
+}
+
+func AutoUpdatePolicy(enabled bool) UpdatePolicy {
+	return UpdatePolicy{AutoUpdate: &enabled}
+}
+
+type ImageObservation struct {
+	Digest    string
+	Unhealthy bool
+}
+
+type RolloutNotice struct {
+	UpdateAvailable bool
+	Digest          string
+}
+
+func ProjectUpdate(policy UpdatePolicy, currentDigest, latestDigest string) RolloutNotice {
+	if policy.Automatic() || latestDigest == "" || currentDigest == "" || latestDigest == currentDigest {
+		return RolloutNotice{}
+	}
+	return RolloutNotice{UpdateAvailable: true, Digest: latestDigest}
+}
+
+func ProjectManagedStatus(running, unhealthy bool, deployment Deployment, policy UpdatePolicy, latestDigest string) AppStatus {
+	if deployment.Phase != "" && deployment.Phase != PhaseActive {
+		return AppStatusPublishing
+	}
+	if unhealthy {
+		return AppStatusUnhealthy
+	}
+	digest := deployment.AvailableDigest
+	if digest == "" {
+		digest = latestDigest
+	}
+	if !policy.Automatic() && digest != "" && deployment.ImageDigest != "" && digest != deployment.ImageDigest {
+		return AppStatusUpdateAvailable
+	}
+	if running {
+		return AppStatusRunning
+	}
+	return AppStatusStopped
+}
+
 func (r Rollout) Update(ctx context.Context, app App) error {
+	return r.publish(ctx, app, "")
+}
+
+func (r Rollout) Observe(ctx context.Context, app App, policy UpdatePolicy, observed ImageObservation) (RolloutNotice, error) {
+	if err := r.ready(&app); err != nil {
+		return RolloutNotice{}, err
+	}
+	record, existed, err := r.Store.Load(ctx, app.ID)
+	if err != nil {
+		return RolloutNotice{}, safeFailure(ErrOperationFailed, err)
+	}
+	if rolloutBusy(record.Value, existed, r.now()) {
+		return RolloutNotice{}, ErrReconcilePending
+	}
+	if observed.Unhealthy {
+		if policy.Automatic() && observed.Digest != "" && (!existed || observed.Digest != record.Value.ImageDigest) {
+			return RolloutNotice{}, r.publish(ctx, app, observed.Digest)
+		}
+		return RolloutNotice{}, r.RecoverHealth(ctx, app)
+	}
+	notice := ProjectUpdate(policy, record.Value.ImageDigest, observed.Digest)
+	if !existed {
+		if policy.Automatic() && observed.Digest != "" {
+			return RolloutNotice{}, r.publish(ctx, app, observed.Digest)
+		}
+		return notice, nil
+	}
+	if record.Value.ImageDigest == "" && observed.Digest != "" {
+		return RolloutNotice{}, r.rememberDigest(ctx, record, observed.Digest, "")
+	}
+	if observed.Digest == "" || observed.Digest == record.Value.ImageDigest {
+		if record.Value.AvailableDigest != "" {
+			return RolloutNotice{}, r.rememberDigest(ctx, record, record.Value.ImageDigest, "")
+		}
+		return RolloutNotice{}, nil
+	}
+	if !policy.Automatic() {
+		if err := r.rememberDigest(ctx, record, record.Value.ImageDigest, observed.Digest); err != nil {
+			return RolloutNotice{}, err
+		}
+		audit(r.Auditor, AuditRecord{Action: "rollout.available", Outcome: "projected", Detail: app.ID})
+		return notice, nil
+	}
+	return RolloutNotice{}, r.publish(ctx, app, observed.Digest)
+}
+
+func (r Rollout) Confirm(ctx context.Context, app App) error {
+	if err := r.ready(&app); err != nil {
+		return err
+	}
+	record, ok, err := r.Store.Load(ctx, app.ID)
+	if err != nil {
+		return safeFailure(ErrOperationFailed, err)
+	}
+	if !ok || record.Value.AvailableDigest == "" {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return ErrInvalidPreview
+	}
+	return r.publish(ctx, app, record.Value.AvailableDigest)
+}
+
+func (r Rollout) Rollback(ctx context.Context, appID string) error {
+	if err := r.ready(nil); err != nil {
+		return err
+	}
+	record, ok, err := r.Store.Load(ctx, appID)
+	if err != nil {
+		return safeFailure(ErrOperationFailed, err)
+	}
+	if !ok || len(record.Value.History) == 0 {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return ErrInvalidPreview
+	}
+	if rolloutBusy(record.Value, true, r.now()) {
+		return ErrReconcilePending
+	}
+	rev := record.Value.History[len(record.Value.History)-1]
+	app := App{ID: appID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
+	if err := app.Validate(); err != nil {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return safeFailure(ErrInvalidPreview, err)
+	}
+	return r.publish(ctx, app, rev.ImageDigest)
+}
+
+func (r Rollout) RecoverHealth(ctx context.Context, app App) error {
+	if err := r.ready(&app); err != nil {
+		return err
+	}
+	record, existed, err := r.Store.Load(ctx, app.ID)
+	if err != nil {
+		return safeFailure(ErrOperationFailed, err)
+	}
+	if rolloutBusy(record.Value, existed, r.now()) {
+		return ErrReconcilePending
+	}
+	digest := ""
+	if existed && record.Value.ImageDigest != "" {
+		app.Image = pinImageDigest(app.Image, record.Value.ImageDigest)
+		digest = record.Value.ImageDigest
+	}
+	return r.publish(ctx, app, digest)
+}
+
+func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if r.Auditor == nil {
 		return ErrAuditRequired
 	}
@@ -177,6 +349,9 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 		PriorInstance:     prior.Value.InstanceID,
 		PriorAbsent:       !existed,
 		DesiredRuleTarget: "", // no candidate exists until Start succeeds
+		ImageDigest:       digest,
+		PriorDigest:       prior.Value.ImageDigest,
+		History:           cloneRevisions(prior.Value.History),
 	}
 	record, err := r.Store.AcquireLease(ctx, app.ID, prior.Version, pulling, r.now().Add(r.leaseDuration()))
 	if err != nil {
@@ -217,7 +392,7 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 			return r.rollback(record, prior.Value, true, pending, true, err)
 		}
 	}
-	active := Deployment{AppID: app.ID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken}
+	active := Deployment{AppID: app.ID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken, ImageDigest: digest, History: publishedHistory(record.Value)}
 	if _, err = r.Store.CompareAndSwap(ctx, app.ID, record.Version, record.Value.FencingToken, active); err != nil {
 		return ErrReconcilePending
 	}
@@ -331,7 +506,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		if err != nil || !post.Instances[pending] || post.RuleTarget != pending {
 			return r.release(record, ErrReconcilePending)
 		}
-		active := Deployment{AppID: v.AppID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence}
+		active := Deployment{AppID: v.AppID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence, ImageDigest: v.ImageDigest, History: publishedHistory(v)}
 		ctx, cancel = r.cleanupContext()
 		_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, active)
 		cancel()
@@ -397,6 +572,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	prior.InstanceID, prior.Image, prior.Generation, prior.RuleRef = priorInstance, v.PriorImage, v.PriorGeneration, v.PriorRuleRef
 	prior.Phase, prior.RuleTarget, prior.PendingInstance, prior.DesiredRuleTarget, prior.PriorRuleTarget, prior.LastFailure, prior.Lease, prior.LeaseUntil, prior.PriorAbsent = PhaseActive, v.PriorRuleTarget, "", "", "", "", "", time.Time{}, false
 	prior.PriorImage, prior.PriorGeneration, prior.PriorRuleRef, prior.PriorInstance = "", "", "", ""
+	prior.ImageDigest, prior.AvailableDigest, prior.PriorDigest = v.PriorDigest, "", ""
 	ctx, cancel = r.cleanupContext()
 	_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, prior)
 	cancel()
@@ -436,6 +612,71 @@ func (r Rollout) progress(app App, phase RolloutPhase) {
 func (r Rollout) fail(err error) error {
 	audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 	return safeFailure(ErrOperationFailed, err)
+}
+
+func (r Rollout) ready(app *App) error {
+	if r.Auditor == nil {
+		return ErrAuditRequired
+	}
+	if app != nil {
+		if err := app.Validate(); err != nil {
+			audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+			return safeFailure(ErrInvalidPreview, err)
+		}
+	}
+	if r.Store == nil || r.Executor == nil {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, current, available string) error {
+	v := record.Value
+	if v.ImageDigest == current && v.AvailableDigest == available {
+		return nil
+	}
+	v.ImageDigest, v.AvailableDigest = current, available
+	if _, err := r.Store.CompareAndSwap(ctx, v.AppID, record.Version, v.FencingToken, v); err != nil {
+		return ErrReconcilePending
+	}
+	return nil
+}
+
+func rolloutBusy(value Deployment, existed bool, now time.Time) bool {
+	return existed && ((value.Phase != "" && value.Phase != PhaseActive) || (value.Lease != "" && value.LeaseUntil.After(now)))
+}
+
+func publishedHistory(value Deployment) []DeploymentRevision {
+	if value.PriorAbsent || (value.PriorInstance == "" && value.PriorImage == "") {
+		return cloneRevisions(value.History)
+	}
+	return []DeploymentRevision{{
+		InstanceID:  value.PriorInstance,
+		Image:       value.PriorImage,
+		RuleRef:     value.PriorRuleRef,
+		RuleTarget:  value.PriorRuleTarget,
+		Generation:  value.PriorGeneration,
+		ImageDigest: value.PriorDigest,
+	}}
+}
+
+func cloneRevisions(history []DeploymentRevision) []DeploymentRevision {
+	if len(history) == 0 {
+		return nil
+	}
+	return append([]DeploymentRevision(nil), history...)
+}
+
+func pinImageDigest(image, digest string) string {
+	if digest == "" || image == "" || strings.Contains(image, "@") {
+		return image
+	}
+	pinned := image + "@" + digest
+	if !boundedText(pinned, 512) {
+		return image
+	}
+	return pinned
 }
 
 type ResourceOwner string
