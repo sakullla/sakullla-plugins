@@ -46,7 +46,7 @@ func buildIPPolicyArtifact(t *testing.T) []byte {
 	t.Helper()
 	return cachedPolicyArtifact(t, &ipPolicyArtifactCache, policyArtifactSpec{
 		packageName: "sakullla-ip-policy",
-		target:      "wasm32v1-none",
+		target:      "wasm32-unknown-unknown",
 		fileName:    "sakullla_ip_policy.wasm",
 	})
 }
@@ -55,7 +55,7 @@ func buildRateLimitArtifact(t *testing.T) []byte {
 	t.Helper()
 	return cachedPolicyArtifact(t, &rateLimitArtifactCache, policyArtifactSpec{
 		packageName: "sakullla-rate-limit",
-		target:      "wasm32v1-none",
+		target:      "wasm32-unknown-unknown",
 		fileName:    "sakullla_rate_limit.wasm",
 	})
 }
