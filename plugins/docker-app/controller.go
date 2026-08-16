@@ -226,6 +226,7 @@ func cloneApps(apps []App) []App {
 	result := append([]App(nil), apps...)
 	for index := range result {
 		result[index].SecretRefs = append([]string(nil), result[index].SecretRefs...)
+		result[index].AutoUpdate = cloneBool(result[index].AutoUpdate)
 	}
 	return result
 }

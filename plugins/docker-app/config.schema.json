@@ -9,7 +9,8 @@
       "image": {"type": "string", "minLength": 1, "maxLength": 512},
       "rule_ref": {"type": "string", "minLength": 1, "maxLength": 128},
       "generation": {"type": "string", "minLength": 1, "maxLength": 128},
-      "secret_refs": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}}
+      "secret_refs": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+      "auto_update": {"type": "boolean"}
     }} },
     "registry_mirror": {"type": "string", "maxLength": 512, "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$"}
   }

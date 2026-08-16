@@ -252,6 +252,7 @@ func StopManaged(ctx context.Context, app App, executor StopExecutor, auditor Au
 
 func cloneApp(app App) App {
 	app.SecretRefs = append([]string(nil), app.SecretRefs...)
+	app.AutoUpdate = cloneBool(app.AutoUpdate)
 	return app
 }
 

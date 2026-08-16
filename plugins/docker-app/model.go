@@ -34,6 +34,7 @@ type App struct {
 	RuleRef    string   `json:"rule_ref"`
 	Generation string   `json:"generation"`
 	SecretRefs []string `json:"secret_refs,omitempty"`
+	AutoUpdate *bool    `json:"auto_update,omitempty"`
 }
 
 func (app App) Validate() error {
@@ -139,6 +140,14 @@ func validID(value string) bool {
 
 func boundedText(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 func sortedUnique(values []string, maximum int) ([]string, error) {
