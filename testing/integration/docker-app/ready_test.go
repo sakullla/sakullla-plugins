@@ -1,0 +1,112 @@
+package dockerapp_test
+
+import (
+	"strings"
+	"testing"
+
+	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
+)
+
+type installSpy struct{ called bool }
+
+func (spy *installSpy) Install() error {
+	spy.called = true
+	return nil
+}
+
+func TestDockerReadyInstalledProjectsEngineReady(t *testing.T) {
+	installer := &installSpy{}
+	got, err := dockerapp.ProjectEngineReady(dockerapp.EngineObservation{Installed: true, Version: "27.1.1"}, []byte(`{"apps":[],"registry_mirror":"https://mirror.example"}`), installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Status.Ready || got.Status.Version != "27.1.1" || got.Status.RequestsInstall() {
+		t.Fatalf("ready = %#v", got.Status)
+	}
+	if got.Command.Command != "" || got.Command.DaemonJSON != "" {
+		t.Fatalf("installed engine still projected an install command: %#v", got.Command)
+	}
+	if installer.called {
+		t.Fatal("installed observation invoked install action")
+	}
+}
+
+func TestDockerReadyMissingEngineDoesNotCallInstallAction(t *testing.T) {
+	installer := &installSpy{}
+	got, err := dockerapp.ProjectEngineReady(dockerapp.EngineObservation{}, []byte(`{"apps":[]}`), installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Ready || got.Status.Version != "" || got.Status.RequestsInstall() {
+		t.Fatalf("missing engine projected ready: %#v", got.Status)
+	}
+	if got.Command.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command.Command, "get.docker.com") {
+		t.Fatalf("command = %#v", got.Command)
+	}
+	if strings.Contains(got.Command.Command, "registry-mirrors") || got.Command.DaemonJSON != "" {
+		t.Fatalf("empty mirror leaked registry-mirrors: %#v", got.Command)
+	}
+	if installer.called {
+		t.Fatal("missing engine invoked install action")
+	}
+}
+
+func TestDockerInstallCommandOmitsRegistryMirrorsWithoutAccelerator(t *testing.T) {
+	for _, document := range [][]byte{
+		[]byte(`{"apps":[]}`),
+		[]byte(`{"apps":[],"registry_mirror":""}`),
+	} {
+		got, err := dockerapp.InstallCommandForDocument(document)
+		if err != nil {
+			t.Fatalf("document %s err=%v", document, err)
+		}
+		if got.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command, "get.docker.com") {
+			t.Fatalf("document %s command = %#v", document, got)
+		}
+		if strings.Contains(got.Command, "registry-mirrors") || strings.Contains(got.DaemonJSON, "registry-mirrors") || got.DaemonJSON != "" {
+			t.Fatalf("document %s leaked registry-mirrors: %#v", document, got)
+		}
+	}
+}
+
+func TestDockerInstallCommandIncludesHTTPSRegistryMirror(t *testing.T) {
+	const mirror = "https://mirror.example"
+	got, err := dockerapp.InstallCommandForDocument([]byte(`{"apps":[],"registry_mirror":"https://mirror.example"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Command != dockerapp.OfficialDockerInstallCommand || !strings.Contains(got.Command, "get.docker.com") {
+		t.Fatalf("command = %#v", got)
+	}
+	if strings.Contains(got.Command, "registry-mirrors") {
+		t.Fatalf("official script included registry-mirrors: %#v", got)
+	}
+	if !strings.Contains(got.DaemonJSON, "registry-mirrors") || !strings.Contains(got.DaemonJSON, mirror) {
+		t.Fatalf("daemon suggestion missing %s: %#v", mirror, got)
+	}
+}
+
+func TestDockerRegistryMirrorInvalidOverlayIsRejected(t *testing.T) {
+	installer := &installSpy{}
+	for _, document := range []string{
+		`{"apps":[],"registry_mirror":"http://insecure.example"}`,
+		`{"apps":[],"registry_mirror":"ftp://mirror.example"}`,
+		`{"apps":[],"registry_mirror":"https://user:pass@mirror.example"}`,
+		`{"apps":[],"registry_mirror":"https://mirror.example?q=1"}`,
+		`{"apps":[],"registry_mirror":"https://ok.example","extra":true}`,
+		`{"registry_mirror":"https://ok.example"}`,
+	} {
+		if _, err := dockerapp.InstallCommandForDocument([]byte(document)); err == nil {
+			t.Fatalf("document %s was accepted", document)
+		}
+		if _, err := dockerapp.ParseConfiguration([]byte(document)); err == nil {
+			t.Fatalf("parse %s was accepted", document)
+		}
+		if _, err := dockerapp.ProjectEngineReady(dockerapp.EngineObservation{}, []byte(document), installer); err == nil {
+			t.Fatalf("ready document %s was accepted", document)
+		}
+	}
+	if installer.called {
+		t.Fatal("rejected overlay invoked install action")
+	}
+}

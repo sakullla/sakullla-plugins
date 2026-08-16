@@ -3,19 +3,24 @@
 package dockerapp
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"sort"
 	"strings"
 )
 
 const (
-	PluginID           = "docker-app"
-	PluginVersion      = "0.1.0"
-	MaxApps            = 128
-	MaxDiscoveries     = 512
-	MaxComposeServices = 128
-	MaxCollectionItems = 256
+	PluginID                     = "docker-app"
+	PluginVersion                = "0.1.0"
+	MaxApps                      = 128
+	MaxDiscoveries               = 512
+	MaxComposeServices           = 128
+	MaxCollectionItems           = 256
+	OfficialDockerInstallCommand = "curl -fsSL https://get.docker.com | sh"
 )
 
 var (
@@ -51,10 +56,19 @@ func (app App) Validate() error {
 }
 
 type Configuration struct {
-	Apps []App `json:"apps"`
+	Apps           []App  `json:"apps"`
+	RegistryMirror string `json:"registry_mirror,omitempty"`
+}
+
+type EngineStatus struct {
+	Ready   bool
+	Version string
 }
 
 func (configuration Configuration) Validate() error {
+	if err := validateRegistryMirror(configuration.RegistryMirror); err != nil {
+		return err
+	}
 	if len(configuration.Apps) > MaxApps {
 		return fmt.Errorf("%w: apps maximum is %d", ErrBoundExceeded, MaxApps)
 	}
@@ -67,6 +81,63 @@ func (configuration Configuration) Validate() error {
 			return errors.New("app id is duplicated")
 		}
 		seen[app.ID] = struct{}{}
+	}
+	return nil
+}
+
+// ParseConfiguration loads one overlay document. Any unknown field, missing
+// apps, or invalid registry_mirror rejects the whole document.
+func ParseConfiguration(wire []byte) (Configuration, error) {
+	if len(wire) > MaxConfigBytes {
+		return Configuration{}, fmt.Errorf("%w: config exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(wire))
+	decoder.DisallowUnknownFields()
+	var document struct {
+		Apps           *[]App `json:"apps"`
+		RegistryMirror string `json:"registry_mirror"`
+	}
+	if err := decoder.Decode(&document); err != nil {
+		return Configuration{}, fmt.Errorf("config JSON is invalid: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Configuration{}, errors.New("config must contain one JSON document")
+	}
+	if document.Apps == nil {
+		return Configuration{}, errors.New("config requires apps")
+	}
+	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror}
+	if err := configuration.Validate(); err != nil {
+		return Configuration{}, err
+	}
+	return configuration, nil
+}
+
+// ProjectEngine maps a host-supplied observation to readiness. It never
+// requests an install action; an absent engine only yields Ready=false.
+func ProjectEngine(observation EngineObservation) EngineStatus {
+	if !observation.Installed {
+		return EngineStatus{}
+	}
+	return EngineStatus{Ready: true, Version: observation.Version}
+}
+
+func (EngineStatus) RequestsInstall() bool { return false }
+
+func validateRegistryMirror(value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > 512 || strings.ContainsAny(value, "\x00\r\n") {
+		return errors.New("registry_mirror is invalid")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Opaque != "" {
+		return errors.New("registry_mirror must be an https URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("registry_mirror contains unsupported components")
 	}
 	return nil
 }
