@@ -20,9 +20,11 @@ artifacts:
     goarch: amd64
 extension_points:
   - container.provider
+  - http.backend-provider
 permissions:
-  - name: container.read
-  - name: container.manage
+  - name: container.compose
+  - name: http.rule
+  - name: ui.dynamic
   - name: event.emit
   - name: service.revocable-resource-handle
 config_schema: config.schema.json

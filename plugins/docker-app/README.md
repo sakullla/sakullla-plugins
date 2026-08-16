@@ -15,6 +15,7 @@ transaction: controller-owned Commit runs only after registration, and its
 non-blocking Abort compensates generation revoke or deadline failure.
 
 The canonical `nre:rpc/v1` manifest and executable support a CI handshake
-self-check. Normal startup fails closed because the public SDK currently lacks
-typed Docker, Compose, HTTP-rule, and dynamic UI handles; no private Host wire
-contract substitutes for them.
+self-check. Permissions and required grants are the public handle names
+`container.compose`, `http.rule`, and `ui.dynamic`. Normal startup and
+operational actions fail closed when those handles are not granted; no private
+Host wire contract substitutes for them.

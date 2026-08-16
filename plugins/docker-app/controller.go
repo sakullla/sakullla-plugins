@@ -101,7 +101,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:   []string{"docker-app.business-model"},
-		RequiredGrants: []string{"docker-compose", "dynamic-ui", "http-rule"},
+		RequiredGrants: []string{"container.compose", "http.rule", "ui.dynamic"},
 		Timeouts:       rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
@@ -170,7 +170,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	}
 	epoch := &commitEpoch{generation: generation.ID()}
 	epoch.live.Store(true)
-	handle, err := rpcplugin.BindHandle(generation, "docker-compose", epoch, func(epoch *commitEpoch) {
+	handle, err := rpcplugin.BindHandle(generation, "container.compose", epoch, func(epoch *commitEpoch) {
 		epoch.live.Store(false)
 		controller.mu.Lock()
 		if controller.epoch == epoch {
@@ -218,7 +218,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 		if prepared == nil {
 			return ErrTypedHandlesUnavailable
 		}
-		transaction, err := rpcplugin.BindHandle(generation, "docker-compose", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
+		transaction, err := rpcplugin.BindHandle(generation, "container.compose", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
 		if err != nil {
 			prepared.Abort()
 			return err

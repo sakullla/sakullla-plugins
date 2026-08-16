@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -261,9 +263,15 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 		}
 		return controller
 	}
-	request := handshake([]string{"docker-compose", "dynamic-ui", "http-rule"})
-	if _, err := newController(nil).Handshake(context.Background(), handshake([]string{"docker-compose", "http-rule"})); err == nil {
-		t.Fatal("missing dynamic-ui grant was accepted")
+	request := handshake(requiredGrants())
+	for _, grants := range [][]string{
+		{"http.rule", "ui.dynamic"},
+		{"container.compose", "ui.dynamic"},
+		{"container.compose", "http.rule"},
+	} {
+		if _, err := newController(nil).Handshake(context.Background(), handshake(grants)); err == nil {
+			t.Fatalf("incomplete grants %v were accepted", grants)
+		}
 	}
 	controller := newController(dockerapp.TypedHandleAdmissionFunc(func(_ context.Context, got pluginsdk.RPCHandshakeRequest, apps []dockerapp.App) (dockerapp.PreparedAdmission, error) {
 		if got.Generation != "generation-1" || len(apps) != 1 {
@@ -353,10 +361,25 @@ func TestDockerEntrypointCanonicalRPCAndDefaultFailClosed(t *testing.T) {
 	if err := dockerapp.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
 		t.Fatalf("default entrypoint err=%v", err)
 	}
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "plugins", "docker-app", "plugin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(manifest)
+	for _, required := range []string{"container.compose", "http.rule", "ui.dynamic", "container.provider", "http.backend-provider"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("plugin.yaml missing %q", required)
+		}
+	}
+	for _, retired := range []string{"container.read", "container.manage", "docker-compose", "dynamic-ui", "http-rule"} {
+		if strings.Contains(text, retired) {
+			t.Fatalf("plugin.yaml still declares %q", retired)
+		}
+	}
 }
 
 func TestDockerControllerDeadlineLateNilCannotCommitGenerationState(t *testing.T) {
-	grants := []string{"docker-compose", "dynamic-ui", "http-rule"}
+	grants := requiredGrants()
 	t.Run("prepare", func(t *testing.T) {
 		release := make(chan struct{})
 		started := make(chan struct{})
@@ -582,7 +605,7 @@ func TestDockerDurableReconcileRestartCASAndPendingAdmission(t *testing.T) {
 }
 
 func TestDockerSecretRefsAndGenerationBoundLateAdmission(t *testing.T) {
-	grants := []string{"docker-compose", "dynamic-ui", "http-rule"}
+	grants := requiredGrants()
 	material := "plaintext-material-must-not-appear"
 	legacy, err := dockerapp.NewController(dockerapp.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
@@ -1068,6 +1091,10 @@ func configWire(t *testing.T, count int) []byte {
 		t.Fatal(err)
 	}
 	return wire
+}
+
+func requiredGrants() []string {
+	return []string{"container.compose", "http.rule", "ui.dynamic"}
 }
 
 func handshake(grants []string) pluginsdk.RPCHandshakeRequest {
