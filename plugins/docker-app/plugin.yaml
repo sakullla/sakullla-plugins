@@ -25,8 +25,9 @@ http_backend_providers:
   - id: default
     display_name: Docker 应用
 permissions:
-  - name: container.manage
-  - name: ui.dynamic-actions
+  - name: container.compose
+  - name: http.rule
+  - name: ui.dynamic
   - name: event.emit
   - name: service.revocable-resource-handle
   - name: http.outbound
