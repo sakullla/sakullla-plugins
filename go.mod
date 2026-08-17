@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/klauspost/compress v1.19.2
-	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.7.0
+	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.7.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/mod v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -22,3 +22,5 @@ require (
 	google.golang.org/grpc v1.66.2
 	google.golang.org/protobuf v1.34.2
 )
+
+replace github.com/sakullla/nginx-reverse-emby/plugin-sdk => ../nginx-reverse-emby-2026-08-18-ss-sdk-handles/plugin-sdk
