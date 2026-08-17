@@ -7,6 +7,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,4 +306,250 @@ func TestShadowsocksDestroyedEngineRejectsNewWire(t *testing.T) {
 	if _, err = engine.SealTCPRequest(make([]byte, 16), "example.com:443", []byte("x"), time.Now(), nil); !errors.Is(err, ss.ErrRevoked) {
 		t.Fatalf("destroyed engine=%v", err)
 	}
+}
+
+func canonicalPSK(size int, fill byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, size))
+}
+
+func assertCanonicalPSK(t *testing.T, method, psk string) {
+	t.Helper()
+	size := 16
+	if strings.Contains(method, "256") {
+		size = 32
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(psk)
+	if err != nil || len(decoded) != size || base64.StdEncoding.EncodeToString(decoded) != psk {
+		t.Fatalf("method=%s psk=%q", method, psk)
+	}
+}
+
+func TestShadowsocksProtocol2022IdentityPSKClientPasswordAndWire(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, test := range []struct {
+		method string
+		size   int
+	}{
+		{method: "2022-blake3-aes-128-gcm", size: 16},
+		{method: "2022-blake3-aes-256-gcm", size: 32},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			generatedServer, generatedUser, err := ss.GenerateSS2022Identity(test.method)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCanonicalPSK(t, test.method, generatedServer)
+			assertCanonicalPSK(t, test.method, generatedUser)
+			if generatedServer == generatedUser {
+				t.Fatal("generated server and user PSK must differ")
+			}
+			if _, err = ss.NewProtocolEngine(test.method, []byte(generatedServer+":"+generatedUser)); err != nil {
+				t.Fatal(err)
+			}
+
+			serverPSK := canonicalPSK(test.size, 0x11)
+			userPSK := canonicalPSK(test.size, 0x22)
+			assertCanonicalPSK(t, test.method, serverPSK)
+			assertCanonicalPSK(t, test.method, userPSK)
+			if serverPSK == userPSK {
+				t.Fatal("server and user PSK must differ")
+			}
+			clientPassword := serverPSK + ":" + userPSK
+			engine, err := ss.NewProtocolEngine(test.method, []byte(clientPassword))
+			if err != nil || engine.Name() != test.method || engine.SaltSize() != test.size || !engine.HasIdentity() {
+				t.Fatalf("identity engine=%v salt=%d identity=%v err=%v", engine, engine.SaltSize(), engine != nil && engine.HasIdentity(), err)
+			}
+			single, err := ss.NewProtocolEngine(test.method, []byte(userPSK))
+			if err != nil || single.HasIdentity() {
+				t.Fatalf("single engine identity=%v err=%v", single != nil && single.HasIdentity(), err)
+			}
+			salt := bytes.Repeat([]byte{0xa5}, engine.SaltSize())
+			identityTCP, err := engine.SealTCPRequest(salt, "example.org:53", []byte("identity-payload"), now, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			singleTCP, err := single.SealTCPRequest(salt, "example.org:53", []byte("identity-payload"), now, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(identityTCP) != len(singleTCP)+16 {
+				t.Fatalf("tcp eih=%d single=%d", len(identityTCP), len(singleTCP))
+			}
+			request, err := engine.OpenTCPRequest(identityTCP, now)
+			if err != nil || request.Target != "example.org:53" || string(request.Payload) != "identity-payload" {
+				t.Fatalf("tcp request=%+v err=%v", request, err)
+			}
+			if _, err = single.OpenTCPRequest(identityTCP, now); !errors.Is(err, ss.ErrAuthentication) {
+				t.Fatalf("user-only tcp=%v", err)
+			}
+			wrong, err := ss.NewProtocolEngine(test.method, []byte(serverPSK+":"+canonicalPSK(test.size, 0x33)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = wrong.OpenTCPRequest(identityTCP, now); !errors.Is(err, ss.ErrAuthentication) {
+				t.Fatalf("wrong identity tcp=%v", err)
+			}
+			sessionID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+			identityUDP, err := engine.SealUDPPacket(sessionID, 9, "example.org:53", []byte("identity-query"), now, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			singleUDP, err := single.SealUDPPacket(sessionID, 9, "example.org:53", []byte("identity-query"), now, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(identityUDP) != len(singleUDP)+16 {
+				t.Fatalf("udp eih=%d single=%d", len(identityUDP), len(singleUDP))
+			}
+			request, err = engine.OpenUDPPacket(identityUDP, now)
+			if err != nil || request.Target != "example.org:53" || request.SessionID != 0x0102030405060708 || request.PacketID != 9 || string(request.Payload) != "identity-query" {
+				t.Fatalf("udp request=%+v err=%v", request, err)
+			}
+			if _, err = single.OpenUDPPacket(identityUDP, now); !errors.Is(err, ss.ErrAuthentication) {
+				t.Fatalf("user-only udp=%v", err)
+			}
+
+			runtime := &runtime{now: uint64(now.Unix()), secrets: map[string]string{"secret/identity": clientPassword}}
+			service, serviceErr := ss.NewService(ss.Configuration{
+				Generation: "generation-1", ListenerRef: "listener/1", Cipher: test.method, MaxSessions: 2,
+				Users: []ss.User{{ID: "identity-user", SecretRef: "secret/identity", SecretVersion: "v1", Enabled: true, QuotaBytes: 1024}},
+			}, runtime.adapters())
+			if serviceErr != nil {
+				t.Fatal(serviceErr)
+			}
+			if serviceErr = service.Initialize(context.Background()); serviceErr != nil {
+				t.Fatal(serviceErr)
+			}
+			flow, selected, serviceErr := service.OpenTCP(context.Background(), identityTCP)
+			if serviceErr != nil || selected.UserID != "identity-user" {
+				t.Fatalf("service tcp user=%q err=%v", selected.UserID, serviceErr)
+			}
+			_ = flow.Close()
+			flow, selected, serviceErr = service.OpenUDP(context.Background(), identityUDP)
+			if serviceErr != nil || selected.UserID != "identity-user" {
+				t.Fatalf("service udp user=%q err=%v", selected.UserID, serviceErr)
+			}
+			_ = flow.Close()
+		})
+	}
+}
+
+func TestShadowsocksProtocolSIP002URIAndQRCode(t *testing.T) {
+	for _, test := range []struct {
+		method string
+		modern bool
+	}{
+		{method: "aes-128-gcm"},
+		{method: "aes-256-gcm"},
+		{method: "2022-blake3-aes-128-gcm", modern: true},
+		{method: "2022-blake3-aes-256-gcm", modern: true},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			const host = "example.com"
+			const port = 8388
+			account := ss.SIP002Account{Method: test.method, Host: host, Port: port}
+			password := "only-one-password"
+			if test.modern {
+				serverPSK, identityPSK, err := ss.GenerateSS2022Identity(test.method)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertCanonicalPSK(t, test.method, serverPSK)
+				assertCanonicalPSK(t, test.method, identityPSK)
+				if serverPSK == identityPSK {
+					t.Fatal("server and user PSK must differ")
+				}
+				password = serverPSK + ":" + identityPSK
+				account.ServerPSK = serverPSK
+				account.IdentityPSK = identityPSK
+			} else {
+				account.Password = password
+			}
+			share, err := ss.BuildSIP002(account)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if share.Password != password || share.URI == "" || share.QR.Content != share.URI {
+				t.Fatalf("share password=%q uri=%q qr=%q", share.Password, share.URI, share.QR.Content)
+			}
+			uri, err := ss.SIP002URI(test.method, password, host, port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if qr := ss.SIP002QRContent(uri); qr != uri {
+				t.Fatalf("qr=%q uri=%q", qr, uri)
+			}
+			assertImportableSIP002(t, share.URI, test.method, password, host, port, test.modern)
+			assertImportableSIP002(t, uri, test.method, password, host, port, test.modern)
+		})
+	}
+}
+
+func assertImportableSIP002(t *testing.T, uri, method, password, host string, port int, modern bool) {
+	t.Helper()
+	if !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "plugin=") {
+		t.Fatalf("uri=%q", uri)
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.Scheme != "ss" {
+		t.Fatalf("uri=%q err=%v", uri, err)
+	}
+	if parsed.Hostname() != host || parsed.Port() != strconv.Itoa(port) {
+		t.Fatalf("hostport=%s:%s", parsed.Hostname(), parsed.Port())
+	}
+	userinfo := uri[len("ss://"):]
+	if at := strings.Index(userinfo, "@"); at >= 0 {
+		userinfo = userinfo[:at]
+	}
+	gotMethod, gotPassword, ok := sip002Credentials(parsed, userinfo)
+	if !ok || gotMethod != method || gotPassword != password {
+		t.Fatalf("parsed method=%q password=%q userinfo=%q", gotMethod, gotPassword, userinfo)
+	}
+	if modern {
+		if strings.Count(userinfo, ":") != 1 || !strings.Contains(userinfo, "%") {
+			t.Fatalf("ss2022 userinfo=%q", userinfo)
+		}
+		if sip002UserinfoIsBase64URL(userinfo, method, password) {
+			t.Fatalf("ss2022 userinfo is Base64URL: %q", userinfo)
+		}
+		return
+	}
+	if strings.Contains(gotPassword, ":") {
+		t.Fatalf("legacy password must be a single secret: %q", gotPassword)
+	}
+}
+
+func sip002Credentials(parsed *url.URL, userinfo string) (method, password string, ok bool) {
+	if parsed.User != nil {
+		if secret, has := parsed.User.Password(); has {
+			return parsed.User.Username(), secret, parsed.User.Username() != "" && secret != ""
+		}
+	}
+	decoded, err := decodeSIP002Userinfo(userinfo)
+	if err != nil {
+		return "", "", false
+	}
+	method, password, ok = strings.Cut(string(decoded), ":")
+	return method, password, ok && method != "" && password != ""
+}
+
+func sip002UserinfoIsBase64URL(userinfo, method, password string) bool {
+	want := method + ":" + password
+	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding} {
+		decoded, err := encoding.DecodeString(userinfo)
+		if err == nil && string(decoded) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeSIP002Userinfo(userinfo string) ([]byte, error) {
+	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.StdEncoding, base64.RawStdEncoding} {
+		decoded, err := encoding.DecodeString(userinfo)
+		if err == nil {
+			return decoded, nil
+		}
+	}
+	return nil, errors.New("userinfo is not importable SIP002")
 }

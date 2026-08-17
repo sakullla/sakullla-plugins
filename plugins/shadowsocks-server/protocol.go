@@ -12,6 +12,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,11 +20,13 @@ import (
 )
 
 const (
-	maxLegacyPayload = 0x3fff
-	max2022Payload   = 0xffff
-	max2022Padding   = 900
-	maxUDPPacket     = 65507
-	ss2022KDFContext = "shadowsocks 2022 session subkey"
+	maxLegacyPayload      = 0x3fff
+	max2022Payload        = 0xffff
+	max2022Padding        = 900
+	maxUDPPacket          = 65507
+	ss2022IdentitySize    = 16
+	ss2022KDFContext      = "shadowsocks 2022 session subkey"
+	ss2022IdentityContext = "shadowsocks 2022 identity subkey"
 )
 
 var (
@@ -42,6 +45,10 @@ var supportedMethods = map[string]int{
 func SupportedMethod(method string) bool {
 	_, ok := supportedMethods[method]
 	return ok
+}
+
+func MethodKeyLength(method string) int {
+	return supportedMethods[method]
 }
 
 type ProxyRequest struct {
@@ -63,35 +70,147 @@ type TCPServerSession struct {
 	closed      bool
 }
 
-// ProtocolEngine owns a single user's master key. All wire parsing and AEAD
-// authentication happen in this repository; Host adapters never receive a
-// cipher name, password, PSK, or plaintext protocol frame.
+// ProtocolEngine owns a single user's master key. SS2022 identity engines also
+// hold the instance server PSK and require SIP022 identity headers. All wire
+// parsing and AEAD authentication happen in this repository; Host adapters
+// never receive a cipher name, password, PSK, or plaintext protocol frame.
 type ProtocolEngine struct {
-	method string
-	key    []byte
-	keyLen int
-	modern bool
-	mu     sync.RWMutex
-	dead   bool
+	method   string
+	key      []byte
+	identity []byte
+	keyLen   int
+	modern   bool
+	mu       sync.RWMutex
+	dead     bool
 }
 
+// NewProtocolEngine builds a cipher engine. SS2022 material is one canonical
+// standard-Base64 PSK, or serverPSK:userPSK to enable SIP022 identity headers.
 func NewProtocolEngine(method string, material []byte) (*ProtocolEngine, error) {
 	keyLen, ok := supportedMethods[method]
 	if !ok || len(material) == 0 {
 		return nil, ErrUnsupportedMethod
 	}
-	var key []byte
-	if strings.HasPrefix(method, "2022-") {
-		decoded, err := base64.StdEncoding.Strict().DecodeString(string(material))
-		if err != nil || len(decoded) != keyLen || !bytes.Equal([]byte(base64.StdEncoding.EncodeToString(decoded)), material) {
-			clear(decoded)
+	if !strings.HasPrefix(method, "2022-") {
+		return &ProtocolEngine{method: method, key: evpBytesToKey(material, keyLen), keyLen: keyLen}, nil
+	}
+	if bytes.IndexByte(material, ':') >= 0 {
+		serverPSK, userPSK, ok := splitSS2022ClientPassword(material)
+		if !ok {
 			return nil, ErrInvalid
 		}
-		key = decoded
-	} else {
-		key = evpBytesToKey(material, keyLen)
+		return newSS2022IdentityEngine(method, serverPSK, userPSK)
 	}
-	return &ProtocolEngine{method: method, key: key, keyLen: keyLen, modern: strings.HasPrefix(method, "2022-")}, nil
+	key, err := decodeSS2022PSK(method, string(material))
+	if err != nil {
+		return nil, err
+	}
+	return &ProtocolEngine{method: method, key: key, keyLen: keyLen, modern: true}, nil
+}
+
+// NewSS2022IdentityEngine uses the instance server PSK plus a distinct per-user
+// identity PSK. The client password is serverPSK:userPSK.
+func NewSS2022IdentityEngine(method string, serverPSK, userPSK []byte) (*ProtocolEngine, error) {
+	if !strings.HasPrefix(method, "2022-") || !SupportedMethod(method) {
+		return nil, ErrUnsupportedMethod
+	}
+	return newSS2022IdentityEngine(method, serverPSK, userPSK)
+}
+
+func newSS2022IdentityEngine(method string, serverPSK, userPSK []byte) (*ProtocolEngine, error) {
+	identity, err := decodeSS2022PSK(method, string(serverPSK))
+	if err != nil {
+		return nil, err
+	}
+	key, err := decodeSS2022PSK(method, string(userPSK))
+	if err != nil {
+		clear(identity)
+		return nil, err
+	}
+	if bytes.Equal(identity, key) {
+		clear(identity)
+		clear(key)
+		return nil, ErrInvalid
+	}
+	return &ProtocolEngine{method: method, key: key, identity: identity, keyLen: len(key), modern: true}, nil
+}
+
+func splitSS2022ClientPassword(material []byte) (serverPSK, userPSK []byte, ok bool) {
+	index := bytes.IndexByte(material, ':')
+	if index <= 0 || index >= len(material)-1 || bytes.IndexByte(material[index+1:], ':') >= 0 {
+		return nil, nil, false
+	}
+	return material[:index], material[index+1:], true
+}
+
+func decodeSS2022PSK(method, encoded string) ([]byte, error) {
+	if !strings.HasPrefix(method, "2022-") {
+		return nil, ErrUnsupportedMethod
+	}
+	keyLen, ok := supportedMethods[method]
+	if !ok {
+		return nil, ErrUnsupportedMethod
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(decoded) != keyLen || base64.StdEncoding.EncodeToString(decoded) != encoded {
+		clear(decoded)
+		return nil, ErrInvalid
+	}
+	return decoded, nil
+}
+
+func sip002ShareHostPort(host string, port int) (string, error) {
+	if port < 1 || port > 65535 {
+		return "", ErrInvalid
+	}
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) > 2 {
+		host = host[1 : len(host)-1]
+	}
+	if host == "" {
+		return "", ErrInvalid
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// EncodeSIP002 builds an importable ss:// URI. SS2022 percent-encodes method
+// and password and never Base64URL-encodes userinfo. QR content is this URI.
+func EncodeSIP002(method, password, host string, port int) (string, error) {
+	if !SupportedMethod(method) || password == "" {
+		return "", ErrInvalid
+	}
+	hostport, err := sip002ShareHostPort(host, port)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(method, "2022-") {
+		if _, _, ok := splitSS2022ClientPassword([]byte(password)); !ok {
+			return "", ErrInvalid
+		}
+		engine, err := NewProtocolEngine(method, []byte(password))
+		if err != nil {
+			return "", err
+		}
+		engine.Destroy()
+		return "ss://" + url.UserPassword(method, password).String() + "@" + hostport, nil
+	}
+	userinfo := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
+	return "ss://" + userinfo + "@" + hostport, nil
+}
+
+// SIP002URI is EncodeSIP002.
+func SIP002URI(method, password, host string, port int) (string, error) {
+	return EncodeSIP002(method, password, host, port)
+}
+
+// SIP002QRCode is the QR payload, which is exactly the SIP002 URI.
+func SIP002QRCode(uri string) string {
+	return uri
+}
+
+// SIP002QRContent is SIP002QRCode.
+func SIP002QRContent(uri string) string {
+	return SIP002QRCode(uri)
 }
 
 func (e *ProtocolEngine) Name() string {
@@ -108,6 +227,15 @@ func (e *ProtocolEngine) SaltSize() int {
 	return e.keyLen
 }
 
+func (e *ProtocolEngine) HasIdentity() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return !e.dead && len(e.identity) == e.keyLen
+}
+
 func (e *ProtocolEngine) Destroy() {
 	if e == nil {
 		return
@@ -115,20 +243,35 @@ func (e *ProtocolEngine) Destroy() {
 	e.mu.Lock()
 	clear(e.key)
 	e.key = nil
+	clear(e.identity)
+	e.identity = nil
 	e.dead = true
 	e.mu.Unlock()
 }
 
 func (e *ProtocolEngine) keySnapshot() ([]byte, error) {
+	user, identity, err := e.keysSnapshot()
+	clear(identity)
+	return user, err
+}
+
+func (e *ProtocolEngine) keysSnapshot() (user, identity []byte, err error) {
 	if e == nil {
-		return nil, ErrAuthentication
+		return nil, nil, ErrAuthentication
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.dead || len(e.key) != e.keyLen {
-		return nil, ErrRevoked
+		return nil, nil, ErrRevoked
 	}
-	return append([]byte(nil), e.key...), nil
+	if len(e.identity) != 0 && len(e.identity) != e.keyLen {
+		return nil, nil, ErrRevoked
+	}
+	user = append([]byte(nil), e.key...)
+	if len(e.identity) != 0 {
+		identity = append([]byte(nil), e.identity...)
+	}
+	return user, identity, nil
 }
 
 func (e *ProtocolEngine) OpenTCPRequest(wire []byte, now time.Time) (ProxyRequest, error) {
@@ -140,13 +283,14 @@ func (e *ProtocolEngine) OpenTCPRequest(wire []byte, now time.Time) (ProxyReques
 }
 
 func (e *ProtocolEngine) OpenTCPServerSession(wire []byte, now time.Time) (ProxyRequest, *TCPServerSession, error) {
-	key, err := e.keySnapshot()
+	key, identity, err := e.keysSnapshot()
 	if err != nil {
 		return ProxyRequest{}, nil, err
 	}
 	defer clear(key)
+	defer clear(identity)
 	if e.modern {
-		return e.open2022TCP(key, wire, now)
+		return e.open2022TCP(key, identity, wire, now)
 	}
 	return e.openLegacyTCP(key, wire)
 }
@@ -266,16 +410,17 @@ func openPayloadChunk(session *streamCipher, wire []byte, maximum int) ([]byte, 
 }
 
 func (e *ProtocolEngine) SealTCPRequest(salt []byte, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
-	key, err := e.keySnapshot()
+	key, identity, err := e.keysSnapshot()
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key)
+	defer clear(identity)
 	if len(salt) != e.keyLen {
 		return nil, ErrProtocol
 	}
 	if e.modern {
-		return e.seal2022TCP(key, salt, target, payload, now, padding)
+		return e.seal2022TCP(key, identity, salt, target, payload, now, padding)
 	}
 	if len(padding) != 0 {
 		return nil, ErrProtocol
@@ -284,25 +429,27 @@ func (e *ProtocolEngine) SealTCPRequest(salt []byte, target string, payload []by
 }
 
 func (e *ProtocolEngine) OpenUDPPacket(wire []byte, now time.Time) (ProxyRequest, error) {
-	key, err := e.keySnapshot()
+	key, identity, err := e.keysSnapshot()
 	if err != nil {
 		return ProxyRequest{}, err
 	}
 	defer clear(key)
+	defer clear(identity)
 	if e.modern {
-		return e.open2022UDP(key, wire, now)
+		return e.open2022UDP(key, identity, wire, now)
 	}
 	return e.openLegacyUDP(key, wire)
 }
 
 func (e *ProtocolEngine) SealUDPPacket(saltOrSession []byte, packetID uint64, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
-	key, err := e.keySnapshot()
+	key, identity, err := e.keysSnapshot()
 	if err != nil {
 		return nil, err
 	}
 	defer clear(key)
+	defer clear(identity)
 	if e.modern {
-		return e.seal2022UDP(key, saltOrSession, packetID, target, payload, now, padding)
+		return e.seal2022UDP(key, identity, saltOrSession, packetID, target, payload, now, padding)
 	}
 	if len(padding) != 0 || packetID != 0 || len(saltOrSession) != e.keyLen {
 		return nil, ErrProtocol
@@ -487,7 +634,7 @@ func (e *ProtocolEngine) openLegacyUDP(key, wire []byte) (ProxyRequest, error) {
 	return ProxyRequest{Target: target, Payload: append([]byte(nil), body[consumed:]...), ReplayToken: salt}, nil
 }
 
-func (e *ProtocolEngine) seal2022TCP(key, salt []byte, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
+func (e *ProtocolEngine) seal2022TCP(key, identity, salt []byte, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
 	if len(padding) > max2022Padding || len(payload) > max2022Payload {
 		return nil, ErrProtocol
 	}
@@ -509,23 +656,35 @@ func (e *ProtocolEngine) seal2022TCP(key, salt []byte, target string, payload []
 		return nil, err
 	}
 	wire := append([]byte(nil), salt...)
+	if header, err := seal2022Identity(identity, key, salt); err != nil {
+		return nil, err
+	} else if len(header) != 0 {
+		wire = append(wire, header...)
+	}
 	wire = append(wire, session.seal(fixed)...)
 	wire = append(wire, session.seal(variable)...)
 	clear(variable)
 	return wire, nil
 }
 
-func (e *ProtocolEngine) open2022TCP(key, wire []byte, now time.Time) (ProxyRequest, *TCPServerSession, error) {
+func (e *ProtocolEngine) open2022TCP(key, identity, wire []byte, now time.Time) (ProxyRequest, *TCPServerSession, error) {
 	fixedWireLength := 11 + 16
-	if len(wire) < e.keyLen+fixedWireLength+16 {
+	overhead := ss2022IdentityOverhead(identity)
+	if len(wire) < e.keyLen+overhead+fixedWireLength+16 {
 		return ProxyRequest{}, nil, ErrProtocol
 	}
 	salt := append([]byte(nil), wire[:e.keyLen]...)
+	position := e.keyLen
+	if overhead != 0 {
+		if err := open2022Identity(identity, key, salt, wire[position:position+ss2022IdentitySize]); err != nil {
+			return ProxyRequest{}, nil, err
+		}
+		position += ss2022IdentitySize
+	}
 	session, err := e.newSession(key, salt)
 	if err != nil {
 		return ProxyRequest{}, nil, err
 	}
-	position := e.keyLen
 	fixed, err := session.open(wire[position : position+fixedWireLength])
 	if err != nil || len(fixed) != 11 {
 		return ProxyRequest{}, nil, ErrAuthentication
@@ -559,12 +718,12 @@ func (e *ProtocolEngine) open2022TCP(key, wire []byte, now time.Time) (ProxyRequ
 	return request, &TCPServerSession{engine: e, inbound: session, requestSalt: salt, modern: true}, nil
 }
 
-func (e *ProtocolEngine) seal2022UDP(key, sessionID []byte, packetID uint64, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
+func (e *ProtocolEngine) seal2022UDP(key, identity, sessionID []byte, packetID uint64, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {
 	if len(sessionID) != 8 || len(padding) > max2022Padding {
 		return nil, ErrProtocol
 	}
 	address, err := encodeAddress(target)
-	if err != nil || 16+16+11+len(padding)+len(address)+len(payload) > maxUDPPacket {
+	if err != nil || 16+16+11+len(padding)+len(address)+len(payload)+ss2022IdentityOverhead(identity) > maxUDPPacket {
 		return nil, ErrProtocol
 	}
 	separate := make([]byte, 16)
@@ -599,13 +758,19 @@ func (e *ProtocolEngine) seal2022UDP(key, sessionID []byte, packetID uint64, tar
 	body = append(body, padding...)
 	body = append(body, address...)
 	body = append(body, payload...)
-	wire := append(encryptedSeparate, aead.Seal(nil, separate[4:16], body, nil)...)
+	header, err := seal2022Identity(identity, key, separate)
+	if err != nil {
+		return nil, err
+	}
+	wire := append(encryptedSeparate, header...)
+	wire = append(wire, aead.Seal(nil, separate[4:16], body, nil)...)
 	clear(body)
 	return wire, nil
 }
 
-func (e *ProtocolEngine) open2022UDP(key, wire []byte, now time.Time) (ProxyRequest, error) {
-	if len(wire) < 16+1+8+2+1+2+16 || len(wire) > maxUDPPacket {
+func (e *ProtocolEngine) open2022UDP(key, identity, wire []byte, now time.Time) (ProxyRequest, error) {
+	overhead := ss2022IdentityOverhead(identity)
+	if len(wire) < overhead+16+1+8+2+1+2+16 || len(wire) > maxUDPPacket {
 		return ProxyRequest{}, ErrProtocol
 	}
 	block, err := aes.NewCipher(key)
@@ -614,6 +779,13 @@ func (e *ProtocolEngine) open2022UDP(key, wire []byte, now time.Time) (ProxyRequ
 	}
 	separate := make([]byte, 16)
 	block.Decrypt(separate, wire[:16])
+	position := 16
+	if overhead != 0 {
+		if err := open2022Identity(identity, key, separate, wire[ss2022IdentitySize:2*ss2022IdentitySize]); err != nil {
+			return ProxyRequest{}, err
+		}
+		position = 2 * ss2022IdentitySize
+	}
 	sessionID := binary.BigEndian.Uint64(separate[:8])
 	packetID := binary.BigEndian.Uint64(separate[8:])
 	material := append(append(make([]byte, 0, len(key)+8), key...), separate[:8]...)
@@ -633,7 +805,7 @@ func (e *ProtocolEngine) open2022UDP(key, wire []byte, now time.Time) (ProxyRequ
 	if err != nil {
 		return ProxyRequest{}, ErrProtocol
 	}
-	body, err := aead.Open(nil, separate[4:16], wire[16:], nil)
+	body, err := aead.Open(nil, separate[4:16], wire[position:], nil)
 	if err != nil {
 		return ProxyRequest{}, ErrAuthentication
 	}
@@ -745,6 +917,73 @@ func (e *ProtocolEngine) open2022UDPResponse(key, wire []byte, now time.Time, ex
 	}
 	payloadStart := 19 + paddingLength + consumed
 	return ProxyRequest{Target: target, Payload: append([]byte(nil), body[payloadStart:]...), ReplayToken: append([]byte(nil), separate...), SessionID: serverSessionID, PacketID: packetID}, nil
+}
+
+func ss2022IdentityOverhead(identity []byte) int {
+	if len(identity) == 0 {
+		return 0
+	}
+	return ss2022IdentitySize
+}
+
+// seal2022Identity writes SIP022 EIH: AES-ECB(identity_subkey(iPSK)[:16], uPSK[:16] XOR mask).
+// TCP mask is salt[0:16]; UDP mask is the plaintext session header.
+func seal2022Identity(ipsk, nextPSK, mask []byte) ([]byte, error) {
+	if len(ipsk) == 0 {
+		return nil, nil
+	}
+	plain, key, err := ss2022IdentityMaterial(ipsk, nextPSK, mask)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plain)
+	defer clear(key)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	out := make([]byte, aes.BlockSize)
+	block.Encrypt(out, plain)
+	return out, nil
+}
+
+func open2022Identity(ipsk, nextPSK, mask, header []byte) error {
+	if len(header) != ss2022IdentitySize {
+		return ErrProtocol
+	}
+	plain, key, err := ss2022IdentityMaterial(ipsk, nextPSK, mask)
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	defer clear(key)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return ErrProtocol
+	}
+	out := make([]byte, aes.BlockSize)
+	block.Encrypt(out, plain)
+	if !bytes.Equal(out, header) {
+		return ErrAuthentication
+	}
+	return nil
+}
+
+func ss2022IdentityMaterial(ipsk, nextPSK, mask []byte) (plain, aesKey []byte, err error) {
+	if len(nextPSK) < ss2022IdentitySize || len(mask) < ss2022IdentitySize {
+		return nil, nil, ErrProtocol
+	}
+	derived, err := blake3DeriveKey(ss2022IdentityContext, ipsk)
+	if err != nil {
+		return nil, nil, err
+	}
+	aesKey = append([]byte(nil), derived[:ss2022IdentitySize]...)
+	clear(derived[:])
+	plain = make([]byte, ss2022IdentitySize)
+	for i := range plain {
+		plain[i] = nextPSK[i] ^ mask[i]
+	}
+	return plain, aesKey, nil
 }
 
 func timestampValid(value uint64, now time.Time) bool {
