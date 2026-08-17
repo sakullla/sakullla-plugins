@@ -2,22 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generation", "listener_ref", "max_sessions", "users"],
+  "required": ["generation", "listener_ref", "cipher", "max_sessions", "users"],
   "properties": {
     "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
     "listener_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
     "cipher": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
-    "server_psk_secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "server_psk_secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "server_psk_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+    "server_psk_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
     "max_sessions": {"type": "integer", "minimum": 1, "maximum": 4096},
     "users": {
       "type": "array", "maxItems": 256,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["id", "cipher", "secret_ref", "secret_version", "enabled"],
+        "required": ["id", "secret_ref", "secret_version", "enabled"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "cipher": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
+          "method": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
           "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
           "secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
           "enabled": {"type": "boolean"},

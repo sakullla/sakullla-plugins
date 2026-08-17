@@ -611,8 +611,10 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 		credentialForHost := append([]byte(nil), credential...)
 		if SS2022Method(user.ResolvedMethod(cipher)) {
 			if _, userPSK, ok := splitSS2022ClientPassword(credentialForHost); ok {
+				// Copy before clearing: split aliases into credentialForHost.
+				extracted := append([]byte(nil), userPSK...)
 				clear(credentialForHost)
-				credentialForHost = append([]byte(nil), userPSK...)
+				credentialForHost = extracted
 			}
 		}
 		if err = s.host(ctx, func(ctx context.Context) error {

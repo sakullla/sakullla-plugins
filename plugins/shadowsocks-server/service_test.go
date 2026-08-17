@@ -1,9 +1,12 @@
 package shadowsocksserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -903,11 +906,18 @@ func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
 	if err = mustOpenTCP(t, s, modern.Method, modernPass, 22).Close(); err != nil {
 		t.Fatal(err)
 	}
+	flow, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: modern.ID, Credential: []byte(modernPass), ReplayToken: []byte("admit-2022")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = flow.Close(); err != nil {
+		t.Fatal(err)
+	}
 	_, identity, ok := splitSS2022ClientPassword([]byte(modernPass))
 	if !ok {
 		t.Fatalf("ss2022 password=%q", modernPass)
 	}
-	flow, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: modern.ID, Credential: identity, ReplayToken: []byte("admit-2022")})
+	flow, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: modern.ID, Credential: identity, ReplayToken: []byte("admit-2022-id")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -931,4 +941,93 @@ func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGenerationLive(t, s)
+}
+
+func decodePreparedConfiguration(t *testing.T, wire []byte) Configuration {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(wire))
+	decoder.DisallowUnknownFields()
+	var configuration Configuration
+	if err := decoder.Decode(&configuration); err != nil {
+		t.Fatalf("config=%s decode=%v", wire, err)
+	}
+	if err := configuration.Validate(); err != nil {
+		t.Fatalf("config=%s validate=%v", wire, err)
+	}
+	return configuration
+}
+
+func TestServiceConfigSchemaAlignsWithConfiguration(t *testing.T) {
+	data, err := os.ReadFile("config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+			Items      struct {
+				Required   []string                   `json:"required"`
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"items"`
+		} `json:"properties"`
+	}
+	if err = json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	required := strings.Join(schema.Required, ",")
+	if !strings.Contains(required, "cipher") || strings.Contains(required, "server_psk") {
+		t.Fatalf("instance required=%v", schema.Required)
+	}
+	if _, ok := schema.Properties["cipher"]; !ok {
+		t.Fatal("schema missing instance cipher")
+	}
+	if _, ok := schema.Properties["server_psk_ref"]; !ok {
+		t.Fatal("schema missing server_psk_ref")
+	}
+	if _, ok := schema.Properties["server_psk_version"]; !ok {
+		t.Fatal("schema missing server_psk_version")
+	}
+	if _, ok := schema.Properties["server_psk_secret_ref"]; ok {
+		t.Fatal("schema still uses server_psk_secret_ref")
+	}
+	if _, ok := schema.Properties["server_psk_secret_version"]; ok {
+		t.Fatal("schema still uses server_psk_secret_version")
+	}
+	users := schema.Properties["users"]
+	if _, ok := users.Items.Properties["method"]; !ok {
+		t.Fatal("schema missing users[].method")
+	}
+	if _, ok := users.Items.Properties["cipher"]; ok {
+		t.Fatal("schema still uses users[].cipher")
+	}
+	for _, field := range users.Items.Required {
+		if field == "method" || field == "cipher" {
+			t.Fatalf("per-user method must stay optional: %v", users.Items.Required)
+		}
+	}
+
+	s := newAccountService(t)
+	createAccount(t, s, "legacy-1", "aes-256-gcm")
+	createAccount(t, s, "ss2022-1", "2022-blake3-aes-256-gcm")
+	wire, err := json.Marshal(s.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := decodePreparedConfiguration(t, wire)
+	if snapshot.Cipher != "aes-256-gcm" || snapshot.ServerPSKRef == "" || snapshot.ServerPSKVersion == "" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if _, ok := snapshot.User("legacy-1"); !ok {
+		t.Fatalf("snapshot users=%+v", snapshot.Users)
+	}
+	if user, ok := snapshot.User("ss2022-1"); !ok || user.Method != "2022-blake3-aes-256-gcm" {
+		t.Fatalf("ss2022 snapshot=%+v", user)
+	}
+
+	fallback := decodePreparedConfiguration(t, []byte(`{"generation":"gen-1","listener_ref":"listener/1","cipher":"aes-256-gcm","max_sessions":16,"users":[{"id":"alice","secret_ref":"secret/alice","secret_version":"v1","enabled":true}]}`))
+	if user, ok := fallback.User("alice"); !ok || user.ResolvedMethod(fallback.Cipher) != "aes-256-gcm" {
+		t.Fatalf("instance-cipher fallback=%+v", fallback)
+	}
 }
