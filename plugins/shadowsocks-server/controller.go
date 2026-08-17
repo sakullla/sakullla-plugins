@@ -92,6 +92,74 @@ func (c *Controller) Use(ctx context.Context, f func(context.Context, *Service) 
 	return service.Use(ctx, f)
 }
 
+// CreateAccount mints a traditional SS or SS2022 user on the live generation.
+// Quota and expiry are filled by the service; callers may omit both.
+func (c *Controller) CreateAccount(ctx context.Context, spec AccountSpec) (User, *SecretOnce, error) {
+	var user User
+	var secret *SecretOnce
+	err := c.Use(ctx, func(ctx context.Context, s *Service) error {
+		var createErr error
+		user, secret, createErr = s.CreateAccount(ctx, spec)
+		if createErr != nil {
+			return createErr
+		}
+		s.rememberIssuedSecret(secret)
+		return nil
+	})
+	return user, secret, err
+}
+
+func (c *Controller) ListAccounts(ctx context.Context) ([]AccountRecord, error) {
+	var accounts []AccountRecord
+	err := c.Use(ctx, func(_ context.Context, s *Service) error {
+		accounts = s.ListAccounts()
+		return nil
+	})
+	return accounts, err
+}
+
+func (c *Controller) SetAccountEnabled(ctx context.Context, userID string, enabled bool) error {
+	return c.Use(ctx, func(ctx context.Context, s *Service) error {
+		return s.SetAccountEnabled(ctx, userID, enabled)
+	})
+}
+
+func (c *Controller) DisableAccount(ctx context.Context, userID string) error {
+	return c.SetAccountEnabled(ctx, userID, false)
+}
+
+func (c *Controller) EnableAccount(ctx context.Context, userID string) error {
+	return c.SetAccountEnabled(ctx, userID, true)
+}
+
+func (c *Controller) RotateUserKey(ctx context.Context, userID, expectedVersion string) (*SecretOnce, error) {
+	var secret *SecretOnce
+	err := c.Use(ctx, func(ctx context.Context, s *Service) error {
+		var rotateErr error
+		secret, rotateErr = s.Rotate(ctx, userID, expectedVersion)
+		if rotateErr != nil {
+			return rotateErr
+		}
+		s.rememberIssuedSecret(secret)
+		return nil
+	})
+	return secret, err
+}
+
+func (c *Controller) RotateServerPSK(ctx context.Context, expectedVersion string) (*SecretOnce, error) {
+	var secret *SecretOnce
+	err := c.Use(ctx, func(ctx context.Context, s *Service) error {
+		var rotateErr error
+		secret, rotateErr = s.RotateServerPSK(ctx, expectedVersion)
+		if rotateErr != nil {
+			return rotateErr
+		}
+		s.rememberIssuedSecret(secret)
+		return nil
+	})
+	return secret, err
+}
+
 func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, wire []byte) error {
 	if len(wire) > MaxConfigBytes {
 		return ErrInvalid
@@ -176,6 +244,7 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			transaction.Revoke()
 			return safeControllerError(err)
 		}
+		runtime.Secrets = wrapIssuedSecrets(runtime.Secrets)
 		service, err := NewService(configuration, runtime)
 		if err != nil {
 			transaction.Revoke()
@@ -250,4 +319,121 @@ func safeControllerError(err error) error {
 }
 func requiredGrants() []string {
 	return []string{"audit", "listener", "monotonic-clock", "replay", "secret", "traffic"}
+}
+
+type issuedSecrets struct {
+	mu    sync.Mutex
+	base  SecretVerifier
+	items map[string]string
+}
+
+func wrapIssuedSecrets(base SecretVerifier) SecretVerifier {
+	if base == nil {
+		return nil
+	}
+	if issued, ok := base.(*issuedSecrets); ok {
+		return issued
+	}
+	return &issuedSecrets{base: base, items: map[string]string{}}
+}
+
+func issuedSecretKey(ref, version string) string {
+	return ref + "\x00" + version
+}
+
+func (i *issuedSecrets) put(ref, version, material string) {
+	if i == nil || ref == "" || version == "" {
+		return
+	}
+	i.mu.Lock()
+	i.items[issuedSecretKey(ref, version)] = material
+	i.mu.Unlock()
+}
+
+func (i *issuedSecrets) lookup(ref, version string) (string, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	material, ok := i.items[issuedSecretKey(ref, version)]
+	return material, ok
+}
+
+func issuedVaultMaterial(material []byte) []byte {
+	if _, userPSK, ok := splitSS2022ClientPassword(material); ok {
+		return append([]byte(nil), userPSK...)
+	}
+	return append([]byte(nil), material...)
+}
+
+func issuedMaterialMatches(stored string, material []byte) bool {
+	if stored == string(material) {
+		return true
+	}
+	if _, userPSK, ok := splitSS2022ClientPassword([]byte(stored)); ok && string(userPSK) == string(material) {
+		return true
+	}
+	if _, userPSK, ok := splitSS2022ClientPassword(material); ok && stored == string(userPSK) {
+		return true
+	}
+	return false
+}
+
+func (i *issuedSecrets) Verify(ctx context.Context, ref, version string, material []byte) error {
+	if stored, ok := i.lookup(ref, version); ok {
+		if issuedMaterialMatches(stored, material) {
+			return nil
+		}
+		return ErrDenied
+	}
+	return i.base.Verify(ctx, ref, version, material)
+}
+
+func (i *issuedSecrets) Resolve(ctx context.Context, ref, version string) ([]byte, error) {
+	if stored, ok := i.lookup(ref, version); ok {
+		return issuedVaultMaterial([]byte(stored)), nil
+	}
+	return i.base.Resolve(ctx, ref, version)
+}
+
+func (s *Service) issuedSecrets() *issuedSecrets {
+	if issued, ok := s.runtime.Secrets.(*issuedSecrets); ok {
+		return issued
+	}
+	issued := wrapIssuedSecrets(s.runtime.Secrets).(*issuedSecrets)
+	s.runtime.Secrets = issued
+	return issued
+}
+
+func peekSecretMaterial(secret *SecretOnce) []byte {
+	if secret == nil {
+		return nil
+	}
+	secret.mu.Lock()
+	defer secret.mu.Unlock()
+	if secret.consumed || len(secret.material) == 0 {
+		return nil
+	}
+	return append([]byte(nil), secret.material...)
+}
+
+func (s *Service) rememberIssuedSecret(secret *SecretOnce) {
+	if secret == nil {
+		return
+	}
+	material := peekSecretMaterial(secret)
+	if len(material) == 0 {
+		return
+	}
+	s.mu.Lock()
+	issued := s.issuedSecrets()
+	if serverPSK, userPSK, ok := splitSS2022ClientPassword(material); ok {
+		// Host Verify/Resolve see the user identity PSK, not SIP002 serverPSK:userPSK.
+		issued.put(secret.SecretRef, secret.SecretVersion, string(userPSK))
+		if ref, version := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion; ref != "" && version != "" {
+			issued.put(ref, version, string(serverPSK))
+		}
+	} else {
+		issued.put(secret.SecretRef, secret.SecretVersion, string(material))
+	}
+	s.mu.Unlock()
+	clear(material)
 }

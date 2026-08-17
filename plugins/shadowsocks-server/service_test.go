@@ -2,7 +2,10 @@ package shadowsocksserver
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +32,7 @@ type testRuntime struct {
 	listeners         int
 	aborts            int
 	finishes          int
+	accountVault      bool
 }
 type testReservation struct {
 	runtime *testRuntime
@@ -153,6 +157,27 @@ func (r *testRuntime) Register(context.Context, string, *Service) error { r.list
 func (r *testRuntime) Rotate(_ context.Context, id, currentRef, currentVersion, op string) (*SecretOnce, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.accountVault {
+		r.rotations++
+		raw := make([]byte, 32)
+		for i := range raw {
+			raw[i] = byte(r.rotations) ^ byte(i*17+3)
+		}
+		material := []byte(base64.StdEncoding.EncodeToString(raw))
+		ref := "secret/account/" + id + "/" + strconv.Itoa(r.rotations)
+		version := "v" + strconv.Itoa(r.rotations)
+		if r.refs == nil {
+			r.refs = map[string]string{}
+		}
+		r.refs[ref] = string(material)
+		if r.rotationCommitted != nil {
+			select {
+			case r.rotationCommitted <- struct{}{}:
+			default:
+			}
+		}
+		return NewSecretOnce(ref, version, material), nil
+	}
 	if r.vaultVersion != "" && r.vaultVersion != currentVersion {
 		return nil, ErrRevoked
 	}
@@ -587,4 +612,323 @@ func TestDrainTracksBlockedTrafficFinish(t *testing.T) {
 	if r.aborts != 1 || r.finishes != 0 {
 		t.Fatalf("aborts=%d finishes=%d", r.aborts, r.finishes)
 	}
+}
+
+func accountConfig() Configuration {
+	return Configuration{Generation: "gen-1", ListenerRef: "listener/1", Cipher: "aes-256-gcm", MaxSessions: 16}
+}
+
+func newAccountService(t *testing.T) *Service {
+	t.Helper()
+	r := &testRuntime{now: 10, used: map[string]uint64{}, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
+	s, err := NewService(accountConfig(), adapters(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func createAccount(t *testing.T, s *Service, id, method string) (User, string) {
+	t.Helper()
+	return createAccountSpec(t, s, AccountSpec{ID: id, Method: method})
+}
+
+func createAccountSpec(t *testing.T, s *Service, spec AccountSpec) (User, string) {
+	t.Helper()
+	user, secret, err := s.CreateAccount(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("create %+v: %v", spec, err)
+	}
+	if spec.ID != "" && user.ID != spec.ID {
+		t.Fatalf("account=%+v spec=%+v", user, spec)
+	}
+	if user.ID == "" || !user.Enabled || user.SecretRef == "" || user.SecretVersion == "" || user.ExpiresAt != 0 {
+		t.Fatalf("account=%+v", user)
+	}
+	method := user.Method
+	if spec.Method != "" && method != spec.Method {
+		t.Fatalf("account=%+v spec=%+v", user, spec)
+	}
+	if spec.Family != "" && AccountFamilyOf(method) != spec.Family {
+		t.Fatalf("account=%+v spec=%+v", user, spec)
+	}
+	password := string(secret.RevealOnce())
+	if password == "" || secret.RevealOnce() != nil {
+		t.Fatal("client password must be revealed once")
+	}
+	if SS2022Method(method) {
+		server, identity, ok := splitSS2022ClientPassword([]byte(password))
+		if !ok || string(server) == string(identity) {
+			t.Fatalf("ss2022 password=%q", password)
+		}
+	} else if strings.Contains(password, ":") {
+		t.Fatalf("legacy password must be a single secret: %q", password)
+	}
+	return user, password
+}
+
+func assertGenerationLive(t *testing.T, s *Service) {
+	t.Helper()
+	snapshot := s.Snapshot()
+	if !s.live.Load() || snapshot.Generation != "gen-1" || snapshot.ListenerRef != "listener/1" {
+		t.Fatalf("generation revoked: live=%v snapshot=%+v", s.live.Load(), snapshot)
+	}
+}
+
+func mustOpenTCP(t *testing.T, s *Service, method, password string, salt0 byte) Flow {
+	t.Helper()
+	client, err := NewProtocolEngine(method, []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Destroy()
+	salt := make([]byte, client.SaltSize())
+	salt[0] = salt0
+	wire, err := client.SealTCPRequest(salt, "example.com:443", []byte("x"), time.Unix(10, 0), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, request, err := s.OpenTCP(context.Background(), wire)
+	if err != nil || request.Target != "example.com:443" || string(request.Payload) != "x" {
+		t.Fatalf("request=%+v err=%v", request, err)
+	}
+	return flow
+}
+
+func assertTCPDenied(t *testing.T, s *Service, method, password string, salt0 byte) {
+	t.Helper()
+	client, err := NewProtocolEngine(method, []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Destroy()
+	salt := make([]byte, client.SaltSize())
+	salt[0] = salt0
+	wire, err := client.SealTCPRequest(salt, "example.com:443", []byte("x"), time.Unix(10, 0), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.OpenTCP(context.Background(), wire); !errors.Is(err, ErrAuthentication) && !errors.Is(err, ErrDenied) && !errors.Is(err, ErrDisabled) {
+		t.Fatalf("denied=%v", err)
+	}
+}
+
+func TestServiceAccountAPICreatesLegacyAndSS2022(t *testing.T) {
+	s := newAccountService(t)
+	legacy, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")
+	modern, modernPass := createAccount(t, s, "ss2022-1", "2022-blake3-aes-256-gcm")
+	familyLegacy, familyLegacyPass := createAccountSpec(t, s, AccountSpec{ID: "family-ss", Family: AccountFamilyLegacy})
+	familyModern, familyModernPass := createAccountSpec(t, s, AccountSpec{ID: "family-2022", Family: AccountFamily2022})
+	accounts := s.ListAccounts()
+	if len(accounts) != 4 {
+		t.Fatalf("accounts=%+v", accounts)
+	}
+	byID := map[string]AccountRecord{}
+	for _, account := range accounts {
+		byID[account.ID] = account
+	}
+	if got := byID[legacy.ID]; !got.Enabled || got.Family != AccountFamilyLegacy || got.Method != "aes-256-gcm" || got.ExpiresAt != 0 {
+		t.Fatalf("legacy list=%+v", got)
+	}
+	if got := byID[modern.ID]; !got.Enabled || got.Family != AccountFamily2022 || got.Method != "2022-blake3-aes-256-gcm" || got.ExpiresAt != 0 {
+		t.Fatalf("ss2022 list=%+v", got)
+	}
+	if got := byID[familyLegacy.ID]; !got.Enabled || got.Family != AccountFamilyLegacy || got.Method != DefaultLegacyMethod {
+		t.Fatalf("family legacy list=%+v", got)
+	}
+	if got := byID[familyModern.ID]; !got.Enabled || got.Family != AccountFamily2022 || got.Method != DefaultSS2022Method {
+		t.Fatalf("family ss2022 list=%+v", got)
+	}
+	for _, user := range s.Snapshot().Users {
+		if user.ExpiresAt != 0 || user.QuotaBytes == 0 {
+			t.Fatalf("simple path must omit expiry and fill quota: %+v", user)
+		}
+	}
+	if err := mustOpenTCP(t, s, "aes-256-gcm", legacyPass, 1).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", modernPass, 2).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustOpenTCP(t, s, familyLegacy.Method, familyLegacyPass, 17).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustOpenTCP(t, s, familyModern.Method, familyModernPass, 18).Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertGenerationLive(t, s)
+}
+
+func TestAccountDisableEnablePreservesPasswordAndGeneration(t *testing.T) {
+	s := newAccountService(t)
+	legacy, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")
+	modern, modernPass := createAccount(t, s, "ss2022-1", "2022-blake3-aes-256-gcm")
+	if err := s.DisableAccount(context.Background(), legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertTCPDenied(t, s, "aes-256-gcm", legacyPass, 3)
+	if err := mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", modernPass, 4).Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertGenerationLive(t, s)
+	for _, account := range s.ListAccounts() {
+		if account.ID == legacy.ID && account.Enabled {
+			t.Fatalf("disabled user still enabled: %+v", account)
+		}
+		if account.ID != legacy.ID && !account.Enabled {
+			t.Fatalf("other user disabled: %+v", account)
+		}
+	}
+	if err := s.EnableAccount(context.Background(), legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustOpenTCP(t, s, "aes-256-gcm", legacyPass, 5).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DisableAccount(context.Background(), modern.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertTCPDenied(t, s, "2022-blake3-aes-256-gcm", modernPass, 19)
+	if err := mustOpenTCP(t, s, "aes-256-gcm", legacyPass, 20).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableAccount(context.Background(), modern.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", modernPass, 21).Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertGenerationLive(t, s)
+}
+
+func TestAccountRotateUserKeyInvalidatesOldPassword(t *testing.T) {
+	s := newAccountService(t)
+	legacy, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")
+	modern, modernPass := createAccount(t, s, "ss2022-1", "2022-blake3-aes-256-gcm")
+	rotated, err := s.Rotate(context.Background(), legacy.ID, legacy.SecretVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLegacy := string(rotated.RevealOnce())
+	if newLegacy == "" || newLegacy == legacyPass {
+		t.Fatalf("rotated legacy password=%q", newLegacy)
+	}
+	assertTCPDenied(t, s, "aes-256-gcm", legacyPass, 6)
+	if err = mustOpenTCP(t, s, "aes-256-gcm", newLegacy, 7).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", modernPass, 8).Close(); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err = s.Rotate(context.Background(), modern.ID, modern.SecretVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newModern := string(rotated.RevealOnce())
+	if newModern == "" || newModern == modernPass {
+		t.Fatalf("rotated ss2022 password=%q", newModern)
+	}
+	assertTCPDenied(t, s, "2022-blake3-aes-256-gcm", modernPass, 9)
+	if err = mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", newModern, 10).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "aes-256-gcm", newLegacy, 11).Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertGenerationLive(t, s)
+}
+
+func TestRotateServerPSKInvalidatesAllSS2022ClientPasswords(t *testing.T) {
+	s := newAccountService(t)
+	_, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")
+	_, firstPass := createAccount(t, s, "ss2022-1", "2022-blake3-aes-256-gcm")
+	_, secondPass := createAccount(t, s, "ss2022-2", "2022-blake3-aes-256-gcm")
+	_, firstIdentity, ok := splitSS2022ClientPassword([]byte(firstPass))
+	if !ok {
+		t.Fatalf("first password=%q", firstPass)
+	}
+	_, secondIdentity, ok := splitSS2022ClientPassword([]byte(secondPass))
+	if !ok {
+		t.Fatalf("second password=%q", secondPass)
+	}
+	snapshot := s.Snapshot()
+	if snapshot.ServerPSKVersion == "" {
+		t.Fatal("ss2022 server psk version missing")
+	}
+	versions := map[string]string{}
+	for _, user := range snapshot.Users {
+		versions[user.ID] = user.SecretVersion
+	}
+	rotated, err := s.RotateServerPSK(context.Background(), snapshot.ServerPSKVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newServer := string(rotated.RevealOnce())
+	if newServer == "" {
+		t.Fatal("rotated server psk empty")
+	}
+	assertTCPDenied(t, s, "2022-blake3-aes-256-gcm", firstPass, 12)
+	assertTCPDenied(t, s, "2022-blake3-aes-256-gcm", secondPass, 13)
+	if err = mustOpenTCP(t, s, "aes-256-gcm", legacyPass, 14).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", newServer+":"+string(firstIdentity), 15).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", newServer+":"+string(secondIdentity), 16).Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range s.Snapshot().Users {
+		if versions[user.ID] == "" || user.SecretVersion != versions[user.ID] {
+			t.Fatalf("server psk rotation changed user version: before=%q after=%+v", versions[user.ID], user)
+		}
+	}
+	assertGenerationLive(t, s)
+}
+
+func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
+	s := newAccountService(t)
+	user, password := createAccountSpec(t, s, AccountSpec{ID: "admit-1", Family: AccountFamilyLegacy})
+	modern, modernPass := createAccountSpec(t, s, AccountSpec{ID: "admit-2022", Family: AccountFamily2022})
+	flow, err := s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: user.ID, Credential: []byte(password), ReplayToken: []byte("admit-1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = flow.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, modern.Method, modernPass, 22).Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, identity, ok := splitSS2022ClientPassword([]byte(modernPass))
+	if !ok {
+		t.Fatalf("ss2022 password=%q", modernPass)
+	}
+	flow, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: modern.ID, Credential: identity, ReplayToken: []byte("admit-2022")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = flow.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DisableAccount(context.Background(), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: user.ID, Credential: []byte(password), ReplayToken: []byte("admit-2")}); !errors.Is(err, ErrDenied) && !errors.Is(err, ErrAuthentication) && !errors.Is(err, ErrDisabled) {
+		t.Fatalf("disabled admit=%v", err)
+	}
+	if err = s.EnableAccount(context.Background(), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	flow, err = s.Admit(context.Background(), AdmissionRequest{Protocol: TCP, UserID: user.ID, Credential: []byte(password), ReplayToken: []byte("admit-3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = flow.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertGenerationLive(t, s)
 }

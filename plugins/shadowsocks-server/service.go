@@ -3,6 +3,7 @@ package shadowsocksserver
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"time"
@@ -61,6 +62,68 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 		return outcome.value, outcome.err
 	}
 }
+func engineFromMaterial(method string, material []byte, serverPSK string) (*ProtocolEngine, error) {
+	if SS2022Method(method) && serverPSK != "" {
+		if _, _, ok := splitSS2022ClientPassword(material); ok {
+			return NewProtocolEngine(method, material)
+		}
+		return NewSS2022IdentityEngine(method, []byte(serverPSK), material)
+	}
+	return NewProtocolEngine(method, material)
+}
+
+func ss2022ClientPasswordFromEngine(engine *ProtocolEngine) (string, error) {
+	user, identity, err := engine.keysSnapshot()
+	if err != nil {
+		return "", err
+	}
+	defer clear(user)
+	defer clear(identity)
+	if len(identity) == 0 {
+		return "", ErrInvalid
+	}
+	return base64.StdEncoding.EncodeToString(identity) + ":" + base64.StdEncoding.EncodeToString(user), nil
+}
+
+func encodedPSK(raw []byte) string {
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func (s *Service) resolveSecret(ctx context.Context, ref, version string) ([]byte, error) {
+	material, err := awaitHost(ctx, s, false, func(ctx context.Context) ([]byte, error) {
+		return s.runtime.Secrets.Resolve(ctx, ref, version)
+	})
+	if err != nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	return material, nil
+}
+
+func (s *Service) rotateVault(ctx context.Context, id, ref, version, generation, scope string) (*SecretOnce, error) {
+	op := sha256.Sum256([]byte(generation + "\x00" + id + "\x00" + ref + "\x00" + version + "\x00" + scope))
+	secret, err := awaitHost(ctx, s, false, func(ctx context.Context) (*SecretOnce, error) {
+		return s.runtime.Vault.Rotate(ctx, id, ref, version, hex.EncodeToString(op[:]))
+	})
+	if err != nil {
+		return nil, ErrDenied
+	}
+	if secret == nil || !refPattern.MatchString(secret.SecretRef) || !refPattern.MatchString(secret.SecretVersion) {
+		secret.discard()
+		return nil, ErrInvalid
+	}
+	return secret, nil
+}
+
+func (s *Service) resolveUserEngine(ctx context.Context, method, ref, version, serverPSK string) (*ProtocolEngine, error) {
+	material, err := s.resolveSecret(ctx, ref, version)
+	if err != nil {
+		return nil, err
+	}
+	engine, err := engineFromMaterial(method, material, serverPSK)
+	clear(material)
+	return engine, err
+}
+
 func NewService(c Configuration, r RuntimeAdapters) (*Service, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -78,18 +141,25 @@ func NewService(c Configuration, r RuntimeAdapters) (*Service, error) {
 	return s, nil
 }
 func (s *Service) Initialize(ctx context.Context) error {
-	for _, user := range s.configuration.Users {
+	s.mu.Lock()
+	users := append([]User(nil), s.configuration.Users...)
+	cipher := s.configuration.Cipher
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	s.mu.Unlock()
+	var serverPSK string
+	if serverRef != "" && serverVersion != "" {
+		material, err := s.resolveSecret(ctx, serverRef, serverVersion)
+		if err != nil {
+			return err
+		}
+		serverPSK = string(material)
+		clear(material)
+	}
+	for _, user := range users {
 		if !user.Enabled {
 			continue
 		}
-		material, err := awaitHost(ctx, s, false, func(ctx context.Context) ([]byte, error) {
-			return s.runtime.Secrets.Resolve(ctx, user.SecretRef, user.SecretVersion)
-		})
-		if err != nil {
-			return ErrTypedHandlesUnavailable
-		}
-		engine, err := NewProtocolEngine(s.configuration.Cipher, material)
-		clear(material)
+		engine, err := s.resolveUserEngine(ctx, user.ResolvedMethod(cipher), user.SecretRef, user.SecretVersion, serverPSK)
 		if err != nil {
 			return err
 		}
@@ -103,6 +173,235 @@ func (s *Service) Initialize(ctx context.Context) error {
 		s.mu.Unlock()
 	}
 	return nil
+}
+
+func (s *Service) ListAccounts() []AccountRecord {
+	return s.Snapshot().ListAccounts()
+}
+
+// CreateAccount mints one enabled user through the plugin API. Traditional SS
+// and SS2022 can share the instance; quota and expiry stay on safe defaults.
+func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *SecretOnce, error) {
+	if err := ctx.Err(); err != nil {
+		return User{}, nil, err
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		return User{}, nil, ErrRevoked
+	}
+	generation := s.configuration.Generation
+	cipher := s.configuration.Cipher
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	s.mu.Unlock()
+	method, err := spec.resolveMethod(cipher)
+	if err != nil {
+		return User{}, nil, err
+	}
+	if spec.ID == "" {
+		id, idErr := NewAccountID()
+		if idErr != nil {
+			return User{}, nil, ErrDenied
+		}
+		spec.ID = id
+	}
+	var mintedServer *SecretOnce
+	serverPSK := ""
+	if SS2022Method(method) {
+		if serverRef != "" && serverVersion != "" {
+			material, resolveErr := s.resolveSecret(ctx, serverRef, serverVersion)
+			if resolveErr != nil {
+				return User{}, nil, resolveErr
+			}
+			serverPSK = string(material)
+			clear(material)
+		} else {
+			mintedServer, err = s.rotateVault(ctx, ServerPSKID, ServerPSKSecretRef(), InitialSecretVersion(), generation, "server-psk")
+			if err != nil {
+				return User{}, nil, err
+			}
+			material, resolveErr := s.resolveSecret(ctx, mintedServer.SecretRef, mintedServer.SecretVersion)
+			if resolveErr != nil {
+				mintedServer.discard()
+				return User{}, nil, resolveErr
+			}
+			serverPSK = string(material)
+			serverRef, serverVersion = mintedServer.SecretRef, mintedServer.SecretVersion
+			clear(material)
+		}
+	}
+	secret, err := s.rotateVault(ctx, spec.ID, AccountSecretRef(spec.ID), InitialSecretVersion(), generation, "user")
+	if err != nil {
+		if mintedServer != nil {
+			mintedServer.discard()
+		}
+		return User{}, nil, err
+	}
+	material, err := s.resolveSecret(ctx, secret.SecretRef, secret.SecretVersion)
+	if err != nil {
+		secret.discard()
+		if mintedServer != nil {
+			mintedServer.discard()
+		}
+		return User{}, nil, err
+	}
+	engine, err := engineFromMaterial(method, material, serverPSK)
+	if err != nil {
+		clear(material)
+		secret.discard()
+		if mintedServer != nil {
+			mintedServer.discard()
+		}
+		return User{}, nil, err
+	}
+	client := append([]byte(nil), material...)
+	if SS2022Method(method) && serverPSK != "" {
+		if _, _, ok := splitSS2022ClientPassword(material); !ok {
+			client = []byte(serverPSK + ":" + string(material))
+		}
+	}
+	clear(material)
+	revealed := NewSecretOnce(secret.SecretRef, secret.SecretVersion, client)
+	secret.discard()
+	s.engineGate.Lock()
+	user, installed, err := s.installCreatedAccount(spec, revealed, engine, serverRef, serverVersion, mintedServer)
+	s.engineGate.Unlock()
+	if err != nil {
+		return User{}, nil, err
+	}
+	if auditErr := s.audit(ctx, AuditRecord{Action: "create-account", Outcome: "succeeded", UserID: user.ID}); auditErr != nil {
+		return user, installed, auditErr
+	}
+	return user, installed, nil
+}
+
+func (s *Service) installCreatedAccount(spec AccountSpec, secret *SecretOnce, engine *ProtocolEngine, serverRef, serverVersion string, mintedServer *SecretOnce) (User, *SecretOnce, error) {
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		engine.Destroy()
+		secret.discard()
+		if mintedServer != nil {
+			mintedServer.discard()
+		}
+		return User{}, nil, ErrRevoked
+	}
+	next, user, err := s.configuration.CreateAccount(spec, secret.SecretRef, secret.SecretVersion)
+	if err != nil {
+		s.mu.Unlock()
+		engine.Destroy()
+		secret.discard()
+		if mintedServer != nil {
+			mintedServer.discard()
+		}
+		return User{}, nil, err
+	}
+	if user.QuotaBytes == 0 {
+		user.QuotaBytes = UnlimitedQuotaBytes
+		if index, _, ok := next.lookupUser(user.ID); ok {
+			next.Users[index].QuotaBytes = UnlimitedQuotaBytes
+		}
+	}
+	if serverRef != "" && next.ServerPSKVersion == "" {
+		next.ServerPSKRef, next.ServerPSKVersion = serverRef, serverVersion
+	}
+	s.configuration = next
+	s.engines[user.ID] = engine
+	secret.owner, secret.generation = s, s.configuration.Generation
+	s.secrets[secret] = struct{}{}
+	if mintedServer != nil {
+		mintedServer.owner, mintedServer.generation = s, s.configuration.Generation
+		s.secrets[mintedServer] = struct{}{}
+	}
+	s.mu.Unlock()
+	return user, secret, nil
+}
+
+func (s *Service) DisableAccount(ctx context.Context, userID string) error {
+	return s.SetAccountEnabled(ctx, userID, false)
+}
+
+func (s *Service) EnableAccount(ctx context.Context, userID string) error {
+	return s.SetAccountEnabled(ctx, userID, true)
+}
+
+// SetAccountEnabled flips one user's enabled flag. It does not call Disable, so
+// the generation stays live and an unrotated password works again after enable.
+func (s *Service) SetAccountEnabled(ctx context.Context, userID string, enabled bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		return ErrRevoked
+	}
+	_, user, ok := s.configuration.lookupUser(userID)
+	if !ok {
+		s.mu.Unlock()
+		return ErrDenied
+	}
+	needEngine := enabled && s.engines[userID] == nil
+	method := user.ResolvedMethod(s.configuration.Cipher)
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	if !needEngine {
+		next, err := s.configuration.SetAccountEnabled(userID, enabled)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.configuration = next
+		s.mu.Unlock()
+		return s.auditAccountToggle(ctx, userID, enabled)
+	}
+	s.mu.Unlock()
+	serverPSK := ""
+	if SS2022Method(method) && serverRef != "" && serverVersion != "" {
+		material, err := s.resolveSecret(ctx, serverRef, serverVersion)
+		if err != nil {
+			return err
+		}
+		serverPSK = string(material)
+		clear(material)
+	}
+	engine, err := s.resolveUserEngine(ctx, method, user.SecretRef, user.SecretVersion, serverPSK)
+	if err != nil {
+		return err
+	}
+	s.engineGate.Lock()
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		s.engineGate.Unlock()
+		engine.Destroy()
+		return ErrRevoked
+	}
+	next, err := s.configuration.SetAccountEnabled(userID, true)
+	if err != nil {
+		s.mu.Unlock()
+		s.engineGate.Unlock()
+		engine.Destroy()
+		return err
+	}
+	s.configuration = next
+	if s.engines[userID] == nil {
+		s.engines[userID] = engine
+		engine = nil
+	}
+	s.mu.Unlock()
+	s.engineGate.Unlock()
+	if engine != nil {
+		engine.Destroy()
+	}
+	return s.auditAccountToggle(ctx, userID, true)
+}
+
+func (s *Service) auditAccountToggle(ctx context.Context, userID string, enabled bool) error {
+	action := "disable-account"
+	if enabled {
+		action = "enable-account"
+	}
+	return s.audit(ctx, AuditRecord{Action: action, Outcome: "succeeded", UserID: userID})
 }
 
 func (s *Service) Engine(userID string) (*ProtocolEngine, bool) {
@@ -273,7 +572,7 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 			break
 		}
 	}
-	generation := s.configuration.Generation
+	generation, cipher := s.configuration.Generation, s.configuration.Cipher
 	s.mu.Unlock()
 	releaseSlot := func() { <-s.slots; s.sessions.Done() }
 	var reservation TrafficReservation
@@ -294,7 +593,7 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 	if err != nil {
 		return fail(ErrDenied)
 	}
-	if user.ExpiresAt > 0 && now >= user.ExpiresAt {
+	if user.Expired(now) {
 		return fail(ErrExpired)
 	}
 	credential, replay := append([]byte(nil), r.Credential...), append([]byte(nil), r.ReplayToken...)
@@ -303,13 +602,19 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 	op := sha256.Sum256([]byte(generation + "\x00" + user.ID + "\x00" + string(replay)))
 	opKey := hex.EncodeToString(op[:])
 	reservation, err = awaitHost(ctx, s, false, func(ctx context.Context) (TrafficReservation, error) {
-		return s.runtime.Traffic.Reserve(ctx, user.ID, user.QuotaBytes, opKey)
+		return s.runtime.Traffic.Reserve(ctx, user.ID, user.EffectiveQuota(), opKey)
 	})
 	if err != nil {
 		return fail(ErrQuota)
 	}
 	if verifyCredential {
 		credentialForHost := append([]byte(nil), credential...)
+		if SS2022Method(user.ResolvedMethod(cipher)) {
+			if _, userPSK, ok := splitSS2022ClientPassword(credentialForHost); ok {
+				clear(credentialForHost)
+				credentialForHost = append([]byte(nil), userPSK...)
+			}
+		}
 		if err = s.host(ctx, func(ctx context.Context) error {
 			defer clear(credentialForHost)
 			return s.runtime.Secrets.Verify(ctx, user.SecretRef, user.SecretVersion, credentialForHost)
@@ -334,43 +639,74 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 }
 func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*SecretOnce, error) {
 	s.mu.Lock()
-	index := -1
-	var current User
-	for i := range s.configuration.Users {
-		if s.configuration.Users[i].ID == userID {
-			index, current = i, s.configuration.Users[i]
-			break
-		}
-	}
-	generation, cipherName := s.configuration.Generation, s.configuration.Cipher
+	_, current, ok := s.configuration.lookupUser(userID)
+	generation := s.configuration.Generation
+	method := current.ResolvedMethod(s.configuration.Cipher)
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
 	s.mu.Unlock()
-	if index < 0 || expectedVersion == "" || current.SecretVersion != expectedVersion {
+	if !ok || expectedVersion == "" || current.SecretVersion != expectedVersion {
 		return nil, ErrDenied
 	}
-	op := sha256.Sum256([]byte(generation + "\x00" + userID + "\x00" + current.SecretRef + "\x00" + current.SecretVersion))
-	secret, err := awaitHost(ctx, s, false, func(ctx context.Context) (*SecretOnce, error) {
-		return s.runtime.Vault.Rotate(ctx, userID, current.SecretRef, current.SecretVersion, hex.EncodeToString(op[:]))
-	})
+	secret, err := s.rotateVault(ctx, userID, current.SecretRef, current.SecretVersion, generation, "user")
 	if err != nil {
-		return nil, ErrDenied
+		return nil, err
 	}
-	if secret == nil || !refPattern.MatchString(secret.SecretRef) || !refPattern.MatchString(secret.SecretVersion) {
-		secret.discard()
-		return nil, ErrInvalid
-	}
-	material, resolveErr := awaitHost(ctx, s, false, func(ctx context.Context) ([]byte, error) {
-		return s.runtime.Secrets.Resolve(ctx, secret.SecretRef, secret.SecretVersion)
-	})
-	var replacement *ProtocolEngine
-	if resolveErr == nil {
-		replacement, resolveErr = NewProtocolEngine(cipherName, material)
-	}
-	clear(material)
-	if resolveErr != nil {
+	material, resolveErr := s.resolveSecret(ctx, secret.SecretRef, secret.SecretVersion)
+	disableStale := func() {
 		s.engineGate.Lock()
 		defer s.engineGate.Unlock()
 		s.mu.Lock()
-		if s.configuration.Users[index].SecretRef == current.SecretRef && s.configuration.Users[index].SecretVersion == current.SecretVersion {
+		if index, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
+			s.configuration.Users[index].Enabled = false
+			if engine := s.engines[userID]; engine != nil {
+				engine.Destroy()
+				delete(s.engines, userID)
+			}
+		}
+		s.mu.Unlock()
+		secret.discard()
+	}
+	if resolveErr != nil {
+		clear(material)
+		disableStale()
+		return nil, ErrDenied
+	}
+	serverPSK := ""
+	if SS2022Method(method) && serverRef != "" && serverVersion != "" {
+		serverMaterial, serverErr := s.resolveSecret(ctx, serverRef, serverVersion)
+		if serverErr != nil {
+			clear(material)
+			disableStale()
+			return nil, ErrDenied
+		}
+		serverPSK = string(serverMaterial)
+		clear(serverMaterial)
+	}
+	s.engineGate.Lock()
+	defer s.engineGate.Unlock()
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		clear(material)
+		secret.discard()
+		return nil, ErrRevoked
+	}
+	if index, user, found := s.configuration.lookupUser(userID); !found || user.SecretRef != current.SecretRef || user.SecretVersion != current.SecretVersion {
+		s.mu.Unlock()
+		clear(material)
+		secret.discard()
+		return nil, ErrRevoked
+	} else {
+		_ = index
+	}
+	method = current.ResolvedMethod(s.configuration.Cipher)
+	if latest, found := s.configuration.User(userID); found {
+		method = latest.ResolvedMethod(s.configuration.Cipher)
+	}
+	replacement, resolveErr := engineFromMaterial(method, material, serverPSK)
+	clear(material)
+	if resolveErr != nil {
+		if index, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
 			s.configuration.Users[index].Enabled = false
 			if engine := s.engines[userID]; engine != nil {
 				engine.Destroy()
@@ -381,23 +717,145 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 		secret.discard()
 		return nil, ErrDenied
 	}
-	s.engineGate.Lock()
-	defer s.engineGate.Unlock()
-	s.mu.Lock()
-	if !s.live.Load() || s.root.Err() != nil || s.configuration.Users[index].SecretRef != current.SecretRef || s.configuration.Users[index].SecretVersion != current.SecretVersion {
+	next, replaceErr := s.configuration.ReplaceUserSecret(userID, current.SecretVersion, secret.SecretRef, secret.SecretVersion)
+	if replaceErr != nil {
 		s.mu.Unlock()
 		replacement.Destroy()
 		secret.discard()
-		return nil, ErrRevoked
+		return nil, replaceErr
 	}
 	previous := s.engines[userID]
-	s.configuration.Users[index].SecretRef, s.configuration.Users[index].SecretVersion = secret.SecretRef, secret.SecretVersion
+	s.configuration = next
 	s.engines[userID] = replacement
+	if SS2022Method(method) && replacement.HasIdentity() {
+		if client, clientErr := ss2022ClientPasswordFromEngine(replacement); clientErr == nil {
+			rotated := NewSecretOnce(secret.SecretRef, secret.SecretVersion, []byte(client))
+			secret.discard()
+			secret = rotated
+		}
+	}
 	secret.owner, secret.generation = s, generation
 	s.secrets[secret] = struct{}{}
 	s.mu.Unlock()
 	if previous != nil {
 		previous.Destroy()
+	}
+	return secret, nil
+}
+
+// RotateServerPSK replaces the instance SS2022 server PSK. User identity PSKs
+// stay; every SS2022 client password serverPSK:userPSK becomes invalid.
+func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (*SecretOnce, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		return nil, ErrRevoked
+	}
+	generation := s.configuration.Generation
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	s.mu.Unlock()
+	if expectedVersion == "" || serverVersion != expectedVersion {
+		return nil, ErrDenied
+	}
+	secret, err := s.rotateVault(ctx, ServerPSKID, serverRef, serverVersion, generation, "server-psk")
+	if err != nil {
+		return nil, err
+	}
+	material, err := s.resolveSecret(ctx, secret.SecretRef, secret.SecretVersion)
+	if err != nil {
+		secret.discard()
+		return nil, err
+	}
+	serverPSK := string(material)
+	clear(material)
+	s.engineGate.Lock()
+	installed, err := s.installRotatedServerPSK(expectedVersion, secret, serverPSK)
+	s.engineGate.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if auditErr := s.audit(ctx, AuditRecord{Action: "rotate-server-psk", Outcome: "succeeded"}); auditErr != nil {
+		return installed, auditErr
+	}
+	return installed, nil
+}
+
+func (s *Service) installRotatedServerPSK(expectedVersion string, secret *SecretOnce, serverPSK string) (*SecretOnce, error) {
+	type ss2022Account struct {
+		id, method, userPSK string
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		secret.discard()
+		return nil, ErrRevoked
+	}
+	if s.configuration.ServerPSKVersion != expectedVersion {
+		s.mu.Unlock()
+		secret.discard()
+		return nil, ErrDenied
+	}
+	accounts := make([]ss2022Account, 0, len(s.engines))
+	for id, engine := range s.engines {
+		if engine == nil || !SS2022Method(engine.Name()) {
+			continue
+		}
+		key, _, snapErr := engine.keysSnapshot()
+		if snapErr != nil {
+			s.mu.Unlock()
+			secret.discard()
+			return nil, ErrDenied
+		}
+		accounts = append(accounts, ss2022Account{id: id, method: engine.Name(), userPSK: encodedPSK(key)})
+		clear(key)
+	}
+	generation := s.configuration.Generation
+	s.mu.Unlock()
+	replacements := make(map[string]*ProtocolEngine, len(accounts))
+	rollback := func() {
+		for _, engine := range replacements {
+			engine.Destroy()
+		}
+	}
+	for _, account := range accounts {
+		engine, buildErr := NewSS2022IdentityEngine(account.method, []byte(serverPSK), []byte(account.userPSK))
+		if buildErr != nil {
+			rollback()
+			secret.discard()
+			return nil, buildErr
+		}
+		replacements[account.id] = engine
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		rollback()
+		secret.discard()
+		return nil, ErrRevoked
+	}
+	next, err := s.configuration.ReplaceServerPSK(expectedVersion, secret.SecretRef, secret.SecretVersion)
+	if err != nil {
+		s.mu.Unlock()
+		rollback()
+		secret.discard()
+		return nil, err
+	}
+	previous := make([]*ProtocolEngine, 0, len(replacements))
+	for id, engine := range replacements {
+		if old := s.engines[id]; old != nil {
+			previous = append(previous, old)
+		}
+		s.engines[id] = engine
+	}
+	s.configuration = next
+	secret.owner, secret.generation = s, generation
+	s.secrets[secret] = struct{}{}
+	s.mu.Unlock()
+	for _, old := range previous {
+		old.Destroy()
 	}
 	return secret, nil
 }
