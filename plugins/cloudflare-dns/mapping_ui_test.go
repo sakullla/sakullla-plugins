@@ -496,6 +496,9 @@ func (vault *uiFakeVault) Verify(_ context.Context, ref string) (TokenAttestatio
 	defer vault.mu.Unlock()
 	secret, ok := vault.secrets[ref]
 	if !ok {
+		if strings.HasSuffix(ref, "/map/catalog") {
+			return TokenAttestation{}, ErrMappingCatalogNotFound
+		}
 		return TokenAttestation{}, errors.New("raw missing token")
 	}
 	return TokenAttestation{SecretRef: ref, Version: versionName(secret.version), Permissions: []string{PermissionVaultEnroll, PermissionVaultRotate}, LastUsed: 1}, nil

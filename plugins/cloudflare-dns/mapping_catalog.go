@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"sync"
 )
 
@@ -59,7 +60,10 @@ func newVaultMappingCatalog(vault Vault, secretRef string) *vaultMappingCatalog 
 func (catalog *vaultMappingCatalog) Load(ctx context.Context) (mappingCatalogSnapshot, error) {
 	attestation, err := catalog.vault.Verify(ctx, catalog.ref)
 	if err != nil {
-		return mappingCatalogSnapshot{}, nil
+		if errors.Is(err, ErrMappingCatalogNotFound) {
+			return mappingCatalogSnapshot{}, nil
+		}
+		return mappingCatalogSnapshot{}, err
 	}
 	material, err := catalog.vault.Reveal(ctx, catalog.ref)
 	if err != nil {
@@ -88,13 +92,6 @@ func (catalog *vaultMappingCatalog) Save(ctx context.Context, snapshot mappingCa
 	var metadata TokenMetadata
 	if catalog.version == "" {
 		metadata, err = catalog.vault.Enroll(ctx, catalog.ref, payload, operation)
-		if err != nil {
-			attestation, verifyErr := catalog.vault.Verify(ctx, catalog.ref)
-			if verifyErr != nil {
-				return err
-			}
-			metadata, err = catalog.vault.Rotate(ctx, catalog.ref, attestation.Version, payload, operation)
-		}
 	} else {
 		metadata, err = catalog.vault.Rotate(ctx, catalog.ref, catalog.version, payload, operation)
 	}
@@ -154,19 +151,70 @@ func (service *Service) catalogSnapshotLocked() mappingCatalogSnapshot {
 	return mappingCatalogSnapshot{Mappings: mappings, Retired: retired, Revision: service.revision}
 }
 
-func (service *Service) persistMappings(ctx context.Context, action, operation string, request ActionRequest) error {
+type mappingMemory struct {
+	mappings map[string]storedMapping
+	retired  map[string]uint64
+	revision uint64
+}
+
+func (service *Service) cloneMemoryLocked() mappingMemory {
+	mappings := make(map[string]storedMapping, len(service.mappings))
+	for suffix, mapping := range service.mappings {
+		mappings[suffix] = mapping
+	}
+	retired := make(map[string]uint64, len(service.retired))
+	for suffix, epoch := range service.retired {
+		retired[suffix] = epoch
+	}
+	return mappingMemory{mappings: mappings, retired: retired, revision: service.revision}
+}
+
+func (service *Service) restoreMemoryLocked(memory mappingMemory) {
+	service.mappings = memory.mappings
+	service.retired = memory.retired
+	service.revision = memory.revision
+}
+
+func (service *Service) applyAndPersist(ctx context.Context, action, operation string, request ActionRequest, apply func() error) error {
 	if service.catalog == nil {
-		return nil
+		service.mu.Lock()
+		err := apply()
+		service.mu.Unlock()
+		return err
 	}
 	service.catalogMu.Lock()
 	defer service.catalogMu.Unlock()
 	service.mu.Lock()
+	previous := service.cloneMemoryLocked()
+	if err := apply(); err != nil {
+		service.mu.Unlock()
+		return err
+	}
+	newEpochs := map[string]uint64{}
+	for suffix, mapping := range service.mappings {
+		if mapping.Epoch == 0 || !mapping.public().Configured {
+			continue
+		}
+		prior, existed := previous.mappings[suffix]
+		if !existed || !prior.public().Configured || prior.Epoch != mapping.Epoch || prior.SecretRef != mapping.SecretRef || prior.Version != mapping.Version {
+			newEpochs[suffix] = mapping.Epoch
+		}
+	}
 	snapshot := service.catalogSnapshotLocked()
 	service.mu.Unlock()
 	_, err := await(service, ctx, func(callCtx context.Context) (struct{}, error) {
 		return struct{}{}, service.catalog.Save(callCtx, snapshot)
 	})
 	if err != nil {
+		service.mu.Lock()
+		service.restoreMemoryLocked(previous)
+		for suffix, epoch := range newEpochs {
+			service.retireSuffixLocked(suffix, epoch)
+			if mapping, ok := service.mappings[suffix]; ok && !mapping.public().Configured {
+				delete(service.mappings, suffix)
+			}
+		}
+		service.mu.Unlock()
 		return service.fail(ctx, action, operation, request, "catalog", safeExternal(err, ErrVaultOperationFailed))
 	}
 	return nil

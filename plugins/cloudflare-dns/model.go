@@ -48,6 +48,7 @@ var (
 	ErrRevoked                 = errors.New("Cloudflare generation revoked")
 	ErrMappingConflict         = errors.New("Cloudflare mapping suffix already exists")
 	ErrMappingNotFound         = errors.New("Cloudflare mapping not found")
+	ErrMappingCatalogNotFound  = errors.New("Cloudflare mapping catalog not found")
 	ErrTokenUnavailable        = errors.New("Cloudflare domain has no available token")
 	ErrMappedTokenUnavailable  = errors.New("Cloudflare mapped token unavailable")
 )

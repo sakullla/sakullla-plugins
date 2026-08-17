@@ -126,36 +126,33 @@ func (service *Service) ShareMapping(ctx context.Context, request ActionRequest,
 	if err := service.authorizeBare(ctx, action, PermissionVaultEnroll, operation, request); err != nil {
 		return TokenMapping{}, err
 	}
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
-	}
-	existing, exists := service.mappings[normalized]
-	origin, originOK := service.configuredMapping(source)
-	if exists && existing.public().Configured {
-		if existing.SecretRef == origin.SecretRef && originOK {
-			current := existing.public()
-			service.mu.Unlock()
-			return service.finishMapping(ctx, action, operation, request, current)
+	var current TokenMapping
+	err = service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
 		}
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingConflict)
-	}
-	if !originOK {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
-	}
-	if len(service.mappings) >= MaxMappings && !exists {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "bound", ErrBoundExceeded)
-	}
-	service.revision++
-	stored := storedMapping{Suffix: normalized, SecretRef: origin.SecretRef, Version: origin.Version, UpdatedAt: service.revision, Epoch: epoch}
-	service.mappings[normalized] = stored
-	current := stored.public()
-	service.mu.Unlock()
-	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		existing, exists := service.mappings[normalized]
+		origin, originOK := service.configuredMapping(source)
+		if exists && existing.public().Configured {
+			if existing.SecretRef == origin.SecretRef && originOK {
+				current = existing.public()
+				return nil
+			}
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingConflict)
+		}
+		if !originOK {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+		}
+		if len(service.mappings) >= MaxMappings && !exists {
+			return service.fail(ctx, action, operation, request, "bound", ErrBoundExceeded)
+		}
+		service.revision++
+		stored := storedMapping{Suffix: normalized, SecretRef: origin.SecretRef, Version: origin.Version, UpdatedAt: service.revision, Epoch: epoch}
+		service.mappings[normalized] = stored
+		current = stored.public()
+		return nil
+	})
+	if err != nil {
 		return TokenMapping{}, err
 	}
 	return service.finishMapping(ctx, action, operation, request, current)
@@ -182,34 +179,32 @@ func (service *Service) RenameMapping(ctx context.Context, request ActionRequest
 	if err := service.authorizeBare(ctx, action, PermissionVaultEnroll, operation, request); err != nil {
 		return TokenMapping{}, err
 	}
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
-	}
-	current, ok := service.configuredMapping(normalized)
-	if !ok {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
-	}
-	if renamed == normalized {
-		public := current.public()
-		service.mu.Unlock()
-		return service.finishMapping(ctx, action, operation, request, public)
-	}
-	if _, exists := service.configuredMapping(renamed); exists {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingConflict)
-	}
-	service.revision++
-	service.retireSuffixLocked(normalized, current.Epoch)
-	delete(service.mappings, normalized)
-	current.Suffix = renamed
-	current.UpdatedAt = service.revision
-	service.mappings[renamed] = current
-	public := current.public()
-	service.mu.Unlock()
-	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+	var public TokenMapping
+	err = service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
+		}
+		current, ok := service.configuredMapping(normalized)
+		if !ok {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+		}
+		if renamed == normalized {
+			public = current.public()
+			return nil
+		}
+		if _, exists := service.configuredMapping(renamed); exists {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingConflict)
+		}
+		service.revision++
+		service.retireSuffixLocked(normalized, current.Epoch)
+		delete(service.mappings, normalized)
+		current.Suffix = renamed
+		current.UpdatedAt = service.revision
+		service.mappings[renamed] = current
+		public = current.public()
+		return nil
+	})
+	if err != nil {
 		return TokenMapping{}, err
 	}
 	return service.finishMapping(ctx, action, operation, request, public)
@@ -305,20 +300,19 @@ func (service *Service) DeleteMapping(ctx context.Context, request ActionRequest
 	if err := service.authorizeBare(ctx, action, PermissionVaultEnroll, operation, request); err != nil {
 		return err
 	}
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return service.fail(ctx, action, operation, request, "revoked", err)
-	}
-	current, ok := service.configuredMapping(normalized)
-	if !ok {
-		service.mu.Unlock()
-		return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
-	}
-	service.retireSuffixLocked(normalized, current.Epoch)
-	delete(service.mappings, normalized)
-	service.mu.Unlock()
-	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+	err = service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
+		}
+		current, ok := service.configuredMapping(normalized)
+		if !ok {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+		}
+		service.retireSuffixLocked(normalized, current.Epoch)
+		delete(service.mappings, normalized)
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	if err := service.emitUI(ctx, UIProjection{Kind: action, Outcome: "succeeded", OperationKey: operation, Suffix: normalized, Domain: request.Domain}); err != nil {
@@ -606,38 +600,46 @@ func (service *Service) storeMapping(ctx context.Context, action, operation stri
 		service.releaseMapping(mapping.Suffix)
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "stale", ErrTokenStale)
 	}
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
-	}
-	service.revision++
-	mapping.UpdatedAt = service.revision
-	service.mappings[mapping.Suffix] = mapping
-	current := mapping.public()
-	service.mu.Unlock()
-	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+	var current TokenMapping
+	err := service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
+		}
+		service.revision++
+		mapping.UpdatedAt = service.revision
+		service.mappings[mapping.Suffix] = mapping
+		current = mapping.public()
+		return nil
+	})
+	if err != nil {
 		return TokenMapping{}, err
 	}
 	return service.finishMapping(ctx, action, operation, request, current)
 }
 
 func (service *Service) finishCommittedMapping(ctx context.Context, action, operation string, request ActionRequest, suffix string, epoch uint64, metadata TokenMetadata) (TokenMapping, error) {
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
+	var current TokenMapping
+	replayed := false
+	err := service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
+		}
+		if existing, ok := service.configuredMapping(suffix); ok {
+			current = existing.public()
+			replayed = true
+			return nil
+		}
+		if epoch != 0 && service.retired[suffix] >= epoch {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+		}
+		return nil
+	})
+	if err != nil {
+		return TokenMapping{}, err
 	}
-	if current, ok := service.configuredMapping(suffix); ok {
-		public := current.public()
-		service.mu.Unlock()
-		return service.finishMapping(ctx, action, operation, request, public)
+	if replayed {
+		return service.finishMapping(ctx, action, operation, request, current)
 	}
-	if epoch != 0 && service.retired[suffix] >= epoch {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
-	}
-	service.mu.Unlock()
 	return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: suffix, SecretRef: metadata.SecretRef, Version: metadata.Version, Epoch: epoch})
 }
 
@@ -645,31 +647,34 @@ func (service *Service) applyRotatedMapping(ctx context.Context, action, operati
 	if metadata.SecretRef != secretRef || !refPattern.MatchString(metadata.Version) {
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "stale", ErrTokenStale)
 	}
-	service.mu.Lock()
-	if err := service.guardMappingsLocked(); err != nil {
-		service.mu.Unlock()
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
-	}
 	var current TokenMapping
-	found := false
-	service.revision++
-	for suffix, mapping := range service.mappings {
-		if mapping.SecretRef != secretRef || !mapping.public().Configured {
-			continue
+	err := service.applyAndPersist(ctx, action, operation, request, func() error {
+		if err := service.guardMappingsLocked(); err != nil {
+			return service.fail(ctx, action, operation, request, "revoked", err)
 		}
-		mapping.Version = metadata.Version
-		mapping.UpdatedAt = service.revision
-		service.mappings[suffix] = mapping
-		if suffix == request.Suffix {
-			current = mapping.public()
-			found = true
+		if existing, ok := service.configuredMapping(request.Suffix); !ok || existing.SecretRef != secretRef {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
 		}
-	}
-	service.mu.Unlock()
-	if !found {
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
-	}
-	if err := service.persistMappings(ctx, action, operation, request); err != nil {
+		service.revision++
+		found := false
+		for suffix, mapping := range service.mappings {
+			if mapping.SecretRef != secretRef || !mapping.public().Configured {
+				continue
+			}
+			mapping.Version = metadata.Version
+			mapping.UpdatedAt = service.revision
+			service.mappings[suffix] = mapping
+			if suffix == request.Suffix {
+				current = mapping.public()
+				found = true
+			}
+		}
+		if !found {
+			return service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+		}
+		return nil
+	})
+	if err != nil {
 		return TokenMapping{}, err
 	}
 	return service.finishMapping(ctx, action, operation, request, current)
