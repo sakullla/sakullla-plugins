@@ -82,6 +82,54 @@ func TestCloudflareRPCInjectedLifecycleRevokeAndCleanup(t *testing.T) {
 	}
 }
 
+func TestCloudflareRPCActivateLoadsEmptyCatalogAndResolves(t *testing.T) {
+	vault, trace := newFakeVault(), &safeTrace{}
+	runtime := runtimeFor(vault, newFakeDNS(vault), trace)
+	controller, err := cloudflaredns.NewController(cloudflaredns.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: cloudflaredns.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, cloudflaredns.Configuration) (cloudflaredns.PreparedAdmission, error) {
+		return cloudflaredns.PreparedAdmissionFuncs{CommitFunc: func(context.Context) (cloudflaredns.RuntimeAdapters, error) { return runtime, nil }, AbortFunc: func() {}}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), handshake(requiredGrants())); err != nil {
+		t.Fatal(err)
+	}
+	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, testConfiguration())}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if err := controller.Use(context.Background(), func(ctx context.Context, service *cloudflaredns.Service) error {
+		if _, err := service.CreateMapping(ctx, validAction(""), "example.com", []byte("token-mapped")); err != nil {
+			return err
+		}
+		hit, err := service.ResolveToken(ctx, validAction(""), "www.example.com", []byte("token-fallback"))
+		if err != nil {
+			return err
+		}
+		defer hit.Clear()
+		if hit.Fallback || !bytes.Equal(hit.Token(), []byte("token-mapped")) {
+			t.Fatalf("hit=%#v token=%q", hit, hit.Token())
+		}
+		miss, err := service.ResolveToken(ctx, validAction(""), "other.test", []byte("token-fallback"))
+		if err != nil {
+			return err
+		}
+		defer miss.Clear()
+		if !miss.Fallback || !bytes.Equal(miss.Token(), []byte("token-fallback")) {
+			t.Fatalf("miss=%#v token=%q", miss, miss.Token())
+		}
+		_, err = service.ResolveToken(ctx, validAction(""), "missing.example", nil)
+		if !errors.Is(err, cloudflaredns.ErrTokenUnavailable) || !strings.Contains(err.Error(), "missing.example") {
+			t.Fatalf("unmapped err=%v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCloudflareRPCLateAdmissionCannotPublishAndAborts(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var lasting, aborts atomic.Int32

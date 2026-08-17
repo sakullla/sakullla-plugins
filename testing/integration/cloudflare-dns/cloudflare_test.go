@@ -727,6 +727,9 @@ func (vault *fakeVault) Verify(_ context.Context, ref string) (cloudflaredns.Tok
 	if ref != "vault/cloudflare" {
 		secret, ok := vault.secrets[ref]
 		if !ok {
+			if strings.HasSuffix(ref, "/map/catalog") {
+				return cloudflaredns.TokenAttestation{}, cloudflaredns.ErrMappingCatalogNotFound
+			}
 			return cloudflaredns.TokenAttestation{}, errors.New("raw missing token")
 		}
 		return cloudflaredns.TokenAttestation{SecretRef: ref, Version: fmt.Sprintf("version-%d", secret.version), Permissions: append([]string(nil), vault.permissions...), ZoneIDs: append([]string(nil), vault.zoneIDs...), LastUsed: 42}, nil
