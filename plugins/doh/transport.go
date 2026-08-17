@@ -559,6 +559,8 @@ type quicConn struct {
 	cryptoRead    [3]uint64
 	streams       map[uint64]*quicStream
 	handshakeDone bool
+	onPacket      func()
+	coalesce      bool
 }
 
 func dialQUIC(ctx context.Context, address string, tlsConfig *tls.Config) (*quicConn, error) {
@@ -765,6 +767,9 @@ func (conn *quicConn) handshake(ctx context.Context) error {
 }
 
 func (conn *quicConn) drainTLS() error {
+	if conn.tls == nil {
+		return nil
+	}
 	for {
 		event := conn.tls.NextEvent()
 		switch event.Kind {
@@ -834,6 +839,7 @@ func suiteKeys(suite uint16, secret []byte) (quicKeys, error) {
 
 func (conn *quicConn) flush(ctx context.Context) error {
 	_ = ctx
+	var datagram []byte
 	for _, space := range []quicSpace{spaceInitial, spaceHandshake, spaceApplication} {
 		if len(conn.cryptoOut[space]) == 0 && conn.largestRecv[space] < 0 {
 			continue
@@ -853,17 +859,41 @@ func (conn *quicConn) flush(ctx context.Context) error {
 		if len(frames) == 0 {
 			continue
 		}
-		if err := conn.sendPacket(space, frames, space == spaceInitial); err != nil {
+		packet, err := conn.encodePacket(space, frames, space == spaceInitial)
+		if err != nil {
 			return err
+		}
+		if conn.coalesce {
+			datagram = append(datagram, packet...)
+			continue
+		}
+		if _, err := conn.udp.Write(packet); err != nil {
+			return ErrUpstreamFailed
+		}
+	}
+	if len(datagram) > 0 {
+		if _, err := conn.udp.Write(datagram); err != nil {
+			return ErrUpstreamFailed
 		}
 	}
 	return nil
 }
 
 func (conn *quicConn) sendPacket(space quicSpace, frames []byte, padInitial bool) error {
+	packet, err := conn.encodePacket(space, frames, padInitial)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.udp.Write(packet); err != nil {
+		return ErrUpstreamFailed
+	}
+	return nil
+}
+
+func (conn *quicConn) encodePacket(space quicSpace, frames []byte, padInitial bool) ([]byte, error) {
 	keys := conn.keys[space]
 	if len(keys.key) == 0 {
-		return ErrUpstreamFailed
+		return nil, ErrUpstreamFailed
 	}
 	pn := conn.writePN[space]
 	conn.writePN[space]++
@@ -878,14 +908,7 @@ func (conn *quicConn) sendPacket(space quicSpace, frames []byte, padInitial bool
 			payload = append(payload, make([]byte, need)...)
 		}
 	}
-	packet, err := sealQUICPacket(header, payload, pn, keys)
-	if err != nil {
-		return err
-	}
-	if _, err := conn.udp.Write(packet); err != nil {
-		return ErrUpstreamFailed
-	}
-	return nil
+	return sealQUICPacket(header, payload, pn, keys)
 }
 
 func (conn *quicConn) writeStream(id uint64, data []byte, fin bool) error {
@@ -937,6 +960,9 @@ func (conn *quicConn) handleDatagram(datagram []byte) error {
 			return ErrUpstreamFailed
 		}
 		offset += consumed
+		if conn.onPacket != nil {
+			conn.onPacket()
+		}
 		if err := conn.drainTLS(); err != nil {
 			return err
 		}
@@ -1259,7 +1285,7 @@ func unprotectQUICPacket(packet []byte, space quicSpace, keys quicKeys, shortCID
 	if len(keys.key) == 0 || len(packet) < 20 {
 		return nil, nil, 0, 0, ErrUpstreamFailed
 	}
-	pnOffset, hdrLenGuess, err := headerPNOffset(packet, space, shortCID)
+	pnOffset, remainder, err := headerPNOffset(packet, space, shortCID)
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
@@ -1273,28 +1299,27 @@ func unprotectQUICPacket(packet []byte, space quicSpace, keys quicKeys, shortCID
 		pn = pn<<8 | uint64(unprotected[pnOffset+i])
 	}
 	header := unprotected[:pnOffset+pnLen]
+	end := len(unprotected)
+	if space != spaceApplication {
+		end = pnOffset + remainder
+		if remainder < pnLen+16 || end > len(unprotected) {
+			return nil, nil, 0, 0, ErrUpstreamFailed
+		}
+	}
 	aead, err := aesGCM(keys.key)
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
-	body, err := aead.Open(nil, aeadNonce(keys.iv, pn), unprotected[pnOffset+pnLen:], header)
+	body, err := aead.Open(nil, aeadNonce(keys.iv, pn), unprotected[pnOffset+pnLen:end], header)
 	if err != nil {
 		return nil, nil, 0, 0, ErrUpstreamFailed
 	}
-	consumed := len(packet)
-	if space != spaceApplication {
-		consumed = pnOffset + pnLen + len(body) + 16
-		if consumed > len(packet) {
-			consumed = len(packet)
-		}
-	}
-	_ = hdrLenGuess
-	return header, body, consumed, pn, nil
+	return header, body, end, pn, nil
 }
 
 func headerPNOffset(packet []byte, space quicSpace, shortCID []byte) (int, int, error) {
 	if packet[0]&0x80 == 0 {
-		return 1 + len(shortCID), 1 + len(shortCID) + 4, nil
+		return 1 + len(shortCID), len(packet) - (1 + len(shortCID)), nil
 	}
 	_, _, rest, err := peekLongHeaderCIDs(packet)
 	if err != nil {
@@ -1307,11 +1332,11 @@ func headerPNOffset(packet []byte, space quicSpace, shortCID []byte) (int, int, 
 			return 0, 0, err
 		}
 	}
-	_, offset, err = readVarint(packet, offset)
+	length, offset, err := readVarint(packet, offset)
 	if err != nil {
 		return 0, 0, err
 	}
-	return offset, offset + 4, nil
+	return offset, int(length), nil
 }
 
 func protectHeader(packet []byte, pnOffset int, hp []byte) []byte {

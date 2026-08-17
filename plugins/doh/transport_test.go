@@ -54,6 +54,45 @@ func TestQUICPacketSealOpen(t *testing.T) {
 	}
 }
 
+func TestQUICCoalescedHandshakeNeedsSecretsFromFirstPacket(t *testing.T) {
+	initialKeys := deriveQUICKeys(bytesRepeat(0x11, 32), 16)
+	handshakeKeys := deriveQUICKeys(bytesRepeat(0x22, 32), 16)
+	dcid := bytesRepeat(0x01, 8)
+	scid := bytesRepeat(0x02, 8)
+	initial, err := sealQUICPacket(encodeLongHeader(spaceInitial, dcid, scid, 1, 0), []byte{0x01}, 1, initialKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handshake, err := sealQUICPacket(encodeLongHeader(spaceHandshake, dcid, scid, 1, 0), []byte{0x01}, 1, handshakeKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram := append(append([]byte{}, initial...), handshake...)
+	_, _, consumed, _, err := unprotectQUICPacket(datagram, spaceInitial, initialKeys, scid)
+	if err != nil || consumed != len(initial) {
+		t.Fatalf("consumed=%d want=%d err=%v", consumed, len(initial), err)
+	}
+	if _, _, _, _, err := unprotectQUICPacket(datagram[consumed:], spaceHandshake, handshakeKeys, scid); err != nil {
+		t.Fatalf("handshake after first packet: %v", err)
+	}
+	conn := &quicConn{
+		scid:        scid,
+		peerCID:     dcid,
+		readKeys:    [3]quicKeys{spaceInitial: initialKeys},
+		largestRecv: [3]int64{-1, -1, -1},
+		streams:     map[uint64]*quicStream{},
+	}
+	if err := conn.handleDatagram(datagram); err == nil {
+		t.Fatal("coalesced handshake opened without secrets from the first packet")
+	}
+	conn.readKeys = [3]quicKeys{spaceInitial: initialKeys}
+	conn.largestRecv = [3]int64{-1, -1, -1}
+	conn.onPacket = func() { conn.readKeys[spaceHandshake] = handshakeKeys }
+	if err := conn.handleDatagram(datagram); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestParseTransportSpecDoesNotRewriteBareIPToHTTPS(t *testing.T) {
 	spec, err := parseTransportSpec("8.8.8.8")
 	if err != nil || spec.kind != transportUDP || spec.address != "8.8.8.8:53" {
@@ -333,6 +372,7 @@ func startQUICDNSServer(t *testing.T, alpns []string) string {
 			return
 		}
 		defer conn.close()
+		conn.coalesce = true
 		if err := conn.handshake(ctx); err != nil {
 			errc <- err
 			return
