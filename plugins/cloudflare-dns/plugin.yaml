@@ -2,7 +2,7 @@ schema_version: 1
 id: cloudflare-dns
 version: 0.1.0
 name: Cloudflare DNS
-description: 按域名后缀解析 Cloudflare DNS Token
+description: 按域名后缀解析 Cloudflare DNS Token，并提供专门映射管理页
 compatibility:
   host: "*"
   agent: "*"
@@ -20,6 +20,16 @@ artifacts:
     goarch: amd64
 extension_points:
   - dns.provider
+  - ui.route
+  - resource.group
+ui_route_id: cloudflare-dns
+resource_group_id: cloudflare-dns
+metadata:
+  ui.nav.group: 基础设施
+  ui.nav.label: 域名 Token
+  resource.group.ref: resource-group/cloudflare-dns
+  resource.group.label: Cloudflare DNS
+  resource.group.description: 按域名后缀隔离 Token 映射
 permissions:
   - name: dns.manage
   - name: secret.use

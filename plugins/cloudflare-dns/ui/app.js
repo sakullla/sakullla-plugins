@@ -47,13 +47,13 @@ document.querySelectorAll("form[data-action]").forEach((form) => {
     }
     try {
       if (action === "create") {
-        await sendJSON("/api/mappings", { suffix, token });
+        await sendJSON("api/mappings", { suffix, token });
       } else if (action === "rename") {
-        await sendJSON(`/api/mappings/${encodeURIComponent(current)}/rename`, { suffix, confirm: current });
+        await sendJSON(`api/mappings/${encodeURIComponent(current)}/rename`, { suffix, confirm: current });
       } else if (action === "rotate") {
-        await sendJSON(`/api/mappings/${encodeURIComponent(current)}/rotate`, { token, confirm: current });
+        await sendJSON(`api/mappings/${encodeURIComponent(current)}/rotate`, { token, confirm: current });
       } else if (action === "delete") {
-        await sendJSON(`/api/mappings/${encodeURIComponent(current)}/delete`, { confirm: current });
+        await sendJSON(`api/mappings/${encodeURIComponent(current)}/delete`, { confirm: current });
       }
       window.location.reload();
     } catch (error) {

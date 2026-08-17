@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,6 +297,58 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), "unavailable") || inactive.Body.Len() == 0 {
 		t.Fatalf("inactive controller status=%d body=%s", inactive.Code, inactive.Body.String())
+	}
+}
+
+func TestPluginYAMLDeclaresUIRouteNotPanelPage(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: cloudflare-dns") {
+		t.Fatalf("plugin.yaml must declare ui.route support: %s", text)
+	}
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: cloudflare-dns") {
+		t.Fatalf("plugin.yaml must declare resource.group support: %s", text)
+	}
+	if strings.Contains(text, "ui_schema:") {
+		t.Fatal("mapping UI must not use host config ui_schema")
+	}
+}
+
+func TestPluginYAMLDeclaresResourceGroupForHostCatalog(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"resource.group.ref: resource-group/cloudflare-dns",
+		"resource.group.label: Cloudflare DNS",
+		"resource.group.description: 按域名后缀隔离 Token 映射",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plugin.yaml must declare %q: %s", want, text)
+		}
+	}
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: cloudflare-dns") {
+		t.Fatal("plugin.yaml must declare resource.group as an SDK extension point")
+	}
+}
+
+func TestMappingUIUsesConfiguredResourceGroupWhenHeaderMissing(t *testing.T) {
+	t.Parallel()
+	service, _ := newUIService(t, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/mappings", nil)
+	request.Header.Set(mappingActorHeader, "actor/admin")
+	request.Header.Set(mappingOperationHeader, "operation/ui-list-declared")
+	listed := httptest.NewRecorder()
+	service.ServeHTTP(listed, request)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"access"`) {
+		t.Fatalf("list without group header status=%d body=%s", listed.Code, listed.Body.String())
 	}
 }
 

@@ -1,0 +1,61 @@
+format: delivery_report
+status: completed
+workflow_id: 2026-08-17-Cloudflare域名Token解析
+candidate_ref: 73e77636aeca909bb66ef1385b390ac75e107ba8
+environment:
+  python: 3.14.6
+  platform: Windows-11-10.0.26200-SP0
+  processor: Intel64 Family 6 Model 158 Stepping 13, GenuineIntel
+  network: not_required
+  logical_cpu_count: 8
+verification:
+  status: passed
+  command_set_digest: sha256:a797a60cd28d077ea12ec8a4115c55873ea483574882355355b8b8a1ed7e8598
+  commands:
+    - id: plugin-resolver
+      command: go test ./plugins/cloudflare-dns ./testing/integration/cloudflare-dns ./internal/pluginmanifest
+      owner: T-map-resolve
+      protocol: pass
+      sla_seconds: 0
+      status: passed
+      attempt_count: 1
+      runs:
+        - phase: check
+          ordinal: 1
+          wall_clock_seconds: 0.8263675000052899
+          exit_code: 0
+          timed_out: false
+          metrics:
+            jobs: null
+            modules: null
+            skipped: null
+            tests: null
+          stdout: "ok  \tgithub.com/sakullla/sakullla-plugins/plugins/cloudflare-dns\t(cached)\nok  \tgithub.com/sakullla/sakullla-plugins/testing/integration/cloudflare-dns\t(cached)\nok  \tgithub.com/sakullla/sakullla-plugins/internal/pluginmanifest\t(cached)\n"
+          stderr: ""
+          evidence_ref: evidence/verification/sha256-4baa3d304d47733fa54890bb44efda3b88f8ee1628560600519f67787e0e0e7a.json
+    - id: mapping-ui
+      command: go test ./plugins/cloudflare-dns
+      owner: T-mapping-ui
+      protocol: pass
+      sla_seconds: 0
+      status: passed
+      attempt_count: 1
+      runs:
+        - phase: check
+          ordinal: 1
+          wall_clock_seconds: 0.7674033000075724
+          exit_code: 0
+          timed_out: false
+          metrics:
+            jobs: null
+            modules: null
+            skipped: null
+            tests: null
+          stdout: "ok  \tgithub.com/sakullla/sakullla-plugins/plugins/cloudflare-dns\t(cached)\n"
+          stderr: ""
+          evidence_ref: evidence/verification/sha256-38997926360d14e20cd42eca21eae472fd28b9ccb2112c952306ca2867058faf.json
+  pending_ids: []
+review_result:
+  decision: passed
+  summary: "Dependency reader matches 19 changed paths in 996e906c..73e77636. Completed risk dimensions: R1/R2/R5 longest-suffix and fallback/fail contract; R3 CRUD, auth deny, confirm/cancel, no plaintext, last save after restart; R4 in-repo ResolveToken by domain; R6 redaction; R7-R10 exclusions; catalog/UI/resolve interaction; historical findings closed; sibling DNS/lifecycle paths; verification pass. No still-valid business root cause."
+  findings: []

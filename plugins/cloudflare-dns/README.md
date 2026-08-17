@@ -23,6 +23,11 @@ reloaded when the service is reconstructed or a new generation activates
 against the same Vault catalog. The host may mount this page; this plugin does
 not declare `ui.schema.json`.
 
+The plugin declares `ui.route` and `resource.group` in `plugin.yaml`. The host
+mounts the page at `/panel-api/plugins/<ui_route_id>/` and lists the resource
+group from `resource_group_id` plus `resource.group.*` metadata. Instance
+`resource_group_ref` must match `resource.group.ref`.
+
 Existing zone-scoped DNS record adapters remain for injected test brokers. They
 are not the product face of this plugin.
 

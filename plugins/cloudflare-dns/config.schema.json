@@ -6,6 +6,10 @@
   "properties": {
     "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
     "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "resource_group_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"}
+    "resource_group_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+      "description": "Instance binding; must equal plugin.yaml metadata resource.group.ref"
+    }
   }
 }

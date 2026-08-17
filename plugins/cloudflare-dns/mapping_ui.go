@@ -152,7 +152,7 @@ func (service *Service) serveMappingPage(writer http.ResponseWriter, request *ht
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	identity, err := mappingActionFromRequest(request, "mapping-page", "")
+	identity, err := service.mappingActionFromRequest(request, "mapping-page")
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err != nil {
 		service.writeDeniedPage(writer, http.StatusForbidden)
@@ -182,7 +182,7 @@ func (service *Service) writeDeniedPage(writer http.ResponseWriter, status int) 
 func (service *Service) serveMappingCollection(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet, http.MethodHead:
-		identity, err := mappingActionFromRequest(request, "mapping-list", "")
+		identity, err := service.mappingActionFromRequest(request, "mapping-list")
 		if err != nil {
 			writeMappingJSON(writer, http.StatusForbidden, mappingAPIResponse{Error: ErrAuthorizationDenied.Error()})
 			return
@@ -213,7 +213,7 @@ func (service *Service) serveMappingItem(writer http.ResponseWriter, request *ht
 			writeMappingJSON(writer, http.StatusMethodNotAllowed, mappingAPIResponse{Error: "method not allowed"})
 			return
 		}
-		identity, err := mappingActionFromRequest(request, "mapping-get", suffix)
+		identity, err := service.mappingActionFromRequest(request, "mapping-get")
 		if err != nil {
 			writeMappingJSON(writer, http.StatusForbidden, mappingAPIResponse{Error: ErrAuthorizationDenied.Error()})
 			return
@@ -250,7 +250,7 @@ func (service *Service) handleMappingWrite(writer http.ResponseWriter, request *
 			return
 		}
 	}
-	identity, err := mappingActionFromRequest(request, "mapping-"+action, suffix)
+	identity, err := service.mappingActionFromRequest(request, "mapping-"+action)
 	if err != nil {
 		writeMappingJSON(writer, http.StatusForbidden, mappingAPIResponse{Error: ErrAuthorizationDenied.Error(), Suffix: suffix})
 		return
@@ -299,9 +299,12 @@ func readMappingWrite(request *http.Request) (mappingWriteRequest, error) {
 	return body, nil
 }
 
-func mappingActionFromRequest(request *http.Request, action, suffix string) (ActionRequest, error) {
+func (service *Service) mappingActionFromRequest(request *http.Request, action string) (ActionRequest, error) {
 	actor := strings.TrimSpace(request.Header.Get(mappingActorHeader))
 	group := strings.TrimSpace(request.Header.Get(mappingGroupHeader))
+	if group == "" {
+		group = strings.TrimSpace(service.configuration.ResourceGroupRef)
+	}
 	key := strings.TrimSpace(request.Header.Get(mappingOperationHeader))
 	if key == "" {
 		key = newMappingUIOperationKey(action)
