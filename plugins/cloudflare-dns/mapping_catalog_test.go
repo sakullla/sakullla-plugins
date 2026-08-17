@@ -55,6 +55,71 @@ func TestVaultCatalogSaveDoesNotRotateUnrestored(t *testing.T) {
 	}
 }
 
+func TestMappingRotateRetryAfterPersistFailureUsesVaultVersion(t *testing.T) {
+	t.Parallel()
+	failing := &failSaveCatalog{inner: newMemoryMappingCatalog()}
+	runtime := uiRuntimeWithCatalog(t, failing)
+	service, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateMapping(context.Background(), uiAction("operation/rotate-create"), "example.com", []byte("rotate-secret-token-1")); err != nil {
+		t.Fatal(err)
+	}
+	failing.fail = true
+	if _, err := service.RotateMappingToken(context.Background(), uiAction("operation/rotate-fail"), "example.com", []byte("rotate-secret-token-2")); err == nil {
+		t.Fatal("rotate succeeded after catalog save failure")
+	}
+	failing.fail = false
+	if _, err := service.RotateMappingToken(context.Background(), uiAction("operation/rotate-retry"), "example.com", []byte("rotate-secret-token-3")); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := service.ResolveToken(context.Background(), uiAction("operation/rotate-resolve"), "example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if !bytes.Equal(resolved.Token(), []byte("rotate-secret-token-3")) {
+		t.Fatalf("token=%q", resolved.Token())
+	}
+}
+
+func TestMappingCreateAfterPersistFailureSurvivesNewService(t *testing.T) {
+	t.Parallel()
+	failing := &failSaveCatalog{inner: newMemoryMappingCatalog(), fail: true}
+	runtime := uiRuntimeWithCatalog(t, failing)
+	service, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateMapping(context.Background(), uiAction("operation/restart-fail"), "example.com", []byte("restart-secret-token-1")); err == nil {
+		t.Fatal("create succeeded after catalog save failure")
+	}
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	failing.fail = false
+	restarted, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := restarted.CreateMapping(context.Background(), uiAction("operation/restart-retry"), "example.com", []byte("restart-secret-token-2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SecretRef == "" {
+		t.Fatalf("created=%#v", created)
+	}
+	resolved, err := restarted.ResolveToken(context.Background(), uiAction("operation/restart-resolve"), "example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if !bytes.Equal(resolved.Token(), []byte("restart-secret-token-2")) {
+		t.Fatalf("token=%q", resolved.Token())
+	}
+}
+
 func TestMappingPersistFailureRollsBackAndRetiresEpoch(t *testing.T) {
 	t.Parallel()
 	failing := &failSaveCatalog{inner: newMemoryMappingCatalog(), fail: true}

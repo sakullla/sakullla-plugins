@@ -62,47 +62,54 @@ func (service *Service) CreateMapping(ctx context.Context, request ActionRequest
 		}
 	}()
 	action := "mapping-create"
-	epoch := service.nextMappingEpoch(normalized)
-	operation := service.mappingOperationKey(action, request, normalized, epoch)
-	if err := service.authorizeBare(ctx, action, PermissionVaultEnroll, operation, request); err != nil {
-		return TokenMapping{}, err
-	}
-	if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
-		return TokenMapping{}, ErrReconcilePending
-	} else if outcome.State == OperationCommitted {
-		return service.finishCommittedMapping(ctx, action, operation, request, normalized, epoch, outcome.Token)
-	} else if outcome.State == OperationUnknown {
-		return TokenMapping{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
-	} else if outcome.State == OperationFailed {
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
-	} else if outcome.State != OperationAbsent {
-		return TokenMapping{}, ErrReconcilePending
-	}
-	if err := service.reserveMapping(normalized, epoch); err != nil {
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", err)
-	}
-	secretRef := mappingSecretRef(service.configuration.SecretRef, normalized, epoch)
-	ownedSecret := secret
-	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
-		return service.runtime.Vault.Enroll(callCtx, secretRef, ownedSecret, operation)
-	}, func() { clear(ownedSecret) })
-	secret = nil
-	if err != nil {
-		service.releaseMapping(normalized)
-		failure := safeExternal(err, ErrVaultOperationFailed)
-		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
-			return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
+	for attempt := 0; attempt < MaxMappings; attempt++ {
+		epoch := service.nextMappingEpoch(normalized)
+		operation := service.mappingOperationKey(action, request, normalized, epoch)
+		if err := service.authorizeBare(ctx, action, PermissionVaultEnroll, operation, request); err != nil {
+			return TokenMapping{}, err
 		}
-		outcome, inspectErr := service.inspect(ctx, operation)
-		if inspectErr == nil && outcome.State == OperationCommitted {
+		if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
+			return TokenMapping{}, ErrReconcilePending
+		} else if outcome.State == OperationCommitted {
 			return service.finishCommittedMapping(ctx, action, operation, request, normalized, epoch, outcome.Token)
+		} else if outcome.State == OperationUnknown {
+			return TokenMapping{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+		} else if outcome.State == OperationFailed {
+			return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", ErrVaultOperationFailed)
+		} else if outcome.State != OperationAbsent {
+			return TokenMapping{}, ErrReconcilePending
 		}
-		if inspectErr == nil && outcome.State == OperationFailed {
-			return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
+		if err := service.reserveMapping(normalized, epoch); err != nil {
+			return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", err)
 		}
-		return TokenMapping{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
+		secretRef := mappingSecretRef(service.configuration.SecretRef, normalized, epoch)
+		attemptSecret := append([]byte(nil), secret...)
+		metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
+			return service.runtime.Vault.Enroll(callCtx, secretRef, attemptSecret, operation)
+		}, func() { clear(attemptSecret) })
+		if err != nil {
+			service.releaseMapping(normalized)
+			if service.shouldAdvanceMappingIdentity(ctx, secretRef, operation) {
+				service.retireMappingEpoch(normalized, epoch)
+				continue
+			}
+			failure := safeExternal(err, ErrVaultOperationFailed)
+			if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
+				return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
+			}
+			outcome, inspectErr := service.inspect(ctx, operation)
+			if inspectErr == nil && outcome.State == OperationCommitted {
+				return service.finishCommittedMapping(ctx, action, operation, request, normalized, epoch, outcome.Token)
+			}
+			if inspectErr == nil && outcome.State == OperationFailed {
+				return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
+			}
+			return TokenMapping{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
+		}
+		return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: normalized, SecretRef: metadata.SecretRef, Version: metadata.Version, Epoch: epoch})
 	}
-	return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: normalized, SecretRef: metadata.SecretRef, Version: metadata.Version, Epoch: epoch})
+	operation := service.mappingOperationKey(action, request, normalized, 0)
+	return TokenMapping{}, service.fail(ctx, action, operation, request, "bound", ErrBoundExceeded)
 }
 
 func (service *Service) ShareMapping(ctx context.Context, request ActionRequest, suffix, sourceSuffix string) (TokenMapping, error) {
@@ -261,9 +268,18 @@ func (service *Service) RotateMappingToken(ctx context.Context, request ActionRe
 	} else if outcome.State != OperationAbsent {
 		return TokenMapping{}, ErrReconcilePending
 	}
+	attestation, err := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
+		return service.runtime.Vault.Verify(callCtx, current.SecretRef)
+	})
+	if err != nil {
+		return TokenMapping{}, service.fail(ctx, action, operation, request, "token", safeExternal(err, ErrMappedTokenUnavailable))
+	}
+	if attestation.SecretRef != current.SecretRef || !refPattern.MatchString(attestation.Version) {
+		return TokenMapping{}, service.fail(ctx, action, operation, request, "stale", ErrTokenStale)
+	}
 	ownedSecret := secret
 	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
-		return service.runtime.Vault.Rotate(callCtx, current.SecretRef, current.Version, ownedSecret, operation)
+		return service.runtime.Vault.Rotate(callCtx, current.SecretRef, attestation.Version, ownedSecret, operation)
 	}, func() { clear(ownedSecret) })
 	secret = nil
 	if err != nil {
@@ -556,6 +572,26 @@ func (service *Service) nextMappingEpoch(suffix string) uint64 {
 		return mapping.Epoch
 	}
 	return service.retired[suffix] + 1
+}
+
+func (service *Service) retireMappingEpoch(suffix string, epoch uint64) {
+	service.mu.Lock()
+	service.retireSuffixLocked(suffix, epoch)
+	if mapping, ok := service.mappings[suffix]; ok && !mapping.public().Configured {
+		delete(service.mappings, suffix)
+	}
+	service.mu.Unlock()
+}
+
+func (service *Service) shouldAdvanceMappingIdentity(ctx context.Context, secretRef, operation string) bool {
+	attestation, err := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
+		return service.runtime.Vault.Verify(callCtx, secretRef)
+	})
+	if err != nil || attestation.SecretRef != secretRef || !refPattern.MatchString(attestation.Version) {
+		return false
+	}
+	outcome, inspectErr := service.inspect(ctx, operation)
+	return inspectErr == nil && outcome.State == OperationAbsent
 }
 
 func (service *Service) retireSuffixLocked(suffix string, epoch uint64) {
