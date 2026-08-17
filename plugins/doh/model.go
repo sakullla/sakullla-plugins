@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"regexp"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,10 +15,13 @@ const (
 	ProviderID               = "default"
 	DNSQueryPath             = "/dns-query"
 	DefaultUpstreamID        = "default"
-	DefaultUpstreamEndpoint  = "https://cloudflare-dns.com/dns-query"
+	DefaultUpstreamEndpoint  = "https://dns.google/dns-query"
 	MaxConfigBytes           = 1 << 20
-	MaxPluginConfigBytes     = 4096
-	MaxUpstreams             = 8
+	MaxPluginConfigBytes     = 16384
+	MaxUpstreams             = 32
+	MaxUpstreamLines         = 64
+	MaxUpstreamLineBytes     = 512
+	MaxUpstreamDomainBytes   = 253
 	MaxDNSRequestBytes       = 4096
 	MaxDNSResponseBytes      = 65535
 	defaultRequestTimeoutMS  = 2000
@@ -52,19 +54,13 @@ var opaqueRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 type Upstream struct {
 	ID       string `json:"id"`
 	Endpoint string `json:"endpoint"`
+	Domain   string `json:"domain,omitempty"`
 	Priority int    `json:"priority"`
 	Enabled  bool   `json:"enabled"`
 }
 
 type PluginConfig struct {
-	Upstreams []UpstreamConfig `json:"upstreams,omitempty"`
-}
-
-type UpstreamConfig struct {
-	ID       string `json:"id"`
-	Endpoint string `json:"endpoint"`
-	Priority int    `json:"priority"`
-	Enabled  bool   `json:"enabled"`
+	Upstreams string `json:"upstreams,omitempty"`
 }
 
 type Configuration struct {
@@ -79,16 +75,11 @@ type Configuration struct {
 }
 
 func ConfigurationFromPlugin(config PluginConfig) Configuration {
-	configuration := Configuration{}
-	for _, upstream := range config.Upstreams {
-		configuration.Upstreams = append(configuration.Upstreams, Upstream{
-			ID:       upstream.ID,
-			Endpoint: upstream.Endpoint,
-			Priority: upstream.Priority,
-			Enabled:  upstream.Enabled,
-		})
+	upstreams, err := parseUpstreamText(config.Upstreams)
+	if err != nil {
+		return Configuration{}
 	}
-	return configuration
+	return Configuration{Upstreams: upstreams}
 }
 
 func applyConfigurationDefaults(configuration Configuration) Configuration {
@@ -130,7 +121,7 @@ func (configuration Configuration) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(configuration.Upstreams))
 	for _, upstream := range configuration.Upstreams {
-		if !opaqueRefPattern.MatchString(upstream.ID) || len(upstream.Endpoint) == 0 || len(upstream.Endpoint) > 256 || upstream.Priority < -1000 || upstream.Priority > 1000 {
+		if !opaqueRefPattern.MatchString(upstream.ID) || len(upstream.Endpoint) == 0 || len(upstream.Endpoint) > MaxUpstreamLineBytes || len(upstream.Domain) > MaxUpstreamDomainBytes || upstream.Priority < -1000 || upstream.Priority > 1000 {
 			return ErrInvalidRequest
 		}
 		if _, exists := seen[upstream.ID]; exists {
@@ -142,14 +133,35 @@ func (configuration Configuration) Validate() error {
 }
 
 func (configuration Configuration) orderedUpstreams() []Upstream {
-	upstreams := append([]Upstream(nil), configuration.Upstreams...)
-	sort.Slice(upstreams, func(left, right int) bool {
-		if upstreams[left].Priority != upstreams[right].Priority {
-			return upstreams[left].Priority < upstreams[right].Priority
+	return append([]Upstream(nil), configuration.Upstreams...)
+}
+
+func (configuration Configuration) upstreamsForName(qname string) []Upstream {
+	qname = normalizeDomain(qname)
+	best := ""
+	var matched []Upstream
+	for _, upstream := range configuration.Upstreams {
+		if !upstream.Enabled || upstream.Domain == "" || !domainMatches(qname, upstream.Domain) {
+			continue
 		}
-		return upstreams[left].ID < upstreams[right].ID
-	})
-	return upstreams
+		if len(upstream.Domain) > len(best) {
+			best = upstream.Domain
+			matched = matched[:0]
+		}
+		if upstream.Domain == best {
+			matched = append(matched, upstream)
+		}
+	}
+	if len(matched) > 0 {
+		return matched
+	}
+	var defaults []Upstream
+	for _, upstream := range configuration.Upstreams {
+		if upstream.Enabled && upstream.Domain == "" {
+			defaults = append(defaults, upstream)
+		}
+	}
+	return defaults
 }
 
 type HTTPRequest struct {

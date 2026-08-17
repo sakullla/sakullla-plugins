@@ -5,8 +5,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 )
 
@@ -14,16 +12,12 @@ type httpUpstreamResolver struct {
 	client *http.Client
 }
 
-func newHTTPUpstreamResolver() *httpUpstreamResolver {
+func newHTTPClientResolver() *httpUpstreamResolver {
 	return &httpUpstreamResolver{client: &http.Client{Timeout: 5 * time.Second}}
 }
 
 func (resolver *httpUpstreamResolver) Resolve(ctx context.Context, request ResolveRequest) ([]byte, error) {
-	endpoint, err := normalizeUpstreamEndpoint(request.Endpoint)
-	if err != nil {
-		return nil, err
-	}
-	outbound, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(request.DNSMessage))
+	outbound, err := http.NewRequestWithContext(ctx, http.MethodPost, request.Endpoint, bytes.NewReader(request.DNSMessage))
 	if err != nil {
 		return nil, err
 	}
@@ -50,22 +44,4 @@ func (resolver *httpUpstreamResolver) Resolve(ctx context.Context, request Resol
 		return nil, ErrResponseTooLarge
 	}
 	return body, nil
-}
-
-func normalizeUpstreamEndpoint(endpoint string) (string, error) {
-	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" {
-		return "", ErrInvalidRequest
-	}
-	if !strings.Contains(endpoint, "://") {
-		endpoint = "https://" + endpoint
-	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return "", ErrInvalidRequest
-	}
-	if parsed.Path == "" || parsed.Path == "/" {
-		parsed.Path = DNSQueryPath
-	}
-	return parsed.String(), nil
 }

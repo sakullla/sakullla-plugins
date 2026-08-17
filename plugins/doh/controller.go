@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -248,13 +247,25 @@ func parsePluginConfig(wire []byte) (PluginConfig, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(wire))
 	decoder.DisallowUnknownFields()
-	var config PluginConfig
-	if err := decoder.Decode(&config); err != nil {
+	var raw struct {
+		Upstreams json.RawMessage `json:"upstreams"`
+	}
+	if err := decoder.Decode(&raw); err != nil {
 		return PluginConfig{}, errors.New("doh configuration must be an object with optional upstreams")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return PluginConfig{}, errors.New("doh configuration must contain one object")
+	}
+	var config PluginConfig
+	if len(raw.Upstreams) > 0 {
+		trimmed := bytes.TrimSpace(raw.Upstreams)
+		if len(trimmed) == 0 || trimmed[0] != '"' {
+			return PluginConfig{}, ErrInvalidRequest
+		}
+		if err := json.Unmarshal(raw.Upstreams, &config.Upstreams); err != nil {
+			return PluginConfig{}, ErrInvalidRequest
+		}
 	}
 	if err := validatePluginConfig(config); err != nil {
 		return PluginConfig{}, err
@@ -263,20 +274,8 @@ func parsePluginConfig(wire []byte) (PluginConfig, error) {
 }
 
 func validatePluginConfig(config PluginConfig) error {
-	if len(config.Upstreams) > MaxUpstreams {
-		return ErrInvalidRequest
-	}
-	seen := make(map[string]struct{}, len(config.Upstreams))
-	for _, upstream := range config.Upstreams {
-		if !opaqueRefPattern.MatchString(upstream.ID) || strings.TrimSpace(upstream.Endpoint) == "" || upstream.Priority < -1000 || upstream.Priority > 1000 {
-			return ErrInvalidRequest
-		}
-		if _, exists := seen[upstream.ID]; exists {
-			return ErrInvalidRequest
-		}
-		seen[upstream.ID] = struct{}{}
-	}
-	return nil
+	_, err := parseUpstreamText(config.Upstreams)
+	return err
 }
 
 func lifecycleFailure(code pluginsdk.ErrorCode, message string) pluginsdk.LifecycleResponse {
