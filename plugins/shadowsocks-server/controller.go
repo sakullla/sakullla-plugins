@@ -160,6 +160,44 @@ func (c *Controller) RotateServerPSK(ctx context.Context, expectedVersion string
 	return secret, err
 }
 
+func (c *Controller) ListenBinding(ctx context.Context) (ListenBinding, error) {
+	var binding ListenBinding
+	err := c.Use(ctx, func(_ context.Context, s *Service) error {
+		binding = s.ListenBinding()
+		return nil
+	})
+	return binding, err
+}
+
+func (c *Controller) ShareEndpoint(ctx context.Context) (ShareEndpoint, error) {
+	var endpoint ShareEndpoint
+	err := c.Use(ctx, func(_ context.Context, s *Service) error {
+		endpoint = s.ShareEndpoint()
+		return nil
+	})
+	return endpoint, err
+}
+
+func (c *Controller) ShareAccount(ctx context.Context, userID string) (AccountShare, error) {
+	var share AccountShare
+	err := c.Use(ctx, func(ctx context.Context, s *Service) error {
+		var shareErr error
+		share, shareErr = s.ShareAccount(ctx, userID)
+		return shareErr
+	})
+	return share, err
+}
+
+func (c *Controller) ListShares(ctx context.Context) ([]AccountShare, error) {
+	var shares []AccountShare
+	err := c.Use(ctx, func(ctx context.Context, s *Service) error {
+		var listErr error
+		shares, listErr = s.ListShares(ctx)
+		return listErr
+	})
+	return shares, err
+}
+
 func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, wire []byte) error {
 	if len(wire) > MaxConfigBytes {
 		return ErrInvalid
@@ -262,7 +300,10 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			return err
 		}
 		if err = serviceHandle.Use(ctx, func(ctx context.Context, service *Service) error {
-			return runtime.Listener.Register(ctx, configuration.ListenerRef, service)
+			if err := runtime.Listener.Register(ctx, configuration.ListenerRef, service); err != nil {
+				return err
+			}
+			return service.RefreshListenShare(ctx)
 		}); err != nil {
 			serviceHandle.Revoke()
 			transaction.Revoke()

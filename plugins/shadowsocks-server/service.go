@@ -6,8 +6,46 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"time"
 )
+
+// AccountShare is one account plus the current listen projection. Accounts
+// remain when the public host is missing; URI and QR stay empty.
+type AccountShare struct {
+	Account   AccountRecord
+	Endpoint  ShareEndpoint
+	Share     SIP002Share
+	Available bool
+	Reason    string
+}
+
+// ListenBindingSource is the optional Host view of the actual bound port.
+type ListenBindingSource interface {
+	ListenBinding(context.Context, string) (ListenBinding, error)
+}
+
+// NodeAddressSource is the optional Host view of this node's public addresses.
+type NodeAddressSource interface {
+	NodeAddresses(context.Context) (NodeAddresses, error)
+}
+
+type listenShareAttachment struct {
+	binding ListenBinding
+	node    NodeAddresses
+}
+
+var (
+	listenShareMu sync.Mutex
+	listenShares  = map[*Service]*listenShareAttachment{}
+)
+
+// SelectPublicHost picks DDNS, otherwise IPv4, otherwise IPv6. It never
+// returns 0.0.0.0, ::, or a loopback address.
+func SelectPublicHost(node NodeAddresses) (string, bool) {
+	host, _, ok := node.SelectHost()
+	return host, ok
+}
 
 const hostCallTimeout = time.Second
 
@@ -878,6 +916,196 @@ func (s *Service) Snapshot() Configuration {
 	defer s.mu.Unlock()
 	return clone(s.configuration)
 }
+
+func listenShareOf(s *Service) listenShareAttachment {
+	listenShareMu.Lock()
+	defer listenShareMu.Unlock()
+	if current := listenShares[s]; current != nil {
+		return *current
+	}
+	return listenShareAttachment{}
+}
+
+func updateListenShare(s *Service, update func(*listenShareAttachment)) {
+	listenShareMu.Lock()
+	defer listenShareMu.Unlock()
+	current := listenShares[s]
+	if current == nil {
+		current = &listenShareAttachment{}
+		listenShares[s] = current
+	}
+	update(current)
+}
+
+func forgetListenShare(s *Service) {
+	listenShareMu.Lock()
+	delete(listenShares, s)
+	listenShareMu.Unlock()
+}
+
+func (s *Service) ListenBinding() ListenBinding {
+	return listenShareOf(s).binding
+}
+
+func (s *Service) NodeAddresses() NodeAddresses {
+	return listenShareOf(s).node
+}
+
+func (s *Service) ShareEndpoint() ShareEndpoint {
+	state := listenShareOf(s)
+	return ProjectShareEndpoint(state.binding, state.node)
+}
+
+// RefreshListenShare pulls the optional Host binding and node address views
+// after Listener.Register. Missing projectors leave share unavailable.
+func (s *Service) RefreshListenShare(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		return ErrRevoked
+	}
+	runtime := s.runtime
+	ref := s.configuration.ListenerRef
+	s.mu.Unlock()
+	if src, ok := runtime.Listener.(ListenBindingSource); ok {
+		binding, err := awaitHost(ctx, s, false, func(ctx context.Context) (ListenBinding, error) {
+			return src.ListenBinding(ctx, ref)
+		})
+		if err != nil {
+			return err
+		}
+		if err = binding.Validate(); err != nil {
+			return err
+		}
+		updateListenShare(s, func(current *listenShareAttachment) {
+			current.binding = binding
+		})
+	}
+	if src, ok := runtime.Listener.(NodeAddressSource); ok {
+		node, err := awaitHost(ctx, s, false, func(ctx context.Context) (NodeAddresses, error) {
+			return src.NodeAddresses(ctx)
+		})
+		if err != nil {
+			return err
+		}
+		updateListenShare(s, func(current *listenShareAttachment) {
+			current.node = node
+		})
+	}
+	return nil
+}
+
+func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare, error) {
+	if err := ctx.Err(); err != nil {
+		return AccountShare{}, err
+	}
+	s.mu.Lock()
+	if !s.live.Load() || s.root.Err() != nil {
+		s.mu.Unlock()
+		return AccountShare{}, ErrRevoked
+	}
+	snapshot := clone(s.configuration)
+	s.mu.Unlock()
+	user, ok := snapshot.User(userID)
+	if !ok {
+		return AccountShare{}, ErrDenied
+	}
+	endpoint := s.ShareEndpoint()
+	out := AccountShare{Account: snapshot.AccountRecord(user), Endpoint: endpoint}
+	if !endpoint.Available {
+		out.Reason = endpoint.Reason
+		if out.Reason == "" {
+			out.Reason = MissingShareHost
+		}
+		return out, nil
+	}
+	password, method, err := s.shareClientPassword(ctx, user)
+	if err != nil {
+		out.Reason = "share unavailable"
+		return out, nil
+	}
+	account := SIP002Account{Method: method, Host: endpoint.Host, Port: endpoint.Port}
+	if SS2022Method(method) {
+		server, identity, ok := splitSS2022ClientPassword([]byte(password))
+		if !ok {
+			out.Reason = "share unavailable"
+			return out, nil
+		}
+		account.ServerPSK, account.IdentityPSK = string(server), string(identity)
+	} else {
+		account.Password = password
+	}
+	sip, err := BuildSIP002(account)
+	if err != nil {
+		out.Reason = "share unavailable"
+		return out, nil
+	}
+	out.Share = sip
+	out.Available = true
+	return out, nil
+}
+
+func (s *Service) ListShares(ctx context.Context) ([]AccountShare, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	accounts := s.ListAccounts()
+	shares := make([]AccountShare, 0, len(accounts))
+	for _, account := range accounts {
+		share, err := s.ShareAccount(ctx, account.ID)
+		if err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	return shares, nil
+}
+
+func (s *Service) shareClientPassword(ctx context.Context, user User) (string, string, error) {
+	s.engineGate.RLock()
+	s.mu.Lock()
+	engine := s.engines[user.ID]
+	method := user.ResolvedMethod(s.configuration.Cipher)
+	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	s.mu.Unlock()
+	if SS2022Method(method) && engine != nil && engine.HasIdentity() {
+		password, err := ss2022ClientPasswordFromEngine(engine)
+		s.engineGate.RUnlock()
+		return password, method, err
+	}
+	s.engineGate.RUnlock()
+	material, err := s.resolveSecret(ctx, user.SecretRef, user.SecretVersion)
+	if err != nil {
+		return "", method, err
+	}
+	if !SS2022Method(method) {
+		password := string(append([]byte(nil), material...))
+		clear(material)
+		return password, method, nil
+	}
+	if _, _, ok := splitSS2022ClientPassword(material); ok {
+		password := string(append([]byte(nil), material...))
+		clear(material)
+		return password, method, nil
+	}
+	if serverRef == "" || serverVersion == "" {
+		clear(material)
+		return "", method, ErrInvalid
+	}
+	server, err := s.resolveSecret(ctx, serverRef, serverVersion)
+	if err != nil {
+		clear(material)
+		return "", method, err
+	}
+	password, err := SS2022ClientPassword(method, server, material)
+	clear(material)
+	clear(server)
+	return password, method, err
+}
+
 func (s *Service) Disable() {
 	s.hostMu.Lock()
 	s.hostOpen = false
@@ -896,6 +1124,7 @@ func (s *Service) Disable() {
 	}
 	s.engines = map[string]*ProtocolEngine{}
 	s.mu.Unlock()
+	forgetListenShare(s)
 }
 func (s *Service) Drain(ctx context.Context) error {
 	s.Disable()
