@@ -5,6 +5,20 @@ secret verification and rotation, replay protection, monotonic time,
 traffic accounting, and audit are exclusively brokered through typed adapters.
 It never registers an HTTP or generic L4 egress provider.
 
+Administrators manage accounts from the plugin's simple panel: generate a
+traditional SS or SS2022 account, list enabled and disabled users, disable or
+re-enable one account, rotate that account's client key, optionally rotate the
+instance SS2022 server PSK, and copy a SIP002 URI or show the matching QR.
+The panel also shows the R4 listen host and port as copyable `host:port`.
+Sharing uses the instance's own TCP+UDP listen; generating and sharing do not
+require opening the L4 rules page or filling a backend. There is no
+subscription URL and no SIP003 plugin parameter.
+
+The host may mount this page because `plugin.yaml` declares `ui.route` with
+`ui_route_id: shadowsocks-server`. The page is `web.NewHandler(*Controller)`
+and the static tree lives in `ui/`. This plugin does not declare
+`ui.schema.json` and does not register `http.backend-provider`.
+
 The current public SDK does not expose these typed service handles, so the
 production entrypoint intentionally fails closed. Integration tests inject the
 business adapters without defining another Host RPC or wire ABI. The Host starts

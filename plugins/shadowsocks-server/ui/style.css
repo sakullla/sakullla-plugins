@@ -1,0 +1,113 @@
+:root {
+  --page: #f8f9fa;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --card: #ffffff;
+  --line: #e5e7eb;
+  --accent: #2563eb;
+  --danger: #b91c1c;
+  --ok: #047857;
+  --code-bg: #f3f4f6;
+  color-scheme: light;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; min-height: 100%; }
+
+body {
+  color: var(--ink);
+  background: var(--page);
+}
+
+.masthead {
+  padding: 16px clamp(16px, 4vw, 48px);
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+h1, h2 { margin: 0; }
+
+h1 { font-size: 20px; }
+
+h2 { font-size: 16px; margin-bottom: 8px; }
+
+main {
+  width: min(880px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 32px 0 80px;
+}
+
+.lede, .hint {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.card {
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.actions, .hostport-row, .share-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+form { margin: 0; }
+
+label { display: grid; gap: 4px; font-size: 14px; }
+
+button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 14px;
+  font: inherit;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+button.ghost {
+  color: var(--ink);
+  background: var(--code-bg);
+}
+
+button.danger { background: var(--danger); }
+
+.account {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.account:first-child { border-top: 0; }
+
+.status-on { color: var(--ok); }
+
+.status-off { color: var(--danger); }
+
+code, .uri {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  word-break: break-all;
+  font-size: 13px;
+}
+
+.qr {
+  width: 160px;
+  height: 160px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+#panel-status { margin-top: 16px; }
+
+#panel-status[data-error="true"] { color: var(--danger); }

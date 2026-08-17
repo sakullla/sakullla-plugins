@@ -2,7 +2,7 @@ schema_version: 1
 id: shadowsocks-server
 version: 0.1.0
 name: Shadowsocks 服务
-description: 提供可管理账号的 Shadowsocks 代理服务
+description: 通过简单面板管理账号，并分享本机自监听的 Shadowsocks 服务
 compatibility:
   host: "*"
   agent: "*"
@@ -20,6 +20,11 @@ artifacts:
     goarch: amd64
 extension_points:
   - tunnel.provider
+  - ui.route
+ui_route_id: shadowsocks-server
+metadata:
+  ui.nav.group: 网络
+  ui.nav.label: Shadowsocks 账号
 permissions:
   - name: secret.use
   - name: storage.read
