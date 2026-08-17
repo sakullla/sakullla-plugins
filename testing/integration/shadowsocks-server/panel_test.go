@@ -20,7 +20,7 @@ import (
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	ss "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
-	"github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server/web"
+	_ "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server/web"
 )
 
 type panelRuntime struct {
@@ -116,7 +116,7 @@ func panelWire(t *testing.T) []byte {
 	return body
 }
 
-func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Controller, *web.Handler) {
+func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Controller, http.Handler) {
 	t.Helper()
 	listen, err := ss.DualStackListen(port, "0.0.0.0")
 	if err != nil {
@@ -138,7 +138,7 @@ func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Co
 	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	return controller, web.NewHandler(controller)
+	return controller, controller
 }
 
 func panelJSON(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -323,12 +323,11 @@ func TestShadowsocksAdminPanelUnavailableUntilActivated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := web.NewHandler(controller)
-	page := panelJSON(t, handler, http.MethodGet, "/", "")
+	page := panelJSON(t, controller, http.MethodGet, "/", "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Shadowsocks 账号") {
 		t.Fatalf("page should still render: %d", page.Code)
 	}
-	api := panelJSON(t, handler, http.MethodGet, "/api/panel", "")
+	api := panelJSON(t, controller, http.MethodGet, "/api/panel", "")
 	if api.Code != http.StatusServiceUnavailable || !strings.Contains(api.Body.String(), "服务未就绪") {
 		t.Fatalf("inactive=%d %s", api.Code, api.Body.String())
 	}
