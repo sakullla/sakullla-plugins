@@ -8,6 +8,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 // AccountShare is one account plus the current listen projection. Accounts
@@ -970,31 +972,74 @@ func (s *Service) RefreshListenShare(ctx context.Context) error {
 	runtime := s.runtime
 	ref := s.configuration.ListenerRef
 	s.mu.Unlock()
-	if src, ok := runtime.Listener.(ListenBindingSource); ok {
-		binding, err := awaitHost(ctx, s, false, func(ctx context.Context) (ListenBinding, error) {
-			return src.ListenBinding(ctx, ref)
+	if err := refreshListenBinding(ctx, s, runtime.Listener, ref); err != nil {
+		return err
+	}
+	return refreshNodeAddresses(ctx, s, runtime.Listener)
+}
+
+func refreshListenBinding(ctx context.Context, s *Service, listener Listener, ref string) error {
+	if src, ok := listener.(pluginsdk.DualStackListener); ok {
+		binding, err := awaitHost(ctx, s, false, func(ctx context.Context) (pluginsdk.DualStackListenBinding, error) {
+			return src.Binding(ctx, ref)
 		})
 		if err != nil {
 			return err
 		}
-		if err = binding.Validate(); err != nil {
+		mapped := ListenBinding{Port: binding.Port, BindHost: binding.BindHost, TCP: binding.TCP, UDP: binding.UDP}
+		if err = mapped.Validate(); err != nil {
 			return err
 		}
 		updateListenShare(s, func(current *listenShareAttachment) {
-			current.binding = binding
+			current.binding = mapped
 		})
+		return nil
 	}
-	if src, ok := runtime.Listener.(NodeAddressSource); ok {
-		node, err := awaitHost(ctx, s, false, func(ctx context.Context) (NodeAddresses, error) {
+	src, ok := listener.(ListenBindingSource)
+	if !ok {
+		return nil
+	}
+	binding, err := awaitHost(ctx, s, false, func(ctx context.Context) (ListenBinding, error) {
+		return src.ListenBinding(ctx, ref)
+	})
+	if err != nil {
+		return err
+	}
+	if err = binding.Validate(); err != nil {
+		return err
+	}
+	updateListenShare(s, func(current *listenShareAttachment) {
+		current.binding = binding
+	})
+	return nil
+}
+
+func refreshNodeAddresses(ctx context.Context, s *Service, listener Listener) error {
+	if src, ok := listener.(pluginsdk.NodeAddressSource); ok {
+		node, err := awaitHost(ctx, s, false, func(ctx context.Context) (pluginsdk.NodeAddresses, error) {
 			return src.NodeAddresses(ctx)
 		})
 		if err != nil {
 			return err
 		}
 		updateListenShare(s, func(current *listenShareAttachment) {
-			current.node = node
+			current.node = NodeAddresses{DDNS: node.DDNS, IPv4: node.IPv4, IPv6: node.IPv6}
 		})
+		return nil
 	}
+	src, ok := listener.(NodeAddressSource)
+	if !ok {
+		return nil
+	}
+	node, err := awaitHost(ctx, s, false, func(ctx context.Context) (NodeAddresses, error) {
+		return src.NodeAddresses(ctx)
+	})
+	if err != nil {
+		return err
+	}
+	updateListenShare(s, func(current *listenShareAttachment) {
+		current.node = node
+	})
 	return nil
 }
 

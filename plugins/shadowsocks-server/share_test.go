@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 type shareHost struct {
@@ -251,6 +253,49 @@ func TestShareListenHostUsesProjectedAddressNotBind(t *testing.T) {
 	}
 	if parsed.Hostname() != "ss.example.com" || parsed.Port() != "8488" {
 		t.Fatalf("uri=%q", share.Share.URI)
+	}
+}
+
+type sdkShareHost struct {
+	node   pluginsdk.NodeAddresses
+	listen pluginsdk.DualStackListenBinding
+}
+
+func (sdkShareHost) Register(context.Context, string, *Service) error { return nil }
+
+func (h sdkShareHost) Binding(_ context.Context, ref string) (pluginsdk.DualStackListenBinding, error) {
+	if ref == "" {
+		return pluginsdk.DualStackListenBinding{}, ErrInvalid
+	}
+	return h.listen, nil
+}
+
+func (h sdkShareHost) NodeAddresses(context.Context) (pluginsdk.NodeAddresses, error) {
+	return h.node, nil
+}
+
+func TestRefreshListenShareConsumesPublishedSDKHandles(t *testing.T) {
+	var _ pluginsdk.DualStackListener = sdkShareHost{}
+	var _ pluginsdk.NodeAddressSource = sdkShareHost{}
+	runtime := &testRuntime{now: 10, used: map[string]uint64{}, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
+	adapters := adapters(runtime)
+	adapters.Listener = sdkShareHost{
+		node:   pluginsdk.NodeAddresses{DDNS: "ss.example.com", IPv4: "203.0.113.10"},
+		listen: pluginsdk.DualStackListenBinding{Port: 8488, BindHost: "0.0.0.0", TCP: true, UDP: true},
+	}
+	service, err := NewService(accountConfig(), adapters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.RefreshListenShare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := service.ShareEndpoint()
+	if !endpoint.Available || endpoint.Host != "ss.example.com" || endpoint.Port != 8488 || endpoint.HostPort != "ss.example.com:8488" {
+		t.Fatalf("endpoint=%+v", endpoint)
 	}
 }
 

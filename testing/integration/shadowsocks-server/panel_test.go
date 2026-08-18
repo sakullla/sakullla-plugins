@@ -72,11 +72,11 @@ func (*panelRuntime) Admit(context.Context, string, []byte) error { return nil }
 func (*panelRuntime) Register(context.Context, string, *ss.Service) error {
 	return nil
 }
-func (r *panelRuntime) ListenBinding(context.Context, string) (ss.ListenBinding, error) {
-	return r.listen, nil
+func (r *panelRuntime) Binding(_ context.Context, _ string) (pluginsdk.DualStackListenBinding, error) {
+	return pluginsdk.DualStackListenBinding{Port: r.listen.Port, BindHost: r.listen.BindHost, TCP: r.listen.TCP, UDP: r.listen.UDP}, nil
 }
-func (r *panelRuntime) NodeAddresses(context.Context) (ss.NodeAddresses, error) {
-	return r.node, nil
+func (r *panelRuntime) NodeAddresses(context.Context) (pluginsdk.NodeAddresses, error) {
+	return pluginsdk.NodeAddresses{DDNS: r.node.DDNS, IPv4: r.node.IPv4, IPv6: r.node.IPv6}, nil
 }
 
 func (r *panelRuntime) Rotate(_ context.Context, id, _, _, _ string) (*ss.SecretOnce, error) {
