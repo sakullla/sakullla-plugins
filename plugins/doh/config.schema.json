@@ -5,7 +5,9 @@
   "properties": {
     "upstreams": {
       "type": "string",
-      "maxLength": 16384
+      "maxLength": 16384,
+      "title": "上游",
+      "description": "按行填写，留空使用默认上游。"
     }
   }
 }
