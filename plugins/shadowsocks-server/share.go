@@ -135,7 +135,7 @@ func shareableHost(value string) (string, bool) {
 	if value == "" || strings.EqualFold(value, "localhost") || strings.HasSuffix(strings.ToLower(value), ".localhost") {
 		return "", false
 	}
-	if strings.Contains(value, "://") || strings.ContainsAny(value, " /\\?#@:[]%\x00\r\n\t") || len(value) > 253 {
+	if strings.Contains(value, "://") || strings.ContainsAny(value, " /\\?#@:[]%<>\"'&\x00\r\n\t") || len(value) > 253 {
 		return "", false
 	}
 	return value, true

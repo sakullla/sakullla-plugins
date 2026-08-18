@@ -89,6 +89,7 @@ func TestShareHostRejectsWildcardAndLoopback(t *testing.T) {
 		{name: "loopback-v4", node: NodeAddresses{IPv4: "127.0.0.1"}, bind: "127.0.0.1"},
 		{name: "loopback-v6", node: NodeAddresses{IPv6: "::1"}, bind: "::1"},
 		{name: "localhost", node: NodeAddresses{DDNS: "localhost"}, bind: "0.0.0.0"},
+		{name: "markup-ddns", node: NodeAddresses{DDNS: `<img src=x onerror=alert(1)>.example.com`}, bind: "0.0.0.0"},
 		{name: "unusable-all", node: NodeAddresses{DDNS: "0.0.0.0", IPv4: "127.0.0.1", IPv6: "::1"}, bind: "0.0.0.0"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

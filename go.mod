@@ -22,5 +22,3 @@ require (
 	google.golang.org/grpc v1.66.2
 	google.golang.org/protobuf v1.34.2
 )
-
-replace github.com/sakullla/nginx-reverse-emby/plugin-sdk => ../nginx-reverse-emby-2026-08-18-ss-sdk-handles/plugin-sdk

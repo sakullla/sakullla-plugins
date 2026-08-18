@@ -68,29 +68,36 @@ const renderAccount = (account) => {
   article.className = "account";
   article.dataset.id = account.id;
   article.dataset.enabled = account.enabled ? "true" : "false";
-  const status = account.enabled ? "启用" : "停用";
-  const statusClass = account.enabled ? "status-on" : "status-off";
-  const share = account.share_available
-    ? `<label>SIP002 URI <code class="uri">${account.uri}</code></label>
-       <div class="share-row">
-         <button type="button" data-copy-uri>复制 SIP002 URI</button>
-       </div>
-       <p>对应二维码</p>
-       <img class="qr" alt="SIP002 二维码" src="api/accounts/${encodeURIComponent(account.id)}/qr.png">`
-    : `<p class="hint">${account.reason || (account.enabled ? "分享不可用" : "停用账号不提供可导入 URI")}</p>`;
-  article.innerHTML = `
-    <p><strong>${account.id}</strong> · ${familyLabel(account.family)} · ${account.method} · <span class="${statusClass}">${status}</span></p>
-    ${share}
-    <div class="actions">
-      <form method="post" data-action="${account.enabled ? "disable" : "enable"}" data-id="${account.id}">
-        <button type="submit">${account.enabled ? "停用" : "再启用"}</button>
-      </form>
-      <form method="post" data-action="rotate" data-id="${account.id}">
-        <button type="submit">轮换客户端密钥</button>
-      </form>
-    </div>`;
-  const copy = article.querySelector("[data-copy-uri]");
-  if (copy) {
+
+  const title = document.createElement("p");
+  const identity = document.createElement("strong");
+  identity.textContent = account.id;
+  const status = document.createElement("span");
+  status.className = account.enabled ? "status-on" : "status-off";
+  status.textContent = account.enabled ? "启用" : "停用";
+  title.append(identity, ` · ${familyLabel(account.family)} · `, document.createTextNode(account.method || ""), " · ", status);
+  article.append(title);
+
+  if (account.share_available) {
+    const label = document.createElement("label");
+    const uri = document.createElement("code");
+    uri.className = "uri";
+    uri.textContent = account.uri || "";
+    label.append("SIP002 URI ", uri);
+    const shareRow = document.createElement("div");
+    shareRow.className = "share-row";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.dataset.copyUri = "";
+    copy.textContent = "复制 SIP002 URI";
+    shareRow.append(copy);
+    const qrCaption = document.createElement("p");
+    qrCaption.textContent = "对应二维码";
+    const qr = document.createElement("img");
+    qr.className = "qr";
+    qr.alt = "SIP002 二维码";
+    qr.src = `api/accounts/${encodeURIComponent(account.id)}/qr.png`;
+    article.append(label, shareRow, qrCaption, qr);
     copy.addEventListener("click", async () => {
       try {
         await copyText(account.uri);
@@ -99,7 +106,33 @@ const renderAccount = (account) => {
         showStatus(error.message, true);
       }
     });
+  } else {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = account.reason || (account.enabled ? "分享不可用" : "停用账号不提供可导入 URI");
+    article.append(hint);
   }
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const toggle = document.createElement("form");
+  toggle.method = "post";
+  toggle.dataset.action = account.enabled ? "disable" : "enable";
+  toggle.dataset.id = account.id;
+  const toggleButton = document.createElement("button");
+  toggleButton.type = "submit";
+  toggleButton.textContent = account.enabled ? "停用" : "再启用";
+  toggle.append(toggleButton);
+  const rotate = document.createElement("form");
+  rotate.method = "post";
+  rotate.dataset.action = "rotate";
+  rotate.dataset.id = account.id;
+  const rotateButton = document.createElement("button");
+  rotateButton.type = "submit";
+  rotateButton.textContent = "轮换客户端密钥";
+  rotate.append(rotateButton);
+  actions.append(toggle, rotate);
+  article.append(actions);
   article.querySelectorAll("form[data-action]").forEach((form) => {
     form.addEventListener("submit", onAction);
   });
