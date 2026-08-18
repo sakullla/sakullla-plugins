@@ -4,14 +4,56 @@
   "additionalProperties": false,
   "required": ["apps"],
   "properties": {
-    "apps": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["id", "image", "rule_ref", "generation"], "properties": {
-      "id": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
-      "image": {"type": "string", "minLength": 1, "maxLength": 512},
-      "rule_ref": {"type": "string", "minLength": 1, "maxLength": 128},
-      "generation": {"type": "string", "minLength": 1, "maxLength": 128},
-      "secret_refs": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
-      "auto_update": {"type": "boolean"}
-    }} },
-    "registry_mirror": {"type": "string", "maxLength": 512, "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$"}
+    "apps": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "image", "rule_ref", "generation"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+            "description": "由宿主写入，不作为用户填写项。"
+          },
+          "image": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "title": "镜像"
+          },
+          "rule_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "title": "规则"
+          },
+          "generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "由宿主写入，不作为用户填写项。"
+          },
+          "secret_refs": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            "description": "由宿主写入，不作为用户填写项。"
+          },
+          "auto_update": {
+            "type": "boolean",
+            "title": "自动更新"
+          }
+        }
+      }
+    },
+    "registry_mirror": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$",
+      "title": "镜像加速"
+    }
   }
 }
