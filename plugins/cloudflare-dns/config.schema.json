@@ -7,17 +7,20 @@
     "generation": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
-      "description": "由宿主写入，不作为用户填写项。"
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
     },
     "secret_ref": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
-      "description": "由宿主写入，不作为用户填写项。"
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
     },
     "resource_group_ref": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
-      "description": "由宿主写入，不作为用户填写项。"
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
     }
   }
 }

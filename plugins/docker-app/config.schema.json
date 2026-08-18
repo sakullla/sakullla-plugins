@@ -15,7 +15,8 @@
           "id": {
             "type": "string",
             "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
-            "description": "由宿主写入，不作为用户填写项。"
+            "description": "由宿主写入，不作为用户填写项。",
+            "hostInjected": true
           },
           "image": {
             "type": "string",
@@ -33,14 +34,16 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "由宿主写入，不作为用户填写项。"
+            "description": "由宿主写入，不作为用户填写项。",
+            "hostInjected": true
           },
           "secret_refs": {
             "type": "array",
             "maxItems": 32,
             "uniqueItems": true,
             "items": {"type": "string", "minLength": 1, "maxLength": 128},
-            "description": "由宿主写入，不作为用户填写项。"
+            "description": "由宿主写入，不作为用户填写项。",
+            "hostInjected": true
           },
           "auto_update": {
             "type": "boolean",
