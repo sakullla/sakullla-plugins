@@ -32,9 +32,13 @@ type Timeouts struct {
 	Drain    time.Duration
 }
 
-// Config is immutable after New. Capabilities are the public plugin
-// capabilities returned by the SDK handshake, while RequiredGrants are the
-// scopes the host must place in RPCHandshakeRequest.GrantedScopes.
+// Config is immutable after the first successful handshake. Capabilities are
+// the public plugin capabilities returned by the SDK handshake, while
+// RequiredGrants are the scopes the host must place in
+// RPCHandshakeRequest.GrantedScopes. PackageDigest and ArtifactDigest may be
+// left empty when the runtime receives those Host-attested values only through
+// the canonical handshake; the first handshake then binds both values for the
+// lifetime of the process.
 type Config struct {
 	PluginID       string
 	PluginVersion  string
@@ -139,8 +143,11 @@ func New(config Config, hooks Hooks) (*Lifecycle, error) {
 	if hooks == nil {
 		return nil, errors.New("RPC plugin hooks are required")
 	}
-	if config.PluginID == "" || config.PluginVersion == "" || config.PackageDigest == "" || config.ArtifactDigest == "" {
-		return nil, errors.New("RPC plugin identity and package/artifact digests are required")
+	if config.PluginID == "" || config.PluginVersion == "" {
+		return nil, errors.New("RPC plugin identity is required")
+	}
+	if (config.PackageDigest == "") != (config.ArtifactDigest == "") {
+		return nil, errors.New("RPC plugin package and artifact digests must be supplied together")
 	}
 	if config.Timeouts.Prepare <= 0 || config.Timeouts.Activate <= 0 || config.Timeouts.Stop <= 0 || config.Timeouts.Drain <= 0 {
 		return nil, errors.New("RPC lifecycle prepare, activate, stop, and drain timeouts must be positive")
@@ -180,9 +187,11 @@ func (l *Lifecycle) Handshake(ctx context.Context, request pluginsdk.RPCHandshak
 	if request.ABI != pluginsdk.RPCABIV1 {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorIncompatibleABI, "unsupported RPC ABI", false)
 	}
-	if request.PluginID != l.config.PluginID || request.PluginVersion != l.config.PluginVersion ||
-		request.PackageDigest != l.config.PackageDigest || request.ArtifactDigest != l.config.ArtifactDigest {
+	if request.PluginID != l.config.PluginID || request.PluginVersion != l.config.PluginVersion {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorPermissionDenied, "plugin identity or artifact binding mismatch", false)
+	}
+	if request.PackageDigest == "" || request.ArtifactDigest == "" {
+		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorInvalidArgument, "package and artifact digests are required", false)
 	}
 	if request.Generation == "" {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorInvalidArgument, "generation is required", false)
@@ -201,6 +210,12 @@ func (l *Lifecycle) Handshake(ctx context.Context, request pluginsdk.RPCHandshak
 	defer l.mu.Unlock()
 	if l.state != stateNew {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorInvalidArgument, ErrInvalidTransition.Error(), false)
+	}
+	if l.config.PackageDigest == "" && l.config.ArtifactDigest == "" {
+		l.config.PackageDigest = request.PackageDigest
+		l.config.ArtifactDigest = request.ArtifactDigest
+	} else if request.PackageDigest != l.config.PackageDigest || request.ArtifactDigest != l.config.ArtifactDigest {
+		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorPermissionDenied, "plugin identity or artifact binding mismatch", false)
 	}
 	l.generation = newGeneration(request.Generation, grants, l.config.LogSink)
 	l.state = stateHandshaken
