@@ -28,9 +28,17 @@ mounts the page at `/panel-api/plugins/<ui_route_id>/` and lists the resource
 group from `resource_group_id` plus `resource.group.*` metadata. Instance
 `resource_group_ref` must match `resource.group.ref`.
 
-Existing zone-scoped DNS record adapters remain for injected test brokers. They
-are not the product face of this plugin.
+Production activation uses the SDK host-runtime client. Vault writes, durable
+operation outcomes, instance state, and audit events stay in generic host
+capabilities; Cloudflare request and response semantics stay in this plugin.
+Secret-backed HTTP is restricted by the granted `http.outbound` resource to
+`api.cloudflare.com`.
 
-The current public SDK does not publish typed host handles, so production
-activation fails closed. Injectable adapters exist only for deterministic
-business tests and do not define a Host wire protocol.
+Cloudflare list operations consume all validated result pages within the plugin
+bounds. DNS mutations forward stable operation IDs to the durable host journal;
+404 delete is idempotent, while timeouts, 5xx responses, and malformed success
+responses remain inspectable as unknown instead of being repeated. The token
+verification endpoint confirms that a token is active and zone listing confirms
+Zone read access. Cloudflare does not return token policy permissions from that
+endpoint, so `DNS:Edit` is the plugin's required policy and Cloudflare remains
+the authority on every write request.

@@ -292,7 +292,7 @@ func TestCloudflareDNSCommitBeforeErrorRestartAndAuditReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := second.Create(context.Background(), request, record)
-	if err != nil || result.ID != "record/new" || dns.effects.Load() != 1 {
+	if err != nil || result.ID != "record-new" || dns.effects.Load() != 1 {
 		t.Fatalf("restart result=%#v err=%v effects=%d", result, err, dns.effects.Load())
 	}
 	for _, audit := range trace.audit {
@@ -334,7 +334,7 @@ func TestCloudflareDNSExactlyOnceConcurrentOperationAndMalformedState(t *testing
 	close(dns.inspectRelease)
 	for index := 0; index < 2; index++ {
 		result := <-results
-		if result.err != nil || result.record.ID != "record/new" {
+		if result.err != nil || result.record.ID != "record-new" {
 			t.Fatalf("concurrent result=%#v err=%v", result.record, result.err)
 		}
 	}
@@ -928,7 +928,7 @@ func (dns *fakeDNS) Create(_ context.Context, attestation cloudflaredns.TokenAtt
 		return previous, nil
 	}
 	dns.effects.Add(1)
-	record.ID = "record/new"
+	record.ID = "record-new"
 	dns.operations[operation] = record
 	if dns.commitBeforeError.Load() {
 		return cloudflaredns.DNSRecord{}, errors.New("raw commit-before-error")

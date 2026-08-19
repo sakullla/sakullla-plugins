@@ -37,7 +37,7 @@ type Controller struct {
 
 func NewController(config ControllerConfig) (*Controller, error) {
 	if config.Admission == nil {
-		config.Admission = unavailableAdmission{}
+		config.Admission = hostAdmission{}
 	}
 	if config.PrepareTimeout <= 0 {
 		config.PrepareTimeout = time.Second
@@ -163,11 +163,6 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			return rpcplugin.ErrRevoked
 		}
 		prepared, err := controller.admission.Prepare(ctx, request, configuration)
-		if errors.Is(err, ErrTypedHandlesUnavailable) {
-			// ui.route is independently useful and remains fail-closed for every
-			// secret or DNS operation until the Host supplies resource handles.
-			return nil
-		}
 		if err != nil {
 			return safeControllerError(err)
 		}
@@ -252,5 +247,5 @@ func safeControllerError(err error) error {
 	}
 }
 func requiredGrants() []string {
-	return []string{"dns.manage", "event.emit", "secret.use", "service.revocable-resource-handle"}
+	return []string{"dns.manage", "event.emit", "http.outbound", "secret.use", "service.revocable-resource-handle", "storage.read", "storage.write"}
 }

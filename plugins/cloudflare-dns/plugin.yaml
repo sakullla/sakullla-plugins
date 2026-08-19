@@ -1,6 +1,6 @@
 schema_version: 1
 id: cloudflare-dns
-version: 0.1.5
+version: 0.1.6
 name: Cloudflare DNS
 description: 按域名后缀解析 Cloudflare DNS Token，并提供专门映射管理页
 compatibility:
@@ -32,7 +32,11 @@ metadata:
   resource.group.description: 按域名后缀隔离 Token 映射
 permissions:
   - name: dns.manage
+  - name: http.outbound
+    resource: api.cloudflare.com
   - name: secret.use
+  - name: storage.read
+  - name: storage.write
   - name: event.emit
   - name: service.revocable-resource-handle
 config_schema: config.schema.json

@@ -14,7 +14,7 @@ import (
 	cloudflaredns "github.com/sakullla/sakullla-plugins/plugins/cloudflare-dns"
 )
 
-func TestCloudflareRPCGrantsGenerationAndDefaultPublishesReadOnlyUI(t *testing.T) {
+func TestCloudflareRPCGrantsGenerationAndDefaultFailsClosedWithoutHostRuntime(t *testing.T) {
 	controller, err := cloudflaredns.NewController(cloudflaredns.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +32,8 @@ func TestCloudflareRPCGrantsGenerationAndDefaultPublishesReadOnlyUI(t *testing.T
 	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, testConfiguration())}); response.Error != nil {
 		t.Fatal(response.Error)
 	}
-	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
-		t.Fatal(response.Error)
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error == nil || !strings.Contains(response.Error.Error(), cloudflaredns.ErrTypedHandlesUnavailable.Error()) {
+		t.Fatalf("activation without host runtime = %#v", response)
 	}
 	if err := controller.Use(context.Background(), func(context.Context, *cloudflaredns.Service) error { return nil }); !errors.Is(err, cloudflaredns.ErrRevoked) {
 		t.Fatalf("default Use err=%v", err)
@@ -200,7 +200,7 @@ func runtimeFor(vault *fakeVault, dns *fakeDNS, trace *safeTrace) cloudflaredns.
 	return cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, record cloudflaredns.UIProjection) error { trace.addUI(record); return nil }), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error { trace.addAudit(record); return nil }), Logger: cloudflaredns.EventLoggerFunc(func(_ context.Context, record cloudflaredns.EventRecord) error { trace.addLog(record); return nil })}
 }
 func requiredGrants() []string {
-	return []string{"dns.manage", "event.emit", "secret.use", "service.revocable-resource-handle"}
+	return []string{"dns.manage", "event.emit", "http.outbound", "secret.use", "service.revocable-resource-handle", "storage.read", "storage.write"}
 }
 func handshake(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: cloudflaredns.PluginID, PluginVersion: cloudflaredns.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1"}

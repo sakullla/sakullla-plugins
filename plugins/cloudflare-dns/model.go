@@ -14,12 +14,12 @@ import (
 
 const (
 	PluginID       = "cloudflare-dns"
-	PluginVersion  = "0.1.5"
+	PluginVersion  = "0.1.6"
 	MaxConfigBytes = 1 << 20
 	MaxZones       = 256
 	MaxRecords     = 1024
 	MaxMappings    = 256
-	MaxTokenBytes  = 8192
+	MaxTokenBytes  = 4096
 	MaxActiveCalls = 64
 )
 
@@ -151,13 +151,14 @@ type Zone struct{ ID, Name string }
 type DNSRecord struct {
 	ID, ZoneID, Type, Name, Content string
 	TTL                             uint32
+	Priority                        uint16
 }
 
 func (record DNSRecord) Validate(write bool) error {
 	if write && record.ID != "" && !refPattern.MatchString(record.ID) {
 		return ErrInvalidInput
 	}
-	if !refPattern.MatchString(record.ZoneID) || len(record.Name) == 0 || len(record.Name) > 253 || len(record.Content) == 0 || len(record.Content) > 4096 || record.TTL > 86400 {
+	if !refPattern.MatchString(record.ZoneID) || len(record.Name) == 0 || len(record.Name) > 253 || len(record.Content) == 0 || len(record.Content) > 4096 || (record.TTL != 1 && (record.TTL < 60 || record.TTL > 86400)) {
 		return ErrInvalidInput
 	}
 	switch record.Type {

@@ -11,61 +11,36 @@
     <h1>Cloudflare 域名 Token 映射</h1>
   </header>
   <main>
-    {{if .Unavailable}}
-    <p id="mapping-unavailable" role="status">插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
-    {{else if .Denied}}
-    <p id="mapping-denied" role="alert">无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
-    {{else}}
+    <p id="mapping-loading" role="status">正在加载映射...</p>
+    <p id="mapping-unavailable" role="status" hidden>插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
+    <p id="mapping-denied" role="alert" hidden>无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
+    <div id="mapping-workspace" hidden>
     <p class="lede">按域名后缀绑定 Cloudflare DNS Token。保存后列表、详情和编辑框都不会回显 Token。本页不配置区域 Token，也不管理 DNS 记录。</p>
     <section class="card" aria-labelledby="mapping-list-title">
       <h2 id="mapping-list-title">已保存映射</h2>
       <div id="mapping-list">
-        {{if .Mappings}}
-        <table>
+        <table id="mapping-table" hidden>
           <thead>
             <tr>
               <th>域名后缀</th>
               <th>已配置</th>
               <th>最近更新</th>
-              {{if or .CanWrite .CanRotate}}<th>操作</th>{{end}}
+              <th id="mapping-actions-heading">操作</th>
             </tr>
           </thead>
           <tbody>
-            {{range .Mappings}}
-            <tr data-suffix="{{.Suffix}}">
-              <td>{{.Suffix}}</td>
-              <td>{{if .Configured}}是{{else}}否{{end}}</td>
-              <td>{{.UpdatedAt}}</td>
-              {{if or $.CanWrite $.CanRotate}}
-              <td class="actions">
-                {{if $.CanWrite}}
-                <form class="inline" method="post" data-action="rename" data-suffix="{{.Suffix}}">
-                  <label>新后缀 <input name="suffix" required autocomplete="off"></label>
-                  <button type="submit">改后缀</button>
-                </form>
-                <form class="inline" method="post" data-action="delete" data-suffix="{{.Suffix}}">
-                  <button type="submit">删除</button>
-                </form>
-                {{end}}
-                {{if $.CanRotate}}
-                <form class="inline" method="post" data-action="rotate" data-suffix="{{.Suffix}}">
-                  <label>新 Token <input name="token" type="password" autocomplete="new-password" required></label>
-                  <button type="submit">轮换 Token</button>
-                </form>
-                {{end}}
-              </td>
-              {{end}}
+            <tr id="mapping-row-template" hidden>
+              <td data-field="suffix"></td>
+              <td data-field="configured"></td>
+              <td data-field="updated"></td>
+              <td class="actions" data-field="actions"></td>
             </tr>
-            {{end}}
           </tbody>
         </table>
-        {{else}}
-        <p id="mapping-empty">还没有映射。</p>
-        {{end}}
+        <p id="mapping-empty" hidden>还没有映射。</p>
       </div>
     </section>
-    {{if .CanWrite}}
-    <section class="card" id="mapping-create" aria-labelledby="mapping-create-title">
+    <section class="card" id="mapping-create" aria-labelledby="mapping-create-title" hidden>
       <h2 id="mapping-create-title">新增映射</h2>
       <form id="create-form" method="post" data-action="create">
         <label>域名后缀 <input name="suffix" required autocomplete="off"></label>
@@ -73,9 +48,8 @@
         <button type="submit">保存</button>
       </form>
     </section>
-    {{end}}
     <p id="mapping-status" role="status" hidden></p>
-    {{end}}
+    </div>
   </main>
   <script src="app.js" defer></script>
 </body>

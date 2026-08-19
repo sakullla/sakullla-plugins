@@ -20,7 +20,7 @@ func (service *Service) operationKey(action string, request ActionRequest) strin
 
 func (service *Service) recordOperationKey(action string, request ActionRequest, record DNSRecord) string {
 	base := service.operationKey(action, request)
-	return stableOperationKey(base, record.ID, record.Type, record.Name, record.Content, strconv.FormatUint(uint64(record.TTL), 10))
+	return stableOperationKey(base, record.ID, record.Type, record.Name, record.Content, strconv.FormatUint(uint64(record.TTL), 10), strconv.FormatUint(uint64(record.Priority), 10))
 }
 
 func stableOperationKey(fields ...string) string {
@@ -223,6 +223,9 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 	if outcome, outcomeErr := service.inspectDNS(ctx, operation); outcomeErr != nil {
 		return DNSRecord{}, ErrReconcilePending
 	} else if outcome.State == OperationCommitted {
+		if !cloudflareRecoveredRecordMatches(action, outcome.Record, record) {
+			return DNSRecord{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+		}
 		return service.finishMutation(ctx, action, operation, request, outcome.Record)
 	} else if outcome.State == OperationUnknown {
 		return DNSRecord{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
@@ -239,6 +242,9 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 		}
 		outcome, inspectErr := service.inspectDNS(ctx, operation)
 		if inspectErr == nil && outcome.State == OperationCommitted {
+			if !cloudflareRecoveredRecordMatches(action, outcome.Record, record) {
+				return DNSRecord{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
+			}
 			return service.finishMutation(ctx, action, operation, request, outcome.Record)
 		}
 		if inspectErr == nil && outcome.State == OperationFailed {
@@ -247,6 +253,10 @@ func (service *Service) mutate(ctx context.Context, action string, request Actio
 		return DNSRecord{}, service.pending(ctx, action, operation, request, "dns", ErrReconcilePending)
 	}
 	return service.finishMutation(ctx, action, operation, request, result)
+}
+
+func cloudflareRecoveredRecordMatches(action string, got, want DNSRecord) bool {
+	return cloudflareRecordMatches(got, want, action == "dns-update")
 }
 
 func (service *Service) finishMutation(ctx context.Context, action, operation string, request ActionRequest, result DNSRecord) (DNSRecord, error) {

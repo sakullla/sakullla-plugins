@@ -34,7 +34,7 @@ func TestMappingUIAuthorizedCRUDPersistsAcrossRefresh(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	service.ServeHTTP(page, uiRequest(http.MethodGet, "/", "", "operation/ui-page"))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `data-suffix="example.com"`) {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="mapping-workspace"`) || strings.Contains(page.Body.String(), "{{") {
 		t.Fatalf("refresh page status=%d body=%s", page.Code, page.Body.String())
 	}
 	if strings.Contains(page.Body.String(), "super-secret-cf-token-ui") || strings.Contains(page.Body.String(), `value="super-secret`) {
@@ -168,20 +168,22 @@ func TestMappingUIUnauthorizedIsExplicitRejection(t *testing.T) {
 	service, _ := newUIService(t, func(action ActionContext) error { return errors.New("raw denied") })
 	page := httptest.NewRecorder()
 	service.ServeHTTP(page, uiRequest(http.MethodGet, "/", "", "operation/ui-denied"))
-	if page.Code != http.StatusForbidden {
+	if page.Code != http.StatusOK {
 		t.Fatalf("denied page status=%d", page.Code)
 	}
 	body := page.Body.String()
-	if body == "" || !strings.Contains(body, "明确拒绝") || !strings.Contains(body, `id="mapping-denied"`) {
+	if body == "" || !strings.Contains(body, "明确拒绝") || !strings.Contains(body, `id="mapping-denied"`) || strings.Contains(body, "{{") {
 		t.Fatalf("denied page was blank or unclear: %q", body)
 	}
-	if strings.Contains(body, `id="mapping-create"`) || strings.Contains(body, `data-action="delete"`) {
-		t.Fatal("denied page still exposes write entry")
+	deniedAPI := httptest.NewRecorder()
+	service.ServeHTTP(deniedAPI, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-denied-api"))
+	if deniedAPI.Code != http.StatusForbidden || !strings.Contains(deniedAPI.Body.String(), ErrAuthorizationDenied.Error()) {
+		t.Fatalf("denied API status=%d body=%s", deniedAPI.Code, deniedAPI.Body.String())
 	}
 
 	anonymous := httptest.NewRecorder()
 	service.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/", nil))
-	if anonymous.Code != http.StatusForbidden || !strings.Contains(anonymous.Body.String(), "明确拒绝") {
+	if anonymous.Code != http.StatusOK || !strings.Contains(anonymous.Body.String(), `id="mapping-denied"`) {
 		t.Fatalf("anonymous page status=%d body=%s", anonymous.Code, anonymous.Body.String())
 	}
 
@@ -206,11 +208,13 @@ func TestMappingUIReadOnlyHidesWriteEntry(t *testing.T) {
 	})
 	page := httptest.NewRecorder()
 	service.ServeHTTP(page, uiRequest(http.MethodGet, "/", "", "operation/ui-readonly"))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "example.com") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="mapping-create"`) || !strings.Contains(page.Body.String(), "hidden") {
 		t.Fatalf("readonly page status=%d body=%s", page.Code, page.Body.String())
 	}
-	if strings.Contains(page.Body.String(), `id="mapping-create"`) || strings.Contains(page.Body.String(), `data-action="delete"`) || strings.Contains(page.Body.String(), `data-action="rotate"`) {
-		t.Fatal("read-only page still shows write entry")
+	listed := httptest.NewRecorder()
+	service.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-readonly-list"))
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), "example.com") || strings.Contains(listed.Body.String(), `"can_write":true`) || strings.Contains(listed.Body.String(), `"can_rotate":true`) {
+		t.Fatalf("read-only list status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	denied := httptest.NewRecorder()
 	service.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/mappings/example.com/delete", `{"confirm":"example.com"}`, "operation/ui-readonly-delete"))
@@ -283,11 +287,11 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 		t.Fatalf("script missing unique operation key: %s", script)
 	}
 	page, err := mappingUIAssets.ReadFile("ui/index.html")
-	if err != nil || !bytes.Contains(page, []byte(`id="create-form" method="post"`)) || !bytes.Contains(page, []byte(`data-action="rotate"`)) || !bytes.Contains(page, []byte(`method="post"`)) {
+	if err != nil || !bytes.Contains(page, []byte(`id="create-form" method="post"`)) || bytes.Contains(page, []byte("{{")) || !bytes.Contains(page, []byte(`method="post"`)) {
 		t.Fatalf("token forms missing post method: %s", page)
 	}
-	if bytes.Count(page, []byte(`method="post"`)) < 2 {
-		t.Fatalf("expected token-bearing forms to post: %s", page)
+	if !bytes.Contains(script, []byte(`actionForm("rotate"`)) || !bytes.Contains(script, []byte(`actionForm("delete"`)) {
+		t.Fatalf("native UI script is missing dynamic actions: %s", script)
 	}
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {

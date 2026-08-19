@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -27,8 +26,6 @@ const (
 	mappingPageCSP         = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 
-var mappingPageTemplate = template.Must(template.ParseFS(mappingUIAssets, "ui/index.html"))
-
 type MappingView struct {
 	Suffix     string `json:"suffix"`
 	Configured bool   `json:"configured"`
@@ -39,14 +36,6 @@ type MappingPageAccess struct {
 	CanRead   bool `json:"can_read"`
 	CanWrite  bool `json:"can_write"`
 	CanRotate bool `json:"can_rotate"`
-}
-
-type mappingPageModel struct {
-	Denied      bool
-	Unavailable bool
-	CanWrite    bool
-	CanRotate   bool
-	Mappings    []MappingView
 }
 
 type mappingWriteRequest struct {
@@ -145,8 +134,7 @@ func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request
 			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = mappingPageTemplate.Execute(writer, mappingPageModel{Unavailable: true})
+		http.ServeFileFS(writer, request, mappingUIAssets, "ui/index.html")
 		return
 	}
 	writeMappingJSON(writer, http.StatusServiceUnavailable, mappingAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
@@ -179,31 +167,7 @@ func (service *Service) serveMappingPage(writer http.ResponseWriter, request *ht
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	identity, err := service.mappingActionFromRequest(request, "mapping-page")
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err != nil {
-		service.writeDeniedPage(writer, http.StatusForbidden)
-		return
-	}
-	access, err := service.MappingPageAccess(request.Context(), identity)
-	if err != nil {
-		service.writeDeniedPage(writer, mappingStatus(err))
-		return
-	}
-	listed, err := service.ListMappings(request.Context(), identity)
-	if err != nil {
-		service.writeDeniedPage(writer, mappingStatus(err))
-		return
-	}
-	model := mappingPageModel{CanWrite: access.CanWrite, CanRotate: access.CanRotate, Mappings: mappingViews(listed)}
-	if err := mappingPageTemplate.Execute(writer, model); err != nil {
-		http.Error(writer, "Cloudflare DNS mapping page is unavailable", http.StatusInternalServerError)
-	}
-}
-
-func (service *Service) writeDeniedPage(writer http.ResponseWriter, status int) {
-	writer.WriteHeader(status)
-	_ = mappingPageTemplate.Execute(writer, mappingPageModel{Denied: true})
+	http.ServeFileFS(writer, request, mappingUIAssets, "ui/index.html")
 }
 
 func (service *Service) serveMappingCollection(writer http.ResponseWriter, request *http.Request) {
