@@ -52,7 +52,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		config.DrainTimeout = time.Second
 	}
 	controller := &Controller{admission: config.Admission}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest, Capabilities: requiredGrants(), RequiredGrants: requiredGrants(), Timeouts: rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
+	lifecycle, err := rpcplugin.New(rpcplugin.Config{PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest, Capabilities: requiredGrants(), RequiredGrants: requiredGrants(), SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1}, Timeouts: rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err
 	}
@@ -61,18 +61,8 @@ func NewController(config ControllerConfig) (*Controller, error) {
 }
 
 func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	features := make([]string, 0, 1)
-	for _, feature := range request.RequiredFeatures {
-		if feature == pluginsdk.RPCFeatureDurableActionsV1 {
-			features = append(features, feature)
-		}
-	}
-	if err := pluginsdk.ValidateRPCFeatures(request.RequiredFeatures, features); err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
 	response, err := controller.lifecycle.Handshake(ctx, request)
 	if err == nil {
-		response.Features = features
 		controller.mu.Lock()
 		controller.request = request
 		controller.mu.Unlock()

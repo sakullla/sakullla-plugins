@@ -37,7 +37,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- ServeLifecycleRPC(runCtx, controller) }()
+	go func() { errorsCh <- pluginsdk.ServeRPCPlugin(runCtx, controller) }()
 	go func() { errorsCh <- pluginsdk.ServePluginUI(runCtx, controller) }()
 	first := <-errorsCh
 	cancel()

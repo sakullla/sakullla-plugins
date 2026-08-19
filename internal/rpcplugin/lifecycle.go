@@ -40,14 +40,15 @@ type Timeouts struct {
 // the canonical handshake; the first handshake then binds both values for the
 // lifetime of the process.
 type Config struct {
-	PluginID       string
-	PluginVersion  string
-	PackageDigest  string
-	ArtifactDigest string
-	Capabilities   []string
-	RequiredGrants []string
-	Timeouts       Timeouts
-	LogSink        LogSink
+	PluginID          string
+	PluginVersion     string
+	PackageDigest     string
+	ArtifactDigest    string
+	Capabilities      []string
+	RequiredGrants    []string
+	SupportedFeatures []string
+	Timeouts          Timeouts
+	LogSink           LogSink
 }
 
 // Hooks contains plugin-owned lifecycle work. Generation exposes only
@@ -162,6 +163,9 @@ func New(config Config, hooks Hooks) (*Lifecycle, error) {
 	}
 	config.Capabilities = capabilities
 	config.RequiredGrants = grants
+	if err := pluginsdk.ValidateRPCFeatures(config.SupportedFeatures, config.SupportedFeatures); err != nil {
+		return nil, fmt.Errorf("supported RPC features: %w", err)
+	}
 	return &Lifecycle{config: config, hooks: hooks, state: stateNew}, nil
 }
 
@@ -196,6 +200,17 @@ func (l *Lifecycle) Handshake(ctx context.Context, request pluginsdk.RPCHandshak
 	if request.Generation == "" {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorInvalidArgument, "generation is required", false)
 	}
+	negotiated := pluginsdk.RPCHandshakeResponse{ABI: pluginsdk.RPCABIV1}
+	if l.config.SupportedFeatures != nil {
+		var err error
+		negotiated, err = pluginsdk.NegotiateRPCHandshake(pluginsdk.RPCPluginDeclaration{
+			PluginID: l.config.PluginID, PluginVersion: l.config.PluginVersion,
+			RequiredCapabilities: l.config.RequiredGrants, SupportedFeatures: l.config.SupportedFeatures,
+		}, request)
+		if err != nil {
+			return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorPermissionDenied, err.Error(), false)
+		}
+	}
 	grants, err := NewGrants(request.GrantedScopes)
 	if err != nil {
 		return pluginsdk.RPCHandshakeResponse{}, runtimeError(pluginsdk.ErrorInvalidArgument, err.Error(), false)
@@ -219,10 +234,8 @@ func (l *Lifecycle) Handshake(ctx context.Context, request pluginsdk.RPCHandshak
 	}
 	l.generation = newGeneration(request.Generation, grants, l.config.LogSink)
 	l.state = stateHandshaken
-	return pluginsdk.RPCHandshakeResponse{
-		ABI:          pluginsdk.RPCABIV1,
-		Capabilities: append([]string(nil), l.config.Capabilities...),
-	}, nil
+	negotiated.Capabilities = append([]string(nil), l.config.Capabilities...)
+	return negotiated, nil
 }
 
 func (l *Lifecycle) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
