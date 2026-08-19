@@ -499,6 +499,9 @@ func newUIController(t *testing.T, runtime RuntimeAdapters) *Controller {
 	if len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureDurableActionsV1 {
 		t.Fatalf("durable action feature acknowledgement = %v", response.Features)
 	}
+	if strings.Join(response.Capabilities, ",") != strings.Join(requiredGrants(), ",") {
+		t.Fatalf("granted capability acknowledgement = %v", response.Capabilities)
+	}
 	config, err := json.Marshal(uiConfiguration())
 	if err != nil {
 		t.Fatal(err)

@@ -52,7 +52,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		config.DrainTimeout = time.Second
 	}
 	controller := &Controller{admission: config.Admission}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest, Capabilities: []string{"cloudflare-dns.business-model"}, RequiredGrants: requiredGrants(), Timeouts: rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
+	lifecycle, err := rpcplugin.New(rpcplugin.Config{PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest, Capabilities: requiredGrants(), RequiredGrants: requiredGrants(), Timeouts: rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err
 	}
