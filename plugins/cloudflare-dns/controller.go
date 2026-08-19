@@ -61,8 +61,18 @@ func NewController(config ControllerConfig) (*Controller, error) {
 }
 
 func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
+	features := make([]string, 0, 1)
+	for _, feature := range request.RequiredFeatures {
+		if feature == pluginsdk.RPCFeatureDurableActionsV1 {
+			features = append(features, feature)
+		}
+	}
+	if err := pluginsdk.ValidateRPCFeatures(request.RequiredFeatures, features); err != nil {
+		return pluginsdk.RPCHandshakeResponse{}, err
+	}
 	response, err := controller.lifecycle.Handshake(ctx, request)
 	if err == nil {
+		response.Features = features
 		controller.mu.Lock()
 		controller.request = request
 		controller.mu.Unlock()

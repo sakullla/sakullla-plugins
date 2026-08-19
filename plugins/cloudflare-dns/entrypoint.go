@@ -17,11 +17,11 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		response, err := controller.Handshake(ctx, pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact", GrantedScopes: requiredGrants(), Generation: "nre-ci-generation"})
+		response, err := controller.Handshake(ctx, pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact", GrantedScopes: requiredGrants(), Generation: "nre-ci-generation", RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1}})
 		if err != nil {
 			return err
 		}
-		if response.ABI != pluginsdk.RPCABIV1 {
+		if response.ABI != pluginsdk.RPCABIV1 || len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureDurableActionsV1 {
 			return errors.New("canonical RPC handshake ABI mismatch")
 		}
 		_, err = fmt.Fprintln(output, response.ABI)

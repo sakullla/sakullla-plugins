@@ -481,7 +481,7 @@ func newUIController(t *testing.T, runtime RuntimeAdapters) *Controller {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+	response, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI:            pluginsdk.RPCABIV1,
 		PluginID:       PluginID,
 		PluginVersion:  PluginVersion,
@@ -489,8 +489,15 @@ func newUIController(t *testing.T, runtime RuntimeAdapters) *Controller {
 		ArtifactDigest: "artifact",
 		GrantedScopes:  requiredGrants(),
 		Generation:     "generation-1",
-	}); err != nil {
+		RequiredFeatures: []string{
+			pluginsdk.RPCFeatureDurableActionsV1,
+		},
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureDurableActionsV1 {
+		t.Fatalf("durable action feature acknowledgement = %v", response.Features)
 	}
 	config, err := json.Marshal(uiConfiguration())
 	if err != nil {
