@@ -30,5 +30,17 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) != 0 {
 		return errors.New("unexpected Cloudflare DNS arguments")
 	}
-	return ErrTypedHandlesUnavailable
+	controller, err := NewController(ControllerConfig{})
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- ServeLifecycleRPC(runCtx, controller) }()
+	go func() { errorsCh <- pluginsdk.ServePluginUI(runCtx, controller) }()
+	first := <-errorsCh
+	cancel()
+	second := <-errorsCh
+	return errors.Join(first, second)
 }

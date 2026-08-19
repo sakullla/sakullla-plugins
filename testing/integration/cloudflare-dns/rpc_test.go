@@ -14,13 +14,13 @@ import (
 	cloudflaredns "github.com/sakullla/sakullla-plugins/plugins/cloudflare-dns"
 )
 
-func TestCloudflareRPCGrantsGenerationAndDefaultFailClosed(t *testing.T) {
+func TestCloudflareRPCGrantsGenerationAndDefaultPublishesReadOnlyUI(t *testing.T) {
 	controller, err := cloudflaredns.NewController(cloudflaredns.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.Handshake(context.Background(), handshake([]string{"authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"})); err == nil {
-		t.Fatal("missing audit grant accepted")
+	if _, err := controller.Handshake(context.Background(), handshake([]string{"dns.manage", "event.emit", "secret.use"})); err == nil {
+		t.Fatal("missing revocable-resource-handle grant accepted")
 	}
 	controller, err = cloudflaredns.NewController(cloudflaredns.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
@@ -32,8 +32,8 @@ func TestCloudflareRPCGrantsGenerationAndDefaultFailClosed(t *testing.T) {
 	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: configurationWire(t, testConfiguration())}); response.Error != nil {
 		t.Fatal(response.Error)
 	}
-	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error == nil {
-		t.Fatal("default admission did not fail closed")
+	if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
 	}
 	if err := controller.Use(context.Background(), func(context.Context, *cloudflaredns.Service) error { return nil }); !errors.Is(err, cloudflaredns.ErrRevoked) {
 		t.Fatalf("default Use err=%v", err)
@@ -191,8 +191,8 @@ func TestCloudflareRPCStrictConfigAndCanonicalEntrypoint(t *testing.T) {
 	if err := cloudflaredns.RunEntrypoint(context.Background(), []string{cloudflaredns.CIHandshakeFlag}, &output); err != nil || strings.TrimSpace(output.String()) != pluginsdk.RPCABIV1 {
 		t.Fatalf("entrypoint=%q err=%v", output.String(), err)
 	}
-	if err := cloudflaredns.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, cloudflaredns.ErrTypedHandlesUnavailable) {
-		t.Fatalf("default entrypoint=%v", err)
+	if err := cloudflaredns.RunEntrypoint(context.Background(), nil, &output); err == nil || errors.Is(err, cloudflaredns.ErrTypedHandlesUnavailable) {
+		t.Fatalf("default entrypoint must require its lifecycle endpoint without the legacy typed-handle failure: %v", err)
 	}
 }
 
@@ -200,7 +200,7 @@ func runtimeFor(vault *fakeVault, dns *fakeDNS, trace *safeTrace) cloudflaredns.
 	return cloudflaredns.RuntimeAdapters{Vault: vault, DNS: dns, Operations: fakeInspector{vault: vault}, Lease: cloudflaredns.GenerationLeaseFunc(func() {}), Authorizer: cloudflaredns.AuthorizerFunc(func(context.Context, cloudflaredns.ActionContext) error { return nil }), UI: cloudflaredns.DynamicUIFunc(func(_ context.Context, record cloudflaredns.UIProjection) error { trace.addUI(record); return nil }), Auditor: cloudflaredns.AuditorFunc(func(_ context.Context, record cloudflaredns.AuditRecord) error { trace.addAudit(record); return nil }), Logger: cloudflaredns.EventLoggerFunc(func(_ context.Context, record cloudflaredns.EventRecord) error { trace.addLog(record); return nil })}
 }
 func requiredGrants() []string {
-	return []string{"audit", "authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"}
+	return []string{"dns.manage", "event.emit", "secret.use", "service.revocable-resource-handle"}
 }
 func handshake(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: cloudflaredns.PluginID, PluginVersion: cloudflaredns.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1"}

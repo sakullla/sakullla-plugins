@@ -95,7 +95,7 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 		return nil
 	})
 	if err != nil {
-		http.Error(writer, "Cloudflare DNS mapping page is unavailable", http.StatusServiceUnavailable)
+		serveUnavailableMappingUI(writer, request)
 	}
 }
 
@@ -121,7 +121,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	}
 	epoch := &controllerEpoch{}
 	epoch.live.Store(true)
-	handle, err := rpcplugin.BindHandle(generation, "cloudflare-dns", epoch, func(epoch *controllerEpoch) {
+	handle, err := rpcplugin.BindHandle(generation, "service.revocable-resource-handle", epoch, func(epoch *controllerEpoch) {
 		epoch.live.Store(false)
 		controller.mu.Lock()
 		if controller.epoch == epoch {
@@ -163,13 +163,18 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			return rpcplugin.ErrRevoked
 		}
 		prepared, err := controller.admission.Prepare(ctx, request, configuration)
+		if errors.Is(err, ErrTypedHandlesUnavailable) {
+			// ui.route is independently useful and remains fail-closed for every
+			// secret or DNS operation until the Host supplies resource handles.
+			return nil
+		}
 		if err != nil {
 			return safeControllerError(err)
 		}
 		if prepared == nil {
 			return ErrTypedHandlesUnavailable
 		}
-		transaction, err := rpcplugin.BindHandle(generation, "vault-secret", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
+		transaction, err := rpcplugin.BindHandle(generation, "secret.use", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
 		if err != nil {
 			prepared.Abort()
 			return err
@@ -191,7 +196,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 			transaction.Revoke()
 			return err
 		}
-		serviceHandle, err := rpcplugin.BindHandle(generation, "cloudflare-dns", service, func(service *Service) { service.Cancel() })
+		serviceHandle, err := rpcplugin.BindHandle(generation, "service.revocable-resource-handle", service, func(service *Service) { service.Cancel() })
 		if err != nil {
 			transaction.Revoke()
 			return err
@@ -247,5 +252,5 @@ func safeControllerError(err error) error {
 	}
 }
 func requiredGrants() []string {
-	return []string{"audit", "authorizer", "cloudflare-dns", "dynamic-ui", "log", "vault-secret"}
+	return []string{"dns.manage", "event.emit", "secret.use", "service.revocable-resource-handle"}
 }

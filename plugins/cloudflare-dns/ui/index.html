@@ -11,10 +11,12 @@
     <h1>Cloudflare 域名 Token 映射</h1>
   </header>
   <main>
-    {{if .Denied}}
+    {{if .Unavailable}}
+    <p id="mapping-unavailable" role="status">插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
+    {{else if .Denied}}
     <p id="mapping-denied" role="alert">无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
     {{else}}
-    <p class="lede">按域名后缀绑定 Cloudflare DNS Token。保存后列表、详情和编辑框都不会回显 Token。未命中时由宿主环境变量全局 Token 兜底；本页不配置区域 Token，也不管理 DNS 记录。</p>
+    <p class="lede">按域名后缀绑定 Cloudflare DNS Token。保存后列表、详情和编辑框都不会回显 Token。本页不配置区域 Token，也不管理 DNS 记录。</p>
     <section class="card" aria-labelledby="mapping-list-title">
       <h2 id="mapping-list-title">已保存映射</h2>
       <div id="mapping-list">

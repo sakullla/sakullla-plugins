@@ -42,10 +42,11 @@ type MappingPageAccess struct {
 }
 
 type mappingPageModel struct {
-	Denied    bool
-	CanWrite  bool
-	CanRotate bool
-	Mappings  []MappingView
+	Denied      bool
+	Unavailable bool
+	CanWrite    bool
+	CanRotate   bool
+	Mappings    []MappingView
 }
 
 type mappingWriteRequest struct {
@@ -123,6 +124,32 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	service.serveMappingItem(writer, request, suffix, action)
+}
+
+func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Security-Policy", mappingPageCSP)
+	writer.Header().Set("Referrer-Policy", "no-referrer")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	if request.URL.Path == "/style.css" || request.URL.Path == "/app.js" {
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			writer.Header().Set("Allow", "GET, HEAD")
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		http.ServeFileFS(writer, request, mappingUIAssets, "ui"+request.URL.Path)
+		return
+	}
+	if request.URL.Path == "/" || request.URL.Path == "" {
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			writer.Header().Set("Allow", "GET, HEAD")
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = mappingPageTemplate.Execute(writer, mappingPageModel{Unavailable: true})
+		return
+	}
+	writeMappingJSON(writer, http.StatusServiceUnavailable, mappingAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
 }
 
 func parseMappingAPIPath(path string) (suffix, action string, ok bool) {

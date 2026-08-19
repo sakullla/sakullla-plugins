@@ -295,7 +295,7 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	}
 	inactive := httptest.NewRecorder()
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/", nil))
-	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), "unavailable") || inactive.Body.Len() == 0 {
+	if inactive.Code != http.StatusOK || !strings.Contains(inactive.Body.String(), "mapping-unavailable") || inactive.Body.Len() == 0 {
 		t.Fatalf("inactive controller status=%d body=%s", inactive.Code, inactive.Body.String())
 	}
 }

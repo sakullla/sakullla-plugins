@@ -35,13 +35,18 @@ main {
   padding: 32px 0 80px;
 }
 
-.lede, #mapping-denied {
+.lede, #mapping-denied, #mapping-unavailable {
   color: var(--muted);
   line-height: 1.6;
 }
 
 #mapping-denied {
   color: var(--danger);
+  font-size: 16px;
+}
+
+#mapping-unavailable {
+  color: #92400e;
   font-size: 16px;
 }
 
