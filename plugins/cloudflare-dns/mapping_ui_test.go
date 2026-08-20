@@ -390,6 +390,51 @@ func TestMappingUIPersistsAcrossControllerStopActivate(t *testing.T) {
 	}
 }
 
+func TestMappingUIRemainsAvailableAfterActivateRequestContextEnds(t *testing.T) {
+	t.Parallel()
+	_, _, runtime := newUIHarness(t, nil)
+	controller, err := NewController(ControllerConfig{
+		PackageDigest:  "package",
+		ArtifactDigest: "artifact",
+		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
+			return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) { return runtime, nil }}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(),
+		Generation: "generation-request-context", RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := uiConfiguration()
+	configuration.Generation = "generation-request-context"
+	config, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepareCtx, cancelPrepare := context.WithCancel(context.Background())
+	if response := controller.Prepare(prepareCtx, pluginsdk.LifecycleRequest{Generation: "generation-request-context", Config: config}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	cancelPrepare()
+	activateCtx, cancelActivate := context.WithCancel(context.Background())
+	if response := controller.Activate(activateCtx, pluginsdk.LifecycleRequest{Generation: "generation-request-context"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	cancelActivate()
+
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-after-activate-context"))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list after activate request ended status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
 func assertUITraceRedacted(t *testing.T, trace *uiTrace, secrets []string) {
 	t.Helper()
 	trace.mu.Lock()
