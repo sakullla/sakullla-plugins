@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="sakura-day">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <div class="wash" aria-hidden="true"></div>
   <header class="masthead">
     <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
     <nav class="primary" aria-label="资源加速">
@@ -25,9 +26,6 @@
         <p class="lede">粘贴原始链接即可一键生成加速地址；Docker 镜像用法见下方示例。全部按当前来源自动填写，无需记忆插件内部地址。</p>
       </div>
       <div class="card converter-card">
-        <p class="kicker">链接转换</p>
-        <h2>粘贴原始链接，一键得到加速地址</h2>
-        <p>粘贴 GitHub 或 Hugging Face 的原始地址，自动生成当前入口的加速链接；脚本文件经此入口下载时会自动改写内部链接。</p>
         <label for="convert-input">原始链接</label>
         <div class="search-row">
           <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
@@ -40,17 +38,39 @@
         <article class="card usage-card">
           <p class="kicker">Docker</p>
           <h2>镜像拉取与仓库镜像</h2>
-          <p>把当前入口当作 Registry 前缀，或写入 Docker 的仓库镜像列表。</p>
-          <pre class="example" data-example="docker-pull"></pre>
-          <button type="button" class="ghost" data-copy="docker-pull">复制拉取命令</button>
-          <pre class="example" data-example="docker-mirror"></pre>
-          <button type="button" class="ghost" data-copy="docker-mirror">复制镜像配置</button>
+          <p>拉取有两种方式。域名前缀直接写在命令里，不必改配置文件；只有走仓库镜像时才需要写入 <code>daemon.json</code> 并重启 Docker。</p>
+          <section class="method">
+            <h3>域名前缀</h3>
+            <p>把当前入口当作 Registry 前缀，一行命令即可拉取，无需配置文件。</p>
+            <div class="shell">
+              <p class="shell-bar"><span class="shell-dots" aria-hidden="true"></span>pull</p>
+              <pre class="example" data-example="docker-pull"></pre>
+            </div>
+            <button type="button" class="ghost" data-copy="docker-pull">复制拉取命令</button>
+          </section>
+          <section class="method">
+            <h3>仓库镜像</h3>
+            <p>把下面的 <code>registry-mirrors</code> 写入 Docker 配置文件后重启生效。参考路径：</p>
+            <ul class="path-ref">
+              <li><span>Linux</span><code>/etc/docker/daemon.json</code></li>
+              <li><span>Windows</span><code>%USERPROFILE%\.docker\daemon.json</code></li>
+              <li><span>macOS</span><code>~/.docker/daemon.json</code></li>
+            </ul>
+            <div class="shell">
+              <p class="shell-bar"><span class="shell-dots" aria-hidden="true"></span>daemon.json</p>
+              <pre class="example" data-example="docker-mirror"></pre>
+            </div>
+            <button type="button" class="ghost" data-copy="docker-mirror">复制镜像配置</button>
+          </section>
         </article>
         <article class="card usage-card">
           <p class="kicker">GitHub · Hugging Face</p>
           <h2>文件与脚本下载</h2>
           <p>在上方「链接转换」粘贴任意 GitHub 或 Hugging Face 原始地址即可得到加速链接；发行包、源码压缩包、模型文件通用，.sh / .ps1 脚本内的链接下载时会自动改写。</p>
-          <pre class="example" data-example="file-sample"></pre>
+          <div class="shell">
+            <p class="shell-bar"><span class="shell-dots" aria-hidden="true"></span>download</p>
+            <pre class="example" data-example="file-sample"></pre>
+          </div>
           <button type="button" class="ghost" data-copy="file-sample">复制示例</button>
         </article>
       </div>
@@ -95,13 +115,14 @@
         <label for="images">镜像引用，每行一个</label>
         <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
         <div class="offline-options">
-          <label for="platform">架构（可留空）</label>
-          <select id="platform">
-            <option value="">留空，默认 linux/amd64</option>
-            <option value="linux/amd64">linux/amd64</option>
-            <option value="linux/arm64">linux/arm64</option>
-            <option value="linux/arm/v7">linux/arm/v7</option>
-          </select>
+          <label for="platform">架构（可留空）
+            <select id="platform">
+              <option value="">留空，默认 linux/amd64</option>
+              <option value="linux/amd64">linux/amd64</option>
+              <option value="linux/arm64">linux/arm64</option>
+              <option value="linux/arm/v7">linux/arm/v7</option>
+            </select>
+          </label>
           <label class="check">
             <input id="compressed-layers" type="checkbox" checked>
             <span>压缩层（默认开启）</span>
