@@ -11,7 +11,7 @@ This repository contains Go RPC plugins and Rust policy guests. Command-line ent
 - `make clean-test` performs two independent package builds and compares them for reproducibility; it is not a cleanup command.
 - `go generate ./...` refreshes generated Go outputs. Review the resulting diff and never hand-edit generated market, package, SDK projection, NOTICE, SBOM, or lock artifacts.
 
-Use Go 1.26.5 and the pinned Rust 1.97.1 toolchain. Preserve LF line endings as configured by `.gitattributes`.
+Use Go 1.27.0 and the pinned Rust 1.97.1 toolchain. Preserve LF line endings as configured by `.gitattributes`.
 
 ## Coding Style & Naming Conventions
 

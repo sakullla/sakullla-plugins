@@ -24,7 +24,7 @@ func run(ctx context.Context, args []string) error {
 	buildCommand := flags.String("build-command", "", "artifact builder executable")
 	var buildArgs stringFlags
 	flags.Var(&buildArgs, "build-arg", "artifact builder argument (repeatable)")
-	goVersion := flags.String("go-version", "1.26.5", "required Go version")
+	goVersion := flags.String("go-version", "1.27.0", "required Go version")
 	rustVersion := flags.String("rust-version", "1.97.1", "required Rust version")
 	protocVersion := flags.String("protoc-version", "32.0", "required protoc version")
 	manifest := flags.String("manifest", "", "path to canonical plugin.yaml")

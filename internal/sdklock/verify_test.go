@@ -198,8 +198,8 @@ func TestSDKGoModulePathAcceptsCheckoutLineEndings(t *testing.T) {
 	t.Parallel()
 	const want = "github.com/sakullla/nginx-reverse-emby/plugin-sdk"
 	for _, goMod := range []string{
-		"module " + want + "\n\ngo 1.26.5\n",
-		"module \"" + want + "\"\r\n\r\ngo 1.26.5\r\n",
+		"module " + want + "\n\ngo 1.27.0\n",
+		"module \"" + want + "\"\r\n\r\ngo 1.27.0\r\n",
 	} {
 		if got := goModulePath([]byte(goMod)); got != want {
 			t.Fatalf("goModulePath() = %q, want %q", got, want)
@@ -227,7 +227,7 @@ func commitSDKFixtureRepository(t *testing.T, repository string) {
 func writeSDKFixture(t *testing.T, root string) {
 	t.Helper()
 	files := map[string]string{
-		"plugin-sdk/go.mod":                                           "module github.com/sakullla/nginx-reverse-emby/plugin-sdk\n\ngo 1.26.5\n",
+		"plugin-sdk/go.mod":                                           "module github.com/sakullla/nginx-reverse-emby/plugin-sdk\n\ngo 1.27.0\n",
 		"plugin-sdk/go/contracts.go":                                  "package pluginsdk\nimport \"context\"\nconst PolicyHostReadBodyWindow = \"fixture\"\nconst Projection = \"locked-projection\"\ntype PolicyHost interface { ReadBodyWindow(context.Context, uint32, uint32) ([]byte, error) }\n",
 		"plugin-sdk/go/protoschema/schema.go":                         "package protoschema\nfunc DescriptorSetBytes() ([]byte,error) { return []byte(\"fixture-descriptor\"),nil }\n",
 		"plugin-sdk/go/schema/plugin-manifest-v1.schema.json":         "{\"title\":\"fixture manifest schema\"}\n",
@@ -393,7 +393,7 @@ func writeModuleIdentityFixture(t *testing.T, root string, lock Lock) {
 		t.Fatal(err)
 	}
 	module := lock.SDK.ModulePath
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26.5\n\nrequire "+module+" "+version+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.27.0\n\nrequire "+module+" "+version+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sums := module + " " + version + " h1:fixture\n" + module + " " + version + "/go.mod h1:fixture\n"

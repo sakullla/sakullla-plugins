@@ -11,7 +11,7 @@ func TestVerifyModuleIdentityRequiresExactModuleAndChecksums(t *testing.T) {
 	lock := moduleIdentityLock()
 	root := t.TempDir()
 	writeIdentityFiles(t, root,
-		"module fixture\n\ngo 1.26.5\n\nrequire (\n\t"+lock.SDK.ModulePath+" v0.6.0\n)\n",
+		"module fixture\n\ngo 1.27.0\n\nrequire (\n\t"+lock.SDK.ModulePath+" v0.6.0\n)\n",
 		lock.SDK.ModulePath+" v0.6.0 h1:module\n"+lock.SDK.ModulePath+" v0.6.0/go.mod h1:mod\n")
 	if err := VerifyModuleIdentity(root, lock); err != nil {
 		t.Fatal(err)
@@ -22,7 +22,7 @@ func TestVerifyModuleIdentityAcceptsQuotedCanonicalRequire(t *testing.T) {
 	lock := moduleIdentityLock()
 	root := t.TempDir()
 	writeIdentityFiles(t, root,
-		"module fixture\n\ngo 1.26.5\n\nrequire \""+lock.SDK.ModulePath+"\" v0.6.0\n",
+		"module fixture\n\ngo 1.27.0\n\nrequire \""+lock.SDK.ModulePath+"\" v0.6.0\n",
 		lock.SDK.ModulePath+" v0.6.0 h1:module\n"+lock.SDK.ModulePath+" v0.6.0/go.mod h1:mod\n")
 	if err := VerifyModuleIdentity(root, lock); err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestVerifyModuleIdentityRejectsDuplicateCanonicalRequire(t *testing.T) {
 	lock := moduleIdentityLock()
 	root := t.TempDir()
 	writeIdentityFiles(t, root,
-		"module fixture\n\ngo 1.26.5\n\nrequire (\n\t"+lock.SDK.ModulePath+" v0.6.0\n\t\""+lock.SDK.ModulePath+"\" v0.6.0\n)\n",
+		"module fixture\n\ngo 1.27.0\n\nrequire (\n\t"+lock.SDK.ModulePath+" v0.6.0\n\t\""+lock.SDK.ModulePath+"\" v0.6.0\n)\n",
 		lock.SDK.ModulePath+" v0.6.0 h1:module\n"+lock.SDK.ModulePath+" v0.6.0/go.mod h1:mod\n")
 	if err := VerifyModuleIdentity(root, lock); err == nil {
 		t.Fatal("duplicate canonical SDK require was accepted")

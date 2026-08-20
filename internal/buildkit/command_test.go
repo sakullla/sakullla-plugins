@@ -32,7 +32,7 @@ func TestBuildToolchainVersionRequiresExactToken(t *testing.T) {
 		output   string
 		expected string
 	}{
-		{"go", "go version go1.26.50 windows/amd64", "1.26.5"},
+		{"go", "go version go1.27.00 windows/amd64", "1.27.0"},
 		{"rustc", "rustc 1.97.10 (abcdef 2026-01-01)", "1.97.1"},
 		{"protoc", "libprotoc 32.0.1", "32.0"},
 	}
@@ -42,7 +42,7 @@ func TestBuildToolchainVersionRequiresExactToken(t *testing.T) {
 		}
 	}
 	for _, test := range []struct{ tool, output, expected string }{
-		{"go", "go version go1.26.5 windows/amd64", "1.26.5"},
+		{"go", "go version go1.27.0 windows/amd64", "1.27.0"},
 		{"rustc", "rustc 1.97.1 (abcdef 2026-01-01)", "1.97.1"},
 		{"protoc", "libprotoc 32.0", "32.0"},
 	} {

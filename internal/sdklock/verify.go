@@ -159,7 +159,7 @@ func verifyRustProjection(ctx context.Context, temporaryRoot, repositoryRoot, sd
 	if err := os.Mkdir(projectionRoot, 0o755); err != nil {
 		return err
 	}
-	module := fmt.Sprintf("module github.com/sakullla/sakullla-plugins\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
+	module := fmt.Sprintf("module github.com/sakullla/sakullla-plugins\n\ngo 1.27.0\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
 	if err := os.WriteFile(filepath.Join(projectionRoot, "go.mod"), []byte(module), 0o644); err != nil {
 		return err
 	}
@@ -258,7 +258,7 @@ func verifyCapability(ctx context.Context, temporaryRoot, checkout, sdkRoot, mod
 	if err := os.Mkdir(probeRoot, 0o755); err != nil {
 		return err
 	}
-	module := fmt.Sprintf("module capabilityprobe\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
+	module := fmt.Sprintf("module capabilityprobe\n\ngo 1.27.0\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
 	if err := os.WriteFile(filepath.Join(probeRoot, "go.mod"), []byte(module), 0o644); err != nil {
 		return err
 	}
@@ -308,7 +308,7 @@ func descriptorSetDigest(ctx context.Context, temporaryRoot, sdkRoot, modulePath
 	if err := os.Mkdir(probe, 0o755); err != nil {
 		return "", err
 	}
-	module := fmt.Sprintf("module sdkprobe\n\ngo 1.26.5\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
+	module := fmt.Sprintf("module sdkprobe\n\ngo 1.27.0\n\nrequire %s v0.0.0\nreplace %s => %s\n", modulePath, modulePath, filepath.ToSlash(sdkRoot))
 	program := fmt.Sprintf("package main\nimport (\"crypto/sha256\"; \"fmt\"; \"%s/protoschema\")\nfunc main(){ b,e:=protoschema.DescriptorSetBytes(); if e!=nil { panic(e) }; fmt.Printf(\"%%x\\n\", sha256.Sum256(b)) }\n", packagePath)
 	if err := os.WriteFile(filepath.Join(probe, "go.mod"), []byte(module), 0o644); err != nil {
 		return "", err

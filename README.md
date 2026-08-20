@@ -7,7 +7,7 @@ through a pinned public SDK contract.
 
 ## Toolchains
 
-- Go is pinned by `go.mod` (`1.26.5`).
+- Go is pinned by `go.mod` (`1.27.0`).
 - Rust is pinned by `rust-toolchain.toml` (`1.97.1`) and the workspace discovers
   policy guests through `plugins/*`.
 - CI pins protoc to `32.0` before running generated-code checks.

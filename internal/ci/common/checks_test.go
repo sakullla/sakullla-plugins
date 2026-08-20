@@ -80,7 +80,7 @@ func TestLicenseCheckRequiresReviewedDependencies(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("GNU GENERAL PUBLIC LICENSE"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26\n\nrequire example.com/dependency v1.0.0\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.27.0\n\nrequire example.com/dependency v1.0.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeCargoLock(t, root, "")
@@ -99,7 +99,7 @@ func TestLicenseCheckRejectsHostImplementationModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	module := "github.com/sakullla/nginx-reverse-emby/panel/backend-go"
-	contents := "module fixture\n\ngo 1.26\n\nrequire " + module + " v0.0.0\n"
+	contents := "module fixture\n\ngo 1.27.0\n\nrequire " + module + " v0.0.0\n"
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestLicenseCheckRequiresReviewedLockedRustCrates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("GNU GENERAL PUBLIC LICENSE"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.26\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.27.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeCargoLock(t, root, `
