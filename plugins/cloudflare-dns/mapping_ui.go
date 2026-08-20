@@ -20,10 +20,12 @@ import (
 var mappingUIAssets embed.FS
 
 const (
-	mappingActorHeader     = "X-NRE-Actor"
-	mappingGroupHeader     = "X-NRE-Resource-Group"
-	mappingOperationHeader = "X-NRE-Operation-Key"
-	mappingPageCSP         = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+	mappingActorHeader       = "X-NRE-Actor"
+	mappingGroupHeader       = "X-NRE-Resource-Group"
+	mappingOperationHeader   = "X-NRE-Operation-Key"
+	internalDNSResolvePath   = "/.nre/providers/dns/token"
+	internalDNSVersionHeader = "X-NRE-DNS-Provider-Version"
+	mappingPageCSP           = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 
 type MappingView struct {
@@ -50,6 +52,15 @@ type mappingAPIResponse struct {
 	Access   MappingPageAccess `json:"access,omitempty"`
 	Error    string            `json:"error,omitempty"`
 	Suffix   string            `json:"suffix,omitempty"`
+}
+
+type internalDNSResolveRequest struct {
+	Domain string `json:"domain"`
+}
+
+type internalDNSResolveResponse struct {
+	Token []byte `json:"token,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 func mappingView(mapping TokenMapping) MappingView {
@@ -90,6 +101,10 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	path := request.URL.Path
+	if path == internalDNSResolvePath {
+		service.serveInternalDNSResolve(writer, request)
+		return
+	}
 	if path == "/style.css" || path == "/app.js" {
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
 			writer.Header().Set("Allow", "GET, HEAD")
@@ -113,6 +128,50 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	service.serveMappingItem(writer, request, suffix, action)
+}
+
+func (service *Service) serveInternalDNSResolve(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set(internalDNSVersionHeader, "1")
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSResolveResponse{Error: "method not allowed"})
+		return
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	var body internalDNSResolveRequest
+	if err := decoder.Decode(&body); err != nil {
+		writeMappingJSON(writer, http.StatusBadRequest, internalDNSResolveResponse{Error: ErrInvalidInput.Error()})
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeMappingJSON(writer, http.StatusBadRequest, internalDNSResolveResponse{Error: ErrInvalidInput.Error()})
+		return
+	}
+	identity, err := service.mappingActionFromRequest(request, "token-resolve")
+	if err != nil {
+		writeMappingJSON(writer, http.StatusForbidden, internalDNSResolveResponse{Error: ErrAuthorizationDenied.Error()})
+		return
+	}
+	issued, err := service.ResolveToken(request.Context(), identity, body.Domain, nil)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, ErrMappingNotFound) || errors.Is(err, ErrTokenUnavailable) {
+			status = http.StatusNotFound
+		}
+		writeMappingJSON(writer, status, internalDNSResolveResponse{Error: publicMappingError(err)})
+		return
+	}
+	defer issued.Clear()
+	token := issued.Token()
+	defer clear(token)
+	if len(token) == 0 || len(token) > MaxTokenBytes {
+		writeMappingJSON(writer, http.StatusServiceUnavailable, internalDNSResolveResponse{Error: ErrMappedTokenUnavailable.Error()})
+		return
+	}
+	writeMappingJSON(writer, http.StatusOK, internalDNSResolveResponse{Token: token})
 }
 
 func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request) {
@@ -335,7 +394,7 @@ func mappingViews(mappings []TokenMapping) []MappingView {
 	return views
 }
 
-func writeMappingJSON(writer http.ResponseWriter, status int, body mappingAPIResponse) {
+func writeMappingJSON(writer http.ResponseWriter, status int, body any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(body)

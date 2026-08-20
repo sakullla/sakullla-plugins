@@ -34,6 +34,11 @@ const fill = (name) => {
 
 Object.keys(examples).forEach(fill);
 
+const hostBadge = document.querySelector("#current-host");
+if (hostBadge) {
+  hostBadge.textContent = host;
+}
+
 const showView = (name) => {
   document.querySelectorAll("[data-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.panel !== name;

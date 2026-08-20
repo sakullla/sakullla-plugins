@@ -9,21 +9,24 @@
 <body>
   <div class="wash" aria-hidden="true"></div>
   <header class="masthead">
-    <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
-    <nav class="primary" aria-label="资源加速">
-      <button type="button" data-view="usage" aria-pressed="true">用法</button>
-      <button type="button" data-view="search" aria-pressed="false">搜索</button>
-      <button type="button" data-view="tags" aria-pressed="false">标签</button>
-      <button type="button" data-view="offline" aria-pressed="false">离线包</button>
-    </nav>
+    <div class="masthead-inner">
+      <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
+      <nav class="primary" aria-label="资源加速">
+        <button type="button" data-view="usage" aria-pressed="true">用法</button>
+        <button type="button" data-view="search" aria-pressed="false">搜索</button>
+        <button type="button" data-view="tags" aria-pressed="false">标签</button>
+        <button type="button" data-view="offline" aria-pressed="false">离线包</button>
+      </nav>
+    </div>
   </header>
 
   <main>
     <section class="panel" id="usage" data-panel="usage">
       <div class="hero">
-        <p class="eyebrow">当前入口</p>
-        <h1>用正在访问的域名加速镜像、代码与模型</h1>
-        <p class="lede">粘贴原始链接即可一键生成加速地址；Docker 镜像用法见下方示例。全部按当前来源自动填写，无需记忆插件内部地址。</p>
+        <p class="eyebrow">镜像 · 代码 · 模型</p>
+        <h1>用当前域名加速每一次下载</h1>
+        <p class="lede">粘贴原始链接一键生成加速地址；Docker 镜像把当前入口当作前缀即可拉取，无需记忆插件内部地址。</p>
+        <p class="host-line"><span class="host-dot" aria-hidden="true"></span>当前入口<code id="current-host"></code></p>
       </div>
       <div class="card converter-card">
         <label for="convert-input">原始链接</label>

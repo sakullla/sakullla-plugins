@@ -101,6 +101,40 @@ func TestMappingUIAuthorizedCRUDPersistsAcrossRefresh(t *testing.T) {
 	assertUITraceRedacted(t, trace, []string{"super-secret-cf-token-ui", "rotated-secret-cf-token-ui"})
 }
 
+func TestInternalDNSResolveReturnsMappedTokenOnlyOnPrivateProviderPath(t *testing.T) {
+	t.Parallel()
+	service, _, _ := newUIHarness(t, nil)
+	created := httptest.NewRecorder()
+	service.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/mappings", `{"suffix":"example.com","token":"private-provider-token"}`, "operation/ui-create-private-provider"))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	request := uiJSONRequest(http.MethodPost, internalDNSResolvePath, `{"domain":"edge.example.com"}`, "operation/internal-resolve")
+	resolved := httptest.NewRecorder()
+	service.ServeHTTP(resolved, request)
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	if resolved.Header().Get(internalDNSVersionHeader) != "1" {
+		t.Fatal("private provider contract version header is missing")
+	}
+	var response internalDNSResolveResponse
+	if err := json.Unmarshal(resolved.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response.Token) != "private-provider-token" || response.Error != "" {
+		t.Fatalf("resolve response token=%q error=%q", response.Token, response.Error)
+	}
+	clear(response.Token)
+
+	missing := httptest.NewRecorder()
+	service.ServeHTTP(missing, uiJSONRequest(http.MethodPost, internalDNSResolvePath, `{"domain":"unmapped.test"}`, "operation/internal-resolve-missing"))
+	if missing.Code != http.StatusNotFound || strings.Contains(missing.Body.String(), "private-provider-token") {
+		t.Fatalf("missing status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestMappingUISecondRotateWithoutOperationKeyStoresNewToken(t *testing.T) {
 	t.Parallel()
 	service, _, runtime := newUIHarness(t, nil)
