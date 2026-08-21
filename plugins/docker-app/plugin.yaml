@@ -1,6 +1,6 @@
 schema_version: 1
 id: docker-app
-version: 0.1.0
+version: 0.1.1
 name: Docker 应用
 description: 通过面板管理 Docker 与 Compose 应用的发布和访问
 compatibility:

@@ -353,13 +353,16 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 	}
 }
 
-func TestDockerEntrypointCanonicalRPCAndDefaultFailClosed(t *testing.T) {
+func TestDockerEntrypointCanonicalRPCAndSDKServers(t *testing.T) {
 	var output bytes.Buffer
 	if err := dockerapp.RunEntrypoint(context.Background(), []string{dockerapp.CIHandshakeFlag}, &output); err != nil || strings.TrimSpace(output.String()) != pluginsdk.RPCABIV1 {
 		t.Fatalf("entrypoint output=%q err=%v", output.String(), err)
 	}
-	if err := dockerapp.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
-		t.Fatalf("default entrypoint err=%v", err)
+	t.Setenv("NRE_PLUGIN_ENDPOINT", "")
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
+	t.Setenv("NRE_PLUGIN_HTTP_ENDPOINT_CONFIG", "")
+	if err := dockerapp.RunEntrypoint(context.Background(), nil, &output); err == nil || errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) || !strings.Contains(err.Error(), "NRE_PLUGIN_") {
+		t.Fatalf("default entrypoint did not reach canonical SDK servers: %v", err)
 	}
 	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "plugins", "docker-app", "plugin.yaml"))
 	if err != nil {

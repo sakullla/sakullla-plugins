@@ -97,9 +97,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	controller := &Controller{admission: config.Admission, prepareGate: config.PrepareGate}
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:   []string{"docker-app.business-model"},
-		RequiredGrants: []string{"container.compose", "http.rule", "ui.dynamic"},
-		Timeouts:       rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
+		Capabilities:      []string{"docker-app.business-model"},
+		RequiredGrants:    []string{"container.compose", "http.rule", "ui.dynamic"},
+		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1, pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		Timeouts:          rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err
