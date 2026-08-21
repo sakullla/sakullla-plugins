@@ -305,7 +305,7 @@ func composeServiceFromYAML(name string, raw composeService) (parsedComposeServi
 	if err != nil {
 		return parsedComposeService{}, nil, ErrInvalidAdoptSource
 	}
-	hosts, volumes := classifyVolumes(raw.Volumes)
+	hosts, volumes, relatives := classifyVolumes(raw.Volumes)
 	credentials, err := collectEnvironment(raw.Environment)
 	if err != nil {
 		wipeCredentials(credentials)
@@ -316,6 +316,7 @@ func composeServiceFromYAML(name string, raw composeService) (parsedComposeServi
 			Name:            name,
 			Privileged:      raw.Privileged,
 			HostMounts:      hosts,
+			RelativeBinds:   relatives,
 			AddCapabilities: append([]string(nil), raw.CapAdd...),
 			Networks:        networks,
 			Volumes:         volumes,
@@ -374,12 +375,15 @@ func parseDockerRunTokens(tokens []string) (parsedDockerRun, []TransientCredenti
 				name, material, _ := strings.Cut(value, "=")
 				credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
 			case "-v", "--volume":
-				host, named := classifyVolume(value)
+				host, named, relative := classifyVolume(value)
 				if host != "" {
 					parsed.service.HostMounts = append(parsed.service.HostMounts, host)
 				}
 				if named != "" {
 					parsed.service.Volumes = append(parsed.service.Volumes, named)
+				}
+				if relative != "" {
+					parsed.service.RelativeBinds = append(parsed.service.RelativeBinds, relative)
 				}
 			case "--cap-add":
 				parsed.service.AddCapabilities = append(parsed.service.AddCapabilities, value)
@@ -566,58 +570,6 @@ func materialBytes(value any) []byte {
 	default:
 		return []byte(fmt.Sprint(typed))
 	}
-}
-
-func classifyVolumes(specs []string) (hosts, named []string) {
-	for _, spec := range specs {
-		host, volume := classifyVolume(spec)
-		if host != "" {
-			hosts = append(hosts, host)
-		}
-		if volume != "" {
-			named = append(named, volume)
-		}
-	}
-	return hosts, named
-}
-
-func classifyVolume(spec string) (hostMount, namedVolume string) {
-	source := volumeSource(spec)
-	if isHostSource(source) {
-		return spec, ""
-	}
-	if source == "" {
-		return "", ""
-	}
-	return "", source
-}
-
-func volumeSource(spec string) string {
-	if drive, rest, ok := windowsDrive(spec); ok {
-		if index := strings.IndexByte(rest, ':'); index >= 0 {
-			return drive + rest[:index]
-		}
-		return spec
-	}
-	if index := strings.IndexByte(spec, ':'); index >= 0 {
-		return spec[:index]
-	}
-	return spec
-}
-
-func windowsDrive(spec string) (string, string, bool) {
-	if len(spec) < 2 || spec[1] != ':' {
-		return "", "", false
-	}
-	letter := spec[0]
-	if (letter < 'A' || letter > 'Z') && (letter < 'a' || letter > 'z') {
-		return "", "", false
-	}
-	return spec[:2], spec[2:], true
-}
-
-func isHostSource(source string) bool {
-	return strings.ContainsAny(source, `/\`) || strings.HasPrefix(source, ".") || strings.HasPrefix(source, "~")
 }
 
 func redactComposeYAML(document string) (string, error) {

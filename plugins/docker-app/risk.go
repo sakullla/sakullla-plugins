@@ -14,6 +14,7 @@ type ComposeService struct {
 	Image           string
 	Privileged      bool
 	HostMounts      []string
+	RelativeBinds   []string
 	AddCapabilities []string
 	Networks        []string
 	Volumes         []string
@@ -118,6 +119,9 @@ func canonicalComposePlan(plan ComposePlan) (ComposePlan, error) {
 			return ComposePlan{}, err
 		}
 		if service.HostMounts, err = sortedUnique(service.HostMounts, MaxCollectionItems); err != nil {
+			return ComposePlan{}, err
+		}
+		if service.RelativeBinds, err = sortedUnique(service.RelativeBinds, MaxCollectionItems); err != nil {
 			return ComposePlan{}, err
 		}
 		if service.AddCapabilities, err = sortedUnique(service.AddCapabilities, MaxCollectionItems); err != nil {
@@ -712,13 +716,17 @@ func dockerRunBoolean(name string) bool {
 }
 
 func assignVolume(service *ComposeService, spec string) {
-	source, _, _ := strings.Cut(spec, ":")
-	if isHostPath(source) {
-		service.HostMounts = append(service.HostMounts, spec)
+	host, named, relative := classifyVolume(spec)
+	if relative != "" {
+		service.RelativeBinds = append(service.RelativeBinds, relative)
 		return
 	}
-	if source != "" {
-		service.Volumes = append(service.Volumes, source)
+	if host != "" {
+		service.HostMounts = append(service.HostMounts, host)
+		return
+	}
+	if named != "" {
+		service.Volumes = append(service.Volumes, named)
 	}
 }
 
@@ -740,22 +748,22 @@ func assignMount(service *ComposeService, spec string) error {
 	if source == "" {
 		return errors.New("docker run command is invalid")
 	}
-	if kind == "bind" || kind == "" && isHostPath(source) {
+	switch classifyBindSource(source) {
+	case bindRelative:
+		service.RelativeBinds = append(service.RelativeBinds, source)
+		return nil
+	case bindHost:
+		if kind == "bind" || kind == "" {
+			service.HostMounts = append(service.HostMounts, source)
+			return nil
+		}
+	}
+	if kind == "bind" {
 		service.HostMounts = append(service.HostMounts, source)
 		return nil
 	}
 	service.Volumes = append(service.Volumes, source)
 	return nil
-}
-
-func isHostPath(value string) bool {
-	if value == "" {
-		return false
-	}
-	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, ".") || strings.HasPrefix(value, "~") || strings.HasPrefix(value, "\\") {
-		return true
-	}
-	return strings.Contains(value, "/") || strings.Contains(value, "\\")
 }
 
 func assignComposeVolumes(service *ComposeService, raw any) error {
@@ -776,11 +784,24 @@ func assignComposeVolumes(service *ComposeService, raw any) error {
 			if source == "" {
 				source, _ = mapString(volume, "src")
 			}
-			if kind == "bind" || source != "" && isHostPath(source) {
+			target, _ := mapString(volume, "target")
+			spec := source
+			if target != "" {
+				spec = source + ":" + target
+			}
+			class := classifyBindSource(source)
+			if class == bindRelative {
 				if source == "" {
 					return errors.New("compose document is invalid")
 				}
-				service.HostMounts = append(service.HostMounts, source)
+				service.RelativeBinds = append(service.RelativeBinds, spec)
+				continue
+			}
+			if kind == "bind" || source != "" && class == bindHost {
+				if source == "" {
+					return errors.New("compose document is invalid")
+				}
+				service.HostMounts = append(service.HostMounts, spec)
 				continue
 			}
 			if source != "" {
@@ -952,4 +973,3 @@ func envFileBase(value string) string {
 	}
 	return base
 }
-

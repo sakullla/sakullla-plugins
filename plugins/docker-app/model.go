@@ -41,6 +41,7 @@ type App struct {
 	AutoUpdate *bool    `json:"auto_update,omitempty"`
 	Image      string   `json:"-"`
 	RuleRef    string   `json:"-"`
+	WorkDir    string   `json:"-"`
 }
 
 func (app App) Validate() error {
