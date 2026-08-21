@@ -14,7 +14,41 @@ import (
 	"github.com/sakullla/sakullla-plugins/internal/ci/performance"
 	"github.com/sakullla/sakullla-plugins/internal/pluginmanifest"
 	"github.com/sakullla/sakullla-plugins/internal/sdklock"
+	acceleratorsources "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources"
+	cloudflaredns "github.com/sakullla/sakullla-plugins/plugins/cloudflare-dns"
+	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
+	"github.com/sakullla/sakullla-plugins/plugins/doh"
+	reversel4 "github.com/sakullla/sakullla-plugins/plugins/reverse-l4"
+	shadowsocksserver "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
 )
+
+func TestRPCPluginBinaryIdentityMatchesManifest(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		id, binaryID, binaryVersion string
+	}{
+		{"accelerator-sources", acceleratorsources.PluginID, acceleratorsources.PluginVersion},
+		{"cloudflare-dns", cloudflaredns.PluginID, cloudflaredns.PluginVersion},
+		{"docker-app", dockerapp.PluginID, dockerapp.PluginVersion},
+		{"doh", doh.PluginID, doh.PluginVersion},
+		{"reverse-l4", reversel4.PluginID, reversel4.PluginVersion},
+		{"shadowsocks-server", shadowsocksserver.PluginID, shadowsocksserver.PluginVersion},
+	}
+	for _, test := range tests {
+		t.Run(test.id, func(t *testing.T) {
+			manifest, err := pluginmanifest.Load(filepath.Join(repositoryRoot, "plugins", test.id, "plugin.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.binaryID != manifest.ID || test.binaryVersion != manifest.Version {
+				t.Fatalf("binary identity %s@%s does not match manifest %s@%s", test.binaryID, test.binaryVersion, manifest.ID, manifest.Version)
+			}
+		})
+	}
+}
 
 func TestPluginGateRequiresHostCapabilitiesBeforeBuild(t *testing.T) {
 	lock := sdklock.Lock{

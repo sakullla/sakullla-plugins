@@ -708,7 +708,11 @@ func buildRPCArtifact(ctx context.Context, repositoryRoot, pluginID, sourcePath,
 		return "", fmt.Errorf("build %s RPC artifact: %w\n%s", pluginID, err, output)
 	}
 	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
-		validate := exec.CommandContext(ctx, outputPath, "--nre-ci-rpc-handshake")
+		manifest, err := pluginmanifest.Load(filepath.Join(repositoryRoot, "plugins", pluginID, "plugin.yaml"))
+		if err != nil {
+			return "", fmt.Errorf("load %s RPC manifest identity: %w", pluginID, err)
+		}
+		validate := exec.CommandContext(ctx, outputPath, "--nre-ci-rpc-handshake", manifest.ID, manifest.Version)
 		validate.Dir = repositoryRoot
 		output, err := validate.CombinedOutput()
 		if err != nil {
