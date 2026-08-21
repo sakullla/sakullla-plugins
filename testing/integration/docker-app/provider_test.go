@@ -161,6 +161,22 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	if created.Backend != "127.0.0.1:8080" || !strings.Contains(created.Backend, "8080") {
 		t.Fatalf("backend does not point at published port: %#v", created)
 	}
+
+	containerOnly := dockerapp.App{
+		ID: "sidecar", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"80\"\n",
+	}
+	runtimeHost := []dockerapp.ContainerObservation{
+		{ID: "ctr-sidecar", Labels: map[string]string{dockerapp.AppLabel: containerOnly.ID}, ExposedPorts: []uint16{32768}},
+	}
+	calls = nil
+	rules, err = dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), handle, existing, containerOnly, runtimeHost, "sidecar.example.com", 32768, auditor)
+	if err != nil || len(calls) != 1 || calls[0].Port != 32768 {
+		t.Fatalf("runtime host create spec=%#v rules=%#v err=%v", calls, rules, err)
+	}
+	if rules[len(rules)-1].Backend != "127.0.0.1:32768" {
+		t.Fatalf("runtime backend = %#v", rules[len(rules)-1])
+	}
 }
 
 func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
@@ -171,6 +187,10 @@ func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 	worker := dockerapp.App{
 		ID: "worker", Image: "batch:latest", Generation: "generation-1",
 		Compose: "services:\n  job:\n    image: batch:latest\n",
+	}
+	containerOnly := dockerapp.App{
+		ID: "sidecar", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"80\"\n      - 443\n      - \":8080\"\n      - \"80/tcp\"\n      - target: 9000\n",
 	}
 	httpObservations := []dockerapp.ContainerObservation{
 		{ID: "ctr-media", Labels: map[string]string{dockerapp.AppLabel: httpApp.ID}, ExposedPorts: []uint16{8080}},
@@ -190,6 +210,17 @@ func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 	if err != nil || workerIngress.CanCreate || len(workerIngress.PublishedPorts) != 0 {
 		t.Fatalf("worker ingress = %#v err=%v", workerIngress, err)
 	}
+	containerOnlyIngress, err := dockerapp.ProjectAppHTTPIngress(containerOnly, nil)
+	if err != nil || containerOnlyIngress.CanCreate || len(containerOnlyIngress.PublishedPorts) != 0 {
+		t.Fatalf("container-only compose ports = %#v err=%v", containerOnlyIngress, err)
+	}
+	observedHost := []dockerapp.ContainerObservation{
+		{ID: "ctr-sidecar", Labels: map[string]string{dockerapp.AppLabel: containerOnly.ID}, ExposedPorts: []uint16{32768}},
+	}
+	observedIngress, err := dockerapp.ProjectAppHTTPIngress(containerOnly, observedHost)
+	if err != nil || !observedIngress.CanCreate || !portsEqual(observedIngress.PublishedPorts, []uint16{32768}) {
+		t.Fatalf("runtime host port = %#v err=%v", observedIngress, err)
+	}
 
 	for _, test := range []struct {
 		name         string
@@ -204,6 +235,8 @@ func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 		{name: "empty-domain", app: httpApp, observations: httpObservations, domain: "", port: 8080, want: dockerapp.ErrEmptyIngressDomain},
 		{name: "whitespace-domain", app: httpApp, observations: httpObservations, domain: "   ", port: 8080, want: dockerapp.ErrEmptyIngressDomain},
 		{name: "no-published-port", app: worker, observations: workerObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrNoPublishedPort},
+		{name: "container-only-short-syntax", app: containerOnly, observations: nil, domain: "app.example.com", port: 80, want: dockerapp.ErrNoPublishedPort},
+		{name: "container-only-target", app: containerOnly, observations: nil, domain: "app.example.com", port: 9000, want: dockerapp.ErrNoPublishedPort},
 		{name: "unknown-port", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 9000, want: dockerapp.ErrNoPublishedPort},
 		{name: "missing-handle", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrTypedHandlesUnavailable, nilHandle: true},
 		{name: "missing-auditor", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrAuditRequired, nilAuditor: true},

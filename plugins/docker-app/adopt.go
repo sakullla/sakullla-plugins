@@ -664,27 +664,46 @@ func publishedPortsFromYAML(value any) []uint16 {
 		}
 		return ports
 	case map[string]any:
-		if published, ok := typed["published"]; ok {
-			return publishedPortsFromYAML(published)
-		}
-		return nil
+		return publishedFieldPort(typed["published"])
 	case map[any]any:
-		if published, ok := typed["published"]; ok {
-			return publishedPortsFromYAML(published)
+		return publishedFieldPort(typed["published"])
+	case string:
+		if port, ok := parsePublishMapping(typed); ok {
+			return []uint16{port}
 		}
 		return nil
 	default:
-		if port, ok := parsePublishedPort(typed); ok {
+		return nil
+	}
+}
+
+func publishedFieldPort(value any) []uint16 {
+	if value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case string:
+		typed = strings.TrimSpace(typed)
+		if slash := strings.LastIndex(typed, "/"); slash >= 0 {
+			typed = typed[:slash]
+		}
+		if typed == "" || strings.ContainsAny(typed, ":-") {
+			return nil
+		}
+		if port, ok := parsePortNumber(typed); ok {
+			return []uint16{port}
+		}
+		return nil
+	default:
+		if port, ok := yamlPortNumber(typed); ok {
 			return []uint16{port}
 		}
 		return nil
 	}
 }
 
-func parsePublishedPort(value any) (uint16, bool) {
+func yamlPortNumber(value any) (uint16, bool) {
 	switch typed := value.(type) {
-	case string:
-		return parsePublishMapping(typed)
 	case int:
 		return portNumber(typed)
 	case int64:
@@ -726,8 +745,8 @@ func parsePublishMapping(value string) (uint16, bool) {
 		return 0, false
 	}
 	parts := strings.Split(value, ":")
-	if len(parts) == 1 {
-		return parsePortNumber(parts[0])
+	if len(parts) < 2 {
+		return 0, false
 	}
 	hostPort := parts[len(parts)-2]
 	if hostPort == "" {
