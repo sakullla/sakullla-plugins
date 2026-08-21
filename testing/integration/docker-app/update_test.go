@@ -119,6 +119,55 @@ func TestDockerManualUpdateDefaultProjectsUntilConfirm(t *testing.T) {
 	})
 }
 
+func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *testing.T) {
+	engine := dockerapp.EngineObservation{Installed: true, Version: "27.1.1"}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	runtime := newLifecycleRuntime()
+	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: testComposeYAML("nginx:latest")}
+	apps, err := dockerapp.DeployComposeApp(context.Background(), nil, spec, engine, runtime, auditor)
+	if err != nil || len(apps) != 1 || apps[0].Image != "nginx:latest" || !runtime.running["media"] {
+		t.Fatalf("compose deploy apps=%#v err=%v", apps, err)
+	}
+	app := apps[0]
+
+	store := dockerapp.NewDeploymentStore()
+	if _, ok := store.Get(app.ID); ok {
+		t.Fatal("compose deploy must not create a rollout record")
+	}
+	status := dockerapp.ProjectOpsStatus(true, false, dockerapp.Deployment{ImageDigest: "sha256:current"}, dockerapp.UpdatePolicy{}, "sha256:latest")
+	if status != "有新版本" {
+		t.Fatalf("compose app projected status = %q", status)
+	}
+
+	fake := &rolloutFake{}
+	rollout := dockerapp.Rollout{Store: store, Executor: fake, Auditor: auditor}
+	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
+	got, ok := store.Get(app.ID)
+	if err != nil || !view.HasUpdate || view.Published || view.AutoUpdate || len(fake.calls) != 0 {
+		t.Fatalf("first observation view=%#v calls=%v err=%v", view, fake.calls, err)
+	}
+	if !ok || got.ImageDigest != "sha256:current" || got.AvailableDigest != "sha256:latest" || got.Phase != dockerapp.PhaseActive || got.Lease != "" {
+		t.Fatalf("first observation did not persist digests: %#v ok=%v", got, ok)
+	}
+	if got.InstanceID != "" {
+		t.Fatalf("first observation invented an instance: %#v", got)
+	}
+
+	if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	published, _ := store.Get(app.ID)
+	if published.InstanceID != "new" || published.Image != app.Image || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" {
+		t.Fatalf("compose confirm did not publish: %#v", published)
+	}
+	if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new" {
+		t.Fatalf("compose confirm calls=%v", fake.calls)
+	}
+	if !runtime.running["media"] || !runtime.containerExists("media") {
+		t.Fatalf("compose runtime was torn down: %#v", runtime)
+	}
+}
+
 func TestDockerAutoUpdateDisabledOnlyProjectsNewVersionUntilConfirm(t *testing.T) {
 	store, fake, rollout, app, old := updateHarness(t, "")
 	view, err := rollout.AutoUpdate(context.Background(), app, boolPtr(false), dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})

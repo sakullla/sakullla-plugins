@@ -240,12 +240,12 @@ func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed U
 	}
 	latest := observed.LatestDigest
 	if latest == "" || current == "" || latest == current {
-		if existed && current != "" {
+		if current != "" {
 			available := record.Value.AvailableDigest
 			if latest != "" && latest == current {
 				available = ""
 			}
-			if err := r.rememberDigest(ctx, record, current, available); err != nil {
+			if err := r.rememberDigest(ctx, record, app, current, available, existed); err != nil {
 				return UpdateView{}, err
 			}
 		}
@@ -254,10 +254,8 @@ func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed U
 	view.HasUpdate = true
 	view.Digest = latest
 	if !view.AutoUpdate {
-		if existed {
-			if err := r.rememberDigest(ctx, record, current, latest); err != nil {
-				return UpdateView{}, err
-			}
+		if err := r.rememberDigest(ctx, record, app, current, latest, existed); err != nil {
+			return UpdateView{}, err
 		}
 		audit(r.Auditor, AuditRecord{Action: "rollout.available", Outcome: "projected", Detail: app.ID})
 		return view, nil
@@ -534,7 +532,7 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		PriorRuleRef:      prior.Value.RuleRef,
 		PriorRuleTarget:   prior.Value.RuleTarget,
 		PriorInstance:     prior.Value.InstanceID,
-		PriorAbsent:       !existed,
+		PriorAbsent:       !existed || prior.Value.InstanceID == "",
 		DesiredRuleTarget: "", // no candidate exists until Start succeeds
 		ImageDigest:       digest,
 		PriorDigest:       prior.Value.ImageDigest,
@@ -821,13 +819,29 @@ func (r Rollout) ready(app *App) error {
 	return nil
 }
 
-func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, current, available string) error {
+func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, app App, current, available string, existed bool) error {
 	v := record.Value
-	if v.ImageDigest == current && v.AvailableDigest == available {
+	if existed && v.ImageDigest == current && v.AvailableDigest == available {
+		return nil
+	}
+	if !existed {
+		seed := Deployment{
+			AppID: app.ID, Image: app.Image, RuleRef: app.RuleRef, Generation: app.Generation,
+			Phase: PhaseActive, ImageDigest: current, AvailableDigest: available,
+		}
+		leased, err := r.Store.AcquireLease(ctx, app.ID, record.Version, seed, r.now().Add(r.leaseDuration()))
+		if err != nil {
+			return ErrReconcilePending
+		}
+		seeded := leased.Value
+		seeded.Lease, seeded.LeaseUntil = "", time.Time{}
+		if _, err := r.Store.CompareAndSwap(ctx, app.ID, leased.Version, leased.Value.FencingToken, seeded); err != nil {
+			return ErrReconcilePending
+		}
 		return nil
 	}
 	v.ImageDigest, v.AvailableDigest = current, available
-	if _, err := r.Store.CompareAndSwap(ctx, v.AppID, record.Version, v.FencingToken, v); err != nil {
+	if _, err := r.Store.CompareAndSwap(ctx, app.ID, record.Version, v.FencingToken, v); err != nil {
 		return ErrReconcilePending
 	}
 	return nil
