@@ -268,26 +268,26 @@ func (service *Service) RotateMappingToken(ctx context.Context, request ActionRe
 	} else if outcome.State != OperationAbsent {
 		return TokenMapping{}, ErrReconcilePending
 	}
-	attestation, err := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
-		return service.runtime.Vault.Verify(callCtx, current.SecretRef)
-	})
-	if err != nil {
-		return TokenMapping{}, service.fail(ctx, action, operation, request, "token", safeExternal(err, ErrMappedTokenUnavailable))
-	}
-	if attestation.SecretRef != current.SecretRef || !refPattern.MatchString(attestation.Version) {
+	if !refPattern.MatchString(current.SecretRef) || !refPattern.MatchString(current.Version) {
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "stale", ErrTokenStale)
 	}
-	ownedSecret := secret
-	metadata, err := awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
-		return service.runtime.Vault.Rotate(callCtx, current.SecretRef, attestation.Version, ownedSecret, operation)
-	}, func() { clear(ownedSecret) })
-	secret = nil
+	effectOperation := operation
+	metadata, err := service.rotateMappingSecret(ctx, current.SecretRef, current.Version, effectOperation, secret)
+	if errors.Is(err, ErrTokenStale) {
+		attestation, verifyErr := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
+			return service.runtime.Vault.Verify(callCtx, current.SecretRef)
+		})
+		if verifyErr == nil && attestation.SecretRef == current.SecretRef && refPattern.MatchString(attestation.Version) {
+			effectOperation = stableOperationKey(operation, "stale-retry", attestation.Version)
+			metadata, err = service.rotateMappingSecret(ctx, current.SecretRef, attestation.Version, effectOperation, secret)
+		}
+	}
 	if err != nil {
 		failure := safeExternal(err, ErrVaultOperationFailed)
 		if errors.Is(failure, ErrTokenStale) || errors.Is(failure, ErrRevoked) {
 			return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
 		}
-		outcome, inspectErr := service.inspect(ctx, operation)
+		outcome, inspectErr := service.inspect(ctx, effectOperation)
 		if inspectErr == nil && outcome.State == OperationCommitted {
 			return service.applyRotatedMapping(ctx, action, operation, request, current.SecretRef, outcome.Token)
 		}
@@ -297,6 +297,13 @@ func (service *Service) RotateMappingToken(ctx context.Context, request ActionRe
 		return TokenMapping{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
 	}
 	return service.applyRotatedMapping(ctx, action, operation, request, current.SecretRef, metadata)
+}
+
+func (service *Service) rotateMappingSecret(ctx context.Context, ref, version, operation string, material []byte) (TokenMetadata, error) {
+	attempt := append([]byte(nil), material...)
+	return awaitOwned(service, ctx, func(callCtx context.Context) (TokenMetadata, error) {
+		return service.runtime.Vault.Rotate(callCtx, ref, version, attempt, operation)
+	}, func() { clear(attempt) })
 }
 
 func (service *Service) DeleteMapping(ctx context.Context, request ActionRequest, suffix string) error {

@@ -135,6 +135,38 @@ func TestInternalDNSResolveReturnsMappedTokenOnlyOnPrivateProviderPath(t *testin
 	}
 }
 
+func TestRotateMappingReplacesInvalidCurrentToken(t *testing.T) {
+	t.Parallel()
+	service, _, runtime := newUIHarness(t, nil)
+	created, err := service.CreateMapping(context.Background(), uiAction("operation/create-revoked"), "example.com", []byte("revoked-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault := runtime.Vault.(*uiFakeVault)
+	vault.mu.Lock()
+	vault.verifyErrors[created.SecretRef] = ErrTokenInvalid
+	vault.mu.Unlock()
+
+	rotated, err := service.RotateMappingToken(context.Background(), uiAction("operation/replace-revoked"), "example.com", []byte("replacement-token"))
+	if err != nil {
+		t.Fatalf("rotate invalid current token: %v", err)
+	}
+	if rotated.SecretRef != created.SecretRef || rotated.Version == created.Version {
+		t.Fatalf("rotated mapping=%#v created=%#v", rotated, created)
+	}
+	vault.mu.Lock()
+	delete(vault.verifyErrors, created.SecretRef)
+	vault.mu.Unlock()
+	resolved, err := service.ResolveToken(context.Background(), uiAction("operation/resolve-replacement"), "edge.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Clear()
+	if !bytes.Equal(resolved.Token(), []byte("replacement-token")) {
+		t.Fatalf("replacement token=%q", resolved.Token())
+	}
+}
+
 func TestMappingUISecondRotateWithoutOperationKeyStoresNewToken(t *testing.T) {
 	t.Parallel()
 	service, _, runtime := newUIHarness(t, nil)
@@ -627,19 +659,23 @@ type uiFakeSecret struct {
 }
 
 type uiFakeVault struct {
-	mu         sync.Mutex
-	operations map[string]TokenMetadata
-	secrets    map[string]uiFakeSecret
-	effects    atomic.Int32
+	mu           sync.Mutex
+	operations   map[string]TokenMetadata
+	secrets      map[string]uiFakeSecret
+	verifyErrors map[string]error
+	effects      atomic.Int32
 }
 
 func newUIVault() *uiFakeVault {
-	return &uiFakeVault{operations: map[string]TokenMetadata{}, secrets: map[string]uiFakeSecret{}}
+	return &uiFakeVault{operations: map[string]TokenMetadata{}, secrets: map[string]uiFakeSecret{}, verifyErrors: map[string]error{}}
 }
 
 func (vault *uiFakeVault) Verify(_ context.Context, ref string) (TokenAttestation, error) {
 	vault.mu.Lock()
 	defer vault.mu.Unlock()
+	if err := vault.verifyErrors[ref]; err != nil {
+		return TokenAttestation{}, err
+	}
 	secret, ok := vault.secrets[ref]
 	if !ok {
 		if strings.HasSuffix(ref, "/map/catalog") {

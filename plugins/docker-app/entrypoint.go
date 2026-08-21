@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -39,5 +40,23 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) != 0 {
 		return fmt.Errorf("unexpected docker-app arguments: %v", args)
 	}
-	return ErrTypedHandlesUnavailable
+	controller, err := NewController(ControllerConfig{})
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- pluginsdk.ServeRPCPlugin(runCtx, controller) }()
+	go func() {
+		errorsCh <- pluginsdk.ServeHTTPBackendProviders(runCtx, map[string]http.Handler{
+			"default": http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				http.Error(writer, "docker application provider is unavailable", http.StatusServiceUnavailable)
+			}),
+		})
+	}()
+	first := <-errorsCh
+	cancel()
+	second := <-errorsCh
+	return errors.Join(first, second)
 }
