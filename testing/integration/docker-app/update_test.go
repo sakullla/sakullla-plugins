@@ -168,6 +168,40 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	}
 }
 
+func TestDockerManualUpdateFailedConfirmAfterSeedRestoresActive(t *testing.T) {
+	for _, fail := range []string{"pull", "start"} {
+		t.Run(fail, func(t *testing.T) {
+			app := testApp("update-secret")
+			store := dockerapp.NewDeploymentStore()
+			fake := &rolloutFake{fail: fail, secret: "update-secret", state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+			rollout := dockerapp.Rollout{Store: store, Executor: fake, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})}
+			if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+				t.Fatal(err)
+			}
+			err := rollout.ConfirmUpdate(context.Background(), app)
+			got, _ := store.Get(app.ID)
+			if err == nil || !errors.Is(err, dockerapp.ErrOperationFailed) {
+				t.Fatalf("%s confirm err=%v", fail, err)
+			}
+			if got.Phase != dockerapp.PhaseActive || got.InstanceID != "" || got.ImageDigest != "sha256:current" || got.AvailableDigest != "sha256:latest" {
+				t.Fatalf("%s confirm left seed unusable: %#v", fail, got)
+			}
+			if dockerapp.ProjectOpsStatus(true, false, got, dockerapp.UpdatePolicy{}, "sha256:latest") != "有新版本" {
+				t.Fatalf("%s confirm hid update: %#v", fail, got)
+			}
+			fake.fail = ""
+			fake.calls = nil
+			if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
+				t.Fatal(err)
+			}
+			published, _ := store.Get(app.ID)
+			if published.InstanceID != "new" || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" {
+				t.Fatalf("%s retry confirm got=%#v", fail, published)
+			}
+		})
+	}
+}
+
 func TestDockerAutoUpdateDisabledOnlyProjectsNewVersionUntilConfirm(t *testing.T) {
 	store, fake, rollout, app, old := updateHarness(t, "")
 	view, err := rollout.AutoUpdate(context.Background(), app, boolPtr(false), dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})

@@ -532,9 +532,10 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		PriorRuleRef:      prior.Value.RuleRef,
 		PriorRuleTarget:   prior.Value.RuleTarget,
 		PriorInstance:     prior.Value.InstanceID,
-		PriorAbsent:       !existed || prior.Value.InstanceID == "",
+		PriorAbsent:       priorInstanceAbsent(existed, prior.Value.InstanceID),
 		DesiredRuleTarget: "", // no candidate exists until Start succeeds
 		ImageDigest:       digest,
+		AvailableDigest:   prior.Value.AvailableDigest,
 		PriorDigest:       prior.Value.ImageDigest,
 		History:           cloneRevisions(prior.Value.History),
 	}
@@ -593,7 +594,7 @@ func (r Rollout) intent(ctx context.Context, record DeploymentRecord, phase Roll
 
 func (r Rollout) rollback(record DeploymentRecord, prior Deployment, existed bool, pending string, routeMayPending bool, cause error) error {
 	v := record.Value
-	v.PendingInstance, v.PriorAbsent, v.PriorRuleTarget, v.LastFailure = pending, !existed, prior.RuleTarget, ErrOperationFailed.Error()
+	v.PendingInstance, v.PriorAbsent, v.PriorRuleTarget, v.LastFailure = pending, priorInstanceAbsent(existed, prior.InstanceID), prior.RuleTarget, ErrOperationFailed.Error()
 	phase := PhaseCleanupPending
 	if routeMayPending {
 		phase = PhaseRouteReconcile
@@ -748,6 +749,17 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		if pending != "" && post.RuleTarget == pending {
 			return r.release(record, ErrReconcilePending)
 		}
+		if v.PriorImage != "" || v.PriorDigest != "" || v.PriorGeneration != "" {
+			restored := Deployment{
+				AppID: v.AppID, Image: v.PriorImage, RuleRef: v.PriorRuleRef, Generation: v.PriorGeneration,
+				Phase: PhaseActive, FencingToken: fence, ImageDigest: v.PriorDigest,
+				AvailableDigest: v.AvailableDigest, History: cloneRevisions(v.History),
+			}
+			ctx, cancel = r.cleanupContext()
+			_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, restored)
+			cancel()
+			return err
+		}
 		ctx, cancel = r.cleanupContext()
 		err = r.Store.DeleteCAS(ctx, v.AppID, record.Version, fence)
 		cancel()
@@ -845,6 +857,10 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 		return ErrReconcilePending
 	}
 	return nil
+}
+
+func priorInstanceAbsent(existed bool, instanceID string) bool {
+	return !existed || instanceID == ""
 }
 
 func rolloutBusy(value Deployment, existed bool, now time.Time) bool {
