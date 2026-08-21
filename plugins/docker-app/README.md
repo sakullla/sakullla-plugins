@@ -16,7 +16,9 @@ transaction: controller-owned Commit runs only after registration, and its
 non-blocking Abort compensates generation revoke or deadline failure.
 
 The canonical `nre:rpc/v1` manifest and executable support a CI handshake
-self-check. Permissions and required grants are the public handle names
-`container.compose`, `http.rule`, and `ui.dynamic`. Normal startup and
-operational actions fail closed when those handles are not granted; no private
-Host wire contract substitutes for them.
+self-check. Required grants are `http.rule` and `ui.dynamic`. Docker/Compose
+API is not a plugin permission: Handshake and Activate do not require
+`container.compose`, and install/deploy overlays have no Docker host, socket,
+or API key fields. Local engine readiness is observed separately and is not a
+connection form. No private Host wire contract substitutes for the remaining
+public grants.

@@ -98,7 +98,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:   []string{"docker-app.business-model"},
-		RequiredGrants: []string{"container.compose", "http.rule", "ui.dynamic"},
+		RequiredGrants: requiredGrants(),
 		Timeouts:       rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
@@ -155,7 +155,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	}
 	epoch := &commitEpoch{generation: generation.ID()}
 	epoch.live.Store(true)
-	handle, err := rpcplugin.BindHandle(generation, "container.compose", epoch, func(epoch *commitEpoch) {
+	handle, err := rpcplugin.BindHandle(generation, generationHandleScope, epoch, func(epoch *commitEpoch) {
 		epoch.live.Store(false)
 		controller.mu.Lock()
 		if controller.epoch == epoch {
@@ -204,7 +204,7 @@ func (controller *Controller) activate(ctx context.Context, generation *rpcplugi
 		if prepared == nil {
 			return ErrTypedHandlesUnavailable
 		}
-		transaction, err := rpcplugin.BindHandle(generation, "container.compose", prepared, func(prepared PreparedAdmission) { prepared.Abort() })
+		transaction, err := rpcplugin.BindHandle(generation, generationHandleScope, prepared, func(prepared PreparedAdmission) { prepared.Abort() })
 		if err != nil {
 			prepared.Abort()
 			return err
@@ -220,6 +220,14 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.epoch = nil
 	controller.mu.Unlock()
 	return nil
+}
+
+// generationHandleScope binds process-local overlay state to the panel grant.
+// Docker/Compose API is not a plugin permission and is not required to start.
+const generationHandleScope = "ui.dynamic"
+
+func requiredGrants() []string {
+	return []string{"http.rule", "ui.dynamic"}
 }
 
 func cloneApps(apps []App) []App {

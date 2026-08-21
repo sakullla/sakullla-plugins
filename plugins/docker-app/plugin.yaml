@@ -25,7 +25,6 @@ http_backend_providers:
   - id: default
     display_name: Docker 应用
 permissions:
-  - name: container.compose
   - name: http.rule
   - name: ui.dynamic
   - name: event.emit

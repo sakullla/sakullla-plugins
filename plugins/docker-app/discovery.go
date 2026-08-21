@@ -20,8 +20,9 @@ type Discovery struct {
 	Candidate   bool
 }
 
-// EngineObservation is supplied by a future container.compose handle.
-// Discover and ProjectEngineReady never open a socket or install the engine.
+// EngineObservation is supplied by the Agent-local Docker engine observation.
+// Discover and ProjectEngineReady never open a socket, take a connection form,
+// or install the engine.
 type EngineObservation struct {
 	Installed bool
 	Version   string

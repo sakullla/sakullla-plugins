@@ -264,8 +264,13 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 		return controller
 	}
 	request := handshake(requiredGrants())
+	if _, err := newController(nil).Handshake(context.Background(), handshake([]string{"http.rule", "ui.dynamic"})); err != nil {
+		t.Fatalf("handshake without container.compose: %v", err)
+	}
 	for _, grants := range [][]string{
-		{"http.rule", "ui.dynamic"},
+		{"ui.dynamic"},
+		{"http.rule"},
+		{"container.compose"},
 		{"container.compose", "ui.dynamic"},
 		{"container.compose", "http.rule"},
 	} {
@@ -366,12 +371,12 @@ func TestDockerEntrypointCanonicalRPCAndDefaultFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(manifest)
-	for _, required := range []string{"container.compose", "http.rule", "ui.dynamic", "container.provider", "http.backend-provider", "http.outbound", "http_backend_providers"} {
+	for _, required := range []string{"http.rule", "ui.dynamic", "container.provider", "http.backend-provider", "http.outbound", "http_backend_providers", "host_scope: agent"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("plugin.yaml missing %q", required)
 		}
 	}
-	for _, retired := range []string{"container.read", "container.manage", "ui.dynamic-actions", "docker-compose", "dynamic-ui", "http-rule"} {
+	for _, retired := range []string{"container.compose", "container.read", "container.manage", "ui.dynamic-actions", "docker-compose", "dynamic-ui", "http-rule"} {
 		if strings.Contains(text, retired) {
 			t.Fatalf("plugin.yaml still declares %q", retired)
 		}
@@ -1099,7 +1104,7 @@ func configWire(t *testing.T, count int) []byte {
 }
 
 func requiredGrants() []string {
-	return []string{"container.compose", "http.rule", "ui.dynamic"}
+	return []string{"http.rule", "ui.dynamic"}
 }
 
 func handshake(grants []string) pluginsdk.RPCHandshakeRequest {
