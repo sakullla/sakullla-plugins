@@ -10,27 +10,27 @@ import (
 )
 
 func TestDockerAppOverlayPersistsAutoUpdate(t *testing.T) {
-	omitted := []byte(`{"apps":[{"id":"media","image":"nginx:latest","rule_ref":"rule-media","generation":"generation-1"}]}`)
+	omitted := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1"}]}`)
 	got, err := dockerapp.ParseConfiguration(omitted)
-	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate != nil || !dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) {
+	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate != nil || !dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) || got.Apps[0].Image != "nginx:latest" {
 		t.Fatalf("omitted auto_update got=%#v err=%v", got, err)
 	}
 
-	disabled := []byte(`{"apps":[{"id":"media","image":"nginx:latest","rule_ref":"rule-media","generation":"generation-1","auto_update":false}]}`)
+	disabled := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","auto_update":false}]}`)
 	got, err = dockerapp.ParseConfiguration(disabled)
 	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate == nil || *got.Apps[0].AutoUpdate || dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) {
 		t.Fatalf("false auto_update got=%#v err=%v", got, err)
 	}
 
-	enabled := []byte(`{"apps":[{"id":"media","image":"nginx:latest","rule_ref":"rule-media","generation":"generation-1","auto_update":true}]}`)
+	enabled := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","auto_update":true}]}`)
 	got, err = dockerapp.ParseConfiguration(enabled)
 	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate == nil || !*got.Apps[0].AutoUpdate || !dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) {
 		t.Fatalf("true auto_update got=%#v err=%v", got, err)
 	}
 
 	for _, document := range []string{
-		`{"apps":[{"id":"media","image":"nginx:latest","rule_ref":"rule-media","generation":"generation-1","auto_update":"no"}]}`,
-		`{"apps":[{"id":"media","image":"nginx:latest","rule_ref":"rule-media","generation":"generation-1","autoupdate":false}]}`,
+		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","auto_update":"no"}]}`,
+		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","autoupdate":false}]}`,
 	} {
 		if _, err := dockerapp.ParseConfiguration([]byte(document)); err == nil {
 			t.Fatalf("document %s was accepted", document)

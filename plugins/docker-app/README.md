@@ -1,10 +1,11 @@
 # Docker App plugin
 
-This package owns bounded application configuration, discovery projections,
-risk previews, rollout state, redacted audit records, and cleanup decisions.
-It never opens the Docker socket, executes Docker or Compose commands, or owns
-HTTP routing resources. All effects remain behind broker adapters that can only
-be implemented by future typed public SDK handles.
+This package owns bounded compose-application configuration, discovery
+projections, risk previews, rollout state, redacted audit records, and cleanup
+decisions. Overlay apps persist compose YAML; image and published ports are
+derived from that document. It never opens the Docker socket, executes Docker
+or Compose commands, or owns HTTP routing resources. All effects remain behind
+broker adapters that can only be implemented by future typed public SDK handles.
 
 Configuration and controller snapshots contain bounded opaque `secret_refs`
 only, never secret material. Future material access must be transient through a

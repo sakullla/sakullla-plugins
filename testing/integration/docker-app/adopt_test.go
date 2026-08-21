@@ -227,7 +227,7 @@ func TestDockerAdoptAndDockerRunKeepSecretRefsAndRedactUnsafeErrors(t *testing.T
 		t.Fatalf("stop audit leaked secret: %v", audits)
 	}
 
-	wire, err := json.Marshal(dockerapp.Configuration{Apps: []dockerapp.App{app}})
+	wire, err := json.Marshal(dockerapp.Configuration{Apps: []dockerapp.App{composeApp}})
 	if err != nil {
 		t.Fatal(err)
 	}

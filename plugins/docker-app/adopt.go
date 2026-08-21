@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -29,9 +30,10 @@ type RuntimeObservation struct {
 }
 
 type CatalogItem struct {
-	App     App
-	Running bool
-	Status  AppStatus
+	App      App
+	Running  bool
+	Status   AppStatus
+	Services []string
 }
 
 type CatalogView struct {
@@ -49,27 +51,32 @@ func (function StopExecutorFunc) Stop(ctx context.Context, appID string) error {
 }
 
 // ParseComposeDocument turns pasted compose YAML into a risk plan and app.
-// Environment values become secret_refs via BindSecretRefs and are wiped.
+// Environment values become secret_refs via BindSecretRefs and are wiped from
+// the stored compose document.
 func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposePlan, App, error) {
 	if len(document) > MaxConfigBytes {
 		return ComposePlan{}, App{}, fmt.Errorf("%w: adopt source exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
 	}
-	if !validID(appID) || !boundedText(generation, 128) || !boundedText(ruleRef, 128) {
+	if !validID(appID) || !boundedText(generation, 128) || (ruleRef != "" && !boundedText(ruleRef, 128)) {
 		return ComposePlan{}, App{}, ErrInvalidAdoptSource
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader([]byte(document)))
 	var file composeDocument
 	if err := decoder.Decode(&file); err != nil {
-		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+		return ComposePlan{}, App{}, ErrInvalidCompose
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+		return ComposePlan{}, App{}, ErrInvalidCompose
 	}
 	if len(file.Services) == 0 || len(file.Services) > MaxComposeServices {
-		return ComposePlan{}, App{}, ErrInvalidAdoptSource
+		return ComposePlan{}, App{}, ErrInvalidCompose
 	}
-	plan := ComposePlan{AppID: appID, Generation: generation, Project: appID, RuleImpacts: []string{ruleRef}}
+	plan := ComposePlan{AppID: appID, Generation: generation, Project: appID}
+	if ruleRef != "" {
+		plan.RuleRef = ruleRef
+		plan.RuleImpacts = []string{ruleRef}
+	}
 	var credentials []TransientCredential
 	var image string
 	for name, service := range file.Services {
@@ -85,7 +92,16 @@ func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposeP
 		plan.Services = append(plan.Services, parsed.service)
 		credentials = append(credentials, serviceCreds...)
 	}
-	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, RuleRef: ruleRef, Generation: generation}, credentials)
+	if image == "" {
+		wipeCredentials(credentials)
+		return ComposePlan{}, App{}, ErrMissingComposeImage
+	}
+	redacted, err := redactComposeYAML(document)
+	if err != nil {
+		wipeCredentials(credentials)
+		return ComposePlan{}, App{}, err
+	}
+	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, RuleRef: ruleRef, Generation: generation, Compose: redacted}, credentials)
 	if err != nil {
 		return ComposePlan{}, App{}, err
 	}
@@ -202,7 +218,7 @@ func ProjectCatalog(observations []ContainerObservation, runtimes []RuntimeObser
 	}
 	view := CatalogView{Managed: make([]CatalogItem, 0, len(apps))}
 	for _, app := range apps {
-		item := CatalogItem{App: cloneApp(app), Status: AppStatusStopped}
+		item := CatalogItem{App: cloneApp(app), Status: AppStatusStopped, Services: composeServiceNames(app.Compose)}
 		for _, observation := range observations {
 			if observation.Labels[AppLabel] != app.ID {
 				continue
@@ -276,7 +292,13 @@ type parsedComposeService struct {
 }
 
 func composeServiceFromYAML(name string, raw composeService) (parsedComposeService, []TransientCredential, error) {
-	if !validID(name) || !boundedText(raw.Image, 512) {
+	if !validID(name) {
+		return parsedComposeService{}, nil, ErrInvalidAdoptSource
+	}
+	if raw.Image == "" {
+		return parsedComposeService{}, nil, ErrMissingComposeImage
+	}
+	if !boundedText(raw.Image, 512) {
 		return parsedComposeService{}, nil, ErrInvalidAdoptSource
 	}
 	networks, err := collectNames(raw.Networks)
@@ -596,4 +618,60 @@ func windowsDrive(spec string) (string, string, bool) {
 
 func isHostSource(source string) bool {
 	return strings.ContainsAny(source, `/\`) || strings.HasPrefix(source, ".") || strings.HasPrefix(source, "~")
+}
+
+func redactComposeYAML(document string) (string, error) {
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(document), &raw); err != nil || raw == nil {
+		return "", ErrInvalidCompose
+	}
+	services, _ := raw["services"].(map[string]any)
+	for _, service := range services {
+		body, ok := service.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch env := body["environment"].(type) {
+		case map[string]any:
+			for key := range env {
+				env[key] = ""
+			}
+		case []any:
+			for index, item := range env {
+				text, ok := item.(string)
+				if !ok {
+					continue
+				}
+				name, _, found := strings.Cut(text, "=")
+				if found {
+					env[index] = name
+				}
+			}
+		}
+	}
+	encoded, err := yaml.Marshal(raw)
+	if err != nil {
+		return "", ErrInvalidCompose
+	}
+	return string(encoded), nil
+}
+
+func ComposeServiceNames(document string) []string {
+	return composeServiceNames(document)
+}
+
+func composeServiceNames(document string) []string {
+	if document == "" {
+		return nil
+	}
+	var file composeDocument
+	if err := yaml.Unmarshal([]byte(document), &file); err != nil || len(file.Services) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(file.Services))
+	for name := range file.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

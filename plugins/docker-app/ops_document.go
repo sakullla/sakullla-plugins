@@ -5,8 +5,8 @@ import "strings"
 const (
 	PluginDisplayName = "Docker 应用"
 	OpsConfigEntry    = "打开配置"
-	OpsPluginUsage    = "选择一台机器后，可以看到 Docker 是否就绪。把应用说明或运行命令贴进来就能管理，需要改设置时打开配置。"
-	OpsAppUsage       = "可以启动、停止或更新这个应用。提供网页服务时，可以在访问规则里选用它。"
+	OpsPluginUsage    = "选择一台机器后，可以看到 Docker 是否就绪。把 compose YAML 贴进来就能部署应用，需要改设置时打开配置。"
+	OpsAppUsage       = "可以启动、停止、重启或删除这个应用，也可以按服务查看日志。"
 
 	OpsStatusRunning         = "运行中"
 	OpsStatusStopped         = "已停止"
@@ -19,6 +19,7 @@ const (
 	OpsActionDisable   = "disable"
 	OpsActionStart     = "start"
 	OpsActionStop      = "stop"
+	OpsActionRestart   = "restart"
 	OpsActionUpdate    = "update"
 	OpsActionRollback  = "rollback"
 	OpsActionDelete    = "delete"
@@ -129,7 +130,7 @@ func opsActions(status AppStatus) []OpsAction {
 	configure := OpsAction{ID: OpsActionConfigure, Label: OpsConfigEntry}
 	switch ProjectPopularStatus(status) {
 	case OpsStatusRunning:
-		return []OpsAction{{ID: OpsActionStop, Label: "停止"}, configure}
+		return []OpsAction{{ID: OpsActionStop, Label: "停止"}, {ID: OpsActionRestart, Label: "重启"}, configure}
 	case OpsStatusStopped:
 		return []OpsAction{{ID: OpsActionStart, Label: "启动"}, {ID: OpsActionDelete, Label: "删除"}, configure}
 	case OpsStatusUpdateAvailable:

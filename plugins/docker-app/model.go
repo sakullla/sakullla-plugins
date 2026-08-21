@@ -26,20 +26,35 @@ var (
 	ErrTypedHandlesUnavailable = errors.New("canonical public SDK has no typed Docker, Compose, HTTP-rule, or dynamic UI handles")
 	ErrUnauthorized            = errors.New("operation is not authorized")
 	ErrBoundExceeded           = errors.New("bounded collection limit exceeded")
+	ErrInvalidCompose          = errors.New("compose YAML is invalid")
+	ErrMissingComposeImage     = errors.New("compose YAML is missing a deployable image")
+	ErrDeleteUnconfirmed       = errors.New("delete was not confirmed")
+	ErrEngineNotReady          = errors.New("Docker engine is not ready")
+	ErrUnknownService          = errors.New("compose service is unknown")
 )
 
 type App struct {
 	ID         string   `json:"id"`
-	Image      string   `json:"image"`
-	RuleRef    string   `json:"rule_ref"`
+	Compose    string   `json:"compose"`
 	Generation string   `json:"generation"`
 	SecretRefs []string `json:"secret_refs,omitempty"`
 	AutoUpdate *bool    `json:"auto_update,omitempty"`
+	Image      string   `json:"-"`
+	RuleRef    string   `json:"-"`
 }
 
 func (app App) Validate() error {
-	if !validID(app.ID) || !boundedText(app.Image, 512) || !boundedText(app.RuleRef, 128) || !boundedText(app.Generation, 128) {
-		return errors.New("app id, image, rule_ref, or generation is invalid")
+	if !validID(app.ID) || !boundedText(app.Generation, 128) {
+		return errors.New("app id or generation is invalid")
+	}
+	if app.Compose != "" && !boundedCompose(app.Compose, MaxConfigBytes) {
+		return ErrInvalidCompose
+	}
+	if !boundedText(app.Image, 512) {
+		return errors.New("app image is invalid")
+	}
+	if app.RuleRef != "" && !boundedText(app.RuleRef, 128) {
+		return errors.New("rule_ref is invalid")
 	}
 	if len(app.SecretRefs) > 32 {
 		return fmt.Errorf("%w: secret refs", ErrBoundExceeded)
@@ -103,10 +118,45 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 		return Configuration{}, errors.New("config requires apps")
 	}
 	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror}
+	for index := range configuration.Apps {
+		if err := configuration.Apps[index].bindCompose(); err != nil {
+			return Configuration{}, err
+		}
+	}
 	if err := configuration.Validate(); err != nil {
 		return Configuration{}, err
 	}
 	return configuration, nil
+}
+
+func (app *App) bindCompose() error {
+	if !boundedCompose(app.Compose, MaxConfigBytes) {
+		return ErrInvalidCompose
+	}
+	_, parsed, err := ParseComposeDocument(app.Compose, app.ID, app.Generation, app.RuleRef)
+	if err != nil {
+		return err
+	}
+	app.Image = parsed.Image
+	app.Compose = parsed.Compose
+	if len(parsed.SecretRefs) == 0 {
+		return nil
+	}
+	combined := make([]string, 0, len(app.SecretRefs)+len(parsed.SecretRefs))
+	seen := make(map[string]struct{}, len(app.SecretRefs)+len(parsed.SecretRefs))
+	for _, reference := range append(append([]string(nil), app.SecretRefs...), parsed.SecretRefs...) {
+		if _, exists := seen[reference]; exists {
+			continue
+		}
+		seen[reference] = struct{}{}
+		combined = append(combined, reference)
+	}
+	normalized, err := sortedUnique(combined, 32)
+	if err != nil {
+		return err
+	}
+	app.SecretRefs = normalized
+	return nil
 }
 
 func validateRegistryMirror(value string) error {
@@ -140,6 +190,10 @@ func validID(value string) bool {
 
 func boundedText(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func boundedCompose(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && !strings.ContainsRune(value, '\x00')
 }
 
 func cloneBool(value *bool) *bool {

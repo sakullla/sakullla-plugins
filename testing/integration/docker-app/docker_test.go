@@ -328,8 +328,8 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 	}
 	validationSecret := "validation-secret"
 	validationWire, err := json.Marshal(dockerapp.Configuration{Apps: []dockerapp.App{
-		{ID: validationSecret, Image: "image:new", RuleRef: "rule-1", Generation: "generation-1"},
-		{ID: validationSecret, Image: "image:new", RuleRef: "rule-2", Generation: "generation-1"},
+		{ID: validationSecret, Compose: testComposeYAML("image:new"), Generation: "generation-1"},
+		{ID: validationSecret, Compose: testComposeYAML("image:new"), Generation: "generation-1"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -629,7 +629,7 @@ func TestDockerSecretRefsAndGenerationBoundLateAdmission(t *testing.T) {
 	if _, err := controller.Handshake(context.Background(), handshake(grants)); err != nil {
 		t.Fatal(err)
 	}
-	configuration := dockerapp.Configuration{Apps: []dockerapp.App{{ID: "media", Image: "image:new", RuleRef: "rule", Generation: "generation-1", SecretRefs: []string{"vault/registry"}}}}
+	configuration := dockerapp.Configuration{Apps: []dockerapp.App{{ID: "media", Compose: testComposeYAML("image:new"), Generation: "generation-1", SecretRefs: []string{"vault/registry"}}}}
 	wire, _ := json.Marshal(configuration)
 	if strings.Contains(string(wire), material) {
 		t.Fatal("configuration contains secret material")
@@ -1076,15 +1076,20 @@ func TestDockerPullingIntentAcquireFailureAndUnknownCommit(t *testing.T) {
 	})
 }
 
+func testComposeYAML(image string) string {
+	return "services:\n  web:\n    image: " + image + "\n"
+}
+
 func testApp(_ string) dockerapp.App {
-	return dockerapp.App{ID: "media", Image: "registry/media:new", RuleRef: "rule-media", Generation: "generation-1", SecretRefs: []string{"registry-credential"}}
+	image := "registry/media:new"
+	return dockerapp.App{ID: "media", Compose: testComposeYAML(image), Image: image, RuleRef: "rule-media", Generation: "generation-1", SecretRefs: []string{"registry-credential"}}
 }
 
 func configWire(t *testing.T, count int) []byte {
 	t.Helper()
 	apps := make([]dockerapp.App, count)
 	for index := range apps {
-		apps[index] = dockerapp.App{ID: fmt.Sprintf("app-%03d", index), Image: "image:new", RuleRef: fmt.Sprintf("rule-%03d", index), Generation: "generation-1"}
+		apps[index] = dockerapp.App{ID: fmt.Sprintf("app-%03d", index), Compose: testComposeYAML("image:new"), Generation: "generation-1"}
 	}
 	wire, err := json.Marshal(dockerapp.Configuration{Apps: apps})
 	if err != nil {
