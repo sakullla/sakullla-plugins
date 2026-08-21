@@ -43,7 +43,7 @@ const (
 	AppStatusPublishing      AppStatus = "publishing"
 	AppStatusUnhealthy       AppStatus = "unhealthy"
 
-	DefaultAutoUpdate = true
+	DefaultAutoUpdate = false
 )
 
 const DefaultCleanupTimeout = time.Second
@@ -153,7 +153,8 @@ type Rollout struct {
 }
 
 // UpdatePolicy decides whether a newer image digest is published automatically.
-// A nil AutoUpdate means DefaultAutoUpdate (true).
+// A nil AutoUpdate means DefaultAutoUpdate (false): digest changes are
+// projected as a new version until ConfirmUpdate.
 type UpdatePolicy struct {
 	AutoUpdate *bool
 }
@@ -239,6 +240,15 @@ func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed U
 	}
 	latest := observed.LatestDigest
 	if latest == "" || current == "" || latest == current {
+		if existed && current != "" {
+			available := record.Value.AvailableDigest
+			if latest != "" && latest == current {
+				available = ""
+			}
+			if err := r.rememberDigest(ctx, record, current, available); err != nil {
+				return UpdateView{}, err
+			}
+		}
 		return view, nil
 	}
 	view.HasUpdate = true
@@ -270,6 +280,9 @@ func (r Rollout) ConfirmUpdate(ctx context.Context, app App) error {
 	if !ok || record.Value.AvailableDigest == "" {
 		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
 		return ErrInvalidPreview
+	}
+	if record.Value.AvailableDigest == record.Value.ImageDigest {
+		return nil
 	}
 	return r.publish(ctx, app, record.Value.AvailableDigest)
 }

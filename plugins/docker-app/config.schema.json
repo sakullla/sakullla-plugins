@@ -42,7 +42,9 @@
           },
           "auto_update": {
             "type": "boolean",
-            "title": "自动更新"
+            "title": "自动更新",
+            "default": false,
+            "description": "缺省关闭。仓库 digest 变化只提示有新版本，需手动更新。"
           }
         }
       }

@@ -98,7 +98,8 @@ func ProjectPluginOpsDocument(enabled bool) OpsDocument {
 }
 
 // ProjectOpsDocument builds the default view for one managed app. The raw
-// AppStatus enum is not copied; version is the image reference without digest.
+// AppStatus enum is not copied; version is the image tag plus a shortened
+// digest when one is present. latest is shown like any other tag.
 func ProjectOpsDocument(app App, status AppStatus) OpsDocument {
 	name := app.ID
 	if name == "" {
@@ -107,7 +108,7 @@ func ProjectOpsDocument(app App, status AppStatus) OpsDocument {
 	return OpsDocument{
 		Name:        name,
 		Status:      ProjectPopularStatus(status),
-		Version:     displayImageVersion(app.Image),
+		Version:     displayImageVersion(app.Image, ""),
 		ConfigEntry: OpsConfigEntry,
 		Usage:       OpsAppUsage,
 		Actions:     opsActions(status),
@@ -120,6 +121,7 @@ func ProjectOpsDocument(app App, status AppStatus) OpsDocument {
 func ProjectOpsDocumentFromRuntime(app App, running, unhealthy bool, deployment Deployment, policy UpdatePolicy, latestDigest string) OpsDocument {
 	status := ProjectManagedStatus(running, unhealthy, deployment, policy, latestDigest)
 	document := ProjectOpsDocument(app, status)
+	document.Version = displayImageVersion(app.Image, deployment.ImageDigest)
 	if canRollback(deployment) && document.Status != OpsStatusPublishing {
 		document.Actions = append(document.Actions, OpsAction{ID: OpsActionRollback, Label: "回滚"})
 	}
@@ -148,9 +150,40 @@ func canRollback(deployment Deployment) bool {
 	return len(deployment.History) > 0 || deployment.PriorInstance != "" || deployment.PriorImage != ""
 }
 
-func displayImageVersion(image string) string {
-	if at := strings.LastIndex(image, "@"); at >= 0 {
-		return image[:at]
+const shortDigestHex = 12
+
+func displayImageVersion(image, digest string) string {
+	tag, imageDigest := splitImageDigest(image)
+	if digest == "" {
+		digest = imageDigest
 	}
-	return image
+	if tag == "" {
+		return digest
+	}
+	if digest == "" {
+		return tag
+	}
+	return tag + " " + shortenDigest(digest)
+}
+
+func splitImageDigest(image string) (tag, digest string) {
+	at := strings.LastIndex(image, "@")
+	if at < 0 {
+		return image, ""
+	}
+	return image[:at], image[at+1:]
+}
+
+func shortenDigest(digest string) string {
+	algo, hex, found := strings.Cut(digest, ":")
+	if !found {
+		if len(digest) > shortDigestHex {
+			return digest[:shortDigestHex]
+		}
+		return digest
+	}
+	if len(hex) > shortDigestHex {
+		hex = hex[:shortDigestHex]
+	}
+	return algo + ":" + hex
 }

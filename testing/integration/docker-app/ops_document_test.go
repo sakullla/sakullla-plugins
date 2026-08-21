@@ -12,7 +12,7 @@ import (
 
 func TestOpsDocumentContainsOnlyZeroFoundationFields(t *testing.T) {
 	app := testApp("ops-secret")
-	app.Image = "registry/media:new@sha256:deadbeef"
+	app.Image = "registry/media:new@sha256:0123456789abcdef0123456789abcdef"
 	documents := []dockerapp.OpsDocument{
 		projectOpsDocument(t, app, true, false, dockerapp.Deployment{Phase: dockerapp.PhaseActive}, dockerapp.UpdatePolicy{}, ""),
 		dockerapp.ProjectPluginOpsDocument(true),
@@ -20,11 +20,53 @@ func TestOpsDocumentContainsOnlyZeroFoundationFields(t *testing.T) {
 	for _, document := range documents {
 		assertOpsDocumentShape(t, document)
 	}
-	if documents[0].Name != app.ID || documents[0].Version != "registry/media:new" {
+	if documents[0].Name != app.ID || documents[0].Version != "registry/media:new sha256:0123456789ab" {
 		t.Fatalf("app document = %#v", documents[0])
 	}
 	if documents[1].Name != "Docker 应用" || documents[1].Version != dockerapp.PluginVersion {
 		t.Fatalf("plugin document = %#v", documents[1])
+	}
+}
+
+func TestOpsDocumentShowsFixedTagAndLatestWithDigest(t *testing.T) {
+	digest := "sha256:0123456789abcdef0123456789abcdef"
+	short := "sha256:0123456789ab"
+	newer := "sha256:fedcba9876543210fedcba9876543210"
+	for _, test := range []struct {
+		name  string
+		image string
+		tag   string
+	}{
+		{name: "fixed-tag", image: "nginx:1.27", tag: "nginx:1.27"},
+		{name: "latest", image: "nginx:latest", tag: "nginx:latest"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := testApp("ops-secret")
+			app.Image = test.image
+			app.Compose = testComposeYAML(test.image)
+			current := projectOpsDocument(t, app, true, false, dockerapp.Deployment{
+				Phase: dockerapp.PhaseActive, ImageDigest: digest,
+			}, dockerapp.UpdatePolicy{}, digest)
+			if current.Version != test.tag+" "+short {
+				t.Fatalf("current version = %q want %q", current.Version, test.tag+" "+short)
+			}
+			if current.Status != "运行中" || hasAction(current, dockerapp.OpsActionUpdate) {
+				t.Fatalf("same digest should not offer update: %#v", current)
+			}
+
+			available := projectOpsDocument(t, app, true, false, dockerapp.Deployment{
+				Phase: dockerapp.PhaseActive, ImageDigest: digest,
+			}, dockerapp.UpdatePolicy{}, newer)
+			if available.Version != test.tag+" "+short {
+				t.Fatalf("available version = %q want current digest display", available.Version)
+			}
+			if available.Status != "有新版本" || !hasAction(available, dockerapp.OpsActionUpdate) {
+				t.Fatalf("digest change should keep tag %q and offer update: %#v", test.tag, available)
+			}
+			if !strings.Contains(available.Version, "latest") && test.tag == "nginx:latest" {
+				t.Fatalf("latest tag was hidden: %#v", available)
+			}
+		})
 	}
 }
 
@@ -42,6 +84,8 @@ func TestOpsDocumentProjectsPlainChineseStatusesWithoutInternalPhaseOrErrorCodes
 		{name: "running", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive}, want: "运行中"},
 		{name: "stopped", deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive}, want: "已停止"},
 		{name: "update-available", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive, ImageDigest: "sha256:current"}, policy: dockerapp.AutoUpdatePolicy(false), latest: "sha256:latest", want: "有新版本"},
+		{name: "update-available-default", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive, ImageDigest: "sha256:current"}, latest: "sha256:latest", want: "有新版本"},
+		{name: "same-digest", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive, ImageDigest: "sha256:current"}, latest: "sha256:current", want: "运行中"},
 		{name: "publishing", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseCutover, LastFailure: "E_CUTOVER_FAILED"}, want: "发布中"},
 		{name: "unhealthy", running: true, unhealthy: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseActive, LastFailure: dockerapp.ErrOperationFailed.Error()}, want: "异常"},
 		{name: "cleanup-pending", running: true, deployment: dockerapp.Deployment{Phase: dockerapp.PhaseCleanupPending, LastFailure: "E_CLEANUP_PENDING"}, want: "发布中"},
@@ -161,7 +205,7 @@ func assertOpsDocumentHasNoInternalTerms(t *testing.T, document dockerapp.OpsDoc
 		dockerapp.ErrBoundExceeded.Error(),
 		"E_CUTOVER_FAILED",
 		"LastFailure",
-		"sha256:deadbeef",
+		"sha256:0123456789abcdef0123456789abcdef",
 	}
 	forbidden = append(forbidden, extras...)
 	for _, term := range forbidden {
@@ -196,6 +240,15 @@ func jsonObject(t *testing.T, payload []byte) map[string]any {
 func hasHan(value string) bool {
 	for _, current := range value {
 		if unicode.Is(unicode.Han, current) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAction(document dockerapp.OpsDocument, id string) bool {
+	for _, action := range document.Actions {
+		if action.ID == id {
 			return true
 		}
 	}

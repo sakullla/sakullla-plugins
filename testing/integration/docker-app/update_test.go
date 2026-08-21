@@ -12,7 +12,7 @@ import (
 func TestDockerAppOverlayPersistsAutoUpdate(t *testing.T) {
 	omitted := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1"}]}`)
 	got, err := dockerapp.ParseConfiguration(omitted)
-	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate != nil || !dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) || got.Apps[0].Image != "nginx:latest" {
+	if err != nil || len(got.Apps) != 1 || got.Apps[0].AutoUpdate != nil || dockerapp.AutoUpdateEnabled(got.Apps[0].AutoUpdate) || got.Apps[0].Image != "nginx:latest" {
 		t.Fatalf("omitted auto_update got=%#v err=%v", got, err)
 	}
 
@@ -38,47 +38,83 @@ func TestDockerAppOverlayPersistsAutoUpdate(t *testing.T) {
 	}
 }
 
-func TestDockerAutoUpdateDefaultDigestTriggersCutoverAndRollback(t *testing.T) {
-	if dockerapp.DefaultAutoUpdate != true {
-		t.Fatal("auto_update must default on")
+func TestDockerManualUpdateDefaultProjectsUntilConfirm(t *testing.T) {
+	if dockerapp.DefaultAutoUpdate {
+		t.Fatal("auto_update must default off")
 	}
-	if !dockerapp.AutoUpdateEnabled(nil) || !dockerapp.AutoUpdateEnabled(boolPtr(true)) || dockerapp.AutoUpdateEnabled(boolPtr(false)) {
-		t.Fatal("omitted auto_update must default to enabled")
+	if dockerapp.AutoUpdateEnabled(nil) || !dockerapp.AutoUpdateEnabled(boolPtr(true)) || dockerapp.AutoUpdateEnabled(boolPtr(false)) {
+		t.Fatal("omitted auto_update must default to disabled")
 	}
 
 	t.Run("same-digest", func(t *testing.T) {
 		store, fake, rollout, app, old := updateHarness(t, "")
 		view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:current"})
 		got, _ := store.Get(app.ID)
-		if err != nil || view.HasUpdate || view.Published || !view.AutoUpdate || len(fake.calls) != 0 {
+		if err != nil || view.HasUpdate || view.Published || view.AutoUpdate || len(fake.calls) != 0 {
 			t.Fatalf("same digest view=%#v calls=%v err=%v", view, fake.calls, err)
 		}
-		if got.InstanceID != old.InstanceID || got.Image != old.Image || got.RuleTarget != old.RuleTarget {
+		if got.InstanceID != old.InstanceID || got.Image != old.Image || got.RuleTarget != old.RuleTarget || got.Phase != dockerapp.PhaseActive {
 			t.Fatalf("same digest mutated deployment: %#v", got)
+		}
+		if got.ImageDigest != "sha256:current" || got.AvailableDigest != "" {
+			t.Fatalf("same digest should keep current digest without available: %#v", got)
+		}
+		if err := rollout.ConfirmUpdate(context.Background(), app); !errors.Is(err, dockerapp.ErrInvalidPreview) {
+			t.Fatalf("same digest confirm err=%v", err)
+		}
+		unchanged, _ := store.Get(app.ID)
+		if unchanged.InstanceID != old.InstanceID || unchanged.Phase != dockerapp.PhaseActive || len(fake.calls) != 0 {
+			t.Fatalf("same digest confirm tore down: %#v calls=%v", unchanged, fake.calls)
 		}
 	})
 
-	t.Run("default-and-explicit", func(t *testing.T) {
-		for _, policy := range []*bool{nil, boolPtr(true)} {
+	t.Run("default-and-explicit-false", func(t *testing.T) {
+		for _, policy := range []*bool{nil, boolPtr(false)} {
 			store, fake, rollout, app, old := updateHarness(t, "")
 			view, err := rollout.AutoUpdate(context.Background(), app, policy, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
 			got, _ := store.Get(app.ID)
-			if err != nil || !view.AutoUpdate || !view.HasUpdate || !view.Published {
-				t.Fatalf("policy=%v view=%#v err=%v", policy, view, err)
+			if err != nil || view.AutoUpdate || !view.HasUpdate || view.Published || view.Digest != "sha256:latest" || len(fake.calls) != 0 {
+				t.Fatalf("policy=%v view=%#v calls=%v err=%v", policy, view, fake.calls, err)
 			}
-			if got.InstanceID != "new" || got.Image != app.Image || got.RuleTarget != "new" || got.Phase != dockerapp.PhaseActive {
-				t.Fatalf("policy=%v cutover got=%#v", policy, got)
+			if got.InstanceID != old.InstanceID || got.Image != old.Image || got.RuleTarget != old.RuleTarget || got.Phase != dockerapp.PhaseActive {
+				t.Fatalf("policy=%v published without confirm: %#v", policy, got)
 			}
-			if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
-				t.Fatalf("policy=%v calls=%v", policy, fake.calls)
+			if got.ImageDigest != "sha256:current" || got.AvailableDigest != "sha256:latest" {
+				t.Fatalf("policy=%v digest projection got=%#v", policy, got)
 			}
-			if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+
+			if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
 				t.Fatal(err)
 			}
-			restored, _ := store.Get(app.ID)
-			if restored.InstanceID != old.InstanceID || restored.Image != old.Image || restored.RuleTarget != old.RuleTarget || restored.Generation != old.Generation || restored.Phase != dockerapp.PhaseActive {
-				t.Fatalf("policy=%v rollback got=%#v", policy, restored)
+			published, _ := store.Get(app.ID)
+			if published.InstanceID != "new" || published.Image != app.Image || published.RuleTarget != "new" || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" {
+				t.Fatalf("policy=%v confirm did not publish: %#v", policy, published)
 			}
+			if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
+				t.Fatalf("policy=%v confirm calls=%v", policy, fake.calls)
+			}
+		}
+	})
+
+	t.Run("explicit-true-still-publishes", func(t *testing.T) {
+		store, fake, rollout, app, old := updateHarness(t, "")
+		view, err := rollout.AutoUpdate(context.Background(), app, boolPtr(true), dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
+		got, _ := store.Get(app.ID)
+		if err != nil || !view.AutoUpdate || !view.HasUpdate || !view.Published {
+			t.Fatalf("explicit true view=%#v err=%v", view, err)
+		}
+		if got.InstanceID != "new" || got.Image != app.Image || got.RuleTarget != "new" || got.Phase != dockerapp.PhaseActive || got.ImageDigest != "sha256:latest" {
+			t.Fatalf("explicit true cutover got=%#v", got)
+		}
+		if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
+			t.Fatalf("explicit true calls=%v", fake.calls)
+		}
+		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		restored, _ := store.Get(app.ID)
+		if restored.InstanceID != old.InstanceID || restored.Image != old.Image || restored.RuleTarget != old.RuleTarget || restored.Generation != old.Generation || restored.Phase != dockerapp.PhaseActive {
+			t.Fatalf("explicit true rollback got=%#v", restored)
 		}
 	})
 }
@@ -98,7 +134,7 @@ func TestDockerAutoUpdateDisabledOnlyProjectsNewVersionUntilConfirm(t *testing.T
 		t.Fatal(err)
 	}
 	published, _ := store.Get(app.ID)
-	if published.InstanceID != "new" || published.Image != app.Image || published.RuleTarget != "new" || published.Phase != dockerapp.PhaseActive {
+	if published.InstanceID != "new" || published.Image != app.Image || published.RuleTarget != "new" || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" {
 		t.Fatalf("confirm did not publish: %#v", published)
 	}
 	if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
@@ -290,8 +326,11 @@ func publishUpdate(t *testing.T) (*dockerapp.DeploymentStore, *rolloutFake, dock
 	if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
 	published, ok := store.Get(app.ID)
-	if !ok || published.InstanceID != "new" || published.Image == "" || published.RuleRef == "" {
+	if !ok || published.InstanceID != "new" || published.Image == "" || published.RuleRef == "" || published.ImageDigest != "sha256:latest" {
 		t.Fatalf("precondition published=%#v ok=%v", published, ok)
 	}
 	fake.calls = nil
@@ -320,6 +359,7 @@ func updateHarness(t *testing.T, fail string) (*dockerapp.DeploymentStore, *roll
 	old := dockerapp.Deployment{
 		AppID: app.ID, InstanceID: "old", Image: "old-image", RuleRef: app.RuleRef,
 		RuleTarget: "old", Generation: "generation-0", Phase: dockerapp.PhaseActive,
+		ImageDigest: "sha256:current",
 	}
 	store.Put(old)
 	fake := &rolloutFake{fail: fail, secret: "update-secret"}
