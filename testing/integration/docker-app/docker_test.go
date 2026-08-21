@@ -374,7 +374,7 @@ func TestDockerEntrypointCanonicalRPCAndSDKServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(manifest)
-	for _, required := range []string{"http.rule", "ui.dynamic", "container.provider", "http.backend-provider", "http.outbound", "http_backend_providers", "host_scope: agent"} {
+	for _, required := range []string{"http.rule", "ui.dynamic", "container.provider", "http.backend-provider", "http.outbound", "http_backend_providers", "host_scope: agent", "ui.route", "ui_route_id: docker-app"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("plugin.yaml missing %q", required)
 		}

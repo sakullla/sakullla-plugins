@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="sakura-day">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Docker 应用</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wash" aria-hidden="true"></div>
+  <main>
+    <header class="page-head">
+      <p class="kicker">Docker 应用</p>
+      <h1>本节点 compose 应用</h1>
+      <p class="lede">先选节点，再用一份 compose YAML 部署应用。有发布端口时可以直接挂 HTTP 规则。</p>
+    </header>
+    <p id="app-loading" role="status">正在加载应用…</p>
+    <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
+    <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
+    <div id="app-workspace" hidden>
+      <div class="toolbar-bar">
+        <label class="agent-field">节点
+          <select id="agent-select" required></select>
+        </label>
+        <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
+      </div>
+      <p id="app-node-hint" class="hint" hidden></p>
+      <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
+        <div class="section-head">
+          <h2 id="app-create-title">部署应用</h2>
+          <button id="create-cancel" class="btn-link" type="button">取消</button>
+        </div>
+        <form id="create-form" method="post">
+          <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
+          <label>Compose YAML <textarea name="compose" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea></label>
+          <div class="form-footer">
+            <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新</label>
+            <button type="submit" class="btn-primary" id="create-submit">部署</button>
+          </div>
+        </form>
+        <p class="hint">./ 相对路径会映射到该应用工作目录。镜像和端口从 YAML 读取。</p>
+      </section>
+      <section class="panel" aria-labelledby="app-list-title">
+        <div class="section-head">
+          <h2 id="app-list-title">应用</h2>
+          <p id="app-count" class="count" hidden></p>
+        </div>
+        <div id="app-list" class="app-list"></div>
+        <p id="app-empty" hidden>还没有应用。选好节点后点右上角部署。</p>
+      </section>
+      <p id="app-status" role="status" hidden></p>
+    </div>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

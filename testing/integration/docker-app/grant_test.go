@@ -76,6 +76,12 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if !strings.Contains(text, "host_scope: agent") || !strings.Contains(text, `agent: "*"`) {
 		t.Fatalf("plugin.yaml is not per-agent / non-local: %s", text)
 	}
+	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: docker-app") {
+		t.Fatalf("plugin.yaml must register a plugin-owned UI route: %s", text)
+	}
+	if !strings.Contains(text, "ui/index.html") || !strings.Contains(text, "ui/app.js") {
+		t.Fatalf("plugin.yaml must ship ui/ frontend assets: %s", text)
+	}
 	if strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") {
 		t.Fatalf("plugin.yaml still gates Docker API or local-only install: %s", text)
 	}
@@ -94,6 +100,23 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
 		t.Fatal(err)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	apps, _ := properties["apps"].(map[string]any)
+	if injected, _ := apps["hostInjected"].(bool); !injected {
+		t.Fatal("apps must be hostInjected so the generic schema form is not the product UI")
+	}
+	if _, hasDefault := apps["default"]; !hasDefault {
+		t.Fatal("hostInjected apps must declare a schema default so omitted configure payloads stay valid")
+	}
+	if _, hasTitle := apps["title"]; hasTitle {
+		t.Fatal("apps must not carry a form title")
+	}
+	items, _ := apps["items"].(map[string]any)
+	itemProperties, _ := items["properties"].(map[string]any)
+	compose, _ := itemProperties["compose"].(map[string]any)
+	if _, hasTitle := compose["title"]; hasTitle {
+		t.Fatal("compose must not carry a form title")
 	}
 	if err := walkSchemaRequired(schema, func(name string) error {
 		if isDockerConnectionField(name) {

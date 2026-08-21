@@ -15,6 +15,11 @@ intents; the included map store is a test model only. Admission is a prepared
 transaction: controller-owned Commit runs only after registration, and its
 non-blocking Abort compensates generation revoke or deadline failure.
 
+The plugin declares `ui.route` with `ui_route_id: docker-app`. The host
+mounts the page at `/panel-api/plugins/<ui_route_id>/` from plugin nav
+metadata; this plugin does not declare `resource.group` or `ui.schema.json`.
+Compose YAML is edited on that page, not on the generic config form.
+
 The canonical `nre:rpc/v1` manifest and executable support a CI handshake
 self-check. Required grants are `http.rule` and `ui.dynamic`. Docker/Compose
 API is not a plugin permission: Handshake and Activate do not require

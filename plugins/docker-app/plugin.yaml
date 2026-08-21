@@ -1,6 +1,6 @@
 schema_version: 1
 id: docker-app
-version: 0.1.1
+version: 0.1.2
 name: Docker 应用
 description: 通过 compose YAML 管理 Agent 上的应用启停、日志与删除
 compatibility:
@@ -21,6 +21,15 @@ artifacts:
 extension_points:
   - container.provider
   - http.backend-provider
+  - ui.route
+ui_route_id: docker-app
+metadata:
+  ui.nav.group: 基础设施
+  ui.nav.label: Docker 应用
+assets:
+  - ui/index.html
+  - ui/app.js
+  - ui/style.css
 http_backend_providers:
   - id: default
     display_name: Docker 应用

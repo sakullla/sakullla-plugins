@@ -7,6 +7,9 @@
     "apps": {
       "type": "array",
       "maxItems": 128,
+      "default": [],
+      "hostInjected": true,
+      "description": "由插件管理页写入，不作为通用配置表单。",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -22,8 +25,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1048576,
-            "title": "Compose YAML",
-            "description": "一份 docker-compose YAML 对应一个应用。镜像与发布端口从 YAML 派生，不作为用户填写项。"
+            "description": "一份 docker-compose YAML 对应一个应用。镜像与发布端口从 YAML 派生。"
           },
           "generation": {
             "type": "string",
@@ -42,7 +44,6 @@
           },
           "auto_update": {
             "type": "boolean",
-            "title": "自动更新",
             "default": false,
             "description": "缺省关闭。仓库 digest 变化只提示有新版本，需手动更新。"
           }
@@ -53,7 +54,7 @@
       "type": "string",
       "maxLength": 512,
       "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$",
-      "title": "镜像加速"
+      "description": "可选镜像加速。"
     }
   }
 }

@@ -59,6 +59,14 @@ type ControllerConfig struct {
 	Admission                                                  TypedHandleAdmission
 	PrepareGate                                                func(context.Context) error
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
+	UIEngine                                                   EngineObservation
+	UIApply                                                    AppApplyExecutor
+	UIStart                                                    StartExecutor
+	UIRestart                                                  RestartExecutor
+	UILogs                                                     ServiceLogReader
+	UIRemove                                                   AppRemoveExecutor
+	UIHTTPRule                                                 HTTPRuleCreateHandle
+	UIAuditor                                                  Auditor
 }
 
 type Controller struct {
@@ -71,6 +79,14 @@ type Controller struct {
 	lifecycle      *rpcplugin.Lifecycle
 	commit         *rpcplugin.Handle[*commitEpoch]
 	epoch          *commitEpoch
+	uiEngine       EngineObservation
+	uiApply        AppApplyExecutor
+	uiStart        StartExecutor
+	uiRestart      RestartExecutor
+	uiLogs         ServiceLogReader
+	uiRemove       AppRemoveExecutor
+	uiHTTPRule     HTTPRuleCreateHandle
+	uiAuditor      Auditor
 }
 
 type commitEpoch struct {
@@ -94,7 +110,15 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if config.DrainTimeout <= 0 {
 		config.DrainTimeout = time.Second
 	}
-	controller := &Controller{admission: config.Admission, prepareGate: config.PrepareGate}
+	auditor := config.UIAuditor
+	if auditor == nil {
+		auditor = AuditorFunc(func(AuditRecord) {})
+	}
+	controller := &Controller{
+		admission: config.Admission, prepareGate: config.PrepareGate,
+		uiEngine: config.UIEngine, uiApply: config.UIApply, uiStart: config.UIStart, uiRestart: config.UIRestart,
+		uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule, uiAuditor: auditor,
+	}
 	lifecycle, err := rpcplugin.New(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:      []string{"docker-app.business-model"},

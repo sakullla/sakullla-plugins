@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -46,7 +48,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errorsCh := make(chan error, 2)
+	errorsCh := make(chan error, 3)
 	go func() { errorsCh <- pluginsdk.ServeRPCPlugin(runCtx, controller) }()
 	go func() {
 		errorsCh <- pluginsdk.ServeHTTPBackendProviders(runCtx, map[string]http.Handler{
@@ -55,8 +57,16 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 			}),
 		})
 	}()
+	go func() { errorsCh <- servePluginUI(runCtx, controller) }()
 	first := <-errorsCh
 	cancel()
-	second := <-errorsCh
-	return errors.Join(first, second)
+	return errors.Join(first, <-errorsCh, <-errorsCh)
+}
+
+func servePluginUI(ctx context.Context, handler http.Handler) error {
+	if strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginUIEndpoint)) == "" {
+		<-ctx.Done()
+		return nil
+	}
+	return pluginsdk.ServePluginUI(ctx, handler)
 }

@@ -15,7 +15,7 @@ import (
 
 const (
 	PluginID           = "docker-app"
-	PluginVersion      = "0.1.1"
+	PluginVersion      = "0.1.2"
 	MaxApps            = 128
 	MaxDiscoveries     = 512
 	MaxComposeServices = 128
