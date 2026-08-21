@@ -175,6 +175,20 @@ func (service *Service) serveInternalDNSResolve(writer http.ResponseWriter, requ
 }
 
 func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == internalDNSResolvePath {
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.Header().Set(internalDNSVersionHeader, "1")
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSResolveResponse{Error: "method not allowed"})
+			return
+		}
+		// An unavailable generation owns no authoritative mapping. Returning the
+		// provider contract's not-mapped status lets the host use its configured
+		// environment fallback without weakening failures from an active vault.
+		writeMappingJSON(writer, http.StatusNotFound, internalDNSResolveResponse{Error: ErrTokenUnavailable.Error()})
+		return
+	}
 	writer.Header().Set("Content-Security-Policy", mappingPageCSP)
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")

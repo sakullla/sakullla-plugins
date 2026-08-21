@@ -368,6 +368,11 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	if inactive.Code != http.StatusOK || !strings.Contains(inactive.Body.String(), "mapping-unavailable") || inactive.Body.Len() == 0 {
 		t.Fatalf("inactive controller status=%d body=%s", inactive.Code, inactive.Body.String())
 	}
+	unavailableResolve := httptest.NewRecorder()
+	controller.ServeHTTP(unavailableResolve, httptest.NewRequest(http.MethodPost, internalDNSResolvePath, strings.NewReader(`{"domain":"unmapped.test"}`)))
+	if unavailableResolve.Code != http.StatusNotFound || unavailableResolve.Header().Get(internalDNSVersionHeader) != "1" || !strings.Contains(unavailableResolve.Body.String(), ErrTokenUnavailable.Error()) {
+		t.Fatalf("inactive resolver status=%d headers=%v body=%s", unavailableResolve.Code, unavailableResolve.Header(), unavailableResolve.Body.String())
+	}
 }
 
 func TestPluginYAMLDeclaresUIRouteNotPanelPage(t *testing.T) {
