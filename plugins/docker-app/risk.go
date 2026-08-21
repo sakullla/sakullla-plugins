@@ -19,6 +19,7 @@ type ComposeService struct {
 	Networks        []string
 	Volumes         []string
 	SecretRefs      []string
+	PublishedPorts  []uint16
 }
 
 type ComposePlan struct {
@@ -133,6 +134,7 @@ func canonicalComposePlan(plan ComposePlan) (ComposePlan, error) {
 		if service.Volumes, err = sortedUnique(service.Volumes, MaxCollectionItems); err != nil {
 			return ComposePlan{}, err
 		}
+		service.PublishedPorts = mergePorts(nil, service.PublishedPorts)
 	}
 	sort.Slice(normalized.Services, func(i, j int) bool { return normalized.Services[i].Name < normalized.Services[j].Name })
 	for index := 1; index < len(normalized.Services); index++ {

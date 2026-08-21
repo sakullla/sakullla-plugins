@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // HTTPOffer is a managed app that may appear in the host HTTP rule
@@ -23,6 +25,39 @@ type HTTPRuleHandleFunc func(context.Context, uint64, string, string) error
 
 func (function HTTPRuleHandleFunc) Cutover(ctx context.Context, fence uint64, ruleRef, target string) error {
 	return function(ctx, fence, ruleRef, target)
+}
+
+// HTTPRuleSpec is the plugin-side create request for a host HTTP rule.
+// The host owns the resulting rule object; backend is the published port.
+type HTTPRuleSpec struct {
+	AppID  string
+	Domain string
+	Port   uint16
+}
+
+// HostHTTPRule is one entry in the host HTTP rule list after a create request.
+type HostHTTPRule struct {
+	Ref, Domain, Backend, AppID string
+	Port                        uint16
+}
+
+// AppHTTPIngress is the application-page projection of published host ports.
+// Apps without a published port do not offer HTTP rule creation.
+type AppHTTPIngress struct {
+	AppID          string
+	PublishedPorts []uint16
+	CanCreate      bool
+}
+
+// HTTPRuleCreateHandle creates a host HTTP rule. Host http.rule implements this.
+type HTTPRuleCreateHandle interface {
+	Create(context.Context, HTTPRuleSpec) (HostHTTPRule, error)
+}
+
+type HTTPRuleCreateHandleFunc func(context.Context, HTTPRuleSpec) (HostHTTPRule, error)
+
+func (function HTTPRuleCreateHandleFunc) Create(ctx context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
+	return function(ctx, spec)
 }
 
 // OffersHTTP reports whether a managed app should be listed as a backend
@@ -72,6 +107,125 @@ func ProjectHTTPOffers(apps []App, observations []ContainerObservation, granted 
 // ListHTTPBackendProviders is the backend-provider catalog projection.
 func ListHTTPBackendProviders(apps []App, observations []ContainerObservation, granted bool) ([]HTTPOffer, error) {
 	return ProjectHTTPOffers(apps, observations, granted)
+}
+
+// ListPublishedPorts returns host-published ports from compose YAML and from
+// labeled runtime observations. Unlabeled candidates are omitted.
+func ListPublishedPorts(app App, observations []ContainerObservation) ([]uint16, error) {
+	if len(observations) > MaxDiscoveries {
+		return nil, fmt.Errorf("%w: discoveries maximum is %d", ErrBoundExceeded, MaxDiscoveries)
+	}
+	ports := composePublishedPorts(app.Compose)
+	discoveries, err := Discover(observations)
+	if err != nil {
+		return nil, err
+	}
+	for _, discovery := range discoveries {
+		if discovery.Candidate || discovery.AppID != app.ID || len(discovery.Ports) == 0 {
+			continue
+		}
+		ports = mergePorts(ports, discovery.Ports)
+	}
+	return ports, nil
+}
+
+// ProjectAppHTTPIngress lists published ports for the application page.
+func ProjectAppHTTPIngress(app App, observations []ContainerObservation) (AppHTTPIngress, error) {
+	ports, err := ListPublishedPorts(app, observations)
+	if err != nil {
+		return AppHTTPIngress{}, err
+	}
+	return AppHTTPIngress{AppID: app.ID, PublishedPorts: ports, CanCreate: len(ports) > 0}, nil
+}
+
+// CreateHTTPRuleFromPublishedPort asks the host to create an HTTP rule for a
+// selected published port and ingress domain. Empty domain or missing ports
+// leave the existing host rule list unchanged.
+func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateHandle, existing []HostHTTPRule, app App, observations []ContainerObservation, domain string, port uint16, auditor Auditor) ([]HostHTTPRule, error) {
+	preserved := cloneHTTPRules(existing)
+	if auditor == nil {
+		return preserved, ErrAuditRequired
+	}
+	normalized, ok := normalizeIngressDomain(domain)
+	if !ok {
+		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "denied", Detail: ErrEmptyIngressDomain.Error()})
+		return preserved, ErrEmptyIngressDomain
+	}
+	ports, err := ListPublishedPorts(app, observations)
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+		return preserved, safeFailure(ErrOperationFailed, err)
+	}
+	if len(ports) == 0 || !containsPort(ports, port) {
+		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "denied", Detail: ErrNoPublishedPort.Error()})
+		return preserved, ErrNoPublishedPort
+	}
+	if handle == nil {
+		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+		return preserved, ErrTypedHandlesUnavailable
+	}
+	created, err := handle.Create(ctx, HTTPRuleSpec{AppID: app.ID, Domain: normalized, Port: port})
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+		return preserved, safeFailure(ErrOperationFailed, err)
+	}
+	created = normalizeCreatedHTTPRule(created, app.ID, normalized, port)
+	audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "succeeded", Detail: app.ID})
+	return append(preserved, created), nil
+}
+
+func normalizeCreatedHTTPRule(rule HostHTTPRule, appID, domain string, port uint16) HostHTTPRule {
+	if rule.AppID == "" {
+		rule.AppID = appID
+	}
+	if rule.Domain == "" {
+		rule.Domain = domain
+	}
+	if rule.Port == 0 {
+		rule.Port = port
+	}
+	if rule.Backend == "" {
+		rule.Backend = ":" + strconv.Itoa(int(port))
+	}
+	return rule
+}
+
+func normalizeIngressDomain(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	lower := strings.ToLower(value)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		value = value[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		value = value[len("http://"):]
+	}
+	if cut := strings.IndexAny(value, "/?#"); cut >= 0 {
+		if cut == 0 {
+			return "", false
+		}
+		value = value[:cut]
+	}
+	value = strings.TrimSpace(value)
+	if !boundedText(value, 253) {
+		return "", false
+	}
+	return value, true
+}
+
+func containsPort(ports []uint16, want uint16) bool {
+	for _, port := range ports {
+		if port == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneHTTPRules(rules []HostHTTPRule) []HostHTTPRule {
+	return append([]HostHTTPRule(nil), rules...)
 }
 
 // CutoverHTTPOffer switches the rule target through http.rule only after the

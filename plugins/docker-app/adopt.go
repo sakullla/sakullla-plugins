@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -30,10 +31,11 @@ type RuntimeObservation struct {
 }
 
 type CatalogItem struct {
-	App      App
-	Running  bool
-	Status   AppStatus
-	Services []string
+	App            App
+	Running        bool
+	Status         AppStatus
+	Services       []string
+	PublishedPorts []uint16
 }
 
 type CatalogView struct {
@@ -218,15 +220,15 @@ func ProjectCatalog(observations []ContainerObservation, runtimes []RuntimeObser
 	}
 	view := CatalogView{Managed: make([]CatalogItem, 0, len(apps))}
 	for _, app := range apps {
-		item := CatalogItem{App: cloneApp(app), Status: AppStatusStopped, Services: composeServiceNames(app.Compose)}
+		item := CatalogItem{App: cloneApp(app), Status: AppStatusStopped, Services: composeServiceNames(app.Compose), PublishedPorts: composePublishedPorts(app.Compose)}
 		for _, observation := range observations {
 			if observation.Labels[AppLabel] != app.ID {
 				continue
 			}
+			item.PublishedPorts = mergePorts(item.PublishedPorts, observation.ExposedPorts)
 			if runningByContainer[observation.ID] {
 				item.Running = true
 				item.Status = AppStatusRunning
-				break
 			}
 		}
 		view.Managed = append(view.Managed, item)
@@ -282,6 +284,7 @@ type composeService struct {
 	Privileged  bool     `yaml:"privileged"`
 	CapAdd      []string `yaml:"cap_add"`
 	Volumes     []string `yaml:"volumes"`
+	Ports       any      `yaml:"ports"`
 	Networks    any      `yaml:"networks"`
 	Environment any      `yaml:"environment"`
 }
@@ -320,6 +323,7 @@ func composeServiceFromYAML(name string, raw composeService) (parsedComposeServi
 			AddCapabilities: append([]string(nil), raw.CapAdd...),
 			Networks:        networks,
 			Volumes:         volumes,
+			PublishedPorts:  publishedPortsFromYAML(raw.Ports),
 		},
 		image: raw.Image,
 	}, credentials, nil
@@ -626,4 +630,123 @@ func composeServiceNames(document string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func composePublishedPorts(document string) []uint16 {
+	if document == "" {
+		return nil
+	}
+	var file composeDocument
+	if err := yaml.Unmarshal([]byte(document), &file); err != nil || len(file.Services) == 0 {
+		return nil
+	}
+	var ports []uint16
+	for _, service := range file.Services {
+		ports = mergePorts(ports, publishedPortsFromYAML(service.Ports))
+	}
+	return ports
+}
+
+func publishedPortsFromYAML(value any) []uint16 {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case []any:
+		var ports []uint16
+		for _, item := range typed {
+			ports = mergePorts(ports, publishedPortsFromYAML(item))
+		}
+		return ports
+	case []string:
+		var ports []uint16
+		for _, item := range typed {
+			ports = mergePorts(ports, publishedPortsFromYAML(item))
+		}
+		return ports
+	case map[string]any:
+		if published, ok := typed["published"]; ok {
+			return publishedPortsFromYAML(published)
+		}
+		return nil
+	case map[any]any:
+		if published, ok := typed["published"]; ok {
+			return publishedPortsFromYAML(published)
+		}
+		return nil
+	default:
+		if port, ok := parsePublishedPort(typed); ok {
+			return []uint16{port}
+		}
+		return nil
+	}
+}
+
+func parsePublishedPort(value any) (uint16, bool) {
+	switch typed := value.(type) {
+	case string:
+		return parsePublishMapping(typed)
+	case int:
+		return portNumber(typed)
+	case int64:
+		return portNumber(int(typed))
+	case uint64:
+		if typed == 0 || typed > 65535 {
+			return 0, false
+		}
+		return uint16(typed), true
+	case uint16:
+		return typed, typed != 0
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, false
+		}
+		return portNumber(int(typed))
+	default:
+		return 0, false
+	}
+}
+
+func parsePublishMapping(value string) (uint16, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if slash := strings.LastIndex(value, "/"); slash >= 0 {
+		value = value[:slash]
+	}
+	if strings.HasPrefix(value, "[") {
+		end := strings.Index(value, "]")
+		if end < 0 {
+			return 0, false
+		}
+		rest := strings.TrimPrefix(value[end+1:], ":")
+		return parsePublishMapping(rest)
+	}
+	if strings.Contains(value, "-") {
+		return 0, false
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) == 1 {
+		return parsePortNumber(parts[0])
+	}
+	hostPort := parts[len(parts)-2]
+	if hostPort == "" {
+		return 0, false
+	}
+	return parsePortNumber(hostPort)
+}
+
+func parsePortNumber(value string) (uint16, bool) {
+	port, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, false
+	}
+	return portNumber(port)
+}
+
+func portNumber(value int) (uint16, bool) {
+	if value <= 0 || value > 65535 {
+		return 0, false
+	}
+	return uint16(value), true
 }

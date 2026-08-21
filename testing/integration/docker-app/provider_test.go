@@ -3,6 +3,7 @@ package dockerapp_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -105,4 +106,158 @@ func TestHTTPOfferCutoverFailureKeepsOldRuleTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
+	app := dockerapp.App{
+		ID: "media", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n      - \"127.0.0.1:9090:90\"\n      - target: 443\n        published: 8443\n",
+	}
+	observations := []dockerapp.ContainerObservation{
+		{ID: "ctr-media", Labels: map[string]string{dockerapp.AppLabel: app.ID}, ExposedPorts: []uint16{8080, 8443, 9090}},
+	}
+	view := projectCatalog(t, observations, []dockerapp.RuntimeObservation{{ContainerID: "ctr-media", Running: true}}, []dockerapp.App{app})
+	if len(view.Managed) != 1 || !portsEqual(view.Managed[0].PublishedPorts, []uint16{8080, 8443, 9090}) {
+		t.Fatalf("catalog published ports = %#v", view.Managed[0].PublishedPorts)
+	}
+
+	ingress, err := dockerapp.ProjectAppHTTPIngress(app, observations)
+	if err != nil || ingress.AppID != app.ID || !ingress.CanCreate || !portsEqual(ingress.PublishedPorts, []uint16{8080, 8443, 9090}) {
+		t.Fatalf("ingress = %#v err=%v", ingress, err)
+	}
+	composeOnly, err := dockerapp.ProjectAppHTTPIngress(app, nil)
+	if err != nil || !composeOnly.CanCreate || !portsEqual(composeOnly.PublishedPorts, []uint16{8080, 8443, 9090}) {
+		t.Fatalf("compose-declared ports = %#v err=%v", composeOnly, err)
+	}
+
+	existing := []dockerapp.HostHTTPRule{{Ref: "rule-kept", Domain: "kept.example.com", Port: 9000, Backend: "127.0.0.1:9000", AppID: "other"}}
+	var calls []dockerapp.HTTPRuleSpec
+	handle := dockerapp.HTTPRuleCreateHandleFunc(func(_ context.Context, spec dockerapp.HTTPRuleSpec) (dockerapp.HostHTTPRule, error) {
+		calls = append(calls, spec)
+		return dockerapp.HostHTTPRule{
+			Ref:     "rule-media-8080",
+			Domain:  spec.Domain,
+			Port:    spec.Port,
+			Backend: fmt.Sprintf("127.0.0.1:%d", spec.Port),
+			AppID:   spec.AppID,
+		}, nil
+	})
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+
+	rules, err := dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), handle, existing, app, observations, "https://app.example.com", 8080, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].AppID != app.ID || calls[0].Domain != "app.example.com" || calls[0].Port != 8080 {
+		t.Fatalf("create spec = %#v", calls)
+	}
+	if len(rules) != 2 || rules[0] != existing[0] {
+		t.Fatalf("host rules = %#v", rules)
+	}
+	created := rules[1]
+	if created.Ref != "rule-media-8080" || created.Domain != "app.example.com" || created.Port != 8080 || created.AppID != app.ID {
+		t.Fatalf("created rule = %#v", created)
+	}
+	if created.Backend != "127.0.0.1:8080" || !strings.Contains(created.Backend, "8080") {
+		t.Fatalf("backend does not point at published port: %#v", created)
+	}
+}
+
+func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
+	httpApp := dockerapp.App{
+		ID: "media", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n",
+	}
+	worker := dockerapp.App{
+		ID: "worker", Image: "batch:latest", Generation: "generation-1",
+		Compose: "services:\n  job:\n    image: batch:latest\n",
+	}
+	httpObservations := []dockerapp.ContainerObservation{
+		{ID: "ctr-media", Labels: map[string]string{dockerapp.AppLabel: httpApp.ID}, ExposedPorts: []uint16{8080}},
+	}
+	workerObservations := []dockerapp.ContainerObservation{
+		{ID: "ctr-worker", Labels: map[string]string{dockerapp.AppLabel: worker.ID}},
+	}
+	existing := []dockerapp.HostHTTPRule{{Ref: "rule-kept", Domain: "kept.example.com", Port: 9000, Backend: "127.0.0.1:9000"}}
+	called := false
+	handle := dockerapp.HTTPRuleCreateHandleFunc(func(context.Context, dockerapp.HTTPRuleSpec) (dockerapp.HostHTTPRule, error) {
+		called = true
+		return dockerapp.HostHTTPRule{Ref: "rule-new"}, nil
+	})
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+
+	workerIngress, err := dockerapp.ProjectAppHTTPIngress(worker, workerObservations)
+	if err != nil || workerIngress.CanCreate || len(workerIngress.PublishedPorts) != 0 {
+		t.Fatalf("worker ingress = %#v err=%v", workerIngress, err)
+	}
+
+	for _, test := range []struct {
+		name         string
+		app          dockerapp.App
+		observations []dockerapp.ContainerObservation
+		domain       string
+		port         uint16
+		want         error
+		nilHandle    bool
+		nilAuditor   bool
+	}{
+		{name: "empty-domain", app: httpApp, observations: httpObservations, domain: "", port: 8080, want: dockerapp.ErrEmptyIngressDomain},
+		{name: "whitespace-domain", app: httpApp, observations: httpObservations, domain: "   ", port: 8080, want: dockerapp.ErrEmptyIngressDomain},
+		{name: "no-published-port", app: worker, observations: workerObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrNoPublishedPort},
+		{name: "unknown-port", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 9000, want: dockerapp.ErrNoPublishedPort},
+		{name: "missing-handle", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrTypedHandlesUnavailable, nilHandle: true},
+		{name: "missing-auditor", app: httpApp, observations: httpObservations, domain: "app.example.com", port: 8080, want: dockerapp.ErrAuditRequired, nilAuditor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called = false
+			var create dockerapp.HTTPRuleCreateHandle
+			if !test.nilHandle {
+				create = handle
+			}
+			var audit dockerapp.Auditor
+			if !test.nilAuditor {
+				audit = auditor
+			}
+			snapshot := append([]dockerapp.HostHTTPRule(nil), existing...)
+			rules, err := dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), create, existing, test.app, test.observations, test.domain, test.port, audit)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want %v", err, test.want)
+			}
+			if called {
+				t.Fatal("host create was invoked")
+			}
+			if len(rules) != len(snapshot) || rules[0] != snapshot[0] {
+				t.Fatalf("existing rules changed: %#v", rules)
+			}
+			if existing[0] != snapshot[0] {
+				t.Fatalf("input rules mutated: %#v", existing)
+			}
+		})
+	}
+
+	t.Run("create-failure", func(t *testing.T) {
+		failing := dockerapp.HTTPRuleCreateHandleFunc(func(context.Context, dockerapp.HTTPRuleSpec) (dockerapp.HostHTTPRule, error) {
+			return dockerapp.HostHTTPRule{Ref: "rule-new", Domain: "app.example.com", Port: 8080, Backend: "127.0.0.1:8080"}, errors.New("host rejected")
+		})
+		snapshot := append([]dockerapp.HostHTTPRule(nil), existing...)
+		rules, err := dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), failing, existing, httpApp, httpObservations, "app.example.com", 8080, auditor)
+		if !errors.Is(err, dockerapp.ErrOperationFailed) {
+			t.Fatalf("create failure err=%v", err)
+		}
+		if len(rules) != len(snapshot) || rules[0] != snapshot[0] {
+			t.Fatalf("failed create changed rules: %#v", rules)
+		}
+	})
+}
+
+func portsEqual(got, want []uint16) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }

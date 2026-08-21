@@ -31,6 +31,8 @@ var (
 	ErrDeleteUnconfirmed       = errors.New("delete was not confirmed")
 	ErrEngineNotReady          = errors.New("Docker engine is not ready")
 	ErrUnknownService          = errors.New("compose service is unknown")
+	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
+	ErrNoPublishedPort         = errors.New("app has no published port")
 )
 
 type App struct {

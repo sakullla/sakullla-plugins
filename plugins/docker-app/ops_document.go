@@ -6,7 +6,7 @@ const (
 	PluginDisplayName = "Docker 应用"
 	OpsConfigEntry    = "打开配置"
 	OpsPluginUsage    = "选择一台机器后，可以看到 Docker 是否就绪。把 compose YAML 贴进来就能部署应用，需要改设置时打开配置。"
-	OpsAppUsage       = "可以启动、停止、重启或删除这个应用，也可以按服务查看日志。"
+	OpsAppUsage       = "可以启动、停止、重启或删除这个应用，也可以按服务查看日志。有发布端口时可以填写入口域名挂 HTTP 规则。"
 
 	OpsStatusRunning         = "运行中"
 	OpsStatusStopped         = "已停止"
