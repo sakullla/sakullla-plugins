@@ -303,8 +303,20 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	if err != nil || instance != "new" {
 		t.Fatalf("rollout start instance=%q err=%v", instance, err)
 	}
+	if err := config.UIRolloutExecutor.Ready(context.Background(), 1, app, instance); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.UIRolloutExecutor.Drain(context.Background(), 1, app, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.UIRolloutExecutor.Remove(context.Background(), 1, app, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.UIRolloutExecutor.Inspect(context.Background(), 1, app, "rule-media"); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(calls) != 4 {
+	if len(calls) != 8 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
 	if calls[0].Operation != hostHTTPRuleOperation || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
@@ -331,6 +343,9 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 				t.Fatalf("generic handle leaked local Docker target: %#v", call)
 			}
 		}
+	}
+	if err := config.UIRolloutExecutor.Ready(context.Background(), 1, App{ID: "media"}, "new"); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("ready without agent_id err=%v", err)
 	}
 }
 

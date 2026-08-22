@@ -149,8 +149,8 @@ func (rollout hostRolloutRuntime) Start(ctx context.Context, fence uint64, app A
 	return result.InstanceID, nil
 }
 
-func (rollout hostRolloutRuntime) Ready(ctx context.Context, fence uint64, instanceID string) error {
-	return rollout.runtime.compose(ctx, map[string]any{"action": "ready", "fence": fence, "instance_id": instanceID}, nil)
+func (rollout hostRolloutRuntime) Ready(ctx context.Context, fence uint64, app App, instanceID string) error {
+	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "ready", "fence": fence, "instance_id": instanceID}, nil)
 }
 
 func (rollout hostRolloutRuntime) Cutover(ctx context.Context, fence uint64, ruleRef, target string) error {
@@ -162,18 +162,18 @@ func (rollout hostRolloutRuntime) Cutover(ctx context.Context, fence uint64, rul
 	}, nil)
 }
 
-func (rollout hostRolloutRuntime) Drain(ctx context.Context, fence uint64, instanceID string) error {
-	return rollout.runtime.compose(ctx, map[string]any{"action": "drain", "fence": fence, "instance_id": instanceID}, nil)
+func (rollout hostRolloutRuntime) Drain(ctx context.Context, fence uint64, app App, instanceID string) error {
+	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "drain", "fence": fence, "instance_id": instanceID}, nil)
 }
 
-func (rollout hostRolloutRuntime) Remove(ctx context.Context, fence uint64, instanceID string) error {
-	return rollout.runtime.compose(ctx, map[string]any{"action": "remove-instance", "fence": fence, "instance_id": instanceID}, nil)
+func (rollout hostRolloutRuntime) Remove(ctx context.Context, fence uint64, app App, instanceID string) error {
+	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "remove-instance", "fence": fence, "instance_id": instanceID}, nil)
 }
 
-func (rollout hostRolloutRuntime) Inspect(ctx context.Context, fence uint64, appID, ruleRef string) (RuntimeState, error) {
+func (rollout hostRolloutRuntime) Inspect(ctx context.Context, fence uint64, app App, ruleRef string) (RuntimeState, error) {
 	var state RuntimeState
-	if err := rollout.runtime.compose(ctx, map[string]any{
-		"action": "inspect", "fence": fence, "app_id": appID, "rule_ref": ruleRef,
+	if err := rollout.runtime.composeApp(ctx, app, map[string]any{
+		"action": "inspect", "fence": fence, "rule_ref": ruleRef,
 	}, &state); err != nil {
 		return RuntimeState{}, err
 	}

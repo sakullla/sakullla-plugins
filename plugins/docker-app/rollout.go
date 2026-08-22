@@ -11,16 +11,20 @@ import (
 )
 
 type Deployment struct {
-	AppID, InstanceID, Image, RuleRef, RuleTarget, Generation string
-	Phase                                                     RolloutPhase
-	PendingInstance, DesiredRuleTarget, PriorRuleTarget       string
-	PriorImage, PriorGeneration, PriorRuleRef, PriorInstance  string
-	LastFailure, Lease                                        string
-	LeaseUntil                                                time.Time
-	FencingToken                                              uint64
-	PriorAbsent                                               bool
-	ImageDigest, AvailableDigest, PriorDigest                 string
-	History                                                   []DeploymentRevision
+	AppID, AgentID, InstanceID, Image, RuleRef, RuleTarget, Generation string
+	Phase                                                              RolloutPhase
+	PendingInstance, DesiredRuleTarget, PriorRuleTarget                string
+	PriorImage, PriorGeneration, PriorRuleRef, PriorInstance           string
+	LastFailure, Lease                                                 string
+	LeaseUntil                                                         time.Time
+	FencingToken                                                       uint64
+	PriorAbsent                                                        bool
+	ImageDigest, AvailableDigest, PriorDigest                          string
+	History                                                            []DeploymentRevision
+}
+
+func (value Deployment) app() App {
+	return App{ID: value.AppID, AgentID: value.AgentID, Image: value.Image, RuleRef: value.RuleRef, Generation: value.Generation}
 }
 
 type DeploymentRevision struct {
@@ -137,11 +141,11 @@ type RuntimeState struct {
 type RolloutExecutor interface {
 	Pull(context.Context, uint64, App) error
 	Start(context.Context, uint64, App) (string, error)
-	Ready(context.Context, uint64, string) error
+	Ready(context.Context, uint64, App, string) error
 	Cutover(context.Context, uint64, string, string) error
-	Drain(context.Context, uint64, string) error
-	Remove(context.Context, uint64, string) error
-	Inspect(context.Context, uint64, string, string) (RuntimeState, error)
+	Drain(context.Context, uint64, App, string) error
+	Remove(context.Context, uint64, App, string) error
+	Inspect(context.Context, uint64, App, string) (RuntimeState, error)
 }
 
 type Rollout struct {
@@ -323,7 +327,7 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 		}
 	}
 	if rev.InstanceID == "" || rev.Image == "" || rev.RuleRef == "" {
-		app := App{ID: appID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
+		app := App{ID: appID, AgentID: current.AgentID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
 		if err := app.Validate(); err != nil {
 			audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
 			return safeFailure(ErrInvalidPreview, err)
@@ -342,7 +346,7 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 	}
 	if current.InstanceID != "" && current.InstanceID != rev.InstanceID {
 		r.progress(App{ID: appID}, PhaseDraining)
-		if err := r.Executor.Drain(ctx, leased.Value.FencingToken, current.InstanceID); err != nil {
+		if err := r.Executor.Drain(ctx, leased.Value.FencingToken, current.app(), current.InstanceID); err != nil {
 			return r.abortHistoricalRollback(leased, current, true, err)
 		}
 	}
@@ -355,7 +359,7 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 		target = rev.InstanceID
 	}
 	restored := Deployment{
-		AppID: appID, InstanceID: rev.InstanceID, Image: rev.Image, RuleRef: rev.RuleRef, RuleTarget: target,
+		AppID: appID, AgentID: current.AgentID, InstanceID: rev.InstanceID, Image: rev.Image, RuleRef: rev.RuleRef, RuleTarget: target,
 		Generation: rev.Generation, Phase: PhaseActive, FencingToken: leased.Value.FencingToken,
 		ImageDigest: rev.ImageDigest, History: history,
 	}
@@ -416,7 +420,7 @@ func (r Rollout) forgetGoneHistoryInstance(record DeploymentRecord, history []De
 		return history
 	}
 	ctx, cancel := r.cleanupContext()
-	state, err := r.Executor.Inspect(ctx, record.Value.FencingToken, record.Value.AppID, record.Value.RuleRef)
+	state, err := r.Executor.Inspect(ctx, record.Value.FencingToken, record.Value.app(), record.Value.RuleRef)
 	cancel()
 	if err != nil || state.Instances[instanceID] {
 		return history
@@ -447,7 +451,7 @@ func (r Rollout) restoreHistoricalPrior(record DeploymentRecord, state RuntimeSt
 		history = clearHistoryInstance(history, pending)
 	}
 	prior := Deployment{
-		AppID: v.AppID, InstanceID: priorInstance, Image: v.PriorImage, RuleRef: v.PriorRuleRef,
+		AppID: v.AppID, AgentID: v.AgentID, InstanceID: priorInstance, Image: v.PriorImage, RuleRef: v.PriorRuleRef,
 		RuleTarget: v.PriorRuleTarget, Generation: v.PriorGeneration, Phase: PhaseActive,
 		FencingToken: fence, ImageDigest: v.PriorDigest, History: history,
 	}
@@ -531,6 +535,7 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	// scratch so recovery fields from an earlier rollout cannot leak forward.
 	pulling := Deployment{
 		AppID:             app.ID,
+		AgentID:           app.AgentID,
 		InstanceID:        prior.Value.InstanceID,
 		Image:             app.Image,
 		RuleRef:           app.RuleRef,
@@ -569,7 +574,7 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhaseReadiness)
-	if err = r.Executor.Ready(ctx, record.Value.FencingToken, pending); err != nil {
+	if err = r.Executor.Ready(ctx, record.Value.FencingToken, app, pending); err != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, err)
 	}
 	if record, err = r.intent(ctx, record, PhaseCutover, pending, prior.Value.RuleTarget, pending); err != nil {
@@ -584,11 +589,11 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	}
 	if existed && prior.Value.InstanceID != "" {
 		r.progress(app, PhaseDraining)
-		if err = r.Executor.Drain(ctx, record.Value.FencingToken, prior.Value.InstanceID); err != nil {
+		if err = r.Executor.Drain(ctx, record.Value.FencingToken, app, prior.Value.InstanceID); err != nil {
 			return r.rollback(record, prior.Value, true, pending, true, err)
 		}
 	}
-	active := Deployment{AppID: app.ID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken, ImageDigest: digest, History: publishedHistory(record.Value)}
+	active := Deployment{AppID: app.ID, AgentID: app.AgentID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken, ImageDigest: digest, History: publishedHistory(record.Value)}
 	if _, err = r.Store.CompareAndSwap(ctx, app.ID, record.Version, record.Value.FencingToken, active); err != nil {
 		return ErrReconcilePending
 	}
@@ -661,7 +666,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		inspectRef = v.PriorRuleRef
 	}
 	ctx, cancel := r.cleanupContext()
-	state, inspectErr := r.Executor.Inspect(ctx, fence, v.AppID, inspectRef)
+	state, inspectErr := r.Executor.Inspect(ctx, fence, v.app(), inspectRef)
 	cancel()
 	if inspectErr != nil {
 		return r.release(record, safeFailure(ErrOperationFailed, inspectErr))
@@ -693,19 +698,19 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	if finishNew {
 		if priorExists {
 			ctx, cancel = r.cleanupContext()
-			err := r.Executor.Drain(ctx, fence, priorInstance)
+			err := r.Executor.Drain(ctx, fence, v.app(), priorInstance)
 			cancel()
 			if err != nil {
 				return r.release(record, safeFailure(ErrOperationFailed, err))
 			}
 		}
 		ctx, cancel = r.cleanupContext()
-		post, err := r.Executor.Inspect(ctx, fence, v.AppID, v.RuleRef)
+		post, err := r.Executor.Inspect(ctx, fence, v.app(), v.RuleRef)
 		cancel()
 		if err != nil || !post.Instances[pending] || post.RuleTarget != pending {
 			return r.release(record, ErrReconcilePending)
 		}
-		active := Deployment{AppID: v.AppID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence, ImageDigest: v.ImageDigest, History: publishedHistory(v)}
+		active := Deployment{AppID: v.AppID, AgentID: v.AgentID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence, ImageDigest: v.ImageDigest, History: publishedHistory(v)}
 		ctx, cancel = r.cleanupContext()
 		_, err = r.Store.CompareAndSwap(ctx, v.AppID, record.Version, fence, active)
 		cancel()
@@ -739,7 +744,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 			return err
 		}
 		ctx, cancel = r.cleanupContext()
-		err = r.Executor.Remove(ctx, fence, pending)
+		err = r.Executor.Remove(ctx, fence, v.app(), pending)
 		cancel()
 		if err != nil {
 			return r.release(record, safeFailure(ErrOperationFailed, err))
@@ -750,7 +755,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	if !v.PriorAbsent {
 		postRef = v.PriorRuleRef
 	}
-	post, err := r.Executor.Inspect(ctx, fence, v.AppID, postRef)
+	post, err := r.Executor.Inspect(ctx, fence, v.app(), postRef)
 	cancel()
 	if err != nil || (pending != "" && post.Instances[pending]) {
 		return r.release(record, ErrReconcilePending)
@@ -761,7 +766,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		}
 		if v.PriorImage != "" || v.PriorDigest != "" || v.PriorGeneration != "" {
 			restored := Deployment{
-				AppID: v.AppID, Image: v.PriorImage, RuleRef: v.PriorRuleRef, Generation: v.PriorGeneration,
+				AppID: v.AppID, AgentID: v.AgentID, Image: v.PriorImage, RuleRef: v.PriorRuleRef, Generation: v.PriorGeneration,
 				Phase: PhaseActive, FencingToken: fence, ImageDigest: v.PriorDigest,
 				AvailableDigest: v.AvailableDigest, History: cloneRevisions(v.History),
 			}
@@ -859,7 +864,7 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 	}
 	if !existed {
 		seed := Deployment{
-			AppID: app.ID, Image: app.Image, RuleRef: app.RuleRef, Generation: app.Generation,
+			AppID: app.ID, AgentID: app.AgentID, Image: app.Image, RuleRef: app.RuleRef, Generation: app.Generation,
 			Phase: PhaseActive, ImageDigest: current, AvailableDigest: available,
 		}
 		leased, err := r.Store.AcquireLease(ctx, app.ID, record.Version, seed, r.now().Add(r.leaseDuration()))

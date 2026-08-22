@@ -987,7 +987,7 @@ func (fake *uiTestRollout) Start(_ context.Context, _ uint64, _ App) (string, er
 	fake.calls = append(fake.calls, "start")
 	return "new", nil
 }
-func (fake *uiTestRollout) Ready(context.Context, uint64, string) error {
+func (fake *uiTestRollout) Ready(context.Context, uint64, App, string) error {
 	fake.calls = append(fake.calls, "ready")
 	return nil
 }
@@ -995,14 +995,14 @@ func (fake *uiTestRollout) Cutover(_ context.Context, _ uint64, _ string, target
 	fake.calls = append(fake.calls, "cutover:"+target)
 	return nil
 }
-func (fake *uiTestRollout) Drain(_ context.Context, _ uint64, target string) error {
+func (fake *uiTestRollout) Drain(_ context.Context, _ uint64, _ App, target string) error {
 	fake.calls = append(fake.calls, "drain:"+target)
 	return nil
 }
-func (fake *uiTestRollout) Remove(_ context.Context, _ uint64, target string) error {
+func (fake *uiTestRollout) Remove(_ context.Context, _ uint64, _ App, target string) error {
 	fake.calls = append(fake.calls, "remove:"+target)
 	return nil
 }
-func (fake *uiTestRollout) Inspect(context.Context, uint64, string, string) (RuntimeState, error) {
+func (fake *uiTestRollout) Inspect(context.Context, uint64, App, string) (RuntimeState, error) {
 	return RuntimeState{Instances: map[string]bool{"new": true}}, nil
 }

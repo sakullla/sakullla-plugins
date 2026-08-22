@@ -718,7 +718,7 @@ func TestDockerFencingLeaseExpiryRejectsOldWriter(t *testing.T) {
 	if current.FencingToken <= oldLease.Value.FencingToken {
 		t.Fatalf("fence did not advance: old=%d new=%d", oldLease.Value.FencingToken, current.FencingToken)
 	}
-	if err := host.Remove(context.Background(), oldLease.Value.FencingToken, "new"); !errors.Is(err, dockerapp.ErrStateConflict) {
+	if err := host.Remove(context.Background(), oldLease.Value.FencingToken, dockerapp.App{ID: "media"}, "new"); !errors.Is(err, dockerapp.ErrStateConflict) {
 		t.Fatalf("stale host effect=%v", err)
 	}
 }
@@ -1169,7 +1169,7 @@ func (fake *rolloutFake) Start(_ context.Context, fence uint64, _ dockerapp.App)
 	fake.state.CandidateInstance = "new"
 	return "new", nil
 }
-func (fake *rolloutFake) Ready(_ context.Context, fence uint64, _ string) error {
+func (fake *rolloutFake) Ready(_ context.Context, fence uint64, _ dockerapp.App, _ string) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}
@@ -1188,13 +1188,13 @@ func (fake *rolloutFake) Cutover(_ context.Context, fence uint64, ruleRef string
 	fake.state.RuleTarget = target
 	return nil
 }
-func (fake *rolloutFake) Drain(_ context.Context, fence uint64, target string) error {
+func (fake *rolloutFake) Drain(_ context.Context, fence uint64, _ dockerapp.App, target string) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}
 	return fake.step("drain:" + target)
 }
-func (fake *rolloutFake) Remove(ctx context.Context, fence uint64, target string) error {
+func (fake *rolloutFake) Remove(ctx context.Context, fence uint64, _ dockerapp.App, target string) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}
@@ -1213,7 +1213,7 @@ func (fake *rolloutFake) Remove(ctx context.Context, fence uint64, target string
 	}
 	return nil
 }
-func (fake *rolloutFake) Inspect(_ context.Context, fence uint64, _ string, ruleRef string) (dockerapp.RuntimeState, error) {
+func (fake *rolloutFake) Inspect(_ context.Context, fence uint64, _ dockerapp.App, ruleRef string) (dockerapp.RuntimeState, error) {
 	if err := fake.acceptFence(fence); err != nil {
 		return dockerapp.RuntimeState{}, err
 	}
