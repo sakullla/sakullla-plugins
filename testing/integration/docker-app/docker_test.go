@@ -798,7 +798,7 @@ func TestDockerReconcileAuthoritativeTruthAndFirstInstallTombstone(t *testing.T)
 		}
 	})
 	t.Run("post-effect-drift", func(t *testing.T) {
-		store, r := seed(dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", PriorRuleTarget: "old", RuleTarget: "old", PendingInstance: "new", Phase: dockerapp.PhaseCleanupPending})
+		store, r := seed(dockerapp.Deployment{AppID: "media", InstanceID: "old", RuleRef: "rule", PriorRuleRef: "rule", PriorRuleTarget: "old", RuleTarget: "old", PendingInstance: "new", Phase: dockerapp.PhaseCleanupPending})
 		r.Executor = &rolloutFake{inspectStates: []dockerapp.RuntimeState{{RuleTarget: "old", Instances: map[string]bool{"old": true, "new": true}}, {RuleTarget: "other", Instances: map[string]bool{"old": true}}}}
 		if err := r.Reconcile(context.Background(), "media"); !errors.Is(err, dockerapp.ErrReconcilePending) {
 			t.Fatalf("drift err=%v", err)
@@ -1151,6 +1151,81 @@ func TestDockerComposeOnlyDrainingIntentActivatesWithoutHTTPRule(t *testing.T) {
 	})
 }
 
+func TestDockerComposeOnlyFailureBeforeFinishNewRestoresPriorWithoutHTTPRule(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	prior := dockerapp.Deployment{AppID: "media", InstanceID: "old", Image: "image:old", Generation: "generation-old", RuleTarget: "old", Phase: dockerapp.PhaseActive}
+	app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new"}
+	assertPrior := func(t *testing.T, got dockerapp.Deployment) {
+		t.Helper()
+		if got.InstanceID != prior.InstanceID || got.Image != prior.Image || got.Generation != prior.Generation || got.RuleRef != "" || got.RuleTarget != prior.RuleTarget || got.Phase != dockerapp.PhaseActive {
+			t.Fatalf("compose-only prior was not restored: %#v", got)
+		}
+		if got.PendingInstance != "" || got.PriorInstance != "" || got.PriorRuleRef != "" || got.LastFailure != "" || got.Lease != "" || !got.LeaseUntil.IsZero() {
+			t.Fatalf("restored compose-only deployment stayed rollout-busy: %#v", got)
+		}
+	}
+	assertNoHTTPCutover := func(t *testing.T, host *rolloutFake) {
+		t.Helper()
+		if len(host.cutoverRefs) != 0 || contains(host.calls, "cutover:old") || contains(host.calls, "cutover:new") {
+			t.Fatalf("compose-only restore cutovered empty http.rule: calls=%v refs=%v", host.calls, host.cutoverRefs)
+		}
+		if host.state.RuleTarget != "" {
+			t.Fatalf("compose-only inspect invented http.rule target: %#v", host.state)
+		}
+	}
+
+	for _, fail := range []string{"ready", "drain"} {
+		t.Run(fail, func(t *testing.T) {
+			store := dockerapp.NewDeploymentStore()
+			store.Put(prior)
+			host := &rolloutFake{fail: fail, state: dockerapp.RuntimeState{Instances: map[string]bool{"old": true}}}
+			rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor}
+			err := rollout.Update(context.Background(), app)
+			got, _ := store.Get(app.ID)
+			if !errors.Is(err, dockerapp.ErrOperationFailed) {
+				t.Fatalf("%s err=%v got=%#v", fail, err, got)
+			}
+			assertPrior(t, got)
+			assertNoHTTPCutover(t, host)
+			host.fail = ""
+			host.calls = nil
+			if err := rollout.Update(context.Background(), app); err != nil {
+				t.Fatalf("%s retry after restore: %v", fail, err)
+			}
+			published, _ := store.Get(app.ID)
+			if published.InstanceID != "new" || published.Image != app.Image || published.Generation != app.Generation || published.Phase != dockerapp.PhaseActive || published.RuleRef != "" {
+				t.Fatalf("%s retry did not publish: %#v", fail, published)
+			}
+		})
+	}
+
+	t.Run("readiness-crash-reconcile", func(t *testing.T) {
+		now := time.Unix(8000, 0)
+		base := dockerapp.NewDeploymentStore()
+		base.Put(prior)
+		store := &faultStore{base: base, failPhase: dockerapp.PhaseReadiness, failRemaining: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{"old": true}}}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("readiness crash err=%v", err)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+			t.Fatalf("readiness reconcile: %v", err)
+		}
+		final, _ := base.Get(app.ID)
+		assertPrior(t, final)
+		assertNoHTTPCutover(t, host)
+		if err := rollout.Update(context.Background(), app); err != nil {
+			t.Fatalf("retry after readiness restore: %v", err)
+		}
+		published, _ := base.Get(app.ID)
+		if published.InstanceID != "new" || published.Phase != dockerapp.PhaseActive || published.RuleRef != "" {
+			t.Fatalf("retry after readiness restore did not publish: %#v", published)
+		}
+	})
+}
+
 func testComposeYAML(image string) string {
 	return "services:\n  web:\n    image: " + image + "\n"
 }
@@ -1245,6 +1320,9 @@ func (fake *rolloutFake) Ready(_ context.Context, fence uint64, _ dockerapp.App,
 func (fake *rolloutFake) Cutover(_ context.Context, fence uint64, ruleRef string, target string) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
+	}
+	if strings.TrimSpace(ruleRef) == "" {
+		return nil
 	}
 	fake.calls = append(fake.calls, "cutover:"+target)
 	fake.cutoverRefs = append(fake.cutoverRefs, ruleRef)

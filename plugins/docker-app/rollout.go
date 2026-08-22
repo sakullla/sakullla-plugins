@@ -725,7 +725,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		if !priorExists {
 			return r.release(record, ErrReconcilePending)
 		}
-		if state.RuleTarget != v.PriorRuleTarget {
+		if !cutOverComplete(v.PriorRuleRef, state.RuleTarget, v.PriorRuleTarget) {
 			ctx, cancel = r.cleanupContext()
 			err := r.Executor.Cutover(ctx, fence, v.PriorRuleRef, v.PriorRuleTarget)
 			cancel()
@@ -782,7 +782,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		cancel()
 		return err
 	}
-	if !post.Instances[priorInstance] || post.RuleTarget != v.PriorRuleTarget {
+	if !post.Instances[priorInstance] || !cutOverComplete(v.PriorRuleRef, post.RuleTarget, v.PriorRuleTarget) {
 		return r.release(record, ErrReconcilePending)
 	}
 	prior := v
@@ -891,7 +891,7 @@ func priorInstanceAbsent(existed bool, instanceID string) bool {
 	return !existed || instanceID == ""
 }
 
-// Empty RuleRef has no http.rule, so cutover is vacuously complete.
+// Empty RuleRef has no http.rule, so observed routing is vacuously complete.
 func cutOverComplete(ruleRef, observedTarget, pending string) bool {
 	return ruleRef == "" || observedTarget == pending
 }

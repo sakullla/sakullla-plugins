@@ -217,6 +217,42 @@ func TestDockerComposeOnlyConfirmUpdateRecoversDrainingIntent(t *testing.T) {
 	}
 }
 
+func TestDockerComposeOnlyConfirmUpdateRestoresPriorWithoutHTTPRule(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	app := dockerapp.App{ID: "media", Image: "nginx:latest", Generation: "generation-1"}
+	for _, fail := range []string{"ready", "drain"} {
+		t.Run(fail, func(t *testing.T) {
+			store := dockerapp.NewDeploymentStore()
+			store.Put(dockerapp.Deployment{
+				AppID: app.ID, InstanceID: "old", Image: "nginx:old", Generation: "generation-0",
+				RuleTarget: "old", Phase: dockerapp.PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest",
+			})
+			fake := &rolloutFake{fail: fail, state: dockerapp.RuntimeState{Instances: map[string]bool{"old": true}}}
+			rollout := dockerapp.Rollout{Store: store, Executor: fake, Auditor: auditor}
+			err := rollout.ConfirmUpdate(context.Background(), app)
+			got, ok := store.Get(app.ID)
+			if !ok || !errors.Is(err, dockerapp.ErrOperationFailed) {
+				t.Fatalf("%s confirm err=%v ok=%v got=%#v", fail, err, ok, got)
+			}
+			if got.Phase != dockerapp.PhaseActive || got.InstanceID != "old" || got.Image != "nginx:old" || got.RuleRef != "" || got.RuleTarget != "old" || got.Lease != "" {
+				t.Fatalf("%s confirm did not restore prior: %#v", fail, got)
+			}
+			if len(fake.cutoverRefs) != 0 || contains(fake.calls, "cutover:old") || fake.state.RuleTarget != "" {
+				t.Fatalf("%s confirm cutovered empty http.rule: calls=%v refs=%v state=%#v", fail, fake.calls, fake.cutoverRefs, fake.state)
+			}
+			fake.fail = ""
+			fake.calls = nil
+			if err := rollout.Update(context.Background(), app); err != nil {
+				t.Fatalf("%s retry after restore: %v", fail, err)
+			}
+			published, _ := store.Get(app.ID)
+			if published.InstanceID != "new" || published.Phase != dockerapp.PhaseActive || published.RuleRef != "" {
+				t.Fatalf("%s retry did not publish: %#v", fail, published)
+			}
+		})
+	}
+}
+
 func TestDockerObserveUpdateWithoutExecutorDoesNotPublish(t *testing.T) {
 	app := testApp("update-secret")
 	store := dockerapp.NewDeploymentStore()
