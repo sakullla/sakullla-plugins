@@ -151,6 +151,9 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" || controller.Apps()[0].Image != "nginx:1.27" {
 		t.Fatalf("http-rule mutated apps=%#v", controller.Apps())
 	}
+	if controller.Apps()[0].RuleRef != "" {
+		t.Fatalf("http-rule bound App.RuleRef=%q", controller.Apps()[0].RuleRef)
+	}
 }
 
 func TestAppUIDoesNotCreateHTTPRuleWithoutPortOrDomain(t *testing.T) {

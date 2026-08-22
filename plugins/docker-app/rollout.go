@@ -577,12 +577,14 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if err = r.Executor.Ready(ctx, record.Value.FencingToken, app, pending); err != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, err)
 	}
-	if record, err = r.intent(ctx, record, PhaseCutover, pending, prior.Value.RuleTarget, pending); err != nil {
-		return ErrReconcilePending
-	}
-	r.progress(app, PhaseCutover)
-	if err = r.Executor.Cutover(ctx, record.Value.FencingToken, app.RuleRef, pending); err != nil {
-		return r.rollback(record, prior.Value, existed, pending, true, err)
+	if app.RuleRef != "" {
+		if record, err = r.intent(ctx, record, PhaseCutover, pending, prior.Value.RuleTarget, pending); err != nil {
+			return ErrReconcilePending
+		}
+		r.progress(app, PhaseCutover)
+		if err = r.Executor.Cutover(ctx, record.Value.FencingToken, app.RuleRef, pending); err != nil {
+			return r.rollback(record, prior.Value, existed, pending, true, err)
+		}
 	}
 	if record, err = r.intent(ctx, record, PhaseDraining, pending, pending, pending); err != nil {
 		return ErrReconcilePending

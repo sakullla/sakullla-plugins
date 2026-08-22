@@ -160,8 +160,14 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	if published.InstanceID != "new" || published.Image != app.Image || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" {
 		t.Fatalf("compose confirm did not publish: %#v", published)
 	}
-	if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new" {
+	if published.RuleRef != "" {
+		t.Fatalf("compose confirm invented rule_ref: %#v", published)
+	}
+	if strings.Join(fake.calls, ",") != "pull,start,ready" {
 		t.Fatalf("compose confirm calls=%v", fake.calls)
+	}
+	if len(fake.cutoverRefs) != 0 {
+		t.Fatalf("compose confirm cutovered empty http.rule: %v", fake.cutoverRefs)
 	}
 	if !runtime.running["media"] || !runtime.containerExists("media") {
 		t.Fatalf("compose runtime was torn down: %#v", runtime)

@@ -154,6 +154,9 @@ func (rollout hostRolloutRuntime) Ready(ctx context.Context, fence uint64, app A
 }
 
 func (rollout hostRolloutRuntime) Cutover(ctx context.Context, fence uint64, ruleRef, target string) error {
+	if strings.TrimSpace(ruleRef) == "" {
+		return nil
+	}
 	if rollout.runtime == nil || rollout.runtime.client == nil {
 		return ErrTypedHandlesUnavailable
 	}

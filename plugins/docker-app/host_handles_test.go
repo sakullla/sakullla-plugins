@@ -349,6 +349,37 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	}
 }
 
+func TestHostRolloutRuntimeSkipsHTTPRuleCutoverWithoutRuleRef(t *testing.T) {
+	t.Parallel()
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, _ any) error {
+		calls = append(calls, call)
+		return nil
+	})
+	if err := (hostRolloutRuntime{}).Cutover(context.Background(), 1, "", "new"); err != nil {
+		t.Fatalf("empty rule_ref without runtime err=%v", err)
+	}
+	rollout := hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}
+	if err := rollout.Cutover(context.Background(), 1, "", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollout.Cutover(context.Background(), 1, "   ", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("empty rule_ref dispatched http.rule: %#v", calls)
+	}
+	if err := rollout.Cutover(context.Background(), 1, "rule-media", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].Operation != hostHTTPRuleOperation {
+		t.Fatalf("cutover calls=%#v", calls)
+	}
+	if !strings.Contains(string(calls[0].Payload), `"rule_ref":"rule-media"`) || !strings.Contains(string(calls[0].Payload), `"action":"cutover"`) {
+		t.Fatalf("cutover payload=%s", calls[0].Payload)
+	}
+}
+
 func copyHostResult(value, target any) error {
 	if target == nil {
 		return nil
