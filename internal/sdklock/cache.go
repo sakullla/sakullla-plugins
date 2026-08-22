@@ -223,7 +223,27 @@ func toolchainIdentity(ctx context.Context) (string, string, string, error) {
 		}
 		identities[index] = filepath.Clean(path) + "\n" + strings.TrimSpace(string(output))
 	}
+	identities[0] += "\nenvironment_sha256=" + commandEnvironmentDigest("go")
 	return identities[0], identities[1], identities[2], nil
+}
+
+func commandEnvironmentDigest(commandName string) string {
+	values := make(map[string]string)
+	for _, entry := range commandEnvironment(commandName) {
+		key, _, _ := strings.Cut(entry, "=")
+		values[strings.ToUpper(key)] = entry
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	canonical := make([]string, 0, len(keys))
+	for _, key := range keys {
+		canonical = append(canonical, key+"="+values[key])
+	}
+	digest := sha256.Sum256([]byte(strings.Join(canonical, "\n")))
+	return hex.EncodeToString(digest[:])
 }
 
 func checkoutCacheKey(lock Lock) (string, error) {

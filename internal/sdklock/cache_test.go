@@ -63,6 +63,45 @@ func TestVerificationCacheHitAndInputInvalidation(t *testing.T) {
 	}
 }
 
+func TestGoToolchainIdentityBindsEffectiveCommandEnvironment(t *testing.T) {
+	t.Setenv("CGO_ENABLED", "0")
+	first := commandEnvironmentDigest("go")
+	t.Setenv("CGO_ENABLED", "1")
+	second := commandEnvironmentDigest("go")
+	if first == second {
+		t.Fatal("CGO_ENABLED change did not invalidate the effective Go environment identity")
+	}
+	t.Setenv("GOEXPERIMENT", "cache-fixture")
+	third := commandEnvironmentDigest("go")
+	if second == third {
+		t.Fatal("GOEXPERIMENT change did not invalidate the effective Go environment identity")
+	}
+
+	_, workspace, lock := newVerificationCacheFixture(t)
+	var executions atomic.Int32
+	options := fixtureVerificationCacheOptions(workspace, &executions)
+	options.toolchain = func(context.Context) (string, string, string, error) {
+		return commandEnvironmentDigest("go"), "fixture-rust", "fixture-cargo", nil
+	}
+	t.Setenv("GOEXPERIMENT", "")
+	if _, err := verifyCached(context.Background(), lock, false, workspace, options); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyCached(context.Background(), lock, false, workspace, options); err != nil {
+		t.Fatal(err)
+	}
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("unchanged effective Go environment executions = %d, want 1", got)
+	}
+	t.Setenv("CGO_ENABLED", "0")
+	if _, err := verifyCached(context.Background(), lock, false, workspace, options); err != nil {
+		t.Fatal(err)
+	}
+	if got := executions.Load(); got != 2 {
+		t.Fatalf("changed effective Go environment executions = %d, want 2", got)
+	}
+}
+
 func TestVerificationCacheRepairsCheckoutAndResultDamage(t *testing.T) {
 	_, workspace, lock := newVerificationCacheFixture(t)
 	var executions atomic.Int32

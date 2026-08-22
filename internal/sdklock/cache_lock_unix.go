@@ -30,8 +30,6 @@ func acquireVerificationCacheLock(ctx context.Context, path string) (*verificati
 	if err != nil {
 		return nil, err
 	}
-	timeout := time.NewTimer(30 * time.Second)
-	defer timeout.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -47,9 +45,6 @@ func acquireVerificationCacheLock(ctx context.Context, path string) (*verificati
 		case <-ctx.Done():
 			file.Close()
 			return nil, fmt.Errorf("wait for SDK verification cache lock: %w", ctx.Err())
-		case <-timeout.C:
-			file.Close()
-			return nil, fmt.Errorf("timed out waiting for SDK verification cache lock %q", path)
 		case <-ticker.C:
 		}
 	}
