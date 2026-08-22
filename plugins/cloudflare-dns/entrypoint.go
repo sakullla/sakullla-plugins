@@ -2,8 +2,6 @@ package cloudflaredns
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -12,39 +10,17 @@ import (
 const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
-	probeIdentity, probe, err := pluginsdk.ResolveRPCHandshakeProbe(args, pluginsdk.RPCPluginDeclaration{PluginID: PluginID, PluginVersion: PluginVersion})
-	if err != nil {
-		return err
+	declaration := pluginsdk.RPCPluginDeclaration{
+		PluginID: PluginID, PluginVersion: PluginVersion,
+		RequiredCapabilities: requiredGrants(),
+		SupportedFeatures:    []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}
-	if probe {
-		controller, err := NewController(ControllerConfig{PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact"})
-		if err != nil {
-			return err
-		}
-		response, err := controller.Handshake(ctx, pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: probeIdentity.PluginID, PluginVersion: probeIdentity.PluginVersion, PackageDigest: "nre-ci-package", ArtifactDigest: "nre-ci-artifact", GrantedScopes: requiredGrants(), Generation: "nre-ci-generation", RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1}})
-		if err != nil {
-			return err
-		}
-		if response.ABI != pluginsdk.RPCABIV1 || len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureDurableActionsV1 {
-			return errors.New("canonical RPC handshake ABI mismatch")
-		}
-		_, err = fmt.Fprintln(output, response.ABI)
-		return err
-	}
-	if len(args) != 0 {
-		return errors.New("unexpected Cloudflare DNS arguments")
-	}
-	controller, err := NewController(ControllerConfig{})
-	if err != nil {
-		return err
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- pluginsdk.ServeRPCPlugin(runCtx, controller) }()
-	go func() { errorsCh <- pluginsdk.ServePluginUI(runCtx, controller) }()
-	first := <-errorsCh
-	cancel()
-	second := <-errorsCh
-	return errors.Join(first, second)
+	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
+		Declaration: declaration,
+		NewProbeLifecycle: func(request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCLifecycle, error) {
+			return NewController(ControllerConfig{PackageDigest: request.PackageDigest, ArtifactDigest: request.ArtifactDigest})
+		},
+		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(ControllerConfig{}) },
+		Services:            pluginsdk.RPCServiceDeclaration{UI: true},
+	})
 }

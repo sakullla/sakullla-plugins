@@ -2,15 +2,7 @@ package acceleratorsources_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -22,7 +14,6 @@ import (
 	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/protoschema"
 	acceleratorsources "github.com/sakullla/sakullla-plugins/plugins/accelerator-sources"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -122,33 +113,6 @@ func TestProductionEntrypointServesLifecycleAndPrivateProvider(t *testing.T) {
 	}
 }
 
-func TestLifecycleRPCLoopbackMutualTLS(t *testing.T) {
-	serverTLS, clientTLS := newMutualTLS(t)
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := probe.Addr().String()
-	_ = probe.Close()
-	controller := newController(t, func() (acceleratorsources.GenerationService, error) { return &fakeService{}, nil })
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- acceleratorsources.ServeLifecycleRPCConfig(ctx, acceleratorsources.LifecycleServerConfig{Network: "tcp", Address: address, Cookie: "mtls-cookie", TLSConfig: serverTLS}, controller)
-	}()
-	connection := dialTCPGRPC(t, address, clientTLS)
-	request := handshakeRequest("mtls-generation")
-	response, err := (wireClient{connection: connection, cookie: "mtls-cookie"}).handshake(t.Context(), request)
-	_ = connection.Close()
-	if err != nil || len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureHTTPBackendProviderV1 {
-		t.Fatalf("mTLS handshake = %+v, %v", response, err)
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestSDKProviderPreservesOnlyHostProjectedExternalAuthority(t *testing.T) {
 	root := shortTempDir(t)
 	endpoint := pluginsdk.HTTPBackendProviderEndpoint{InstanceID: "instance-authority", ProviderID: acceleratorsources.ProviderID, Generation: "generation-authority", Endpoint: filepath.Join(root, "authority.sock"), Credential: "0123456789abcdef0123456789abcdef"}
@@ -195,30 +159,6 @@ func TestSDKProviderPreservesOnlyHostProjectedExternalAuthority(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestLifecycleRPCRejectsWrongCookieAndTCPWithoutMTLS(t *testing.T) {
-	controller := newController(t, func() (acceleratorsources.GenerationService, error) { return &fakeService{}, nil })
-	root := shortTempDir(t)
-	socket := filepath.Join(root, "rpc.sock")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- acceleratorsources.ServeLifecycleRPCConfig(ctx, acceleratorsources.LifecycleServerConfig{Network: "unix", Address: socket, Cookie: "correct-cookie"}, controller)
-	}()
-	connection := dialUnixGRPC(t, socket)
-	defer connection.Close()
-	_, err := (wireClient{connection: connection, cookie: "wrong-cookie"}).handshake(t.Context(), handshakeRequest("generation"))
-	if err == nil || status.Code(err).String() != "Unauthenticated" {
-		t.Fatalf("wrong-cookie error = %v", err)
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if err := acceleratorsources.ServeLifecycleRPCConfig(t.Context(), acceleratorsources.LifecycleServerConfig{Network: "tcp", Address: "127.0.0.1:0", Cookie: "cookie"}, controller); err == nil {
-		t.Fatal("tcp lifecycle server accepted missing mutual TLS")
 	}
 }
 
@@ -344,81 +284,6 @@ func setProviderHeaders(request *http.Request, endpoint pluginsdk.HTTPBackendPro
 	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderInstance, endpoint.InstanceID)
 	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderID, endpoint.ProviderID)
 	request.Header.Set(pluginsdk.HeaderHTTPBackendProviderGeneration, endpoint.Generation)
-}
-
-func dialTCPGRPC(t *testing.T, address string, tlsConfig *tls.Config) *grpc.ClientConn {
-	t.Helper()
-	connection, err := grpc.NewClient("passthrough:///accelerator-sources", grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig.Clone())), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		probe, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-		_, probeErr := (wireClient{connection: connection, cookie: "wrong"}).handshake(probe, handshakeRequest("probe"))
-		cancel()
-		if status.Code(probeErr).String() == "Unauthenticated" {
-			return connection
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	_ = connection.Close()
-	t.Fatal("mTLS lifecycle endpoint did not become ready")
-	return nil
-}
-
-func newMutualTLS(t *testing.T) (*tls.Config, *tls.Config) {
-	t.Helper()
-	now := time.Now()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "nre-test-ca"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverPair := signedPair(t, caCert, caKey, "nre-plugin", true, big.NewInt(2), now)
-	clientPair := signedPair(t, caCert, caKey, "nre-host", false, big.NewInt(3), now)
-	roots := x509.NewCertPool()
-	roots.AddCert(caCert)
-	server := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverPair}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}
-	client := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "nre-plugin", Certificates: []tls.Certificate{clientPair}, RootCAs: roots}
-	return server, client
-}
-
-func signedPair(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, server bool, serial *big.Int, now time.Time) tls.Certificate {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	usage := x509.ExtKeyUsageClientAuth
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}}
-	if server {
-		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-		template.DNSNames = []string{"nre-plugin"}
-		template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
-	}
-	certificate, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair
 }
 
 func shortTempDir(t *testing.T) string {

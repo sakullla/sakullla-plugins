@@ -10,6 +10,7 @@
 mod abi_generated;
 mod budget;
 mod host;
+mod incompatible;
 mod message;
 mod reason;
 mod wire;

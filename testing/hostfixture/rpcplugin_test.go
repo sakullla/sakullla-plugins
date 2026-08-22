@@ -11,7 +11,7 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
 const testSecret = "fixture-super-secret"

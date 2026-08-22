@@ -9,15 +9,16 @@ import (
 	"strings"
 
 	"embed"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
-//go:embed ui/*
+//go:embed assets/ui/*
 var appUIAssets embed.FS
 
 const (
-	appActorHeader     = "X-NRE-Actor"
-	appOperationHeader = "X-NRE-Operation-Key"
-	appPageCSP         = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+	appActorHeader     = pluginsdk.HeaderPluginActor
+	appOperationHeader = pluginsdk.HeaderPluginOperationKey
 )
 
 type appView struct {
@@ -52,28 +53,11 @@ type appAPIResponse struct {
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Security-Policy", appPageCSP)
-	writer.Header().Set("Referrer-Policy", "no-referrer")
-	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	if pluginsdk.ServePluginUIAsset(writer, request, appUIAssets, "assets/ui") {
+		return
+	}
 	path := request.URL.Path
-	if path == "/style.css" || path == "/app.js" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, appUIAssets, "ui"+path)
-		return
-	}
-	if path == "/" || path == "" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, appUIAssets, "ui/index.html")
-		return
-	}
 	if !controller.uiReady() {
 		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
 		return
@@ -213,8 +197,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 }
 
 func (controller *Controller) uiIdentity(request *http.Request) (string, error) {
-	actor := strings.TrimSpace(request.Header.Get(appActorHeader))
-	if actor == "" {
+	actor, ok := pluginsdk.PluginUIActor(request)
+	if !ok {
 		return "", ErrUnauthorized
 	}
 	return actor, nil
@@ -294,9 +278,7 @@ func decodeAppWrite(request *http.Request) (appWriteRequest, error) {
 }
 
 func writeAppJSON(writer http.ResponseWriter, status int, payload appAPIResponse) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(payload)
+	_ = pluginsdk.WritePluginUIJSON(writer, status, payload)
 }
 
 func appStatus(err error) int {

@@ -10,8 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
 type ControllerConfig struct {
@@ -23,8 +22,8 @@ type ControllerConfig struct {
 type controllerEpoch struct{ live atomic.Bool }
 
 type Controller struct {
+	*rpcplugin.Adapter
 	mu            sync.Mutex
-	request       pluginsdk.RPCHandshakeRequest
 	configuration Configuration
 	epoch         *controllerEpoch
 	commit        *rpcplugin.Handle[*controllerEpoch]
@@ -32,55 +31,24 @@ type Controller struct {
 	published     *Service
 	transaction   *rpcplugin.Handle[PreparedAdmission]
 	admission     TypedHandleAdmission
-	lifecycle     *rpcplugin.Lifecycle
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
 	if config.Admission == nil {
 		config.Admission = unavailableAdmission{}
 	}
-	if config.PrepareTimeout <= 0 {
-		config.PrepareTimeout = time.Second
-	}
-	if config.ActivateTimeout <= 0 {
-		config.ActivateTimeout = time.Second
-	}
-	if config.StopTimeout <= 0 {
-		config.StopTimeout = time.Second
-	}
-	if config.DrainTimeout <= 0 {
-		config.DrainTimeout = time.Second
-	}
+	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(time.Second))
 	c := &Controller{admission: config.Admission}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
+	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities: []string{"shadowsocks.business-model"}, RequiredGrants: requiredGrants(),
-		Timeouts: rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
+		Timeouts: timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: c.prepare, ActivateFunc: c.activate, StopFunc: c.stop})
 	if err != nil {
 		return nil, err
 	}
-	c.lifecycle = lifecycle
+	c.Adapter = adapter
 	return c, nil
-}
-
-func (c *Controller) Handshake(ctx context.Context, r pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	response, err := c.lifecycle.Handshake(ctx, r)
-	if err == nil {
-		c.mu.Lock()
-		c.request = r
-		c.mu.Unlock()
-	}
-	return response, err
-}
-func (c *Controller) Prepare(ctx context.Context, r pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return c.lifecycle.Prepare(ctx, r)
-}
-func (c *Controller) Activate(ctx context.Context, r pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return c.lifecycle.Activate(ctx, r)
-}
-func (c *Controller) Stop(ctx context.Context, r pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return c.lifecycle.Stop(ctx, r)
 }
 func (c *Controller) Use(ctx context.Context, f func(context.Context, *Service) error) error {
 	c.mu.Lock()
@@ -248,8 +216,9 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 }
 
 func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generation) error {
+	request, _ := c.Request()
 	c.mu.Lock()
-	request, configuration, epoch, commit := c.request, clone(c.configuration), c.epoch, c.commit
+	configuration, epoch, commit := clone(c.configuration), c.epoch, c.commit
 	c.mu.Unlock()
 	if epoch == nil || commit == nil {
 		return rpcplugin.ErrRevoked

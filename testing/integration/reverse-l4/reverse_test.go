@@ -14,7 +14,7 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 	reversel4 "github.com/sakullla/sakullla-plugins/plugins/reverse-l4"
 )
 

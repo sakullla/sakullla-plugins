@@ -11,7 +11,7 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
 type ServiceFactory func(PluginConfig) (*Service, error)
@@ -37,115 +37,40 @@ func (value *generationState) close() {
 }
 
 type Controller struct {
+	*rpcplugin.Adapter
 	mu sync.RWMutex
 
-	config        ControllerConfig
-	lifecycle     *rpcplugin.Lifecycle
-	prepared      *rpcplugin.Handle[*generationState]
-	active        *rpcplugin.Handle[*generationState]
-	preparedState *generationState
-	activeState   *generationState
-	generation    string
-	pluginConfig  PluginConfig
+	config       ControllerConfig
+	services     *rpcplugin.GenerationSlot[*generationState]
+	pluginConfig PluginConfig
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
-	if config.PrepareTimeout <= 0 {
-		config.PrepareTimeout = 10 * time.Second
-	}
-	if config.ActivateTimeout <= 0 {
-		config.ActivateTimeout = time.Second
-	}
-	if config.StopTimeout <= 0 {
-		config.StopTimeout = 5 * time.Second
-	}
-	if config.DrainTimeout <= 0 {
-		config.DrainTimeout = 30 * time.Second
-	}
-	return &Controller{config: config}, nil
-}
-
-func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	if err := pluginsdk.ValidateRPCFeatures(request.RequiredFeatures, []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}); err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	if controller.lifecycle != nil {
-		return pluginsdk.RPCHandshakeResponse{}, errors.New("lifecycle handshake is already complete")
-	}
-	packageDigest := controller.config.PackageDigest
-	if packageDigest == "" {
-		packageDigest = request.PackageDigest
-	}
-	artifactDigest := controller.config.ArtifactDigest
-	if artifactDigest == "" {
-		artifactDigest = request.ArtifactDigest
-	}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
+	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.Timeouts{Prepare: 10 * time.Second, Activate: time.Second, Stop: 5 * time.Second, Drain: 30 * time.Second})
+	controller := &Controller{config: config}
+	controller.services = rpcplugin.NewGenerationSlot(func(value *generationState) { value.close() })
+	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: packageDigest, ArtifactDigest: artifactDigest,
-		Capabilities:   []string{pluginsdk.PermissionHTTPOutbound},
-		RequiredGrants: []string{pluginsdk.PermissionHTTPOutbound},
-		Timeouts: rpcplugin.Timeouts{
-			Prepare:  controller.config.PrepareTimeout,
-			Activate: controller.config.ActivateTimeout,
-			Stop:     controller.config.StopTimeout,
-			Drain:    controller.config.DrainTimeout,
-		},
+		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
+		Capabilities:      []string{pluginsdk.PermissionHTTPOutbound},
+		RequiredGrants:    []string{pluginsdk.PermissionHTTPOutbound},
+		SupportedFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		RequiredFeatures:  []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
+		return nil, err
 	}
-	response, err := lifecycle.Handshake(ctx, request)
-	if err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
-	response.Features = []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}
-	controller.lifecycle = lifecycle
-	controller.generation = request.Generation
-	return response, nil
-}
-
-func (controller *Controller) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Prepare(ctx, request)
-}
-
-func (controller *Controller) Activate(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Activate(ctx, request)
-}
-
-func (controller *Controller) Stop(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Stop(ctx, request)
+	controller.Adapter = adapter
+	return controller, nil
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	controller.mu.RLock()
-	active := controller.active
-	controller.mu.RUnlock()
-	if active == nil {
+	if _, active := controller.services.ActiveValue(); !active {
 		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
-	err := active.Use(request.Context(), func(_ context.Context, state *generationState) error {
+	err := controller.services.UseActive(request.Context(), func(_ context.Context, state *generationState) error {
 		if state == nil || state.service == nil {
 			http.Error(writer, "provider generation is unavailable", http.StatusServiceUnavailable)
 			return nil
@@ -171,61 +96,26 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		return err
 	}
 	owned := &generationState{config: config, service: service}
-	handle, err := rpcplugin.BindHandle(generation, pluginsdk.PermissionHTTPOutbound, owned, controller.revokeState)
-	if err != nil {
+	if err := controller.services.Prepare(generation, pluginsdk.PermissionHTTPOutbound, owned); err != nil {
 		owned.close()
 		return err
 	}
 	controller.mu.Lock()
-	controller.prepared = handle
-	controller.preparedState = owned
 	controller.pluginConfig = config
-	controller.generation = generation.ID()
 	controller.mu.Unlock()
 	return nil
-}
-
-func (controller *Controller) revokeState(value *generationState) {
-	controller.mu.Lock()
-	if controller.activeState == value {
-		controller.active = nil
-		controller.activeState = nil
-	}
-	if controller.preparedState == value {
-		controller.prepared = nil
-		controller.preparedState = nil
-	}
-	controller.mu.Unlock()
-	value.close()
 }
 
 func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	if controller.prepared == nil {
-		return rpcplugin.ErrRevoked
-	}
-	controller.active = controller.prepared
-	controller.activeState = controller.preparedState
-	return nil
+	return controller.services.Activate(ctx)
 }
 
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
+	instance, ok := controller.services.Clear()
 	controller.mu.Lock()
-	instance := controller.activeState
-	if instance == nil {
-		instance = controller.preparedState
-	}
-	controller.active = nil
-	controller.prepared = nil
-	controller.activeState = nil
-	controller.preparedState = nil
 	controller.pluginConfig = PluginConfig{}
 	controller.mu.Unlock()
-	if instance != nil {
+	if ok {
 		instance.close()
 	}
 	return nil
@@ -276,8 +166,4 @@ func parsePluginConfig(wire []byte) (PluginConfig, error) {
 func validatePluginConfig(config PluginConfig) error {
 	_, err := parseUpstreamText(config.Upstreams)
 	return err
-}
-
-func lifecycleFailure(code pluginsdk.ErrorCode, message string) pluginsdk.LifecycleResponse {
-	return pluginsdk.LifecycleResponse{Error: &pluginsdk.RuntimeError{Code: code, Message: message}}
 }

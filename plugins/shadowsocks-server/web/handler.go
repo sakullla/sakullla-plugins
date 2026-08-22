@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	ss "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
 )
 
@@ -76,29 +77,11 @@ func NewHandler(controller *ss.Controller) *Handler {
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Security-Policy", panelCSP)
-	writer.Header().Set("Referrer-Policy", "no-referrer")
-	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	pluginsdk.SetPluginUIResponseHeadersWithPolicy(writer.Header(), panelCSP)
+	if pluginsdk.ServePluginUIAsset(writer, request, assets, ".") {
+		return
+	}
 	path := request.URL.Path
-	if path == "/style.css" || path == "/app.js" || path == "/index.html" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, assets, strings.TrimPrefix(path, "/"))
-		return
-	}
-	if path == "/" || path == "" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeFileFS(writer, request, assets, "index.html")
-		return
-	}
 	if path == "/api/panel" {
 		handler.servePanel(writer, request)
 		return
@@ -415,10 +398,8 @@ func readJSON(request *http.Request, dest any) error {
 }
 
 func writeJSON(writer http.ResponseWriter, status int, body panelResponse) {
-	writer.Header().Set("Content-Type", "application/json")
 	writer.Header().Set("Cache-Control", "no-store")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(body)
+	_ = pluginsdk.WritePluginUIJSON(writer, status, body)
 }
 
 func panelStatus(err error) int {

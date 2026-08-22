@@ -8,7 +8,7 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
 const MaxConfigBytes = 1 << 20
@@ -70,13 +70,12 @@ type ControllerConfig struct {
 }
 
 type Controller struct {
+	*rpcplugin.Adapter
 	mu             sync.Mutex
 	apps           []App
 	registryMirror string
-	request        pluginsdk.RPCHandshakeRequest
 	admission      TypedHandleAdmission
 	prepareGate    func(context.Context) error
-	lifecycle      *rpcplugin.Lifecycle
 	commit         *rpcplugin.Handle[*commitEpoch]
 	epoch          *commitEpoch
 	uiEngine       EngineObservation
@@ -98,18 +97,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if config.Admission == nil {
 		config.Admission = unavailableAdmission{}
 	}
-	if config.PrepareTimeout <= 0 {
-		config.PrepareTimeout = time.Second
-	}
-	if config.ActivateTimeout <= 0 {
-		config.ActivateTimeout = time.Second
-	}
-	if config.StopTimeout <= 0 {
-		config.StopTimeout = time.Second
-	}
-	if config.DrainTimeout <= 0 {
-		config.DrainTimeout = time.Second
-	}
+	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(time.Second))
 	auditor := config.UIAuditor
 	if auditor == nil {
 		auditor = AuditorFunc(func(AuditRecord) {})
@@ -119,37 +107,18 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiEngine: config.UIEngine, uiApply: config.UIApply, uiStart: config.UIStart, uiRestart: config.UIRestart,
 		uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule, uiAuditor: auditor,
 	}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
+	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:      []string{"docker-app.business-model"},
 		RequiredGrants:    requiredGrants(),
 		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1, pluginsdk.RPCFeatureHTTPBackendProviderV1},
-		Timeouts:          rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout},
+		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err
 	}
-	controller.lifecycle = lifecycle
+	controller.Adapter = adapter
 	return controller, nil
-}
-
-func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	response, err := controller.lifecycle.Handshake(ctx, request)
-	if err == nil {
-		controller.mu.Lock()
-		controller.request = request
-		controller.mu.Unlock()
-	}
-	return response, err
-}
-func (controller *Controller) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Prepare(ctx, request)
-}
-func (controller *Controller) Activate(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Activate(ctx, request)
-}
-func (controller *Controller) Stop(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Stop(ctx, request)
 }
 func (controller *Controller) Apps() []App {
 	controller.mu.Lock()
@@ -209,8 +178,9 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 }
 
 func (controller *Controller) activate(ctx context.Context, generation *rpcplugin.Generation) error {
+	request, _ := controller.Request()
 	controller.mu.Lock()
-	request, apps, handle, epoch := controller.request, cloneApps(controller.apps), controller.commit, controller.epoch
+	apps, handle, epoch := cloneApps(controller.apps), controller.commit, controller.epoch
 	controller.mu.Unlock()
 	if handle == nil || epoch == nil {
 		return rpcplugin.ErrRevoked

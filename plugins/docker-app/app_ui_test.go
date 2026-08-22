@@ -27,8 +27,8 @@ func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	if strings.Contains(text, "resource.group") || strings.Contains(text, "resource_group_id:") {
 		t.Fatal("docker-app UI must not use a resource-group catalog")
 	}
-	if !strings.Contains(text, "ui/index.html") || !strings.Contains(text, "ui/app.js") {
-		t.Fatal("plugin.yaml must declare ui/ frontend assets")
+	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
+		t.Fatal("plugin.yaml must declare frontend files below assets/")
 	}
 	if strings.Contains(text, "ui_schema:") {
 		t.Fatal("compose UI must not use host config ui_schema")

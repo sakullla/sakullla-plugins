@@ -15,7 +15,7 @@ import (
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/imagetar"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/registry"
 	"github.com/sakullla/sakullla-plugins/plugins/accelerator-sources/internal/service"
@@ -64,36 +64,40 @@ type Status struct {
 }
 
 type Controller struct {
+	*rpcplugin.Adapter
 	mu sync.RWMutex
 
-	config          ControllerConfig
-	lifecycle       *rpcplugin.Lifecycle
-	prepared        *rpcplugin.Handle[*generationService]
-	active          *rpcplugin.Handle[*generationService]
-	preparedService *generationService
-	activeService   *generationService
-	generation      string
-	lastMetrics     upstream.Metrics
-	sources         []registry.Source
+	config      ControllerConfig
+	services    *rpcplugin.GenerationSlot[*generationService]
+	lastMetrics upstream.Metrics
+	sources     []registry.Source
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
-	if config.PrepareTimeout <= 0 {
-		config.PrepareTimeout = 10 * time.Second
-	}
-	if config.ActivateTimeout <= 0 {
-		config.ActivateTimeout = time.Second
-	}
-	if config.StopTimeout <= 0 {
-		config.StopTimeout = 5 * time.Second
-	}
-	if config.DrainTimeout <= 0 {
-		config.DrainTimeout = 30 * time.Second
-	}
+	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.Timeouts{Prepare: 10 * time.Second, Activate: time.Second, Stop: 5 * time.Second, Drain: 30 * time.Second})
 	controller := &Controller{config: config}
+	controller.services = rpcplugin.NewGenerationSlot(func(value *generationService) {
+		controller.mu.Lock()
+		controller.lastMetrics = value.service.Metrics()
+		controller.mu.Unlock()
+		value.close()
+	})
 	if controller.config.NewService == nil {
 		controller.config.NewService = controller.newConfiguredService
 	}
+	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
+		PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
+		Capabilities:      []string{pluginsdk.PermissionHTTPOutbound},
+		RequiredGrants:    []string{pluginsdk.PermissionHTTPOutbound},
+		SupportedFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		RequiredFeatures:  []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		Timeouts:          timeouts,
+	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
+	if err != nil {
+		return nil, err
+	}
+	controller.Adapter = adapter
 	return controller, nil
 }
 
@@ -105,87 +109,12 @@ func (controller *Controller) newConfiguredService() (GenerationService, error) 
 	})
 }
 
-func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	if err := pluginsdk.ValidateRPCFeatures(request.RequiredFeatures, []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}); err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	if controller.lifecycle != nil {
-		return pluginsdk.RPCHandshakeResponse{}, errors.New("lifecycle handshake is already complete")
-	}
-	packageDigest := controller.config.PackageDigest
-	if packageDigest == "" {
-		packageDigest = request.PackageDigest
-	}
-	artifactDigest := controller.config.ArtifactDigest
-	if artifactDigest == "" {
-		artifactDigest = request.ArtifactDigest
-	}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
-		PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: packageDigest, ArtifactDigest: artifactDigest,
-		Capabilities:   []string{pluginsdk.PermissionHTTPOutbound},
-		RequiredGrants: []string{pluginsdk.PermissionHTTPOutbound},
-		Timeouts: rpcplugin.Timeouts{
-			Prepare:  controller.config.PrepareTimeout,
-			Activate: controller.config.ActivateTimeout,
-			Stop:     controller.config.StopTimeout,
-			Drain:    controller.config.DrainTimeout,
-		},
-	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
-	if err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
-	response, err := lifecycle.Handshake(ctx, request)
-	if err != nil {
-		return pluginsdk.RPCHandshakeResponse{}, err
-	}
-	response.Features = []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}
-	controller.lifecycle = lifecycle
-	controller.generation = request.Generation
-	return response, nil
-}
-
-func (controller *Controller) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Prepare(ctx, request)
-}
-
-func (controller *Controller) Activate(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Activate(ctx, request)
-}
-
-func (controller *Controller) Stop(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	controller.mu.RLock()
-	lifecycle := controller.lifecycle
-	controller.mu.RUnlock()
-	if lifecycle == nil {
-		return lifecycleFailure(pluginsdk.ErrorInvalidArgument, "handshake is required")
-	}
-	return lifecycle.Stop(ctx, request)
-}
-
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	controller.mu.RLock()
-	active := controller.active
-	controller.mu.RUnlock()
-	if active == nil {
+	if _, active := controller.services.ActiveValue(); !active {
 		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
-	err := active.Use(request.Context(), func(_ context.Context, value *generationService) error {
+	err := controller.services.UseActive(request.Context(), func(_ context.Context, value *generationService) error {
 		value.service.ServeHTTP(writer, request)
 		return nil
 	})
@@ -195,11 +124,13 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 }
 
 func (controller *Controller) Status() Status {
+	request, _ := controller.Request()
+	activeService, active := controller.services.ActiveValue()
 	controller.mu.RLock()
 	defer controller.mu.RUnlock()
-	status := Status{Generation: controller.generation, Active: controller.active != nil, Metrics: controller.lastMetrics}
-	if controller.activeService != nil {
-		status.Metrics = controller.activeService.service.Metrics()
+	status := Status{Generation: request.Generation, Active: active, Metrics: controller.lastMetrics}
+	if active {
+		status.Metrics = activeService.service.Metrics()
 	}
 	return status
 }
@@ -220,62 +151,23 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		return err
 	}
 	owned := &generationService{service: instance}
-	handle, err := rpcplugin.BindHandle(generation, pluginsdk.PermissionHTTPOutbound, owned, controller.revokeService)
-	if err != nil {
+	if err := controller.services.Prepare(generation, pluginsdk.PermissionHTTPOutbound, owned); err != nil {
 		owned.close()
 		return err
 	}
-	controller.mu.Lock()
-	controller.prepared = handle
-	controller.preparedService = owned
-	controller.generation = generation.ID()
-	controller.mu.Unlock()
 	return nil
-}
-
-func (controller *Controller) revokeService(value *generationService) {
-	controller.mu.Lock()
-	if controller.activeService == value {
-		controller.active = nil
-		controller.activeService = nil
-	}
-	if controller.preparedService == value {
-		controller.prepared = nil
-		controller.preparedService = nil
-	}
-	controller.lastMetrics = value.service.Metrics()
-	controller.mu.Unlock()
-	value.close()
 }
 
 func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	if controller.prepared == nil {
-		return rpcplugin.ErrRevoked
-	}
-	controller.active = controller.prepared
-	controller.activeService = controller.preparedService
-	return nil
+	return controller.services.Activate(ctx)
 }
 
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
-	controller.mu.Lock()
-	instance := controller.activeService
-	if instance == nil {
-		instance = controller.preparedService
-	}
-	controller.active = nil
-	controller.prepared = nil
-	controller.activeService = nil
-	controller.preparedService = nil
-	if instance != nil {
+	if instance, ok := controller.services.Clear(); ok {
+		controller.mu.Lock()
 		controller.lastMetrics = instance.service.Metrics()
+		controller.mu.Unlock()
 	}
-	controller.mu.Unlock()
 	return nil
 }
 
@@ -409,8 +301,4 @@ func imageTarSources(sources []registry.Source) map[string]imagetar.Source {
 		}
 	}
 	return mapped
-}
-
-func lifecycleFailure(code pluginsdk.ErrorCode, message string) pluginsdk.LifecycleResponse {
-	return pluginsdk.LifecycleResponse{Error: &pluginsdk.RuntimeError{Code: code, Message: message}}
 }

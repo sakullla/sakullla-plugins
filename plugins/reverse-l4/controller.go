@@ -10,8 +10,7 @@ import (
 	"sync"
 	"time"
 
-	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
-	"github.com/sakullla/sakullla-plugins/internal/rpcplugin"
+	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
 const (
@@ -31,13 +30,12 @@ type ControllerConfig struct {
 // session state. It never creates a Host resource contract; Activate remains
 // fail closed until the public SDK publishes typed L4 service handles.
 type Controller struct {
+	*rpcplugin.Adapter
 	mu        sync.Mutex
 	store     *MappingStore
 	sessions  map[string]*Session
 	clock     Clock
 	backoff   Backoff
-	request   pluginsdk.RPCHandshakeRequest
-	lifecycle *rpcplugin.Lifecycle
 	admission TypedHandleAdmission
 }
 
@@ -52,7 +50,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		config.Admission = publicSDKHandleAdmission{}
 	}
 	controller := &Controller{store: NewMappingStore(), sessions: make(map[string]*Session), clock: config.Clock, backoff: config.Backoff, admission: config.Admission}
-	lifecycle, err := rpcplugin.New(rpcplugin.Config{
+	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:   []string{"reverse-l4.mapping-owner"},
@@ -62,31 +60,8 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	controller.lifecycle = lifecycle
+	controller.Adapter = adapter
 	return controller, nil
-}
-
-func (controller *Controller) Handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
-	response, err := controller.lifecycle.Handshake(ctx, request)
-	if err != nil {
-		return response, err
-	}
-	controller.mu.Lock()
-	controller.request = request
-	controller.mu.Unlock()
-	return response, nil
-}
-
-func (controller *Controller) Prepare(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Prepare(ctx, request)
-}
-
-func (controller *Controller) Activate(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Activate(ctx, request)
-}
-
-func (controller *Controller) Stop(ctx context.Context, request pluginsdk.LifecycleRequest) pluginsdk.LifecycleResponse {
-	return controller.lifecycle.Stop(ctx, request)
 }
 
 func (controller *Controller) prepare(_ context.Context, generation *rpcplugin.Generation, config []byte) error {
@@ -141,8 +116,8 @@ func requireJSONEOF(decoder *json.Decoder) error {
 }
 
 func (controller *Controller) activate(ctx context.Context, _ *rpcplugin.Generation) error {
+	request, _ := controller.Request()
 	controller.mu.Lock()
-	request := controller.request
 	mappings := controller.store.List()
 	controller.mu.Unlock()
 	if err := controller.admission.Admit(ctx, request, mappings); err != nil {

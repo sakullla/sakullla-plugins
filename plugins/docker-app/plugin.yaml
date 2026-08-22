@@ -27,9 +27,9 @@ metadata:
   ui.nav.group: 基础设施
   ui.nav.label: Docker 应用
 assets:
-  - ui/index.html
-  - ui/app.js
-  - ui/style.css
+  - assets/ui/index.html
+  - assets/ui/app.js
+  - assets/ui/style.css
 http_backend_providers:
   - id: default
     display_name: Docker 应用

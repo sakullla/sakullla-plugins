@@ -79,8 +79,8 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: docker-app") {
 		t.Fatalf("plugin.yaml must register a plugin-owned UI route: %s", text)
 	}
-	if !strings.Contains(text, "ui/index.html") || !strings.Contains(text, "ui/app.js") {
-		t.Fatalf("plugin.yaml must ship ui/ frontend assets: %s", text)
+	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
+		t.Fatalf("plugin.yaml must ship frontend files below assets/: %s", text)
 	}
 	if strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") {
 		t.Fatalf("plugin.yaml still gates Docker API or local-only install: %s", text)

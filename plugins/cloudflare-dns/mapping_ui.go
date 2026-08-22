@@ -14,18 +14,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 //go:embed ui/*
 var mappingUIAssets embed.FS
 
 const (
-	mappingActorHeader       = "X-NRE-Actor"
-	mappingGroupHeader       = "X-NRE-Resource-Group"
-	mappingOperationHeader   = "X-NRE-Operation-Key"
+	mappingActorHeader       = pluginsdk.HeaderPluginActor
+	mappingGroupHeader       = pluginsdk.HeaderPluginResourceGroup
+	mappingOperationHeader   = pluginsdk.HeaderPluginOperationKey
 	internalDNSResolvePath   = "/.nre/providers/dns/token"
 	internalDNSVersionHeader = "X-NRE-DNS-Provider-Version"
-	mappingPageCSP           = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 
 type MappingView struct {
@@ -97,25 +98,13 @@ func (service *Service) probePermission(ctx context.Context, request ActionReque
 }
 
 func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Security-Policy", mappingPageCSP)
-	writer.Header().Set("Referrer-Policy", "no-referrer")
-	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
 	path := request.URL.Path
 	if path == internalDNSResolvePath {
 		service.serveInternalDNSResolve(writer, request)
 		return
 	}
-	if path == "/style.css" || path == "/app.js" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, mappingUIAssets, "ui"+path)
-		return
-	}
-	if path == "/" || path == "" {
-		service.serveMappingPage(writer, request)
+	if pluginsdk.ServePluginUIAsset(writer, request, mappingUIAssets, "ui") {
 		return
 	}
 	if path == "/api/mappings" {
@@ -189,25 +178,8 @@ func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request
 		writeMappingJSON(writer, http.StatusNotFound, internalDNSResolveResponse{Error: ErrTokenUnavailable.Error()})
 		return
 	}
-	writer.Header().Set("Content-Security-Policy", mappingPageCSP)
-	writer.Header().Set("Referrer-Policy", "no-referrer")
-	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	if request.URL.Path == "/style.css" || request.URL.Path == "/app.js" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, mappingUIAssets, "ui"+request.URL.Path)
-		return
-	}
-	if request.URL.Path == "/" || request.URL.Path == "" {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		http.ServeFileFS(writer, request, mappingUIAssets, "ui/index.html")
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	if pluginsdk.ServePluginUIAsset(writer, request, mappingUIAssets, "ui") {
 		return
 	}
 	writeMappingJSON(writer, http.StatusServiceUnavailable, mappingAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
@@ -232,15 +204,6 @@ func parseMappingAPIPath(path string) (suffix, action string, ok bool) {
 	default:
 		return "", "", false
 	}
-}
-
-func (service *Service) serveMappingPage(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet && request.Method != http.MethodHead {
-		writer.Header().Set("Allow", "GET, HEAD")
-		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	http.ServeFileFS(writer, request, mappingUIAssets, "ui/index.html")
 }
 
 func (service *Service) serveMappingCollection(writer http.ResponseWriter, request *http.Request) {
@@ -409,9 +372,7 @@ func mappingViews(mappings []TokenMapping) []MappingView {
 }
 
 func writeMappingJSON(writer http.ResponseWriter, status int, body any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(body)
+	_ = pluginsdk.WritePluginUIJSON(writer, status, body)
 }
 
 func mappingStatus(err error) int {
