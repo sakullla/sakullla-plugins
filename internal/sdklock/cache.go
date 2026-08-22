@@ -228,21 +228,36 @@ func toolchainIdentity(ctx context.Context) (string, string, string, error) {
 }
 
 func commandEnvironmentDigest(commandName string) string {
+	return environmentDigest(runtime.GOOS, commandEnvironment(commandName))
+}
+
+func environmentDigest(goos string, environment []string) string {
+	type environmentEntry struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
 	values := make(map[string]string)
-	for _, entry := range commandEnvironment(commandName) {
-		key, _, _ := strings.Cut(entry, "=")
-		values[strings.ToUpper(key)] = entry
+	for _, entry := range environment {
+		key, value, _ := strings.Cut(entry, "=")
+		if goos == "windows" {
+			key = strings.ToUpper(key)
+		}
+		values[key] = value
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	canonical := make([]string, 0, len(keys))
+	canonical := make([]environmentEntry, 0, len(keys))
 	for _, key := range keys {
-		canonical = append(canonical, key+"="+values[key])
+		canonical = append(canonical, environmentEntry{Key: key, Value: values[key]})
 	}
-	digest := sha256.Sum256([]byte(strings.Join(canonical, "\n")))
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		panic(err)
+	}
+	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }
 

@@ -47,16 +47,16 @@ results on the measurement host:
 
 | Command | Sample | Exit status | Wall-clock |
 | --- | ---: | ---: | ---: |
-| IP Policy reproducible build | 1 | 0 | 2.751 s |
-| IP Policy reproducible build | 2 | 0 | 2.950 s |
-| IP Policy reproducible build | 3 | 0 | 2.811 s |
-| SDK capability verification | 1 | 0 | 2.002 s |
-| SDK capability verification | 2 | 0 | 1.096 s |
-| SDK capability verification | 3 | 0 | 1.060 s |
+| IP Policy reproducible build | 1 | 0 | 3.252 s |
+| IP Policy reproducible build | 2 | 0 | 3.208 s |
+| IP Policy reproducible build | 3 | 0 | 3.376 s |
+| SDK capability verification | 1 | 0 | 2.087 s |
+| SDK capability verification | 2 | 0 | 1.098 s |
+| SDK capability verification | 3 | 0 | 1.109 s |
 
 Every measured invocation exited successfully and remained below the 10.000 s
 prewarm target. The unmeasured cache-populating runs took 46.423 s for the IP
-Policy reproducible build and 60.131 s for SDK capability verification; these
+Policy reproducible build and 52.525 s for SDK capability verification; these
 are cold/cache-miss observations and are not part of the prewarm acceptance
 samples.
 

@@ -102,6 +102,24 @@ func TestGoToolchainIdentityBindsEffectiveCommandEnvironment(t *testing.T) {
 	}
 }
 
+func TestEnvironmentDigestPreservesPlatformKeySemanticsAndEncoding(t *testing.T) {
+	unixBefore := environmentDigest("linux", []string{"CGO_ENABLED=0", "cgo_enabled=mask"})
+	unixAfter := environmentDigest("linux", []string{"CGO_ENABLED=1", "cgo_enabled=mask"})
+	if unixBefore == unixAfter {
+		t.Fatal("Unix case-distinct environment key masked an effective setting change")
+	}
+	windowsBefore := environmentDigest("windows", []string{"CGO_ENABLED=0", "cgo_enabled=mask"})
+	windowsAfter := environmentDigest("windows", []string{"CGO_ENABLED=1", "cgo_enabled=mask"})
+	if windowsBefore != windowsAfter {
+		t.Fatal("Windows case-insensitive duplicate keys did not use last-value semantics")
+	}
+	joinedValue := environmentDigest("linux", []string{"A=x\nB=y"})
+	separateValues := environmentDigest("linux", []string{"A=x", "B=y"})
+	if joinedValue == separateValues {
+		t.Fatal("environment digest encoding is ambiguous across entry boundaries")
+	}
+}
+
 func TestVerificationCacheRepairsCheckoutAndResultDamage(t *testing.T) {
 	_, workspace, lock := newVerificationCacheFixture(t)
 	var executions atomic.Int32
