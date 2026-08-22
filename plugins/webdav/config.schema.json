@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["password"],
+  "properties": {
+    "password": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "title": "共享口令",
+      "description": "保护发布入口上的网页与 WebDAV。"
+    },
+    "root_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "title": "共享根目录",
+      "description": "可选的本机绝对目录。缺省时使用实例自有 share 目录。"
+    }
+  }
+}

@@ -155,6 +155,7 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		"reverse-l4":          {name: "四层反代"},
 		"shadowsocks-server":  {name: "Shadowsocks 服务"},
 		"waf":                 {name: "Web 防火墙", declaredUI: true},
+		"webdav":              {name: "文件共享"},
 	}
 	pluginsRoot := filepath.Join("..", "..", "plugins")
 	for id, want := range expected {
@@ -180,6 +181,22 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		if id == "accelerator-sources" {
 			if len(manifest.HTTPBackendProviders) != 1 || manifest.HTTPBackendProviders[0].ID != "default" || manifest.HTTPBackendProviders[0].DisplayName != "资源加速" {
 				t.Fatalf("accelerator-sources provider must stay default/资源加速: %#v", manifest.HTTPBackendProviders)
+			}
+		}
+		if id == "webdav" {
+			if manifest.Runtime.HostScope != "agent" {
+				t.Fatalf("webdav host_scope = %q, want agent", manifest.Runtime.HostScope)
+			}
+			if len(manifest.HTTPBackendProviders) != 1 || manifest.HTTPBackendProviders[0].ID != "default" || manifest.HTTPBackendProviders[0].DisplayName != "文件共享" {
+				t.Fatalf("webdav provider must stay default/文件共享: %#v", manifest.HTTPBackendProviders)
+			}
+			for _, point := range manifest.ExtensionPoints {
+				if point == "ui.route" || point == "resource.group" {
+					t.Fatalf("webdav must not declare %s", point)
+				}
+			}
+			if manifest.UIRouteID != "" || manifest.ResourceGroupID != "" {
+				t.Fatalf("webdav must not declare ui.route or resource.group identity: %#v", manifest)
 			}
 		}
 	}

@@ -1,0 +1,52 @@
+schema_version: 1
+id: webdav
+version: 0.1.0
+name: 文件共享
+description: 在发布的自有域名上提供网页文件管理与 WebDAV 共享
+compatibility:
+  host: "*"
+  agent: "*"
+runtime:
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: agent
+  entry: webdav
+artifacts:
+  - path: artifacts/linux-amd64/webdav
+    sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    size: 1
+    mode: executable
+    goos: linux
+    goarch: amd64
+extension_points:
+  - http.backend-provider
+http_backend_providers:
+  - id: default
+    display_name: 文件共享
+permissions:
+  - name: http.outbound
+config_schema: config.schema.json
+resource_budget:
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
+failure_policy:
+  on_error: fail-closed
+  on_budget: fail-closed
+  restart: on-failure
+  core_fallback: preserve
+signature:
+  algorithm: ed25519
+  key_id: sakullla-official-root-2026
+  file: signature.json
+cleanup:
+  instances: delete
+  config: delete
+  owned_data: delete
+  grants: delete
+  shared_refs: retain
+  audit_events: retain
