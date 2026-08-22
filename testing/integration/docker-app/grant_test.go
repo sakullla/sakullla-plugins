@@ -73,17 +73,20 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(manifest)
-	if !strings.Contains(text, "host_scope: agent") || !strings.Contains(text, `agent: "*"`) {
-		t.Fatalf("plugin.yaml is not per-agent / non-local: %s", text)
+	if !strings.Contains(text, "host_scope: control-plane") || !strings.Contains(text, `agent: "*"`) {
+		t.Fatalf("plugin.yaml is not control-plane / non-local: %s", text)
 	}
 	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: docker-app") {
 		t.Fatalf("plugin.yaml must register a plugin-owned UI route: %s", text)
 	}
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: docker-app") {
+		t.Fatalf("plugin.yaml must register a resource-group catalog: %s", text)
+	}
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatalf("plugin.yaml must ship frontend files below assets/: %s", text)
 	}
-	if strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") {
-		t.Fatalf("plugin.yaml still gates Docker API or local-only install: %s", text)
+	if strings.Contains(text, "host_scope: agent") || strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") || strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
+		t.Fatalf("plugin.yaml still gates Docker API, agent install, or HTTP backend publish: %s", text)
 	}
 
 	schemaBytes, err := os.ReadFile(filepath.Join(pluginDir, "config.schema.json"))
@@ -106,6 +109,13 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if injected, _ := apps["hostInjected"].(bool); !injected {
 		t.Fatal("apps must be hostInjected so the generic schema form is not the product UI")
 	}
+	resourceGroup, _ := properties["resource_group_ref"].(map[string]any)
+	if injected, _ := resourceGroup["hostInjected"].(bool); !injected {
+		t.Fatal("resource_group_ref must be hostInjected")
+	}
+	if _, hasTitle := resourceGroup["title"]; hasTitle {
+		t.Fatal("resource_group_ref must not carry a form title")
+	}
 	if _, hasDefault := apps["default"]; !hasDefault {
 		t.Fatal("hostInjected apps must declare a schema default so omitted configure payloads stay valid")
 	}
@@ -127,15 +137,20 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	accepted, err := dockerapp.ParseConfiguration([]byte(`{"apps":[],"resource_group_ref":"resource-group/docker-app"}`))
+	if err != nil || accepted.ResourceGroupRef != dockerapp.DeclaredResourceGroupRef {
+		t.Fatalf("host-injected resource_group_ref rejected: %#v err=%v", accepted, err)
+	}
 	for _, document := range []string{
 		`{"apps":[],"docker_host":"tcp://127.0.0.1:2375"}`,
 		`{"apps":[],"socket":"/var/run/docker.sock"}`,
 		`{"apps":[],"unix_socket":"/var/run/docker.sock"}`,
 		`{"apps":[],"api_key":"secret"}`,
 		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:1.27\n","generation":"generation-1","docker_host":"tcp://127.0.0.1:2375"}]}`,
+		`{"apps":[],"resource_group_ref":"RESOURCE-GROUP/docker-app"}`,
 	} {
 		if _, err := dockerapp.ParseConfiguration([]byte(document)); err == nil {
-			t.Fatalf("overlay accepted Docker connection field: %s", document)
+			t.Fatalf("overlay accepted Docker connection field or invalid resource_group_ref: %s", document)
 		}
 	}
 }

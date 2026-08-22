@@ -15,10 +15,14 @@ intents; the included map store is a test model only. Admission is a prepared
 transaction: controller-owned Commit runs only after registration, and its
 non-blocking Abort compensates generation revoke or deadline failure.
 
-The plugin declares `ui.route` with `ui_route_id: docker-app`. The host
-mounts the page at `/panel-api/plugins/<ui_route_id>/` from plugin nav
-metadata; this plugin does not declare `resource.group` or `ui.schema.json`.
-Compose YAML is edited on that page, not on the generic config form.
+The plugin declares `ui.route` and `resource.group` in `plugin.yaml`, with
+`host_scope: control-plane`. The host mounts the page at
+`/panel-api/plugins/<ui_route_id>/` and lists the resource group from
+`resource_group_id` plus `resource.group.*` metadata. Instance
+`resource_group_ref` is host-injected and must match `resource.group.ref`.
+This plugin does not declare `http.backend-provider`,
+`http_backend_providers`, or `ui.schema.json`. Compose YAML is edited on
+the resource-group page, not on the generic config form.
 
 The canonical `nre:rpc/v1` manifest and executable support a CI handshake
 self-check. Required grants are `http.rule` and `ui.dynamic`. Docker/Compose

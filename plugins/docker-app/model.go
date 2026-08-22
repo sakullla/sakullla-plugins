@@ -9,18 +9,22 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 )
 
 const (
-	PluginID           = "docker-app"
-	PluginVersion      = "0.1.2"
-	MaxApps            = 128
-	MaxDiscoveries     = 512
-	MaxComposeServices = 128
-	MaxCollectionItems = 256
+	PluginID                 = "docker-app"
+	PluginVersion            = "0.1.2"
+	DeclaredResourceGroupRef = "resource-group/docker-app"
+	MaxApps                  = 128
+	MaxDiscoveries           = 512
+	MaxComposeServices       = 128
+	MaxCollectionItems       = 256
 )
+
+var resourceGroupRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 
 var (
 	ErrTypedHandlesUnavailable = errors.New("canonical public SDK has no typed Docker, Compose, HTTP-rule, or dynamic UI handles")
@@ -74,12 +78,16 @@ func (app App) Validate() error {
 }
 
 type Configuration struct {
-	Apps           []App  `json:"apps"`
-	RegistryMirror string `json:"registry_mirror,omitempty"`
+	Apps             []App  `json:"apps"`
+	RegistryMirror   string `json:"registry_mirror,omitempty"`
+	ResourceGroupRef string `json:"resource_group_ref,omitempty"`
 }
 
 func (configuration Configuration) Validate() error {
 	if err := validateRegistryMirror(configuration.RegistryMirror); err != nil {
+		return err
+	}
+	if err := validateResourceGroupRef(configuration.ResourceGroupRef); err != nil {
 		return err
 	}
 	if len(configuration.Apps) > MaxApps {
@@ -99,7 +107,8 @@ func (configuration Configuration) Validate() error {
 }
 
 // ParseConfiguration loads one overlay document. Any unknown field, missing
-// apps, or invalid registry_mirror rejects the whole document.
+// apps, invalid registry_mirror, or invalid resource_group_ref rejects the
+// whole document.
 func ParseConfiguration(wire []byte) (Configuration, error) {
 	if len(wire) > MaxConfigBytes {
 		return Configuration{}, fmt.Errorf("%w: config exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
@@ -107,8 +116,9 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 	decoder := json.NewDecoder(bytes.NewReader(wire))
 	decoder.DisallowUnknownFields()
 	var document struct {
-		Apps           *[]App `json:"apps"`
-		RegistryMirror string `json:"registry_mirror"`
+		Apps             *[]App `json:"apps"`
+		RegistryMirror   string `json:"registry_mirror"`
+		ResourceGroupRef string `json:"resource_group_ref"`
 	}
 	if err := decoder.Decode(&document); err != nil {
 		return Configuration{}, fmt.Errorf("config JSON is invalid: %w", err)
@@ -120,7 +130,7 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 	if document.Apps == nil {
 		return Configuration{}, errors.New("config requires apps")
 	}
-	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror}
+	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror, ResourceGroupRef: document.ResourceGroupRef}
 	for index := range configuration.Apps {
 		if err := configuration.Apps[index].bindCompose(); err != nil {
 			return Configuration{}, err
@@ -159,6 +169,16 @@ func (app *App) bindCompose() error {
 		return err
 	}
 	app.SecretRefs = normalized
+	return nil
+}
+
+func validateResourceGroupRef(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !resourceGroupRefPattern.MatchString(value) {
+		return errors.New("resource_group_ref is invalid")
+	}
 	return nil
 }
 

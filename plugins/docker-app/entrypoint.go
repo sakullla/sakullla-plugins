@@ -25,9 +25,6 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 			})
 		},
 		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(ControllerConfig{}) },
-		Services: pluginsdk.RPCServiceDeclaration{
-			UI: true, UIOptional: true,
-			UnavailableHTTPBackendProviders: map[string]string{"default": "docker application provider is unavailable"},
-		},
+		Services: pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true},
 	})
 }

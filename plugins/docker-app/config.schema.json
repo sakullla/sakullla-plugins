@@ -55,6 +55,12 @@
       "maxLength": 512,
       "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$",
       "description": "可选镜像加速。"
+    },
+    "resource_group_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
     }
   }
 }

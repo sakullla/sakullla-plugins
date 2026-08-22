@@ -24,14 +24,41 @@ func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	if !strings.Contains(text, "ui.nav.group: 基础设施") || !strings.Contains(text, "ui.nav.label: Docker 应用") {
 		t.Fatalf("plugin.yaml must declare host nav metadata: %s", text)
 	}
-	if strings.Contains(text, "resource.group") || strings.Contains(text, "resource_group_id:") {
-		t.Fatal("docker-app UI must not use a resource-group catalog")
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: docker-app") {
+		t.Fatalf("plugin.yaml must declare resource.group support: %s", text)
+	}
+	if !strings.Contains(text, "host_scope: control-plane") {
+		t.Fatalf("plugin.yaml must declare control-plane host_scope: %s", text)
+	}
+	if strings.Contains(text, "host_scope: agent") || strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
+		t.Fatal("docker-app must not use agent host_scope or install-time HTTP backend publish")
 	}
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatal("plugin.yaml must declare frontend files below assets/")
 	}
 	if strings.Contains(text, "ui_schema:") {
 		t.Fatal("compose UI must not use host config ui_schema")
+	}
+}
+
+func TestPluginYAMLDeclaresResourceGroupForHostCatalog(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"resource.group.ref: resource-group/docker-app",
+		"resource.group.label: Docker 应用",
+		"resource.group.description: 在组内管理 compose 应用与 HTTP 入口",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plugin.yaml must declare %q: %s", want, text)
+		}
+	}
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: docker-app") {
+		t.Fatal("plugin.yaml must declare resource.group as an SDK extension point")
 	}
 }
 

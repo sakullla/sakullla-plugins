@@ -71,21 +71,22 @@ type ControllerConfig struct {
 
 type Controller struct {
 	*rpcplugin.Adapter
-	mu             sync.Mutex
-	apps           []App
-	registryMirror string
-	admission      TypedHandleAdmission
-	prepareGate    func(context.Context) error
-	commit         *rpcplugin.Handle[*commitEpoch]
-	epoch          *commitEpoch
-	uiEngine       EngineObservation
-	uiApply        AppApplyExecutor
-	uiStart        StartExecutor
-	uiRestart      RestartExecutor
-	uiLogs         ServiceLogReader
-	uiRemove       AppRemoveExecutor
-	uiHTTPRule     HTTPRuleCreateHandle
-	uiAuditor      Auditor
+	mu               sync.Mutex
+	apps             []App
+	registryMirror   string
+	resourceGroupRef string
+	admission        TypedHandleAdmission
+	prepareGate      func(context.Context) error
+	commit           *rpcplugin.Handle[*commitEpoch]
+	epoch            *commitEpoch
+	uiEngine         EngineObservation
+	uiApply          AppApplyExecutor
+	uiStart          StartExecutor
+	uiRestart        RestartExecutor
+	uiLogs           ServiceLogReader
+	uiRemove         AppRemoveExecutor
+	uiHTTPRule       HTTPRuleCreateHandle
+	uiAuditor        Auditor
 }
 
 type commitEpoch struct {
@@ -111,7 +112,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:      []string{"docker-app.business-model"},
 		RequiredGrants:    requiredGrants(),
-		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1, pluginsdk.RPCFeatureHTTPBackendProviderV1},
+		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
 		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
@@ -130,6 +131,12 @@ func (controller *Controller) RegistryMirror() string {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	return controller.registryMirror
+}
+
+func (controller *Controller) ResourceGroupRef() string {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.resourceGroupRef
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, config []byte) error {
@@ -155,6 +162,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		if controller.epoch == epoch {
 			controller.apps = nil
 			controller.registryMirror = ""
+			controller.resourceGroupRef = ""
 			controller.commit = nil
 			controller.epoch = nil
 		}
@@ -172,7 +180,11 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		if !epoch.live.Load() {
 			return rpcplugin.ErrRevoked
 		}
-		controller.apps, controller.registryMirror, controller.commit, controller.epoch = cloneApps(configuration.Apps), configuration.RegistryMirror, handle, epoch
+		controller.apps = cloneApps(configuration.Apps)
+		controller.registryMirror = configuration.RegistryMirror
+		controller.resourceGroupRef = configuration.ResourceGroupRef
+		controller.commit = handle
+		controller.epoch = epoch
 		return nil
 	})
 }
@@ -211,6 +223,7 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.mu.Lock()
 	controller.apps = nil
 	controller.registryMirror = ""
+	controller.resourceGroupRef = ""
 	controller.commit = nil
 	controller.epoch = nil
 	controller.mu.Unlock()

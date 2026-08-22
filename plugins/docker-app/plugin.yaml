@@ -9,7 +9,7 @@ compatibility:
 runtime:
   kind: rpc-service
   abi: nre:rpc/v1
-  host_scope: agent
+  host_scope: control-plane
   entry: docker-app
 artifacts:
   - path: artifacts/linux-amd64/docker-app
@@ -20,19 +20,20 @@ artifacts:
     goarch: amd64
 extension_points:
   - container.provider
-  - http.backend-provider
   - ui.route
+  - resource.group
 ui_route_id: docker-app
+resource_group_id: docker-app
 metadata:
   ui.nav.group: 基础设施
   ui.nav.label: Docker 应用
+  resource.group.ref: resource-group/docker-app
+  resource.group.label: Docker 应用
+  resource.group.description: 在组内管理 compose 应用与 HTTP 入口
 assets:
   - assets/ui/index.html
   - assets/ui/app.js
   - assets/ui/style.css
-http_backend_providers:
-  - id: default
-    display_name: Docker 应用
 permissions:
   - name: http.rule
   - name: ui.dynamic
