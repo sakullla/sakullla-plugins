@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "code_dependencies": [
+    {
+      "name": "github.com/klauspost/compress",
+      "version": "v1.19.2",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+      "version": "v0.7.11",
+      "license": "GPL-3.0-only"
+    },
+    {
+      "name": "github.com/santhosh-tekuri/jsonschema/v6",
+      "version": "v6.0.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/tetratelabs/wazero",
+      "version": "v1.12.0",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "golang.org/x/mod",
+      "version": "v0.40.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/net",
+      "version": "v0.26.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/sys",
+      "version": "v0.44.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/text",
+      "version": "v0.16.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20240604185151-ef581f913117",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "google.golang.org/grpc",
+      "version": "v1.66.2",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "google.golang.org/protobuf",
+      "version": "v1.34.2",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "license": "MIT AND Apache-2.0"
+    }
+  ],
+  "data_dependencies": []
+}

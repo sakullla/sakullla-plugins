@@ -1,0 +1,104 @@
+{
+  "schema_version": 2,
+  "repository_commit": "ab680775a9e3c639ce29c61d75c3044e092ac3d1",
+  "market_sha256": "19973195c0da8e8ad95a4ef8094b6afa3b8ce5d8ef549fb5312543484c2995f9",
+  "sdk_repository_commit": "2dd162579765d7b30e6e80f77b405d714f0a7cb4",
+  "sdk_descriptor_sha256": "47c0dc758ccc30fb596dfe078419aeb1effe8b266ed28d729c64334a09881628",
+  "sdk_abis": [
+    "nre:policy/v1",
+    "nre:rpc/v1"
+  ],
+  "signer_identity": "sakullla-official-root-2026",
+  "packages": [
+    {
+      "id": "accelerator-sources",
+      "version": "0.1.3",
+      "package_sha256": "55ff5e03bf00050420f4518e43274b8346a1be80070675c616dddc5a80bf2070",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/accelerator-sources-0.1.3-ef893380dc08bc645d17e3aa861dd1d4ee14d0bd6bb57955d309d1c8a9c78a64.nrepkg",
+      "blob_sha256": "ef893380dc08bc645d17e3aa861dd1d4ee14d0bd6bb57955d309d1c8a9c78a64",
+      "blob_size": 11322059,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "cloudflare-dns",
+      "version": "0.1.12",
+      "package_sha256": "13a12f496312e9686259141fbede32c61b8fdcea1767b85f1f70927aee80f03a",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/cloudflare-dns-0.1.12-32df27a761577f3cbe1d066da5022282e7dad0a4c56c1fd4b96f22acbba8b0da.nrepkg",
+      "blob_sha256": "32df27a761577f3cbe1d066da5022282e7dad0a4c56c1fd4b96f22acbba8b0da",
+      "blob_size": 10929534,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "docker-app",
+      "version": "0.1.3",
+      "package_sha256": "4a7dcca452249188b80ff76fddd35c92bcaad9e45585e4fc6379cabc66ee151a",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/docker-app-0.1.3-6296d5ec7e743b1461e4dfe4f423ce3324f7fc03f31210c455550a9d37690994.nrepkg",
+      "blob_sha256": "6296d5ec7e743b1461e4dfe4f423ce3324f7fc03f31210c455550a9d37690994",
+      "blob_size": 11032988,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "doh",
+      "version": "0.1.0",
+      "package_sha256": "51513ad4d149031efbe63a52938f3f0e3265cf3fc6ccc2a36c0ac9ad263a93fe",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/doh-0.1.0-e1214df9a702486aebbba4d61d4b6243f7c0c684d3ba0f526982d8c8b3e351dc.nrepkg",
+      "blob_sha256": "e1214df9a702486aebbba4d61d4b6243f7c0c684d3ba0f526982d8c8b3e351dc",
+      "blob_size": 10782874,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "ip-policy",
+      "version": "0.1.0",
+      "package_sha256": "865431b7bced9a0539669b8217f8562180bc0e0c97434590952fa1446d695031",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/ip-policy-0.1.0-89a256f22b06ab0817d47138b9c4459442e576e4f0695d7e1aeef55a84874370.nrepkg",
+      "blob_sha256": "89a256f22b06ab0817d47138b9c4459442e576e4f0695d7e1aeef55a84874370",
+      "blob_size": 6729,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "rate-limit",
+      "version": "0.1.0",
+      "package_sha256": "660d74f2dc6475a69e92370ba2194c376d02b89ab488852b96324234cf15e399",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/rate-limit-0.1.0-2343ec2e1da9a8f2db7b7edaf1f3f850985faaad7129956395b81113a5201435.nrepkg",
+      "blob_sha256": "2343ec2e1da9a8f2db7b7edaf1f3f850985faaad7129956395b81113a5201435",
+      "blob_size": 6962,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "reverse-l4",
+      "version": "0.1.0",
+      "package_sha256": "67e0b986a71e44e34db7ac2936809845d66c3f38cb4e7fb17a0938a47a2b63d6",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/reverse-l4-0.1.0-3ad69581936d47bbcc127e36ec51c67b29dac3d7c6c7ec864338240765818092.nrepkg",
+      "blob_sha256": "3ad69581936d47bbcc127e36ec51c67b29dac3d7c6c7ec864338240765818092",
+      "blob_size": 10266931,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "shadowsocks-server",
+      "version": "0.1.0",
+      "package_sha256": "2a2eee06dbba0deea24f50a8406646ee704071933eceec814efd4d43e536fb4b",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/shadowsocks-server-0.1.0-6d2e8b5af75d6a4f2613788eed8d22b2f69bf8d8ea7b9c5c2c7e1932fb2932b3.nrepkg",
+      "blob_sha256": "6d2e8b5af75d6a4f2613788eed8d22b2f69bf8d8ea7b9c5c2c7e1932fb2932b3",
+      "blob_size": 10820341,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "waf",
+      "version": "0.1.0",
+      "package_sha256": "87561659817c026dc1a101347dd8a2b8c9dddd428f11e6cdb1e82397286c3306",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/waf-0.1.0-09798c9df02599b9e4aa4909b8f80587430104b695ea2a1ddcc453dda6e38d9a.nrepkg",
+      "blob_sha256": "09798c9df02599b9e4aa4909b8f80587430104b695ea2a1ddcc453dda6e38d9a",
+      "blob_size": 14291,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "webdav",
+      "version": "0.1.0",
+      "package_sha256": "e43d9734b08ee8373b385557d4a3cb68dabd18ae5b9f5cd484faae1293f2c1d1",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-ab680775a9e3c639ce29c61d75c3044e092ac3d1/webdav-0.1.0-2a8fd5fcc1bcc70b8455ddae91c2d6f1baf74c2e64f28c17675a340b6271925c.nrepkg",
+      "blob_sha256": "2a8fd5fcc1bcc70b8455ddae91c2d6f1baf74c2e64f28c17675a340b6271925c",
+      "blob_size": 10612661,
+      "blob_format": "tar+gzip-v1"
+    }
+  ]
+}
