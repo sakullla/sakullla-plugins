@@ -706,7 +706,7 @@ func TestDockerFencingLeaseExpiryRejectsOldWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := &rolloutFake{}
-	if err := host.Pull(context.Background(), oldLease.Value.FencingToken, "image:old"); err != nil {
+	if err := host.Pull(context.Background(), oldLease.Value.FencingToken, dockerapp.App{ID: "media", Image: "image:old"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Second)
@@ -1151,7 +1151,7 @@ func (fake *rolloutFake) step(name string) error {
 	}
 	return nil
 }
-func (fake *rolloutFake) Pull(_ context.Context, fence uint64, _ string) error {
+func (fake *rolloutFake) Pull(_ context.Context, fence uint64, _ dockerapp.App) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}

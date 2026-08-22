@@ -423,6 +423,45 @@ func TestAppUIDeploysRelativeBindsAgainstWorkDir(t *testing.T) {
 	}
 }
 
+func TestAppUIRejectsOfflineAgentMutations(t *testing.T) {
+	t.Parallel()
+	catalog := NewReportedEngineCatalog()
+	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"})
+	controller := newUIControllerWithSource(t, catalog, `{"apps":[]}`)
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK || len(controller.Apps()) != 1 {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: false, Installed: true, Version: "27.1.1"})
+
+	for _, path := range []string{
+		"/api/apps/media/stop",
+		"/api/apps/media/start",
+		"/api/apps/media/restart",
+		"/api/apps/media/update",
+	} {
+		denied := httptest.NewRecorder()
+		controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, path, `{}`))
+		if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), ErrAgentOffline.Error()) {
+			t.Fatalf("%s status=%d body=%s", path, denied.Code, denied.Body.String())
+		}
+	}
+	logs := httptest.NewRecorder()
+	controller.ServeHTTP(logs, uiJSONRequest(http.MethodPost, "/api/apps/media/logs", `{"service":"web"}`))
+	if logs.Code != http.StatusConflict || !strings.Contains(logs.Body.String(), ErrAgentOffline.Error()) {
+		t.Fatalf("logs status=%d body=%s", logs.Code, logs.Body.String())
+	}
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusConflict || !strings.Contains(deleted.Body.String(), ErrAgentOffline.Error()) {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" || controller.Apps()[0].Image != "nginx:1.27" {
+		t.Fatalf("offline mutations changed apps=%#v", controller.Apps())
+	}
+}
+
 func TestAppUIStartStopRestartLogsAndConfirmedDelete(t *testing.T) {
 	t.Parallel()
 	controller := newUIController(t)
@@ -892,39 +931,39 @@ func (runtime *uiTestRuntime) ApplyApp(_ context.Context, app App) error {
 	return nil
 }
 
-func (runtime *uiTestRuntime) Start(_ context.Context, appID string) error {
-	if _, ok := runtime.applied[appID]; !ok {
+func (runtime *uiTestRuntime) Start(_ context.Context, app App) error {
+	if _, ok := runtime.applied[app.ID]; !ok {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = true
+	runtime.running[app.ID] = true
 	return nil
 }
 
-func (runtime *uiTestRuntime) Stop(_ context.Context, appID string) error {
-	if _, ok := runtime.applied[appID]; !ok {
+func (runtime *uiTestRuntime) Stop(_ context.Context, app App) error {
+	if _, ok := runtime.applied[app.ID]; !ok {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = false
+	runtime.running[app.ID] = false
 	return nil
 }
 
-func (runtime *uiTestRuntime) Restart(_ context.Context, appID string) error {
-	if _, ok := runtime.applied[appID]; !ok {
+func (runtime *uiTestRuntime) Restart(_ context.Context, app App) error {
+	if _, ok := runtime.applied[app.ID]; !ok {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = true
-	runtime.restarts[appID]++
+	runtime.running[app.ID] = true
+	runtime.restarts[app.ID]++
 	return nil
 }
 
-func (runtime *uiTestRuntime) ReadLogs(_ context.Context, appID, service string) (string, error) {
-	return runtime.logs[appID+"/"+service], nil
+func (runtime *uiTestRuntime) ReadLogs(_ context.Context, app App, service string) (string, error) {
+	return runtime.logs[app.ID+"/"+service], nil
 }
 
-func (runtime *uiTestRuntime) RemoveApp(_ context.Context, appID string) error {
-	delete(runtime.applied, appID)
-	delete(runtime.running, appID)
-	delete(runtime.logs, appID+"/web")
+func (runtime *uiTestRuntime) RemoveApp(_ context.Context, app App) error {
+	delete(runtime.applied, app.ID)
+	delete(runtime.running, app.ID)
+	delete(runtime.logs, app.ID+"/web")
 	return nil
 }
 
@@ -940,7 +979,7 @@ type uiTestRollout struct {
 	calls []string
 }
 
-func (fake *uiTestRollout) Pull(context.Context, uint64, string) error {
+func (fake *uiTestRollout) Pull(context.Context, uint64, App) error {
 	fake.calls = append(fake.calls, "pull")
 	return nil
 }

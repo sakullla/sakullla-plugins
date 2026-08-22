@@ -20,39 +20,39 @@ func (function AppApplyExecutorFunc) ApplyApp(ctx context.Context, app App) erro
 }
 
 type StartExecutor interface {
-	Start(context.Context, string) error
+	Start(context.Context, App) error
 }
-type StartExecutorFunc func(context.Context, string) error
+type StartExecutorFunc func(context.Context, App) error
 
-func (function StartExecutorFunc) Start(ctx context.Context, appID string) error {
-	return function(ctx, appID)
+func (function StartExecutorFunc) Start(ctx context.Context, app App) error {
+	return function(ctx, app)
 }
 
 type RestartExecutor interface {
-	Restart(context.Context, string) error
+	Restart(context.Context, App) error
 }
-type RestartExecutorFunc func(context.Context, string) error
+type RestartExecutorFunc func(context.Context, App) error
 
-func (function RestartExecutorFunc) Restart(ctx context.Context, appID string) error {
-	return function(ctx, appID)
+func (function RestartExecutorFunc) Restart(ctx context.Context, app App) error {
+	return function(ctx, app)
 }
 
 type ServiceLogReader interface {
-	ReadLogs(context.Context, string, string) (string, error)
+	ReadLogs(context.Context, App, string) (string, error)
 }
-type ServiceLogReaderFunc func(context.Context, string, string) (string, error)
+type ServiceLogReaderFunc func(context.Context, App, string) (string, error)
 
-func (function ServiceLogReaderFunc) ReadLogs(ctx context.Context, appID, service string) (string, error) {
-	return function(ctx, appID, service)
+func (function ServiceLogReaderFunc) ReadLogs(ctx context.Context, app App, service string) (string, error) {
+	return function(ctx, app, service)
 }
 
 type AppRemoveExecutor interface {
-	RemoveApp(context.Context, string) error
+	RemoveApp(context.Context, App) error
 }
-type AppRemoveExecutorFunc func(context.Context, string) error
+type AppRemoveExecutorFunc func(context.Context, App) error
 
-func (function AppRemoveExecutorFunc) RemoveApp(ctx context.Context, appID string) error {
-	return function(ctx, appID)
+func (function AppRemoveExecutorFunc) RemoveApp(ctx context.Context, app App) error {
+	return function(ctx, app)
 }
 
 func AppFromCompose(appID, generation, document string) (App, error) {
@@ -171,7 +171,7 @@ func StartManaged(ctx context.Context, app App, executor StartExecutor, auditor 
 		audit(auditor, AuditRecord{Action: "app.start", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	if err := executor.Start(ctx, app.ID); err != nil {
+	if err := executor.Start(ctx, app); err != nil {
 		audit(auditor, AuditRecord{Action: "app.start", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return safeFailure(ErrOperationFailed, err)
 	}
@@ -187,7 +187,7 @@ func RestartManaged(ctx context.Context, app App, executor RestartExecutor, audi
 		audit(auditor, AuditRecord{Action: "app.restart", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	if err := executor.Restart(ctx, app.ID); err != nil {
+	if err := executor.Restart(ctx, app); err != nil {
 		audit(auditor, AuditRecord{Action: "app.restart", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return safeFailure(ErrOperationFailed, err)
 	}
@@ -221,7 +221,7 @@ func ReadServiceLogs(ctx context.Context, app App, service string, reader Servic
 			return "", ErrUnknownService
 		}
 	}
-	text, err := reader.ReadLogs(ctx, app.ID, service)
+	text, err := reader.ReadLogs(ctx, app, service)
 	if err != nil {
 		audit(auditor, AuditRecord{Action: "app.logs", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return "", safeFailure(ErrOperationFailed, err)
@@ -243,7 +243,14 @@ func DeleteManagedApp(ctx context.Context, apps []App, appID string, confirmed b
 		audit(auditor, AuditRecord{Action: "app.delete", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return preserved, ErrTypedHandlesUnavailable
 	}
-	if err := executor.RemoveApp(ctx, appID); err != nil {
+	target := App{ID: appID}
+	for _, existing := range apps {
+		if existing.ID == appID {
+			target = existing
+			break
+		}
+	}
+	if err := executor.RemoveApp(ctx, target); err != nil {
 		audit(auditor, AuditRecord{Action: "app.delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return preserved, safeFailure(ErrOperationFailed, err)
 	}

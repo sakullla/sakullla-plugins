@@ -124,14 +124,14 @@ func TestDockerAdoptCandidateStaysOutOfManagedUntilExplicitAdoptThenStopDelete(t
 	if err := dockerapp.StopManaged(context.Background(), app, nil, auditor); !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
 		t.Fatalf("missing stop executor err=%v", err)
 	}
-	if err := dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(_ context.Context, appID string) error {
-		stopped = append(stopped, appID)
+	if err := dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(_ context.Context, stoppedApp dockerapp.App) error {
+		stopped = append(stopped, stoppedApp.ID)
 		return nil
 	}), nil); !errors.Is(err, dockerapp.ErrAuditRequired) || len(stopped) != 0 {
 		t.Fatalf("missing stop auditor err=%v calls=%v", err, stopped)
 	}
-	if err := dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(_ context.Context, appID string) error {
-		stopped = append(stopped, appID)
+	if err := dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(_ context.Context, stoppedApp dockerapp.App) error {
+		stopped = append(stopped, stoppedApp.ID)
 		return nil
 	}), auditor); err != nil || len(stopped) != 1 || stopped[0] != app.ID {
 		t.Fatalf("stop err=%v calls=%v", err, stopped)
@@ -216,7 +216,7 @@ func TestDockerAdoptAndDockerRunKeepSecretRefsAndRedactUnsafeErrors(t *testing.T
 
 	var audits []dockerapp.AuditRecord
 	auditor := dockerapp.AuditorFunc(func(record dockerapp.AuditRecord) { audits = append(audits, record) })
-	err = dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(context.Context, string) error {
+	err = dockerapp.StopManaged(context.Background(), app, dockerapp.StopExecutorFunc(func(context.Context, dockerapp.App) error {
 		return &secretCause{message: "stop denied for " + adoptSecret}
 	}), auditor)
 	raw = nil

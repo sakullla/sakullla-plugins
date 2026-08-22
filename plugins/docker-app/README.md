@@ -32,6 +32,7 @@ or API key fields. Engine readiness is consumed from the generic host runtime
 (`agent.engine.report`: `online`, `installed`, `version`) and is not a
 connection form. Compose apply/start/stop/restart/logs/remove are dispatched
 through the same host runtime (`agent.compose`) with the target `agent_id`.
+Host HTTP rules use `http.rule`; image digest observation uses `agent.image`.
 Missing or unsupported handles fail closed; they never fall back to the
 control-plane `docker.socket` or `/var/run/docker.sock`. Offline or missing
 reports are not treated as ready. The resource-group page lists Agents, shows

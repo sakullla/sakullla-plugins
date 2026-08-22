@@ -135,7 +135,7 @@ type RuntimeState struct {
 // RolloutExecutor is a capability host boundary. It must reject every effect
 // whose fencing token is lower than the highest token observed for the app.
 type RolloutExecutor interface {
-	Pull(context.Context, uint64, string) error
+	Pull(context.Context, uint64, App) error
 	Start(context.Context, uint64, App) (string, error)
 	Ready(context.Context, uint64, string) error
 	Cutover(context.Context, uint64, string, string) error
@@ -554,7 +554,7 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhasePulling)
-	if err = r.Executor.Pull(ctx, record.Value.FencingToken, app.Image); err != nil {
+	if err = r.Executor.Pull(ctx, record.Value.FencingToken, app); err != nil {
 		return r.rollback(record, prior.Value, existed, "", false, err)
 	}
 	if record, err = r.intent(ctx, record, PhaseStarting, "", prior.Value.RuleTarget, ""); err != nil {

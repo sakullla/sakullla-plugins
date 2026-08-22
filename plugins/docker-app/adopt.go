@@ -44,12 +44,12 @@ type CatalogView struct {
 }
 
 type StopExecutor interface {
-	Stop(context.Context, string) error
+	Stop(context.Context, App) error
 }
-type StopExecutorFunc func(context.Context, string) error
+type StopExecutorFunc func(context.Context, App) error
 
-func (function StopExecutorFunc) Stop(ctx context.Context, appID string) error {
-	return function(ctx, appID)
+func (function StopExecutorFunc) Stop(ctx context.Context, app App) error {
+	return function(ctx, app)
 }
 
 // ParseComposeDocument turns pasted compose YAML into a risk plan and app.
@@ -260,7 +260,7 @@ func StopManaged(ctx context.Context, app App, executor StopExecutor, auditor Au
 		audit(auditor, AuditRecord{Action: "app.stop", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}
-	if err := executor.Stop(ctx, app.ID); err != nil {
+	if err := executor.Stop(ctx, app); err != nil {
 		audit(auditor, AuditRecord{Action: "app.stop", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return safeFailure(ErrOperationFailed, err)
 	}

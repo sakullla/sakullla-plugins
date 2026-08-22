@@ -12,6 +12,8 @@ import (
 const (
 	hostAgentEngineOperation  = "agent.engine.report"
 	hostAgentComposeOperation = "agent.compose"
+	hostAgentImageOperation   = "agent.image"
+	hostHTTPRuleOperation     = "http.rule"
 )
 
 type hostRuntimeCaller interface {
@@ -64,30 +66,130 @@ func (runtime *hostCapabilityRuntime) ApplyApp(ctx context.Context, app App) err
 	}, nil)
 }
 
-func (runtime *hostCapabilityRuntime) Start(ctx context.Context, appID string) error {
-	return runtime.compose(ctx, map[string]any{"action": "start", "app_id": appID}, nil)
+func (runtime *hostCapabilityRuntime) Start(ctx context.Context, app App) error {
+	return runtime.composeApp(ctx, app, map[string]any{"action": "start"}, nil)
 }
 
-func (runtime *hostCapabilityRuntime) Stop(ctx context.Context, appID string) error {
-	return runtime.compose(ctx, map[string]any{"action": "stop", "app_id": appID}, nil)
+func (runtime *hostCapabilityRuntime) Stop(ctx context.Context, app App) error {
+	return runtime.composeApp(ctx, app, map[string]any{"action": "stop"}, nil)
 }
 
-func (runtime *hostCapabilityRuntime) Restart(ctx context.Context, appID string) error {
-	return runtime.compose(ctx, map[string]any{"action": "restart", "app_id": appID}, nil)
+func (runtime *hostCapabilityRuntime) Restart(ctx context.Context, app App) error {
+	return runtime.composeApp(ctx, app, map[string]any{"action": "restart"}, nil)
 }
 
-func (runtime *hostCapabilityRuntime) ReadLogs(ctx context.Context, appID, service string) (string, error) {
+func (runtime *hostCapabilityRuntime) ReadLogs(ctx context.Context, app App, service string) (string, error) {
 	var result struct {
 		Logs string `json:"logs"`
 	}
-	if err := runtime.compose(ctx, map[string]any{"action": "logs", "app_id": appID, "service": service}, &result); err != nil {
+	if err := runtime.composeApp(ctx, app, map[string]any{"action": "logs", "service": service}, &result); err != nil {
 		return "", err
 	}
 	return result.Logs, nil
 }
 
-func (runtime *hostCapabilityRuntime) RemoveApp(ctx context.Context, appID string) error {
-	return runtime.compose(ctx, map[string]any{"action": "remove", "app_id": appID}, nil)
+func (runtime *hostCapabilityRuntime) RemoveApp(ctx context.Context, app App) error {
+	return runtime.composeApp(ctx, app, map[string]any{"action": "remove"}, nil)
+}
+
+func (runtime *hostCapabilityRuntime) Create(ctx context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
+	if runtime == nil || runtime.client == nil {
+		return HostHTTPRule{}, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(spec.AgentID) {
+		return HostHTTPRule{}, ErrAgentOffline
+	}
+	var created HostHTTPRule
+	if err := callHost(ctx, runtime.client, hostHTTPRuleOperation, map[string]any{
+		"action": "create", "app_id": spec.AppID, "agent_id": spec.AgentID,
+		"domain": spec.Domain, "port": spec.Port,
+	}, &created); err != nil {
+		return HostHTTPRule{}, err
+	}
+	return created, nil
+}
+
+func (runtime *hostCapabilityRuntime) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
+	if runtime == nil || runtime.client == nil {
+		return UpdateObservation{}, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(app.AgentID) {
+		return UpdateObservation{}, ErrAgentOffline
+	}
+	var result struct {
+		CurrentDigest string `json:"current_digest"`
+		LatestDigest  string `json:"latest_digest"`
+	}
+	if err := callHost(ctx, runtime.client, hostAgentImageOperation, map[string]any{
+		"action": "observe", "agent_id": app.AgentID, "app_id": app.ID, "image": app.Image,
+	}, &result); err != nil {
+		return UpdateObservation{}, err
+	}
+	return UpdateObservation{CurrentDigest: result.CurrentDigest, LatestDigest: result.LatestDigest}, nil
+}
+
+type hostRolloutRuntime struct {
+	runtime *hostCapabilityRuntime
+}
+
+func (rollout hostRolloutRuntime) Pull(ctx context.Context, fence uint64, app App) error {
+	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "pull", "fence": fence, "image": app.Image}, nil)
+}
+
+func (rollout hostRolloutRuntime) Start(ctx context.Context, fence uint64, app App) (string, error) {
+	var result struct {
+		InstanceID string `json:"instance_id"`
+	}
+	if err := rollout.runtime.composeApp(ctx, app, map[string]any{"action": "start-instance", "fence": fence, "image": app.Image}, &result); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(result.InstanceID) == "" {
+		return "", ErrTypedHandlesUnavailable
+	}
+	return result.InstanceID, nil
+}
+
+func (rollout hostRolloutRuntime) Ready(ctx context.Context, fence uint64, instanceID string) error {
+	return rollout.runtime.compose(ctx, map[string]any{"action": "ready", "fence": fence, "instance_id": instanceID}, nil)
+}
+
+func (rollout hostRolloutRuntime) Cutover(ctx context.Context, fence uint64, ruleRef, target string) error {
+	if rollout.runtime == nil || rollout.runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	return callHost(ctx, rollout.runtime.client, hostHTTPRuleOperation, map[string]any{
+		"action": "cutover", "fence": fence, "rule_ref": ruleRef, "target": target,
+	}, nil)
+}
+
+func (rollout hostRolloutRuntime) Drain(ctx context.Context, fence uint64, instanceID string) error {
+	return rollout.runtime.compose(ctx, map[string]any{"action": "drain", "fence": fence, "instance_id": instanceID}, nil)
+}
+
+func (rollout hostRolloutRuntime) Remove(ctx context.Context, fence uint64, instanceID string) error {
+	return rollout.runtime.compose(ctx, map[string]any{"action": "remove-instance", "fence": fence, "instance_id": instanceID}, nil)
+}
+
+func (rollout hostRolloutRuntime) Inspect(ctx context.Context, fence uint64, appID, ruleRef string) (RuntimeState, error) {
+	var state RuntimeState
+	if err := rollout.runtime.compose(ctx, map[string]any{
+		"action": "inspect", "fence": fence, "app_id": appID, "rule_ref": ruleRef,
+	}, &state); err != nil {
+		return RuntimeState{}, err
+	}
+	return state, nil
+}
+
+func (runtime *hostCapabilityRuntime) composeApp(ctx context.Context, app App, payload map[string]any, result any) error {
+	if !validAgentID(app.AgentID) {
+		return ErrAgentOffline
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["agent_id"] = app.AgentID
+	payload["app_id"] = app.ID
+	return runtime.compose(ctx, payload, result)
 }
 
 func (runtime *hostCapabilityRuntime) compose(ctx context.Context, payload map[string]any, result any) error {
@@ -127,6 +229,9 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIRestart = runtime
 	config.UILogs = runtime
 	config.UIRemove = runtime
+	config.UIHTTPRule = runtime
+	config.UIImageObserver = runtime
+	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
 	return config
 }
 

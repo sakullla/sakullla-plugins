@@ -218,50 +218,50 @@ func (runtime *lifecycleRuntime) ApplyApp(_ context.Context, app dockerapp.App) 
 	return nil
 }
 
-func (runtime *lifecycleRuntime) Start(_ context.Context, appID string) error {
+func (runtime *lifecycleRuntime) Start(_ context.Context, app dockerapp.App) error {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if runtime.containers[appID] == "" {
+	if runtime.containers[app.ID] == "" {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = true
+	runtime.running[app.ID] = true
 	return nil
 }
 
-func (runtime *lifecycleRuntime) Stop(_ context.Context, appID string) error {
+func (runtime *lifecycleRuntime) Stop(_ context.Context, app dockerapp.App) error {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if runtime.containers[appID] == "" {
+	if runtime.containers[app.ID] == "" {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = false
+	runtime.running[app.ID] = false
 	return nil
 }
 
-func (runtime *lifecycleRuntime) Restart(_ context.Context, appID string) error {
+func (runtime *lifecycleRuntime) Restart(_ context.Context, app dockerapp.App) error {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if runtime.containers[appID] == "" {
+	if runtime.containers[app.ID] == "" {
 		return errors.New("app is not deployed")
 	}
-	runtime.running[appID] = true
-	runtime.restarts[appID]++
+	runtime.running[app.ID] = true
+	runtime.restarts[app.ID]++
 	return nil
 }
 
-func (runtime *lifecycleRuntime) ReadLogs(_ context.Context, appID, service string) (string, error) {
+func (runtime *lifecycleRuntime) ReadLogs(_ context.Context, app dockerapp.App, service string) (string, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	return runtime.logs[appID+"/"+service], nil
+	return runtime.logs[app.ID+"/"+service], nil
 }
 
-func (runtime *lifecycleRuntime) RemoveApp(_ context.Context, appID string) error {
+func (runtime *lifecycleRuntime) RemoveApp(_ context.Context, app dockerapp.App) error {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	delete(runtime.applied, appID)
-	delete(runtime.running, appID)
-	delete(runtime.containers, appID)
-	delete(runtime.logs, appID+"/web")
+	delete(runtime.applied, app.ID)
+	delete(runtime.running, app.ID)
+	delete(runtime.containers, app.ID)
+	delete(runtime.logs, app.ID+"/web")
 	return nil
 }
 

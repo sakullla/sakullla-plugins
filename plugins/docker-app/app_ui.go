@@ -209,6 +209,12 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		writeAppJSON(writer, http.StatusNotFound, appAPIResponse{Error: "app is unknown"})
 		return
 	}
+	if action != "get" && action != "http-rule" {
+		if err := controller.requireMutableAgent(request.Context(), app); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			return
+		}
+	}
 	switch action {
 	case "get":
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -284,6 +290,23 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 	default:
 		http.Error(writer, "Docker 应用页未找到", http.StatusNotFound)
 	}
+}
+
+func (controller *Controller) requireMutableAgent(ctx context.Context, app App) error {
+	if !validAgentID(app.AgentID) {
+		return ErrAgentOffline
+	}
+	report, err := controller.observeAgent(ctx, app.AgentID)
+	if err != nil {
+		return err
+	}
+	if !report.Online {
+		return ErrAgentOffline
+	}
+	if !ProjectEngine(ObservationFromReport(report)).Ready {
+		return ErrEngineNotReady
+	}
+	return nil
 }
 
 func (controller *Controller) uiIdentity(request *http.Request) (string, error) {

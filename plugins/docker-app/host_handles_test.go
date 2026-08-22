@@ -55,20 +55,20 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	if err := runtime.ApplyApp(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Start(context.Background(), app.ID); err != nil {
+	if err := runtime.Start(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Stop(context.Background(), app.ID); err != nil {
+	if err := runtime.Stop(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Restart(context.Background(), app.ID); err != nil {
+	if err := runtime.Restart(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := runtime.ReadLogs(context.Background(), app.ID, "web")
+	logs, err := runtime.ReadLogs(context.Background(), app, "web")
 	if err != nil || logs != "listening on :80\n" {
 		t.Fatalf("logs=%q err=%v", logs, err)
 	}
-	if err := runtime.RemoveApp(context.Background(), app.ID); err != nil {
+	if err := runtime.RemoveApp(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,6 +84,18 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	}
 	if calls[1].Operation != hostAgentComposeOperation || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" {
 		t.Fatalf("compose apply call = %#v payload=%#v", calls[1], apply)
+	}
+	for index, call := range calls[1:] {
+		if call.Operation != hostAgentComposeOperation {
+			t.Fatalf("compose call %d = %#v", index, call)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["agent_id"] != "agent-1" || payload["app_id"] != "media" {
+			t.Fatalf("compose call %d omitted agent routing: %#v", index, payload)
+		}
 	}
 	for _, marker := range []string{"docker.socket", "docker.sock", "unix://", "container.compose"} {
 		for _, call := range calls {
@@ -131,7 +143,7 @@ func TestHostCapabilityRuntimeFailClosedWithoutClientOrOnLocalSocket(t *testing.
 	if _, err := unavailable.Report(context.Background(), "agent-1"); !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("unsupported engine handle err=%v", err)
 	}
-	if err := unavailable.Start(context.Background(), "media"); !errors.Is(err, ErrTypedHandlesUnavailable) {
+	if err := unavailable.Start(context.Background(), App{ID: "media", AgentID: "agent-1"}); !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("unsupported compose handle err=%v", err)
 	}
 }
@@ -171,6 +183,9 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 	}
 	if config.UIApply != nil || config.UIStart != nil || config.UIStop != nil || config.UIRestart != nil || config.UILogs != nil || config.UIRemove != nil {
 		t.Fatal("missing host runtime still bound compose executors")
+	}
+	if config.UIHTTPRule != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil {
+		t.Fatal("missing host runtime still bound http/image/rollout handles")
 	}
 	if config.Admission == nil {
 		t.Fatal("production admission must not require container.compose")
@@ -222,6 +237,100 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	}
 	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIRemove != runtime {
 		t.Fatal("compose executors were not bound to the generic host handle")
+	}
+	if config.UIHTTPRule != runtime || config.UIImageObserver != runtime {
+		t.Fatal("http.rule and image observer were not bound to the generic host handle")
+	}
+	if rollout, ok := config.UIRolloutExecutor.(hostRolloutRuntime); !ok || rollout.runtime != runtime {
+		t.Fatalf("rollout executor = %#v", config.UIRolloutExecutor)
+	}
+}
+
+func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
+	t.Parallel()
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		calls = append(calls, call)
+		switch call.Operation {
+		case hostHTTPRuleOperation:
+			var payload map[string]any
+			if err := json.Unmarshal(call.Payload, &payload); err != nil {
+				return err
+			}
+			if payload["action"] == "create" {
+				return copyHostResult(map[string]any{
+					"ref": "rule-media-8080", "domain": "app.example.com",
+					"backend": "agent-1:8080", "app_id": "media", "agent_id": "agent-1", "port": 8080,
+				}, target)
+			}
+			return copyHostResult(map[string]any{"accepted": true}, target)
+		case hostAgentImageOperation:
+			return copyHostResult(map[string]any{
+				"current_digest": "sha256:current", "latest_digest": "sha256:latest",
+			}, target)
+		case hostAgentComposeOperation:
+			var payload map[string]any
+			if err := json.Unmarshal(call.Payload, &payload); err != nil {
+				return err
+			}
+			if payload["action"] == "start-instance" {
+				return copyHostResult(map[string]any{"instance_id": "new"}, target)
+			}
+			return copyHostResult(map[string]any{"accepted": true}, target)
+		default:
+			t.Fatalf("unexpected host operation %q", call.Operation)
+			return nil
+		}
+	})
+	config := bindHostCapabilityClient(ControllerConfig{}, func() (hostRuntimeCaller, error) {
+		return client, nil
+	})
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest"}
+	rule, err := config.UIHTTPRule.Create(context.Background(), HTTPRuleSpec{
+		AppID: "media", AgentID: "agent-1", Domain: "app.example.com", Port: 8080,
+	})
+	if err != nil || rule.Backend != "agent-1:8080" || rule.AgentID != "agent-1" {
+		t.Fatalf("http rule=%#v err=%v", rule, err)
+	}
+	observed, err := config.UIImageObserver.ObserveImage(context.Background(), app)
+	if err != nil || observed.CurrentDigest != "sha256:current" || observed.LatestDigest != "sha256:latest" {
+		t.Fatalf("image observe=%#v err=%v", observed, err)
+	}
+	if err := config.UIRolloutExecutor.Pull(context.Background(), 1, app); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := config.UIRolloutExecutor.Start(context.Background(), 1, app)
+	if err != nil || instance != "new" {
+		t.Fatalf("rollout start instance=%q err=%v", instance, err)
+	}
+
+	if len(calls) != 4 {
+		t.Fatalf("host calls = %d", len(calls))
+	}
+	if calls[0].Operation != hostHTTPRuleOperation || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
+		t.Fatalf("http.rule call = %#v", calls[0])
+	}
+	if calls[1].Operation != hostAgentImageOperation || !strings.Contains(string(calls[1].Payload), `"agent_id":"agent-1"`) {
+		t.Fatalf("agent.image call = %#v", calls[1])
+	}
+	for index, call := range calls[2:] {
+		if call.Operation != hostAgentComposeOperation {
+			t.Fatalf("rollout compose call %d = %#v", index, call)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["agent_id"] != "agent-1" || payload["app_id"] != "media" {
+			t.Fatalf("rollout compose call %d omitted agent routing: %#v", index, payload)
+		}
+	}
+	for _, marker := range []string{"docker.socket", "docker.sock", "unix://", "container.compose"} {
+		for _, call := range calls {
+			if strings.Contains(strings.ToLower(string(call.Payload)), marker) || call.Operation == marker {
+				t.Fatalf("generic handle leaked local Docker target: %#v", call)
+			}
+		}
 	}
 }
 
