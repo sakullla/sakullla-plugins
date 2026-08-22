@@ -2,6 +2,8 @@ module github.com/sakullla/sakullla-plugins
 
 go 1.27.0
 
+// Locked via nre-ci sdk --update --tag plugin-sdk/v0.7.11.
+
 require (
 	golang.org/x/text v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect
