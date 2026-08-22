@@ -1084,6 +1084,73 @@ func TestDockerPullingIntentAcquireFailureAndUnknownCommit(t *testing.T) {
 	})
 }
 
+func TestDockerComposeOnlyDrainingIntentActivatesWithoutHTTPRule(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	assertActivated := func(t *testing.T, got dockerapp.Deployment, app dockerapp.App) {
+		t.Helper()
+		if got.InstanceID != "new" || got.Image != app.Image || got.Generation != app.Generation || got.RuleRef != "" || got.Phase != dockerapp.PhaseActive {
+			t.Fatalf("compose-only draining intent did not activate: %#v", got)
+		}
+	}
+	t.Run("first-install-final-cas", func(t *testing.T) {
+		now := time.Unix(3000, 0)
+		base := dockerapp.NewDeploymentStore()
+		store := &faultStore{base: base, failPhase: dockerapp.PhaseActive, failRemaining: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+		app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new"}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("final CAS err=%v", err)
+		}
+		intent, ok := base.Get(app.ID)
+		if !ok || intent.Image != app.Image || intent.Generation != app.Generation || intent.RuleRef != "" || intent.Phase != dockerapp.PhaseDraining {
+			t.Fatalf("desired intent not durable: %#v", intent)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		final, ok := base.Get(app.ID)
+		if !ok {
+			t.Fatal("first-install record was deleted")
+		}
+		assertActivated(t, final, app)
+		if contains(host.calls, "remove:new") {
+			t.Fatalf("compose-only reconcile removed the ready instance: %v", host.calls)
+		}
+		if len(host.cutoverRefs) != 0 {
+			t.Fatalf("compose-only reconcile cutovered empty http.rule: %v", host.cutoverRefs)
+		}
+	})
+	t.Run("changed-metadata-active", func(t *testing.T) {
+		now := time.Unix(4000, 0)
+		base := dockerapp.NewDeploymentStore()
+		base.Put(dockerapp.Deployment{AppID: "media", InstanceID: "old", Image: "image:old", Generation: "generation-old", Phase: dockerapp.PhaseActive})
+		store := &faultStore{base: base, failPhase: dockerapp.PhaseActive, failRemaining: 1}
+		host := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{"old": true}}}
+		app := dockerapp.App{ID: "media", Image: "image:new", Generation: "generation-new"}
+		rollout := dockerapp.Rollout{Store: store, Executor: host, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+		if err := rollout.Update(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+			t.Fatalf("crash err=%v", err)
+		}
+		now = now.Add(2 * time.Second)
+		if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+			t.Fatal(err)
+		}
+		final, _ := base.Get(app.ID)
+		assertActivated(t, final, app)
+		if contains(host.calls, "remove:new") {
+			t.Fatalf("compose-only reconcile removed the ready instance: %v", host.calls)
+		}
+		if len(host.cutoverRefs) != 0 {
+			t.Fatalf("compose-only reconcile cutovered empty http.rule: %v", host.cutoverRefs)
+		}
+		if !contains(host.calls, "drain:old") {
+			t.Fatalf("compose-only reconcile skipped drain: %v", host.calls)
+		}
+	})
+}
+
 func testComposeYAML(image string) string {
 	return "services:\n  web:\n    image: " + image + "\n"
 }

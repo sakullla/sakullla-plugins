@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
 )
@@ -171,6 +172,48 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	}
 	if !runtime.running["media"] || !runtime.containerExists("media") {
 		t.Fatalf("compose runtime was torn down: %#v", runtime)
+	}
+}
+
+func TestDockerComposeOnlyConfirmUpdateRecoversDrainingIntent(t *testing.T) {
+	engine := dockerapp.EngineObservation{Installed: true, Version: "27.1.1"}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	runtime := newLifecycleRuntime()
+	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: testComposeYAML("nginx:latest")}
+	apps, err := dockerapp.DeployComposeApp(context.Background(), nil, spec, engine, runtime, auditor)
+	if err != nil || len(apps) != 1 || apps[0].RuleRef != "" {
+		t.Fatalf("compose deploy apps=%#v err=%v", apps, err)
+	}
+	app := apps[0]
+	now := time.Unix(6000, 0)
+	base := dockerapp.NewDeploymentStore()
+	fake := &rolloutFake{state: dockerapp.RuntimeState{Instances: map[string]bool{}}}
+	observed := dockerapp.Rollout{Store: base, Executor: fake, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+	if _, err := observed.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &faultStore{base: base, failPhase: dockerapp.PhaseActive, failRemaining: 1}
+	rollout := dockerapp.Rollout{Store: store, Executor: fake, Auditor: auditor, Clock: func() time.Time { return now }, LeaseDuration: time.Second}
+	if err := rollout.ConfirmUpdate(context.Background(), app); !errors.Is(err, dockerapp.ErrReconcilePending) {
+		t.Fatalf("compose confirm crash err=%v", err)
+	}
+	intent, ok := base.Get(app.ID)
+	if !ok || intent.RuleRef != "" || intent.Phase != dockerapp.PhaseDraining || intent.PendingInstance != "new" {
+		t.Fatalf("compose confirm did not persist draining intent: %#v ok=%v", intent, ok)
+	}
+	now = now.Add(2 * time.Second)
+	if err := rollout.Reconcile(context.Background(), app.ID); err != nil {
+		t.Fatal(err)
+	}
+	published, _ := base.Get(app.ID)
+	if published.InstanceID != "new" || published.Image != app.Image || published.Phase != dockerapp.PhaseActive || published.ImageDigest != "sha256:latest" || published.RuleRef != "" {
+		t.Fatalf("compose confirm reconcile did not activate: %#v", published)
+	}
+	if contains(fake.calls, "remove:new") {
+		t.Fatalf("compose confirm reconcile removed the ready instance: %v", fake.calls)
+	}
+	if len(fake.cutoverRefs) != 0 {
+		t.Fatalf("compose confirm reconcile cutovered empty http.rule: %v", fake.cutoverRefs)
 	}
 }
 

@@ -693,7 +693,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 	if unrelated {
 		return r.release(record, ErrReconcilePending)
 	}
-	finishNew := (v.Phase == PhaseCutover || v.Phase == PhaseDraining) && newExists && state.RuleTarget == pending
+	finishNew := (v.Phase == PhaseCutover || v.Phase == PhaseDraining) && newExists && cutOverComplete(v.RuleRef, state.RuleTarget, pending)
 	if !finishNew && historicalRollbackPending(v) {
 		return r.restoreHistoricalPrior(record, state, priorInstance, pending, newExists)
 	}
@@ -709,7 +709,7 @@ func (r Rollout) reconcileRecord(record DeploymentRecord) error {
 		ctx, cancel = r.cleanupContext()
 		post, err := r.Executor.Inspect(ctx, fence, v.app(), v.RuleRef)
 		cancel()
-		if err != nil || !post.Instances[pending] || post.RuleTarget != pending {
+		if err != nil || !post.Instances[pending] || !cutOverComplete(v.RuleRef, post.RuleTarget, pending) {
 			return r.release(record, ErrReconcilePending)
 		}
 		active := Deployment{AppID: v.AppID, AgentID: v.AgentID, InstanceID: pending, Image: v.Image, RuleRef: v.RuleRef, RuleTarget: pending, Generation: v.Generation, Phase: PhaseActive, FencingToken: fence, ImageDigest: v.ImageDigest, History: publishedHistory(v)}
@@ -889,6 +889,11 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 
 func priorInstanceAbsent(existed bool, instanceID string) bool {
 	return !existed || instanceID == ""
+}
+
+// Empty RuleRef has no http.rule, so cutover is vacuously complete.
+func cutOverComplete(ruleRef, observedTarget, pending string) bool {
+	return ruleRef == "" || observedTarget == pending
 }
 
 func rolloutBusy(value Deployment, existed bool, now time.Time) bool {
