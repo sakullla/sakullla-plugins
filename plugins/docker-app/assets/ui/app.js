@@ -218,10 +218,15 @@ const renderApp = (app) => {
   title.textContent = app.id;
   const chips = document.createElement("div");
   chips.className = "app-chips";
-  if (app.status) {
+  if (app.status && app.status !== "有新版本") {
     const statusChip = chip(app.status);
-    statusChip.className = app.status === "有新版本" ? "chip app-status-update" : "chip app-status";
+    statusChip.className = "chip app-status";
     chips.append(statusChip);
+  }
+  if (app.notice === "有新版本" || app.status === "有新版本") {
+    const noticeChip = chip("有新版本");
+    noticeChip.className = "chip app-status-update";
+    chips.append(noticeChip);
   }
   const versionChip = chip(version || "未解析镜像");
   versionChip.className = "chip app-version";
@@ -236,6 +241,7 @@ const renderApp = (app) => {
     ? app.actions
     : [{ id: "configure", label: "编辑" }, { id: "delete", label: "删除" }];
   apiActions.forEach((action) => {
+    if (action.id === "rollback") return;
     const button = document.createElement("button");
     button.type = "button";
     button.className = action.id === "delete" ? "btn-link danger" : "btn-link";

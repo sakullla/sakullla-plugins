@@ -384,8 +384,14 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	apps := decodeAppList(t, listed.Body.Bytes())
-	if len(apps) != 1 || apps[0].Status != OpsStatusUpdateAvailable || !hasAppAction(apps[0], OpsActionUpdate) {
+	if len(apps) != 1 || apps[0].Status != OpsStatusRunning || apps[0].Notice != OpsStatusUpdateAvailable || !hasAppAction(apps[0], OpsActionUpdate) {
 		t.Fatalf("update view=%#v", apps)
+	}
+	if !hasAppAction(apps[0], OpsActionStop) || !hasAppAction(apps[0], OpsActionRestart) {
+		t.Fatalf("digest drift dropped running ops: %#v", apps)
+	}
+	if hasAppAction(apps[0], OpsActionRollback) {
+		t.Fatalf("app view offered rollback: %#v", apps)
 	}
 	if apps[0].Version != "nginx:latest sha256:0123456789ab" {
 		t.Fatalf("app version = %q", apps[0].Version)
@@ -403,7 +409,7 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	again := httptest.NewRecorder()
 	controller.ServeHTTP(again, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	unchanged := decodeAppList(t, again.Body.Bytes())
-	if unchanged[0].Version != apps[0].Version || unchanged[0].Status != OpsStatusUpdateAvailable {
+	if unchanged[0].Version != apps[0].Version || unchanged[0].Notice != OpsStatusUpdateAvailable || unchanged[0].Status != OpsStatusRunning {
 		t.Fatalf("list without update changed image: %#v", unchanged)
 	}
 	record, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
@@ -417,12 +423,119 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
 	}
 	published := decodeAppList(t, updated.Body.Bytes())
-	if published[0].Status == OpsStatusUpdateAvailable || !strings.Contains(published[0].Version, "sha256:fedcba987654") {
+	if published[0].Notice == OpsStatusUpdateAvailable || published[0].Status != OpsStatusRunning || !strings.Contains(published[0].Version, "sha256:fedcba987654") {
 		t.Fatalf("confirm did not switch digest: %#v", published)
+	}
+	if hasAppAction(published[0], OpsActionRollback) {
+		t.Fatalf("confirmed update offered rollback: %#v", published)
 	}
 	got, _ := controller.uiRollout.Store.(*DeploymentStore).Get("media")
 	if got.ImageDigest != latest {
 		t.Fatalf("confirm digest=%#v", got)
+	}
+}
+
+func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	if createdApps := decodeAppList(t, created.Body.Bytes()); len(createdApps) != 1 || createdApps[0].Notice != OpsStatusUpdateAvailable || createdApps[0].Status != OpsStatusRunning {
+		t.Fatalf("auto_update hid 有新版本: %#v", createdApps)
+	}
+	record, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
+		t.Fatalf("auto_update published without confirm: %#v ok=%v", record, ok)
+	}
+
+	stopped := httptest.NewRecorder()
+	controller.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
+	if stopped.Code != http.StatusOK {
+		t.Fatalf("stop status=%d body=%s", stopped.Code, stopped.Body.String())
+	}
+	listed := decodeAppList(t, stopped.Body.Bytes())
+	if len(listed) != 1 || listed[0].Status != OpsStatusStopped || listed[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("stop with digest drift view=%#v", listed)
+	}
+	if !hasAppAction(listed[0], OpsActionStart) || !hasAppAction(listed[0], OpsActionDelete) || !hasAppAction(listed[0], OpsActionUpdate) {
+		t.Fatalf("stopped update view dropped start/delete/update: %#v", listed)
+	}
+	if hasAppAction(listed[0], OpsActionRollback) {
+		t.Fatalf("stopped update view offered rollback: %#v", listed)
+	}
+
+	started := httptest.NewRecorder()
+	controller.ServeHTTP(started, uiJSONRequest(http.MethodPost, "/api/apps/media/start", `{}`))
+	if started.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", started.Code, started.Body.String())
+	}
+	running := decodeAppList(t, started.Body.Bytes())
+	if running[0].Status != OpsStatusRunning || running[0].Notice != OpsStatusUpdateAvailable || !hasAppAction(running[0], OpsActionRestart) {
+		t.Fatalf("start with digest drift view=%#v", running)
+	}
+
+	restarted := httptest.NewRecorder()
+	controller.ServeHTTP(restarted, uiJSONRequest(http.MethodPost, "/api/apps/media/restart", `{}`))
+	if restarted.Code != http.StatusOK {
+		t.Fatalf("restart status=%d body=%s", restarted.Code, restarted.Body.String())
+	}
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":""}`))
+	if denied.Code != http.StatusBadRequest || len(controller.Apps()) != 1 {
+		t.Fatalf("unconfirmed delete status=%d apps=%#v body=%s", denied.Code, controller.Apps(), denied.Body.String())
+	}
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+}
+
+func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
+	t.Parallel()
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest", Compose: "services:\n  web:\n    image: nginx:latest\n"}
+	deployment := Deployment{
+		Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest",
+		History: []DeploymentRevision{{InstanceID: "old", Image: "old-image"}},
+	}
+
+	running := projectAppView(app, true, deployment, "sha256:latest")
+	if running.Status != OpsStatusRunning || running.Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("running update view=%#v", running)
+	}
+	if !hasOpsAction(running.Actions, OpsActionUpdate) || !hasOpsAction(running.Actions, OpsActionStop) || !hasOpsAction(running.Actions, OpsActionRestart) {
+		t.Fatalf("running update dropped ops: %#v", running.Actions)
+	}
+	if hasOpsAction(running.Actions, OpsActionRollback) || hasOpsAction(running.Actions, OpsActionDelete) {
+		t.Fatalf("running update offered rollback or delete: %#v", running.Actions)
+	}
+
+	stopped := projectAppView(app, false, deployment, "sha256:latest")
+	if stopped.Status != OpsStatusStopped || stopped.Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("stopped update view=%#v", stopped)
+	}
+	if !hasOpsAction(stopped.Actions, OpsActionStart) || !hasOpsAction(stopped.Actions, OpsActionDelete) || !hasOpsAction(stopped.Actions, OpsActionUpdate) {
+		t.Fatalf("stopped update dropped start/delete/update: %#v", stopped.Actions)
+	}
+	if hasOpsAction(stopped.Actions, OpsActionRollback) {
+		t.Fatalf("stopped update offered rollback: %#v", stopped.Actions)
+	}
+
+	enabled := true
+	auto := app
+	auto.AutoUpdate = &enabled
+	ignored := projectAppView(auto, true, deployment, "sha256:latest")
+	if ignored.Notice != OpsStatusUpdateAvailable || !hasOpsAction(ignored.Actions, OpsActionUpdate) {
+		t.Fatalf("auto_update hid 有新版本: %#v", ignored)
 	}
 }
 
@@ -444,6 +557,8 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 		`dataset.action = "logs"`,
 		"/logs",
 		"有新版本",
+		"app.notice",
+		`className = "chip app-status-update"`,
 	} {
 		if !strings.Contains(script, token) {
 			t.Fatalf("app.js missing %q", token)
@@ -592,6 +707,7 @@ func jsonQuote(value string) (string, error) {
 type uiAppView struct {
 	ID      string
 	Status  string
+	Notice  string
 	Version string
 	Actions []OpsAction
 }

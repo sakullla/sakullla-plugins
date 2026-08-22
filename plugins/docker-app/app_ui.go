@@ -27,6 +27,7 @@ type appView struct {
 	AgentID  string      `json:"agent_id,omitempty"`
 	Name     string      `json:"name"`
 	Status   string      `json:"status"`
+	Notice   string      `json:"notice,omitempty"`
 	Version  string      `json:"version"`
 	Compose  string      `json:"compose,omitempty"`
 	Ports    []uint16    `json:"ports,omitempty"`
@@ -370,12 +371,73 @@ func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
 }
 
 func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {
-	document := ProjectOpsDocumentFromRuntime(app, running, false, deployment, UpdatePolicy{AutoUpdate: app.AutoUpdate}, latestDigest)
+	name := app.ID
+	if name == "" {
+		name = "未命名应用"
+	}
+	status := ProjectPopularStatus(appLifecycleStatus(running, false, deployment))
+	notice := ""
+	if appImageUpdateAvailable(deployment, latestDigest) && status != OpsStatusPublishing {
+		notice = OpsStatusUpdateAvailable
+	}
 	ports, _ := ListPublishedPorts(app, nil)
 	return appView{
-		ID: app.ID, AgentID: app.AgentID, Name: document.Name, Status: document.Status, Version: document.Version,
-		Compose: app.Compose, Ports: ports, Services: composeServiceNames(app.Compose), Actions: document.Actions,
+		ID: app.ID, AgentID: app.AgentID, Name: name, Status: status, Notice: notice,
+		Version: displayImageVersion(app.Image, deployment.ImageDigest),
+		Compose: app.Compose, Ports: ports, Services: composeServiceNames(app.Compose),
+		Actions: appViewActions(status, notice),
 	}
+}
+
+func appLifecycleStatus(running, unhealthy bool, deployment Deployment) AppStatus {
+	if deployment.Phase != "" && deployment.Phase != PhaseActive {
+		return AppStatusPublishing
+	}
+	if unhealthy {
+		return AppStatusUnhealthy
+	}
+	if running {
+		return AppStatusRunning
+	}
+	return AppStatusStopped
+}
+
+func appImageUpdateAvailable(deployment Deployment, latestDigest string) bool {
+	digest := deployment.AvailableDigest
+	if digest == "" {
+		digest = latestDigest
+	}
+	return digest != "" && deployment.ImageDigest != "" && digest != deployment.ImageDigest
+}
+
+func appViewActions(status, notice string) []OpsAction {
+	configure := OpsAction{ID: OpsActionConfigure, Label: OpsConfigEntry}
+	var actions []OpsAction
+	switch status {
+	case OpsStatusRunning:
+		actions = []OpsAction{{ID: OpsActionStop, Label: "停止"}, {ID: OpsActionRestart, Label: "重启"}, configure}
+	case OpsStatusStopped:
+		actions = []OpsAction{{ID: OpsActionStart, Label: "启动"}, {ID: OpsActionDelete, Label: "删除"}, configure}
+	case OpsStatusPublishing:
+		actions = []OpsAction{configure}
+	case OpsStatusUnhealthy:
+		actions = []OpsAction{{ID: OpsActionUpdate, Label: "恢复"}, {ID: OpsActionStop, Label: "停止"}, configure}
+	default:
+		actions = []OpsAction{configure}
+	}
+	if notice == OpsStatusUpdateAvailable && !hasOpsAction(actions, OpsActionUpdate) {
+		actions = append([]OpsAction{{ID: OpsActionUpdate, Label: "更新"}}, actions...)
+	}
+	return actions
+}
+
+func hasOpsAction(actions []OpsAction, id string) bool {
+	for _, action := range actions {
+		if action.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func parseAppAPIPath(path string) (appID, action string, ok bool) {
