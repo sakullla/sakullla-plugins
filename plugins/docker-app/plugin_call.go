@@ -281,13 +281,13 @@ func (controller *Controller) dockerImageDigest(ctx context.Context, image strin
 }
 
 func (controller *Controller) dockerRegistryDigest(ctx context.Context, image string) string {
-	output, err := controller.runCommand(ctx, "", "docker", "manifest", "inspect", "--verbose", image)
+	output, err := controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image)
 	if err == nil {
 		if digest := parseRegistryDigest(output); digest != "" {
 			return digest
 		}
 	}
-	output, err = controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image)
+	output, err = controller.runCommand(ctx, "", "docker", "manifest", "inspect", "--verbose", image)
 	if err == nil {
 		if digest := parseRegistryDigest(output); digest != "" {
 			return digest
@@ -353,6 +353,9 @@ func parseRegistryDigest(output []byte) string {
 	}
 	var payload any
 	if json.Unmarshal([]byte(text), &payload) == nil {
+		if _, isArray := payload.([]any); isArray {
+			return ""
+		}
 		if digest := registryDigestFromJSON(payload); digest != "" {
 			return digest
 		}
@@ -412,12 +415,18 @@ func firstRepoDigest(value any) string {
 func registryDigestFromJSON(payload any) string {
 	switch typed := payload.(type) {
 	case []any:
-		for _, item := range typed {
-			if digest := registryDigestFromJSON(item); digest != "" {
+		// Verbose multi-arch inspect is a platform descriptor array, not the tag digest.
+		return ""
+	case map[string]any:
+		for _, key := range []string{"Manifest", "manifest"} {
+			nested, ok := typed[key].(map[string]any)
+			if !ok {
+				continue
+			}
+			if digest := registryDigestFromJSON(nested); digest != "" {
 				return digest
 			}
 		}
-	case map[string]any:
 		for _, key := range []string{"Descriptor", "descriptor"} {
 			nested, ok := typed[key].(map[string]any)
 			if !ok {
@@ -427,15 +436,6 @@ func registryDigestFromJSON(payload any) string {
 				return digest
 			}
 			if digest := imageDigestValue(stringField(nested, "Digest")); digest != "" {
-				return digest
-			}
-		}
-		for _, key := range []string{"Manifest", "manifest"} {
-			nested, ok := typed[key].(map[string]any)
-			if !ok {
-				continue
-			}
-			if digest := registryDigestFromJSON(nested); digest != "" {
 				return digest
 			}
 		}

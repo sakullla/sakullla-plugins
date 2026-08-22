@@ -121,38 +121,65 @@ func TestControllerCallImageUsesInjectedObserver(t *testing.T) {
 
 func TestControllerCallImageObserveComparesRepoDigestWithRegistryManifest(t *testing.T) {
 	t.Parallel()
-	current := "nginx@sha256:" + strings.Repeat("a", 64)
-	latest := "sha256:" + strings.Repeat("b", 64)
-	var argv [][]string
-	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
-		argv = append(argv, append([]string{name}, args...))
-		switch dockerObserveCommand(name, args) {
-		case "image-inspect":
-			if !strings.Contains(strings.Join(args, " "), "RepoDigests") {
-				t.Fatalf("image inspect must prefer RepoDigests, args=%q", args)
+	index := "sha256:" + strings.Repeat("a", 64)
+	platform := "sha256:" + strings.Repeat("b", 64)
+	moved := "sha256:" + strings.Repeat("c", 64)
+	current := "nginx@" + index
+	verbosePlatforms := `[{"Descriptor":{"digest":"` + platform + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"sha256:` + strings.Repeat("d", 64) + `"}}]`
+
+	observe := func(t *testing.T, registryDigest string) (map[string]any, [][]string) {
+		t.Helper()
+		var argv [][]string
+		runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			switch dockerObserveCommand(name, args) {
+			case "image-inspect":
+				if !strings.Contains(strings.Join(args, " "), "RepoDigests") {
+					t.Fatalf("image inspect must prefer RepoDigests, args=%q", args)
+				}
+				return []byte(current + "\n"), nil
+			case "manifest-inspect":
+				return []byte(verbosePlatforms), nil
+			case "imagetools":
+				return []byte(`{"Manifest":{"Digest":"` + registryDigest + `"}}`), nil
+			default:
+				t.Fatalf("unexpected command %s %q", name, args)
+				return nil, errors.New("unexpected command")
 			}
-			return []byte(current + "\n"), nil
-		case "manifest-inspect":
-			return []byte(`{"Descriptor":{"digest":"` + latest + `"}}`), nil
-		case "imagetools":
-			return []byte(latest + "\n"), nil
-		default:
-			t.Fatalf("unexpected command %s %q", name, args)
-			return nil, errors.New("unexpected command")
+		})
+		return callImageObserve(t, runner, "nginx:latest"), argv
+	}
+
+	t.Run("multi-arch index matches RepoDigest", func(t *testing.T) {
+		t.Parallel()
+		decoded, argv := observe(t, index)
+		if decoded["current_digest"] != current {
+			t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
 		}
+		if decoded["latest_digest"] != current {
+			t.Fatalf("latest_digest=%q want same-form current %q, not platform %q", decoded["latest_digest"], current, platform)
+		}
+		assertNoImageMutation(t, argv)
 	})
-	decoded := callImageObserve(t, runner, "nginx:latest")
-	wantLatest := sameFormDigest(current, latest)
-	if decoded["current_digest"] != current {
-		t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
-	}
-	if decoded["latest_digest"] != wantLatest {
-		t.Fatalf("latest_digest=%q want %q", decoded["latest_digest"], wantLatest)
-	}
-	if decoded["current_digest"] == decoded["latest_digest"] {
-		t.Fatal("moved registry tag still equalized current and latest")
-	}
-	assertNoImageMutation(t, argv)
+
+	t.Run("moved registry digest differs from RepoDigest", func(t *testing.T) {
+		t.Parallel()
+		decoded, argv := observe(t, moved)
+		wantLatest := sameFormDigest(current, moved)
+		if decoded["current_digest"] != current {
+			t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
+		}
+		if decoded["latest_digest"] != wantLatest {
+			t.Fatalf("latest_digest=%q want %q", decoded["latest_digest"], wantLatest)
+		}
+		if decoded["current_digest"] == decoded["latest_digest"] {
+			t.Fatal("moved registry tag still equalized current and latest")
+		}
+		if decoded["latest_digest"] == sameFormDigest(current, platform) {
+			t.Fatal("latest_digest used verbose platform Descriptor.digest")
+		}
+		assertNoImageMutation(t, argv)
+	})
 }
 
 func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T) {
@@ -192,7 +219,7 @@ func TestControllerCallImageObserveFallsBackToImageIDWithoutRepoDigest(t *testin
 		switch dockerObserveCommand(name, args) {
 		case "image-inspect":
 			return []byte(`{"Id":"` + imageID + `","RepoDigests":[]}`), nil
-		case "manifest-inspect":
+		case "manifest-inspect", "imagetools":
 			return []byte(latest), nil
 		default:
 			t.Fatalf("unexpected command %s %q", name, args)
