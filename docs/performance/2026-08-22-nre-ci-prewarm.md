@@ -41,12 +41,28 @@ invocation.
 
 ## Optimized prewarm results
 
-Pending implementation and the required successful warmup plus three measured
-invocations for each command.
+Both commands completed one successful unmeasured warmup after the optimized
+implementation was built. The subsequent unchanged invocations produced these
+results on the measurement host:
+
+| Command | Sample | Exit status | Wall-clock |
+| --- | ---: | ---: | ---: |
+| IP Policy reproducible build | 1 | 0 | 2.662 s |
+| IP Policy reproducible build | 2 | 0 | 2.680 s |
+| IP Policy reproducible build | 3 | 0 | 2.662 s |
+| SDK capability verification | 1 | 0 | 2.292 s |
+| SDK capability verification | 2 | 0 | 1.225 s |
+| SDK capability verification | 3 | 0 | 1.091 s |
+
+Every measured invocation exited successfully and remained below the 10.000 s
+prewarm target. The unmeasured cache-populating runs took 46.423 s for the IP
+Policy reproducible build and 52.819 s for SDK capability verification; these
+are cold/cache-miss observations and are not part of the prewarm acceptance
+samples.
 
 ## Interpretation and exclusions
 
-The acceptance result will describe local prewarmed execution only. It does not
+The acceptance result describes local prewarmed execution only. It does not
 make a 10-second claim for cold dependency downloads, an empty toolchain cache,
 deleted reusable resources, other plugins or subcommands, repository-wide builds,
 or plugin runtime throughput and latency.

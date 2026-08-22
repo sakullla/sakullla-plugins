@@ -24,18 +24,15 @@ type Verification struct {
 }
 
 func Verify(ctx context.Context, lock Lock, requireHostCapabilities bool, repositoryRoot string) (Verification, error) {
-	if err := VerifyModuleIdentity(repositoryRoot, lock); err != nil {
-		return Verification{}, err
-	}
+	return verifyCached(ctx, lock, requireHostCapabilities, repositoryRoot, verificationCacheOptions{})
+}
+
+func verifyCanonical(ctx context.Context, lock Lock, requireHostCapabilities bool, repositoryRoot, checkout string) (Verification, error) {
 	root, err := os.MkdirTemp("", "sakullla-sdk-checkout-")
 	if err != nil {
 		return Verification{}, err
 	}
 	defer os.RemoveAll(root)
-	checkout, err := checkoutLockedRepository(ctx, root, lock.Repository)
-	if err != nil {
-		return Verification{}, err
-	}
 	contractTree, err := run(ctx, checkout, "git", "rev-parse", "HEAD:"+lock.SDK.ModuleDirectory)
 	if err != nil || normalizeGitOutput(contractTree) != lock.SDK.ContractTreeOID {
 		return Verification{}, fmt.Errorf("canonical SDK tree digest mismatch")
