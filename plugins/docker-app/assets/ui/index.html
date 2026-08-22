@@ -11,8 +11,8 @@
   <main>
     <header class="page-head">
       <p class="kicker">Docker 应用</p>
-      <h1>本节点 compose 应用</h1>
-      <p class="lede">先选节点，再用一份 compose YAML 部署应用。有发布端口时可以直接挂 HTTP 规则。</p>
+      <h1>组内 compose 应用</h1>
+      <p class="lede">先选一台在线节点。引擎未就绪时给出本机安装命令；就绪后才能部署 compose。有发布端口时可以挂 HTTP 规则。</p>
     </header>
     <p id="app-loading" role="status">正在加载应用…</p>
     <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
@@ -22,9 +22,24 @@
         <label class="agent-field">节点
           <select id="agent-select" required></select>
         </label>
+        <p id="engine-status" class="engine-status" hidden></p>
         <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
       </div>
       <p id="app-node-hint" class="hint" hidden></p>
+      <p id="app-offline" class="hint" hidden>该节点离线，不能部署或改动 compose 应用。</p>
+      <section class="panel" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
+        <div class="section-head">
+          <h2 id="engine-guide-title">安装 Docker 引擎</h2>
+        </div>
+        <p class="lede">在该节点本机执行下面的官方安装命令。面板不会代为安装 Docker。</p>
+        <pre id="engine-install-script"></pre>
+        <button id="copy-install-script" class="btn-primary" type="button">复制命令</button>
+        <div id="engine-daemon-json-wrap" hidden>
+          <p class="hint">已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
+          <pre id="engine-daemon-json"></pre>
+          <button id="copy-daemon-json" class="btn-primary" type="button">复制 daemon.json</button>
+        </div>
+      </section>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
           <h2 id="app-create-title">部署应用</h2>
@@ -46,7 +61,7 @@
           <p id="app-count" class="count" hidden></p>
         </div>
         <div id="app-list" class="app-list"></div>
-        <p id="app-empty" hidden>还没有应用。选好节点后点右上角部署。</p>
+        <p id="app-empty" hidden>还没有应用。引擎就绪后点右上角部署。</p>
       </section>
       <p id="app-status" role="status" hidden></p>
     </div>

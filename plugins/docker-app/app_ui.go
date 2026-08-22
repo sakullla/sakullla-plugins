@@ -23,6 +23,7 @@ const (
 
 type appView struct {
 	ID      string      `json:"id"`
+	AgentID string      `json:"agent_id,omitempty"`
 	Name    string      `json:"name"`
 	Status  string      `json:"status"`
 	Version string      `json:"version"`
@@ -33,6 +34,7 @@ type appView struct {
 
 type appWriteRequest struct {
 	ID         string `json:"id"`
+	AgentID    string `json:"agent_id"`
 	Compose    string `json:"compose"`
 	AutoUpdate bool   `json:"auto_update"`
 	Confirm    string `json:"confirm"`
@@ -41,11 +43,25 @@ type appWriteRequest struct {
 	Service    string `json:"service"`
 }
 
+type installCommandView struct {
+	Script     string `json:"script"`
+	DaemonJSON string `json:"daemon_json,omitempty"`
+}
+
+type engineAPIView struct {
+	AgentID string              `json:"agent_id"`
+	Online  bool                `json:"online"`
+	Ready   bool                `json:"ready"`
+	Version string              `json:"version,omitempty"`
+	Command *installCommandView `json:"command,omitempty"`
+}
+
 type appAPIResponse struct {
-	Apps   []appView `json:"apps,omitempty"`
-	App    *appView  `json:"app,omitempty"`
-	Logs   string    `json:"logs,omitempty"`
-	Error  string    `json:"error,omitempty"`
+	Apps   []appView      `json:"apps,omitempty"`
+	App    *appView       `json:"app,omitempty"`
+	Logs   string         `json:"logs,omitempty"`
+	Error  string         `json:"error,omitempty"`
+	Engine *engineAPIView `json:"engine,omitempty"`
 	Access struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
@@ -60,6 +76,10 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	path := request.URL.Path
 	if !controller.uiReady() {
 		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
+		return
+	}
+	if path == "/api/engine" {
+		controller.serveEngine(writer, request)
 		return
 	}
 	if path == "/api/apps" {
@@ -80,6 +100,42 @@ func (controller *Controller) uiReady() bool {
 	return controller.epoch != nil && controller.epoch.live.Load()
 }
 
+func (controller *Controller) serveEngine(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", "GET, HEAD")
+		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := controller.uiIdentity(request); err != nil {
+		writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
+		return
+	}
+	agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
+	if !validAgentID(agentID) {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+		return
+	}
+	report, err := controller.observeAgent(request.Context(), agentID)
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+		return
+	}
+	status := ProjectEngine(ObservationFromReport(report))
+	view := engineAPIView{AgentID: agentID, Online: report.Online, Ready: report.Online && status.Ready, Version: status.Version}
+	if !view.Ready {
+		command, commandErr := InstallCommand(controller.RegistryMirror())
+		if commandErr != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: commandErr.Error()})
+			return
+		}
+		view.Command = &installCommandView{Script: command.Script, DaemonJSON: command.DaemonJSON}
+	}
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Engine: &view, Access: struct {
+		CanRead  bool `json:"can_read"`
+		CanWrite bool `json:"can_write"`
+	}{CanRead: true, CanWrite: true}})
+}
+
 func (controller *Controller) serveAppCollection(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet, http.MethodHead:
@@ -87,7 +143,8 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(), Access: struct {
+		agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(agentID), Access: struct {
 			CanRead  bool `json:"can_read"`
 			CanWrite bool `json:"can_write"`
 		}{CanRead: true, CanWrite: true}})
@@ -101,10 +158,20 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrInvalidCompose.Error()})
 			return
 		}
+		agentID := strings.TrimSpace(body.AgentID)
+		if !validAgentID(agentID) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+			return
+		}
+		report, err := controller.observeAgent(request.Context(), agentID)
+		if err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			return
+		}
 		generation := controller.lifecycleGeneration()
-		next, err := DeployComposeApp(request.Context(), controller.Apps(), ComposeDeploySpec{
+		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
 			AppID: body.ID, Generation: generation, Compose: body.Compose,
-		}, controller.uiEngine, controller.uiApply, controller.uiAuditor)
+		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
@@ -112,10 +179,11 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		for index := range next {
 			if next[index].ID == body.ID {
 				next[index].AutoUpdate = cloneBool(&body.AutoUpdate)
+				next[index].AgentID = agentID
 			}
 		}
 		controller.replaceApps(next)
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews()})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(agentID)})
 	default:
 		writer.Header().Set("Allow", "GET, HEAD, POST")
 		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
@@ -154,19 +222,19 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		controller.replaceApps(next)
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews()})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
 	case "start":
 		if err := StartManaged(request.Context(), app, controller.uiStart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews()})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
 	case "restart":
 		if err := RestartManaged(request.Context(), app, controller.uiRestart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews()})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
 	case "http-rule":
 		body, err := decodeAppWrite(request)
 		if err != nil {
@@ -178,7 +246,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews()})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
 	case "logs":
 		body, _ := decodeAppWrite(request)
 		service := body.Service
@@ -228,10 +296,13 @@ func (controller *Controller) appByID(appID string) (App, bool) {
 	return App{}, false
 }
 
-func (controller *Controller) projectAppViews() []appView {
+func (controller *Controller) projectAppViews(agentID string) []appView {
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
 	for _, app := range apps {
+		if agentID != "" && app.AgentID != agentID {
+			continue
+		}
 		views = append(views, projectAppView(app))
 	}
 	return views
@@ -241,7 +312,7 @@ func projectAppView(app App) appView {
 	document := ProjectOpsDocument(app, AppStatusRunning)
 	ports, _ := ListPublishedPorts(app, nil)
 	return appView{
-		ID: app.ID, Name: document.Name, Status: document.Status, Version: document.Version,
+		ID: app.ID, AgentID: app.AgentID, Name: document.Name, Status: document.Status, Version: document.Version,
 		Compose: app.Compose, Ports: ports, Actions: document.Actions,
 	}
 }
@@ -287,6 +358,8 @@ func appStatus(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService):
 		return http.StatusBadRequest
+	case errors.Is(err, ErrAgentOffline):
+		return http.StatusConflict
 	case errors.Is(err, ErrEngineNotReady), errors.Is(err, ErrTypedHandlesUnavailable):
 		return http.StatusServiceUnavailable
 	default:
@@ -310,6 +383,8 @@ func publicAppError(err error) string {
 		return ErrUnknownService.Error()
 	case errors.Is(err, ErrEngineNotReady):
 		return ErrEngineNotReady.Error()
+	case errors.Is(err, ErrAgentOffline):
+		return ErrAgentOffline.Error()
 	case errors.Is(err, ErrTypedHandlesUnavailable):
 		return ErrTypedHandlesUnavailable.Error()
 	default:

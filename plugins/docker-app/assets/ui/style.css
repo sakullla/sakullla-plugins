@@ -144,6 +144,28 @@ h2 { font-size: var(--text-sm); }
   margin-bottom: var(--space-4);
 }
 
+.engine-status {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+#engine-guide pre {
+  margin: var(--space-3) 0;
+  max-height: 14rem;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
+#engine-guide .btn-primary { margin-top: var(--space-2); }
+
+#app-offline { color: var(--color-warning); }
+
 .agent-field {
   display: grid;
   gap: 0.4rem;

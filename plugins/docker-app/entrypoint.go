@@ -9,6 +9,10 @@ import (
 
 const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 
+func productionControllerConfig() ControllerConfig {
+	return ControllerConfig{UIEngineSource: NewReportedEngineCatalog()}
+}
+
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	declaration := pluginsdk.RPCPluginDeclaration{
 		PluginID: PluginID, PluginVersion: PluginVersion,
@@ -24,7 +28,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 				}),
 			})
 		},
-		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(ControllerConfig{}) },
-		Services: pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true},
+		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(productionControllerConfig()) },
+		Services:            pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true},
 	})
 }

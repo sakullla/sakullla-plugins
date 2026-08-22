@@ -1,5 +1,3 @@
-const PLUGIN_ID = "docker-app";
-
 const applyHostTheme = () => {
   const allowed = { "sakura-day": true, "sakura-night": true };
   const aliases = { sakura: "sakura-day", midnight: "sakura-night", "neko-dark": "sakura-night", cyberpunk: "sakura-day" };
@@ -34,14 +32,24 @@ const createCancel = document.querySelector("#create-cancel");
 const deployToggle = document.querySelector("#deploy-toggle");
 const agentSelect = document.querySelector("#agent-select");
 const nodeHint = document.querySelector("#app-node-hint");
+const offlineNode = document.querySelector("#app-offline");
+const engineGuide = document.querySelector("#engine-guide");
+const engineStatus = document.querySelector("#engine-status");
+const engineScript = document.querySelector("#engine-install-script");
+const daemonWrap = document.querySelector("#engine-daemon-json-wrap");
+const daemonNode = document.querySelector("#engine-daemon-json");
+const copyScript = document.querySelector("#copy-install-script");
+const copyDaemon = document.querySelector("#copy-daemon-json");
 const idInput = createForm ? createForm.querySelector('input[name="id"]') : null;
 const composeInput = createForm ? createForm.querySelector('textarea[name="compose"]') : null;
 const autoUpdateInput = createForm ? createForm.querySelector('input[name="auto_update"]') : null;
 
 let busy = false;
-let pluginDetail = null;
 let selectedAgentID = "";
 let editingID = "";
+let agentsCache = [];
+let engineReady = false;
+let agentOnline = false;
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -105,12 +113,17 @@ const sendPluginJSON = async (path, body) => {
 const setBusy = (next) => {
   busy = next;
   workspaceNode.querySelectorAll("button, input, textarea, select").forEach((node) => {
-    if (node === agentSelect) return;
+    if (node === agentSelect || node === copyScript || node === copyDaemon) return;
     node.disabled = next;
   });
 };
 
+const isAgentOnline = (agent) => Boolean(agent) && (agent.online === true || agent.status === "online");
+
+const selectedAgent = () => agentsCache.find((agent) => agent.id === selectedAgentID) || null;
+
 const openCreate = (app) => {
+  if (!engineReady || !agentOnline) return;
   editingID = app ? String(app.id || "") : "";
   createTitle.textContent = editingID ? "更新应用" : "部署应用";
   createSubmit.textContent = editingID ? "保存" : "部署";
@@ -132,26 +145,7 @@ const closeCreate = () => {
   createTitle.textContent = "部署应用";
   createSubmit.textContent = "部署";
   createPanel.hidden = true;
-  deployToggle.hidden = !selectedAgentID;
-};
-
-const instanceTargetsAgent = (instance, agentID) => {
-  const target = String(agentID || "").trim();
-  if (!instance || !target) return false;
-  const targets = Array.isArray(instance.targets) ? instance.targets : [];
-  if (targets.some((item) => String(item || "").trim() === target)) return true;
-  const bindings = Array.isArray(instance.bindings) ? instance.bindings : [];
-  return bindings.some((binding) => String(binding?.target_agent_id || "").trim() === target);
-};
-
-const instanceForAgent = (detail, agentID) => {
-  const instances = Array.isArray(detail?.instances) ? detail.instances : [];
-  return instances.find((instance) => instanceTargetsAgent(instance, agentID)) || null;
-};
-
-const appsFromInstance = (instance) => {
-  const apps = instance?.config?.apps;
-  return Array.isArray(apps) ? apps.filter((app) => app && typeof app === "object") : [];
+  deployToggle.hidden = !(selectedAgentID && engineReady && agentOnline);
 };
 
 const parsePublishedPorts = (compose) => {
@@ -185,43 +179,6 @@ const parseImage = (compose) => {
   return match ? match[1] : "";
 };
 
-const defaultGroupID = (groups) => {
-  const list = Array.isArray(groups) ? groups.filter((group) => group && group.id) : [];
-  if (list.some((group) => group.id === "default")) return "default";
-  return list[0]?.id || "";
-};
-
-const loadPluginDetail = async () => {
-  pluginDetail = await panelJSON(`/panel-api/plugins/${encodeURIComponent(PLUGIN_ID)}`);
-  return pluginDetail;
-};
-
-const saveApps = async (apps) => {
-  const instance = instanceForAgent(pluginDetail, selectedAgentID);
-  const groups = await panelJSON("/panel-api/access/resource-groups").catch(() => ({}));
-  const groupList = Array.isArray(groups?.resource_groups) ? groups.resource_groups : [];
-  const resourceGroupID = String(instance?.resource_group_id || defaultGroupID(groupList) || "").trim();
-  if (!resourceGroupID) throw new Error("当前没有可用的资源组，无法部署。");
-  const instanceID = String(instance?.id || `${PLUGIN_ID}-${selectedAgentID}`).slice(0, 128);
-  const request = {
-    instance_id: instanceID,
-    resource_group_id: resourceGroupID,
-    targets: [selectedAgentID],
-    policy_chains: Array.isArray(instance?.policy_chains) ? instance.policy_chains : [],
-    config: {
-      apps,
-      registry_mirror: instance?.config?.registry_mirror || "",
-    },
-  };
-  if (!instance) request.bindings = [];
-  await sendPluginJSON(`/panel-api/plugins/${encodeURIComponent(PLUGIN_ID)}/configure`, request);
-  const lifecycle = pluginDetail?.plugin?.desired_lifecycle || pluginDetail?.plugin?.current_lifecycle;
-  if (lifecycle && lifecycle !== "enabled" && lifecycle !== "active") {
-    await sendPluginJSON(`/panel-api/plugins/${encodeURIComponent(PLUGIN_ID)}/enable`, {});
-  }
-  await loadPluginDetail();
-};
-
 const chip = (text) => {
   const node = document.createElement("span");
   node.className = "chip";
@@ -229,12 +186,23 @@ const chip = (text) => {
   return node;
 };
 
+const copyText = async (text) => {
+  const value = String(text || "");
+  if (!value) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(value);
+  } else {
+    throw new Error("当前环境无法复制");
+  }
+  showStatus("已复制。", false);
+};
+
 const renderApp = (app) => {
   const card = document.createElement("article");
   card.className = "app-card";
   card.dataset.id = app.id;
   const ports = parsePublishedPorts(app.compose);
-  const version = parseImage(app.compose);
+  const version = app.version || parseImage(app.compose);
 
   const head = document.createElement("div");
   head.className = "app-card-head";
@@ -269,10 +237,9 @@ const renderApp = (app) => {
     }
     setBusy(true);
     try {
-      const instance = instanceForAgent(pluginDetail, selectedAgentID);
-      await saveApps(appsFromInstance(instance).filter((item) => item.id !== app.id));
+      await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/delete`, { confirm: app.id });
       closeCreate();
-      renderApps();
+      await renderWorkspace();
       showStatus("已删除应用。", false);
     } catch (error) {
       showStatus(error.message, true);
@@ -357,58 +324,117 @@ const renderApp = (app) => {
   return card;
 };
 
-const renderApps = () => {
-  const instance = instanceForAgent(pluginDetail, selectedAgentID);
-  const apps = appsFromInstance(instance);
-  listNode.replaceChildren(...apps.map(renderApp));
-  emptyNode.hidden = !selectedAgentID || apps.length > 0;
-  countNode.hidden = apps.length === 0;
-  countNode.textContent = `${apps.length} 个`;
-  deployToggle.hidden = createPanel.hidden === false ? true : !selectedAgentID;
+const loadEngine = async () => {
+  if (!selectedAgentID) return null;
+  const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  return payload.engine || null;
+};
+
+const renderGuide = (engine) => {
+  const command = engine?.command || {};
+  if (engineScript) engineScript.textContent = command.script || "";
+  const daemonJSON = command.daemon_json || "";
+  if (daemonNode) daemonNode.textContent = daemonJSON;
+  if (daemonWrap) daemonWrap.hidden = !daemonJSON;
+};
+
+const renderApps = (apps) => {
+  const list = Array.isArray(apps) ? apps : [];
+  listNode.replaceChildren(...list.map(renderApp));
+  emptyNode.hidden = !selectedAgentID || !engineReady || list.length > 0;
+  countNode.hidden = list.length === 0;
+  countNode.textContent = `${list.length} 个`;
+};
+
+const renderWorkspace = async () => {
+  const agent = selectedAgent();
+  agentOnline = isAgentOnline(agent);
+  engineReady = false;
   if (!selectedAgentID) {
+    if (engineGuide) engineGuide.hidden = true;
+    if (offlineNode) offlineNode.hidden = true;
+    if (engineStatus) engineStatus.hidden = true;
     nodeHint.hidden = false;
-    nodeHint.textContent = "请选择一台节点后再管理应用。";
+    nodeHint.textContent = "请选择一台在线节点后再管理应用。";
     emptyNode.hidden = true;
     closeCreate();
     deployToggle.hidden = true;
-  } else if (!instance) {
-    nodeHint.hidden = false;
-    nodeHint.textContent = "这台节点还没有本插件。第一次部署会同时把它装到该节点。";
-  } else {
-    nodeHint.hidden = true;
+    renderApps([]);
+    return;
   }
+  nodeHint.hidden = true;
+  if (!agentOnline) {
+    if (engineGuide) engineGuide.hidden = true;
+    if (offlineNode) offlineNode.hidden = false;
+    if (engineStatus) {
+      engineStatus.hidden = false;
+      engineStatus.textContent = "节点离线";
+    }
+    closeCreate();
+    deployToggle.hidden = true;
+    emptyNode.hidden = true;
+    renderApps([]);
+    return;
+  }
+  if (offlineNode) offlineNode.hidden = true;
+  const engine = await loadEngine();
+  engineReady = engine?.ready === true;
+  if (engineStatus) {
+    engineStatus.hidden = false;
+    engineStatus.textContent = engineReady
+      ? (engine.version ? `引擎 ${engine.version} 已就绪` : "引擎已就绪")
+      : "引擎未就绪";
+  }
+  if (!engineReady) {
+    renderGuide(engine);
+    if (engineGuide) engineGuide.hidden = false;
+    closeCreate();
+    deployToggle.hidden = true;
+    emptyNode.hidden = true;
+    renderApps([]);
+    return;
+  }
+  if (engineGuide) engineGuide.hidden = true;
+  deployToggle.hidden = createPanel.hidden === false ? true : false;
+  const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  renderApps(payload.apps);
 };
 
 const loadAgents = async () => {
   const payload = await panelJSON("/panel-api/agents");
-  const agents = Array.isArray(payload.agents) ? payload.agents : [];
+  agentsCache = Array.isArray(payload.agents) ? payload.agents : [];
   const requested = new URLSearchParams(window.location.search).get("agent_id") || "";
   agentSelect.replaceChildren();
   const placeholder = document.createElement("option");
   placeholder.value = "";
-  placeholder.textContent = agents.length ? "选择节点" : "暂无节点";
+  placeholder.textContent = agentsCache.length ? "选择节点" : "暂无节点";
   agentSelect.append(placeholder);
-  agents.forEach((agent) => {
+  agentsCache.forEach((agent) => {
     const option = document.createElement("option");
     option.value = agent.id;
-    option.textContent = agent.name && agent.name !== agent.id ? `${agent.name} · ${agent.id}` : (agent.name || agent.id);
+    const label = agent.name && agent.name !== agent.id ? `${agent.name} · ${agent.id}` : (agent.name || agent.id);
+    option.textContent = isAgentOnline(agent) ? label : `${label}（离线）`;
     agentSelect.append(option);
   });
-  selectedAgentID = agents.some((agent) => agent.id === requested)
+  selectedAgentID = agentsCache.some((agent) => agent.id === requested)
     ? requested
-    : (agents.length === 1 ? agents[0].id : "");
+    : (agentsCache.length === 1 ? agentsCache[0].id : "");
   agentSelect.value = selectedAgentID;
 };
 
 if (agentSelect) {
-  agentSelect.addEventListener("change", () => {
+  agentSelect.addEventListener("change", async () => {
     selectedAgentID = agentSelect.value;
     const url = new URL(window.location.href);
     if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
     else url.searchParams.delete("agent_id");
     window.history.replaceState({}, "", url);
     closeCreate();
-    renderApps();
+    try {
+      await renderWorkspace();
+    } catch (error) {
+      showStatus(error.message, true);
+    }
   });
 }
 
@@ -418,11 +444,39 @@ if (deployToggle) {
       showStatus("请先选择一台节点。", true);
       return;
     }
+    if (!agentOnline) {
+      showStatus("该节点离线，不能部署。", true);
+      return;
+    }
+    if (!engineReady) {
+      showStatus("引擎未就绪，请先在该节点本机安装 Docker。", true);
+      return;
+    }
     openCreate(null);
   });
 }
 
 if (createCancel) createCancel.addEventListener("click", closeCreate);
+
+if (copyScript) {
+  copyScript.addEventListener("click", async () => {
+    try {
+      await copyText(engineScript ? engineScript.textContent : "");
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  });
+}
+
+if (copyDaemon) {
+  copyDaemon.addEventListener("click", async () => {
+    try {
+      await copyText(daemonNode ? daemonNode.textContent : "");
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  });
+}
 
 if (createForm) {
   createForm.addEventListener("submit", async (event) => {
@@ -432,21 +486,27 @@ if (createForm) {
       showStatus("请先选择一台节点。", true);
       return;
     }
+    if (!agentOnline) {
+      showStatus("该节点离线，不能部署。", true);
+      return;
+    }
+    if (!engineReady) {
+      showStatus("引擎未就绪，不能部署。", true);
+      return;
+    }
     const data = new FormData(createForm);
     const nextApp = {
       id: String(data.get("id") || "").trim(),
+      agent_id: selectedAgentID,
       compose: String(data.get("compose") || ""),
       auto_update: data.get("auto_update") === "on",
     };
     const updating = Boolean(editingID);
     setBusy(true);
     try {
-      const instance = instanceForAgent(pluginDetail, selectedAgentID);
-      const apps = appsFromInstance(instance).filter((item) => item.id !== nextApp.id);
-      apps.push(nextApp);
-      await saveApps(apps);
+      await sendPluginJSON("api/apps", nextApp);
       closeCreate();
-      renderApps();
+      await renderWorkspace();
       showStatus(updating ? "已更新应用。" : "已部署应用。", false);
     } catch (error) {
       showStatus(error.message, true);
@@ -458,9 +518,8 @@ if (createForm) {
 
 (async () => {
   try {
-    await loadPluginDetail();
     await loadAgents();
-    renderApps();
+    await renderWorkspace();
     loadingNode.hidden = true;
     workspaceNode.hidden = false;
   } catch (error) {

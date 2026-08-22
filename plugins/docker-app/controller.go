@@ -59,7 +59,7 @@ type ControllerConfig struct {
 	Admission                                                  TypedHandleAdmission
 	PrepareGate                                                func(context.Context) error
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
-	UIEngine                                                   EngineObservation
+	UIEngineSource                                             AgentEngineSource
 	UIApply                                                    AppApplyExecutor
 	UIStart                                                    StartExecutor
 	UIRestart                                                  RestartExecutor
@@ -79,7 +79,7 @@ type Controller struct {
 	prepareGate      func(context.Context) error
 	commit           *rpcplugin.Handle[*commitEpoch]
 	epoch            *commitEpoch
-	uiEngine         EngineObservation
+	uiEngineSource   AgentEngineSource
 	uiApply          AppApplyExecutor
 	uiStart          StartExecutor
 	uiRestart        RestartExecutor
@@ -105,7 +105,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	controller := &Controller{
 		admission: config.Admission, prepareGate: config.PrepareGate,
-		uiEngine: config.UIEngine, uiApply: config.UIApply, uiStart: config.UIStart, uiRestart: config.UIRestart,
+		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiRestart: config.UIRestart,
 		uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule, uiAuditor: auditor,
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
@@ -137,6 +137,21 @@ func (controller *Controller) ResourceGroupRef() string {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	return controller.resourceGroupRef
+}
+
+func (controller *Controller) observeAgent(ctx context.Context, agentID string) (AgentEngineReport, error) {
+	if !validAgentID(agentID) {
+		return AgentEngineReport{}, errors.New("agent id is invalid")
+	}
+	if controller.uiEngineSource == nil {
+		return AgentEngineReport{AgentID: agentID}, nil
+	}
+	report, err := controller.uiEngineSource.Report(ctx, agentID)
+	if err != nil {
+		return AgentEngineReport{}, err
+	}
+	report.AgentID = agentID
+	return normalizeAgentEngineReport(report), nil
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, config []byte) error {

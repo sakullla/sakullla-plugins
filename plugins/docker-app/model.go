@@ -34,6 +34,7 @@ var (
 	ErrMissingComposeImage     = errors.New("compose YAML is missing a deployable image")
 	ErrDeleteUnconfirmed       = errors.New("delete was not confirmed")
 	ErrEngineNotReady          = errors.New("Docker engine is not ready")
+	ErrAgentOffline            = errors.New("target Agent is offline")
 	ErrUnknownService          = errors.New("compose service is unknown")
 	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
 	ErrNoPublishedPort         = errors.New("app has no published port")
@@ -41,6 +42,7 @@ var (
 
 type App struct {
 	ID         string   `json:"id"`
+	AgentID    string   `json:"agent_id,omitempty"`
 	Compose    string   `json:"compose"`
 	Generation string   `json:"generation"`
 	SecretRefs []string `json:"secret_refs,omitempty"`
@@ -59,6 +61,9 @@ func (app App) Validate() error {
 	}
 	if !boundedText(app.Image, 512) {
 		return errors.New("app image is invalid")
+	}
+	if app.AgentID != "" && !validAgentID(app.AgentID) {
+		return errors.New("agent_id is invalid")
 	}
 	if app.RuleRef != "" && !boundedText(app.RuleRef, 128) {
 		return errors.New("rule_ref is invalid")

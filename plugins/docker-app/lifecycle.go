@@ -74,6 +74,27 @@ func UpsertManaged(apps []App, app App) ([]App, error) {
 	return RegisterManaged(apps, app)
 }
 
+func DeployComposeAppForAgent(ctx context.Context, apps []App, spec ComposeDeploySpec, report AgentEngineReport, executor AppApplyExecutor, auditor Auditor) ([]App, error) {
+	preserved := cloneApps(apps)
+	if auditor == nil {
+		return preserved, ErrAuditRequired
+	}
+	if !validAgentID(report.AgentID) || !report.Online {
+		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrAgentOffline.Error()})
+		return preserved, ErrAgentOffline
+	}
+	next, err := DeployComposeApp(ctx, apps, spec, ObservationFromReport(report), executor, auditor)
+	if err != nil {
+		return next, err
+	}
+	for index := range next {
+		if next[index].ID == spec.AppID {
+			next[index].AgentID = report.AgentID
+		}
+	}
+	return next, nil
+}
+
 func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, engine EngineObservation, executor AppApplyExecutor, auditor Auditor) ([]App, error) {
 	preserved := cloneApps(apps)
 	if auditor == nil {

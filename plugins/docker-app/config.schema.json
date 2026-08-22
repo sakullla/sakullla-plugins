@@ -21,6 +21,13 @@
             "description": "由宿主写入，不作为用户填写项。",
             "hostInjected": true
           },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "目标 Agent。由插件管理页写入，不作为通用配置表单。",
+            "hostInjected": true
+          },
           "compose": {
             "type": "string",
             "minLength": 1,

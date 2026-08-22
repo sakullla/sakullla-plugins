@@ -25,3 +25,10 @@ func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 		t.Fatalf("RunEntrypoint() error = %v, want canonical SDK endpoint validation", err)
 	}
 }
+
+func TestRunEntrypointProductionWiresReportedEngineSource(t *testing.T) {
+	config := productionControllerConfig()
+	if config.UIEngineSource == nil {
+		t.Fatal("production entrypoint still pins a zero UIEngine as the only observation path")
+	}
+}

@@ -67,7 +67,7 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 	controller := newUIController(t)
 	compose := "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"
 	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","compose":`+jsonString(compose)+`}`))
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
 	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -77,12 +77,12 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	controller.ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="app-workspace"`) || !strings.Contains(page.Body.String(), `id="deploy-toggle"`) || strings.Contains(page.Body.String(), "{{") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="app-workspace"`) || !strings.Contains(page.Body.String(), `id="deploy-toggle"`) || !strings.Contains(page.Body.String(), `id="engine-guide"`) || strings.Contains(page.Body.String(), "{{") {
 		t.Fatalf("page status=%d body=%s", page.Code, page.Body.String())
 	}
 
 	listed := httptest.NewRecorder()
-	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps", ""))
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"media"`) {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
@@ -121,18 +121,143 @@ func TestAppUIRejectsMissingActor(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	engine := httptest.NewRecorder()
+	controller.ServeHTTP(engine, httptest.NewRequest(http.MethodGet, "/api/engine?agent_id=agent-1", nil))
+	if engine.Code != http.StatusForbidden {
+		t.Fatalf("engine status=%d body=%s", engine.Code, engine.Body.String())
+	}
+}
+
+func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
+	t.Parallel()
+	catalog := NewReportedEngineCatalog()
+	if err := catalog.Consume([]byte(`{"id":"agent-1","online":true,"engine":{"installed":false}}`)); err != nil {
+		t.Fatal(err)
+	}
+	controller := newUIControllerWithSource(t, catalog, `{"apps":[],"registry_mirror":"https://mirror.example"}`)
+	compose := `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`
+
+	unready := httptest.NewRecorder()
+	controller.ServeHTTP(unready, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+	if unready.Code != http.StatusOK || !strings.Contains(unready.Body.String(), `"ready":false`) || !strings.Contains(unready.Body.String(), OfficialInstallScript) || !strings.Contains(unready.Body.String(), "registry-mirrors") {
+		t.Fatalf("unready engine status=%d body=%s", unready.Code, unready.Body.String())
+	}
+	if strings.Contains(unready.Body.String(), `"ready":true`) {
+		t.Fatalf("unready engine projected ready: %s", unready.Body.String())
+	}
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps", compose))
+	if denied.Code != http.StatusServiceUnavailable || !strings.Contains(denied.Body.String(), ErrEngineNotReady.Error()) {
+		t.Fatalf("unready deploy status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	if len(controller.Apps()) != 0 {
+		t.Fatalf("unready deploy mutated apps: %#v", controller.Apps())
+	}
+
+	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"})
+	ready := httptest.NewRecorder()
+	controller.ServeHTTP(ready, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+	if ready.Code != http.StatusOK || !strings.Contains(ready.Body.String(), `"ready":true`) || !strings.Contains(ready.Body.String(), `"version":"27.1.1"`) || strings.Contains(ready.Body.String(), OfficialInstallScript) {
+		t.Fatalf("ready engine status=%d body=%s", ready.Code, ready.Body.String())
+	}
+
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", compose))
+	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
+		t.Fatalf("ready deploy status=%d body=%s", created.Code, created.Body.String())
+	}
+	if len(controller.Apps()) != 1 || controller.Apps()[0].AgentID != "agent-1" {
+		t.Fatalf("ready deploy apps=%#v", controller.Apps())
+	}
+}
+
+func TestAppUIRejectsOfflineAgentDeploy(t *testing.T) {
+	t.Parallel()
+	catalog := NewReportedEngineCatalog()
+	catalog.Replace(AgentEngineReport{AgentID: "agent-2", Online: false, Installed: true, Version: "27.1.1"})
+	controller := newUIControllerWithSource(t, catalog, `{"apps":[]}`)
+	engine := httptest.NewRecorder()
+	controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-2", ""))
+	if engine.Code != http.StatusOK || !strings.Contains(engine.Body.String(), `"online":false`) || strings.Contains(engine.Body.String(), `"ready":true`) {
+		t.Fatalf("offline engine status=%d body=%s", engine.Code, engine.Body.String())
+	}
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-2","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), ErrAgentOffline.Error()) {
+		t.Fatalf("offline deploy status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	if len(controller.Apps()) != 0 {
+		t.Fatalf("offline deploy mutated apps: %#v", controller.Apps())
+	}
+}
+
+func TestAppUIDoesNotConfigurePluginOntoAgentOrOfferRemoteInstall(t *testing.T) {
+	t.Parallel()
+	page := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
+	html := page.Body.String()
+	scriptRec := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(scriptRec, uiRequest(http.MethodGet, "/app.js", ""))
+	script := scriptRec.Body.String()
+	combined := html + script
+	for _, token := range []string{
+		"/panel-api/plugins/docker-app/configure",
+		"第一次部署会把本插件装到该节点",
+		"由面板安装",
+		"控制面安装",
+		"一键安装",
+		"id=\"engine-install\"",
+		"data-action=\"install-engine\"",
+	} {
+		if strings.Contains(combined, token) {
+			t.Fatalf("product page still has %q", token)
+		}
+	}
+	if !strings.Contains(html, `id="engine-guide"`) || !strings.Contains(html, "复制命令") || !strings.Contains(script, "api/engine") || !strings.Contains(script, "api/apps") {
+		t.Fatalf("install guide or plugin-local deploy path missing: html=%s", html)
+	}
+	if strings.Contains(script, "targets") && strings.Contains(script, "selectedAgentID") && strings.Contains(script, "configure") {
+		t.Fatal("plugin page still configures docker-app onto the selected Agent")
+	}
+}
+
+func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
+	t.Parallel()
+	config := productionControllerConfig()
+	if config.UIEngineSource == nil {
+		t.Fatal("production runtime still treats a zero UIEngine as the only observation path")
+	}
+	controller, err := NewController(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := controller.observeAgent(context.Background(), "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Online || report.Installed || ProjectEngine(ObservationFromReport(report)).Ready {
+		t.Fatalf("empty catalog leaked readiness: %#v", report)
+	}
 }
 
 func newUIController(t *testing.T) *Controller {
+	t.Helper()
+	catalog := NewReportedEngineCatalog()
+	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "test"})
+	return newUIControllerWithSource(t, catalog, `{"apps":[]}`)
+}
+
+func newUIControllerWithSource(t *testing.T, source AgentEngineSource, config string) *Controller {
 	t.Helper()
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error) {
 			return PreparedAdmissionFuncs{}, nil
 		}),
-		UIEngine: EngineObservation{Installed: true, Version: "test"},
-		UIApply:  AppApplyExecutorFunc(func(context.Context, App) error { return nil }),
-		UIRemove: AppRemoveExecutorFunc(func(context.Context, string) error { return nil }),
+		UIEngineSource: source,
+		UIApply:        AppApplyExecutorFunc(func(context.Context, App) error { return nil }),
+		UIRemove:       AppRemoveExecutorFunc(func(context.Context, string) error { return nil }),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +269,7 @@ func newUIController(t *testing.T) *Controller {
 		t.Fatal(err)
 	}
 	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{
-		Generation: "generation-1", Config: []byte(`{"apps":[]}`),
+		Generation: "generation-1", Config: []byte(config),
 	}); response.Error != nil {
 		t.Fatal(response.Error)
 	}

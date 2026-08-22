@@ -2,6 +2,7 @@ package dockerapp_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,79 @@ type installSpy struct{ called bool }
 func (spy *installSpy) Install() error {
 	spy.called = true
 	return nil
+}
+
+func TestDockerGenericAgentReportFeedsEngineStatusWithoutRemoteInstall(t *testing.T) {
+	installer := &installSpy{}
+	catalog := dockerapp.NewReportedEngineCatalog()
+	if err := catalog.Consume([]byte(`{"id":"agent-1","online":true,"engine":{"installed":false,"version":"stale"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := catalog.Report(context.Background(), "agent-1")
+	if err != nil || !missing.Online || missing.Installed {
+		t.Fatalf("uninstalled report=%#v err=%v", missing, err)
+	}
+	if dockerapp.ProjectEngine(dockerapp.ObservationFromReport(missing)).Ready {
+		t.Fatalf("uninstalled report projected ready: %#v", missing)
+	}
+	got, err := dockerapp.ProjectEngineReady(dockerapp.ObservationFromReport(missing), []byte(`{"apps":[]}`), installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Ready || got.Command.Script != dockerapp.OfficialInstallScript || installer.called {
+		t.Fatalf("uninstalled report invoked install or skipped guide: %#v called=%v", got, installer.called)
+	}
+
+	if err := catalog.Consume([]byte(`{"agent_id":"agent-2","status":"online","engine":{"installed":true,"version":"27.1.1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := catalog.Report(context.Background(), "agent-2")
+	if err != nil || !ready.Online || !ready.Installed || ready.Version != "27.1.1" {
+		t.Fatalf("ready report=%#v err=%v", ready, err)
+	}
+	if err := catalog.Consume([]byte(`{"id":"agent-3","online":false,"engine":{"installed":true,"version":"27.1.1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := catalog.Report(context.Background(), "agent-3")
+	if err != nil || offline.Online || offline.Installed || offline.Version != "" {
+		t.Fatalf("offline report reused cached engine: %#v err=%v", offline, err)
+	}
+	if _, err := dockerapp.DeployComposeAppForAgent(context.Background(), nil, dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: "services:\n  web:\n    image: nginx:1.27\n"}, offline, nil, dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})); !errors.Is(err, dockerapp.ErrAgentOffline) {
+		t.Fatalf("offline deploy err=%v", err)
+	}
+	if installer.called {
+		t.Fatal("generic agent report path invoked remote install")
+	}
+}
+
+func TestDockerAppUIDoesNotConfigureInstanceOntoSelectedAgent(t *testing.T) {
+	pluginDir := filepath.Join("..", "..", "..", "plugins", "docker-app")
+	script, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+	page := string(html)
+	combined := page + js
+	for _, token := range []string{
+		"/panel-api/plugins/docker-app/configure",
+		"第一次部署会把本插件装到该节点",
+		"由面板安装",
+		"控制面安装",
+		"一键安装",
+		"data-action=\"install-engine\"",
+	} {
+		if strings.Contains(combined, token) {
+			t.Fatalf("plugin page still has %q", token)
+		}
+	}
+	if !strings.Contains(page, `id="engine-guide"`) || !strings.Contains(js, "api/engine") || strings.Contains(js, "/configure") {
+		t.Fatal("plugin page still configures docker-app onto the selected Agent or lacks the install guide")
+	}
 }
 
 func TestDockerReadyInstalledProjectsEngineReady(t *testing.T) {
