@@ -2,6 +2,8 @@ package dockerapp_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,18 +58,39 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 		t.Fatalf("PlanFromSource treated ./ as host mount: %#v", sourcePlan)
 	}
 
-	runtime := &workdirRuntime{lifecycleRuntime: newLifecycleRuntime()}
 	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	runtime := newLifecycleRuntime()
 	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: compose, WorkDirRoot: root}
 	apps, err := dockerapp.DeployComposeApp(context.Background(), nil, spec, dockerapp.EngineObservation{Installed: true, Version: "27.1.1"}, runtime, auditor)
 	if err != nil || len(apps) != 1 {
 		t.Fatalf("relative bind deploy err=%v apps=%#v", err, apps)
 	}
-	app := apps[0]
-	workdir := filepath.Join(root, "media")
-	if app.WorkDir != workdir {
-		t.Fatalf("workdir = %q want %q", app.WorkDir, workdir)
+	if apps[0].WorkDir != "" {
+		t.Fatalf("management-face deploy materialized workdir %q", apps[0].WorkDir)
 	}
+	if _, err := os.Stat(filepath.Join(root, "media", dockerapp.ComposeFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("management-face deploy wrote Agent workspace: %v", err)
+	}
+
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		UIWorkDirRoot: root,
+		CommandRunner: dockerapp.CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "compose", payload); err != nil {
+		t.Fatal(err)
+	}
+
+	workdir := filepath.Join(root, "media")
 	if _, err := os.Stat(filepath.Join(workdir, dockerapp.ComposeFileName)); err != nil {
 		t.Fatalf("compose file: %v", err)
 	}
@@ -76,8 +99,12 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("data dir = %#v err=%v", info, err)
 	}
+	binds, err := dockerapp.ResolveComposeBinds(workdir, compose)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	dataBind := findVolumeBind(runtime.binds, "/data")
+	dataBind := findVolumeBind(binds, "/data")
 	if !dataBind.Relative || dataBind.HostPath != dataDir {
 		t.Fatalf("container /data bind = %#v want host %q", dataBind, dataDir)
 	}
@@ -93,7 +120,7 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 	if err := os.WriteFile(configHost, []byte("listen: 80\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configBind := findVolumeBind(runtime.binds, "/app/config.yml")
+	configBind := findVolumeBind(binds, "/app/config.yml")
 	if !configBind.Relative || configBind.HostPath != configHost {
 		t.Fatalf("container file bind = %#v want host %q", configBind, configHost)
 	}
@@ -152,22 +179,6 @@ func TestAbsoluteAndParentBindsRemainHostMounts(t *testing.T) {
 	if !hasRiskKind(preview, dockerapp.RiskHostMount) {
 		t.Fatalf("absolute/parent binds lost host-mount risk: %#v", preview.Items)
 	}
-}
-
-type workdirRuntime struct {
-	*lifecycleRuntime
-	binds []dockerapp.VolumeBind
-}
-
-func (runtime *workdirRuntime) ApplyApp(ctx context.Context, app dockerapp.App) error {
-	if app.WorkDir != "" {
-		binds, err := dockerapp.ResolveAppBinds(app)
-		if err != nil {
-			return err
-		}
-		runtime.binds = binds
-	}
-	return runtime.lifecycleRuntime.ApplyApp(ctx, app)
 }
 
 func mustPreview(t *testing.T, plan dockerapp.ComposePlan) dockerapp.RiskPreview {

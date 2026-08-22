@@ -1,5 +1,8 @@
 // Package dockerapp contains plugin-owned Docker application orchestration
-// state. It never opens a Docker socket or executes docker/compose commands.
+// state. The control-plane management face forwards engine, compose, and image
+// work through plugin.call and keeps HTTP ingress on http.rule. The Agent
+// execution face runs local docker compose CLI. Neither face dials the
+// control-plane docker.socket.
 package dockerapp
 
 import (

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -418,14 +417,11 @@ func TestAppUIDeploysRelativeBindsAgainstWorkDir(t *testing.T) {
 		t.Fatalf("relative bind deploy status=%d body=%s", created.Code, created.Body.String())
 	}
 	apps := controller.Apps()
-	if len(apps) != 1 || apps[0].WorkDir == "" {
-		t.Fatalf("relative bind workdir missing: %#v", apps)
+	if len(apps) != 1 || apps[0].ID != "media" {
+		t.Fatalf("relative bind apps=%#v", apps)
 	}
-	if _, err := os.Stat(filepath.Join(apps[0].WorkDir, "data")); err != nil {
-		t.Fatalf("relative bind data dir: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(apps[0].WorkDir, ComposeFileName)); err != nil {
-		t.Fatalf("relative bind compose file: %v", err)
+	if apps[0].WorkDir != "" {
+		t.Fatalf("management-face deploy materialized a control-plane workdir: %#v", apps[0])
 	}
 
 	emptyRoot := newUIControllerWithOptions(t, uiControllerOptions{workDirRoot: stringPtr("")})

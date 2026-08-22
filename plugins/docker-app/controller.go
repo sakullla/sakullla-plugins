@@ -71,6 +71,8 @@ type ControllerConfig struct {
 	UIWorkDirRoot                                              string
 	UIRolloutExecutor                                          RolloutExecutor
 	UIImageObserver                                            ImageUpdateObserver
+	CommandRunner                                              CommandRunner
+	CallImages                                                 ImageUpdateObserver
 }
 
 type Controller struct {
@@ -95,6 +97,8 @@ type Controller struct {
 	uiWorkDirRoot    string
 	uiRollout        Rollout
 	uiImageObserver  ImageUpdateObserver
+	commandRunner    CommandRunner
+	callImages       ImageUpdateObserver
 	appRuntime       map[string]bool
 	hostRules        []HostHTTPRule
 }
@@ -118,6 +122,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
 		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
+		commandRunner: config.CommandRunner, callImages: config.CallImages,
 		appRuntime: map[string]bool{},
 		uiRollout:  Rollout{Store: NewDeploymentStore(), Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}

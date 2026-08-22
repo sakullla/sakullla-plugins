@@ -21,23 +21,21 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	var calls []pluginsdk.HostRuntimeCall
 	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
 		calls = append(calls, call)
-		switch call.Operation {
-		case hostAgentEngineOperation:
+		request := decodePluginCallRequest(t, call)
+		switch request.Name {
+		case pluginCallEngineName:
 			return copyHostResult(map[string]any{
 				"agent_id": "agent-1", "online": true,
 				"engine": map[string]any{"installed": true, "version": "27.1.1"},
 			}, target)
-		case hostAgentComposeOperation:
-			var payload map[string]any
-			if err := json.Unmarshal(call.Payload, &payload); err != nil {
-				return err
-			}
+		case pluginCallComposeName:
+			payload := decodePluginCallInner(t, request)
 			if payload["action"] == "logs" {
 				return copyHostResult(map[string]any{"logs": "listening on :80\n"}, target)
 			}
 			return copyHostResult(map[string]any{"accepted": true}, target)
 		default:
-			t.Fatalf("unexpected host operation %q", call.Operation)
+			t.Fatalf("unexpected plugin.call name %q", request.Name)
 			return nil
 		}
 	})
@@ -75,31 +73,28 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	if len(calls) != 7 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
-	if calls[0].Operation != hostAgentEngineOperation || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
+	assertNoNamedAgentHostOps(t, calls)
+	engine := decodePluginCallRequest(t, calls[0])
+	if engine.Name != pluginCallEngineName || engine.AgentID != "agent-1" || !strings.Contains(string(engine.Payload), `"agent_id":"agent-1"`) {
 		t.Fatalf("engine call = %#v", calls[0])
 	}
-	var apply map[string]any
-	if err := json.Unmarshal(calls[1].Payload, &apply); err != nil {
-		t.Fatal(err)
-	}
-	if calls[1].Operation != hostAgentComposeOperation || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" {
+	apply := decodePluginCallInner(t, decodePluginCallRequest(t, calls[1]))
+	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" {
 		t.Fatalf("compose apply call = %#v payload=%#v", calls[1], apply)
 	}
 	for index, call := range calls[1:] {
-		if call.Operation != hostAgentComposeOperation {
+		request := decodePluginCallRequest(t, call)
+		if request.Name != pluginCallComposeName {
 			t.Fatalf("compose call %d = %#v", index, call)
 		}
-		var payload map[string]any
-		if err := json.Unmarshal(call.Payload, &payload); err != nil {
-			t.Fatal(err)
-		}
+		payload := decodePluginCallInner(t, request)
 		if payload["agent_id"] != "agent-1" || payload["app_id"] != "media" {
 			t.Fatalf("compose call %d omitted agent routing: %#v", index, payload)
 		}
 	}
 	for _, marker := range []string{"docker.socket", "docker.sock", "unix://", "container.compose"} {
 		for _, call := range calls {
-			if strings.Contains(strings.ToLower(string(call.Payload)), marker) || call.Operation == marker {
+			if call.Operation == marker {
 				t.Fatalf("generic handle leaked local Docker target: %#v", call)
 			}
 		}
@@ -119,8 +114,12 @@ func TestHostCapabilityRuntimeFailClosedWithoutClientOrOnLocalSocket(t *testing.
 	}
 
 	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
-		switch call.Operation {
-		case hostAgentEngineOperation:
+		if call.Operation != pluginsdk.HostRuntimePluginCall {
+			t.Fatalf("unexpected host operation %q", call.Operation)
+		}
+		request := decodePluginCallRequest(t, call)
+		switch request.Name {
+		case pluginCallEngineName:
 			return copyHostResult(map[string]any{
 				"kind": "docker.socket", "id": "local", "path": "/var/run/docker.sock",
 			}, target)
@@ -150,17 +149,19 @@ func TestHostCapabilityRuntimeFailClosedWithoutClientOrOnLocalSocket(t *testing.
 
 func TestHostCapabilityRuntimeSendsComposeVolumeBindWithoutTreatingItAsLocalEngine(t *testing.T) {
 	t.Parallel()
-	var payload map[string]any
+	var request pluginsdk.PluginCallRequest
 	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
-		if err := json.Unmarshal(call.Payload, &payload); err != nil {
-			return err
-		}
+		request = decodePluginCallRequest(t, call)
 		return copyHostResult(map[string]any{"accepted": true}, target)
 	})
 	compose := "services:\n  dind:\n    image: docker:27\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"
 	if err := newHostCapabilityRuntime(client).ApplyApp(context.Background(), App{ID: "dind", AgentID: "agent-1", Compose: compose}); err != nil {
 		t.Fatal(err)
 	}
+	if request.Name != pluginCallComposeName || request.AgentID != "agent-1" {
+		t.Fatalf("plugin.call = %#v", request)
+	}
+	payload := decodePluginCallInner(t, request)
 	if payload["action"] != "apply" || payload["agent_id"] != "agent-1" || payload["app_id"] != "dind" {
 		t.Fatalf("compose handle payload = %#v", payload)
 	}
@@ -264,19 +265,23 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 				}, target)
 			}
 			return copyHostResult(map[string]any{"accepted": true}, target)
-		case hostAgentImageOperation:
-			return copyHostResult(map[string]any{
-				"current_digest": "sha256:current", "latest_digest": "sha256:latest",
-			}, target)
-		case hostAgentComposeOperation:
-			var payload map[string]any
-			if err := json.Unmarshal(call.Payload, &payload); err != nil {
-				return err
+		case pluginsdk.HostRuntimePluginCall:
+			request := decodePluginCallRequest(t, call)
+			switch request.Name {
+			case pluginCallImageName:
+				return copyHostResult(map[string]any{
+					"current_digest": "sha256:current", "latest_digest": "sha256:latest",
+				}, target)
+			case pluginCallComposeName:
+				payload := decodePluginCallInner(t, request)
+				if payload["action"] == "start-instance" {
+					return copyHostResult(map[string]any{"instance_id": "new"}, target)
+				}
+				return copyHostResult(map[string]any{"accepted": true}, target)
+			default:
+				t.Fatalf("unexpected plugin.call name %q", request.Name)
+				return nil
 			}
-			if payload["action"] == "start-instance" {
-				return copyHostResult(map[string]any{"instance_id": "new"}, target)
-			}
-			return copyHostResult(map[string]any{"accepted": true}, target)
 		default:
 			t.Fatalf("unexpected host operation %q", call.Operation)
 			return nil
@@ -319,29 +324,22 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	if len(calls) != 8 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
+	assertNoNamedAgentHostOps(t, calls)
 	if calls[0].Operation != hostHTTPRuleOperation || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
 		t.Fatalf("http.rule call = %#v", calls[0])
 	}
-	if calls[1].Operation != hostAgentImageOperation || !strings.Contains(string(calls[1].Payload), `"agent_id":"agent-1"`) {
-		t.Fatalf("agent.image call = %#v", calls[1])
+	image := decodePluginCallRequest(t, calls[1])
+	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || image.Name != pluginCallImageName || image.AgentID != "agent-1" {
+		t.Fatalf("image plugin.call = %#v", calls[1])
 	}
 	for index, call := range calls[2:] {
-		if call.Operation != hostAgentComposeOperation {
+		request := decodePluginCallRequest(t, call)
+		if request.Name != pluginCallComposeName {
 			t.Fatalf("rollout compose call %d = %#v", index, call)
 		}
-		var payload map[string]any
-		if err := json.Unmarshal(call.Payload, &payload); err != nil {
-			t.Fatal(err)
-		}
+		payload := decodePluginCallInner(t, request)
 		if payload["agent_id"] != "agent-1" || payload["app_id"] != "media" {
 			t.Fatalf("rollout compose call %d omitted agent routing: %#v", index, payload)
-		}
-	}
-	for _, marker := range []string{"docker.socket", "docker.sock", "unix://", "container.compose"} {
-		for _, call := range calls {
-			if strings.Contains(strings.ToLower(string(call.Payload)), marker) || call.Operation == marker {
-				t.Fatalf("generic handle leaked local Docker target: %#v", call)
-			}
 		}
 	}
 	if err := config.UIRolloutExecutor.Ready(context.Background(), 1, App{ID: "media"}, "new"); !errors.Is(err, ErrAgentOffline) {
@@ -377,6 +375,43 @@ func TestHostRolloutRuntimeSkipsHTTPRuleCutoverWithoutRuleRef(t *testing.T) {
 	}
 	if !strings.Contains(string(calls[0].Payload), `"rule_ref":"rule-media"`) || !strings.Contains(string(calls[0].Payload), `"action":"cutover"`) {
 		t.Fatalf("cutover payload=%s", calls[0].Payload)
+	}
+}
+
+func decodePluginCallRequest(t *testing.T, call pluginsdk.HostRuntimeCall) pluginsdk.PluginCallRequest {
+	t.Helper()
+	if call.Operation != pluginsdk.HostRuntimePluginCall {
+		t.Fatalf("host operation = %q want %q", call.Operation, pluginsdk.HostRuntimePluginCall)
+	}
+	var request pluginsdk.PluginCallRequest
+	if err := json.Unmarshal(call.Payload, &request); err != nil {
+		t.Fatalf("plugin.call envelope: %v payload=%s", err, call.Payload)
+	}
+	return request
+}
+
+func decodePluginCallInner(t *testing.T, request pluginsdk.PluginCallRequest) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if len(request.Payload) == 0 {
+		return payload
+	}
+	if err := json.Unmarshal(request.Payload, &payload); err != nil {
+		t.Fatalf("plugin.call payload: %v", err)
+	}
+	return payload
+}
+
+func assertNoNamedAgentHostOps(t *testing.T, calls []pluginsdk.HostRuntimeCall) {
+	t.Helper()
+	for _, call := range calls {
+		switch call.Operation {
+		case "agent.engine.report", "agent.compose", "agent.image":
+			t.Fatalf("production still emits %q: %#v", call.Operation, call)
+		case pluginsdk.HostRuntimePluginCall, pluginsdk.HostRuntimeHTTPRule:
+		default:
+			t.Fatalf("unexpected host operation %q", call.Operation)
+		}
 	}
 }
 

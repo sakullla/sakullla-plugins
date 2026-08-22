@@ -131,14 +131,6 @@ func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, e
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return preserved, ErrTypedHandlesUnavailable
 	}
-	if spec.WorkDirRoot != "" {
-		workspace, err := PrepareAppWorkspace(spec.WorkDirRoot, app.ID, app.Compose)
-		if err != nil {
-			audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-			return preserved, safeFailure(ErrOperationFailed, err)
-		}
-		app.WorkDir = workspace.Dir
-	}
 	if err := executor.ApplyApp(ctx, app); err != nil {
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return preserved, safeFailure(ErrOperationFailed, err)

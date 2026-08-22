@@ -92,6 +92,22 @@ func TestProductionSourcesDoNotDialControlPlaneDockerSocket(t *testing.T) {
 		if strings.Contains(text, "RPCResourceDockerRequest") {
 			t.Fatalf("%s still emits the control-plane docker.socket resource call", name)
 		}
+		for _, op := range []string{"agent.engine.report", "agent.compose", "agent.image"} {
+			if strings.Contains(text, op) {
+				t.Fatalf("%s still emits named host operation %s", name, op)
+			}
+		}
+	}
+	handles, err := os.ReadFile(filepath.Join(pluginDir, "host_handles.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(handles)
+	if !strings.Contains(text, "HostRuntimePluginCall") {
+		t.Fatal("host_handles.go must dispatch plugin.call")
+	}
+	if !strings.Contains(text, "HostRuntimeHTTPRule") {
+		t.Fatal("host_handles.go must keep HTTP ingress on http.rule")
 	}
 }
 

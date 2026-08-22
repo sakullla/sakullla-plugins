@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	hostAgentEngineOperation  = "agent.engine.report"
-	hostAgentComposeOperation = "agent.compose"
-	hostAgentImageOperation   = "agent.image"
-	hostHTTPRuleOperation     = "http.rule"
+	pluginCallEngineName  = "engine.report"
+	pluginCallComposeName = "compose"
+	pluginCallImageName   = "image"
+	hostHTTPRuleOperation = pluginsdk.HostRuntimeHTTPRule
 )
 
 type hostRuntimeCaller interface {
@@ -39,7 +39,7 @@ func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string
 		return AgentEngineReport{}, ErrTypedHandlesUnavailable
 	}
 	var raw map[string]any
-	if err := callHost(ctx, runtime.client, hostAgentEngineOperation, map[string]any{"agent_id": agentID}, &raw); err != nil {
+	if err := runtime.pluginCall(ctx, agentID, pluginCallEngineName, map[string]any{"agent_id": agentID}, &raw); err != nil {
 		return AgentEngineReport{}, err
 	}
 	encoded, err := json.Marshal(raw)
@@ -120,7 +120,7 @@ func (runtime *hostCapabilityRuntime) ObserveImage(ctx context.Context, app App)
 		CurrentDigest string `json:"current_digest"`
 		LatestDigest  string `json:"latest_digest"`
 	}
-	if err := callHost(ctx, runtime.client, hostAgentImageOperation, map[string]any{
+	if err := runtime.pluginCall(ctx, app.AgentID, pluginCallImageName, map[string]any{
 		"action": "observe", "agent_id": app.AgentID, "app_id": app.ID, "image": app.Image,
 	}, &result); err != nil {
 		return UpdateObservation{}, err
@@ -199,7 +199,39 @@ func (runtime *hostCapabilityRuntime) compose(ctx context.Context, payload map[s
 	if runtime == nil || runtime.client == nil {
 		return ErrTypedHandlesUnavailable
 	}
-	return callHost(ctx, runtime.client, hostAgentComposeOperation, payload, result)
+	agentID, _ := payload["agent_id"].(string)
+	return runtime.pluginCall(ctx, agentID, pluginCallComposeName, payload, result)
+}
+
+func (runtime *hostCapabilityRuntime) pluginCall(ctx context.Context, agentID, name string, inner any, result any) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(agentID) {
+		return ErrAgentOffline
+	}
+	payload, err := marshalPluginCallPayload(inner)
+	if err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	request := pluginsdk.PluginCallRequest{AgentID: agentID, Name: name, Payload: payload}
+	if err := request.Validate(); err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	return callHost(ctx, runtime.client, pluginsdk.HostRuntimePluginCall, request, result)
+}
+
+func marshalPluginCallPayload(inner any) (json.RawMessage, error) {
+	switch typed := inner.(type) {
+	case nil:
+		return nil, nil
+	case json.RawMessage:
+		return typed, nil
+	case []byte:
+		return typed, nil
+	default:
+		return json.Marshal(typed)
+	}
 }
 
 func bindProductionHostCapabilities(config ControllerConfig) ControllerConfig {
@@ -280,6 +312,9 @@ func localDockerEngineValue(node any, key string) bool {
 			if strings.EqualFold(childKey, "compose") {
 				continue
 			}
+			if strings.EqualFold(childKey, "payload") {
+				child = decodePluginCallPayload(child)
+			}
 			if localDockerEngineValue(child, childKey) {
 				return true
 			}
@@ -300,6 +335,27 @@ func localDockerEngineValue(node any, key string) bool {
 	default:
 		return isLocalDockerHandleKey(key)
 	}
+}
+
+func decodePluginCallPayload(node any) any {
+	switch typed := node.(type) {
+	case string:
+		var decoded any
+		if err := json.Unmarshal([]byte(typed), &decoded); err == nil {
+			return decoded
+		}
+	case json.RawMessage:
+		var decoded any
+		if err := json.Unmarshal(typed, &decoded); err == nil {
+			return decoded
+		}
+	case []byte:
+		var decoded any
+		if err := json.Unmarshal(typed, &decoded); err == nil {
+			return decoded
+		}
+	}
+	return node
 }
 
 func isLocalDockerHandleKey(key string) bool {
