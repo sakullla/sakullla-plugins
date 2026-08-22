@@ -136,7 +136,7 @@ func run(ctx context.Context, args []string) error {
 		if len(command) == 0 {
 			return fmt.Errorf("reproducible requires a command after --")
 		}
-		return common.CheckReproducible(ctx, *root, *output, command[0], command[1:])
+		return common.CheckReproducibleInPlace(ctx, *root, *output, command[0], command[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}

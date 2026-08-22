@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -90,14 +91,29 @@ func walkFiles(root string, visit func(string, string) error) error {
 }
 
 func treeDigest(root string) (string, error) {
+	return treeDigestExcluding(root, "")
+}
+
+func treeDigestExcluding(root, excludedPath string) (string, error) {
+	excludedPath = filepath.ToSlash(filepath.Clean(excludedPath))
+	if excludedPath == "." {
+		excludedPath = ""
+	}
 	var records []string
 	err := walkFiles(root, func(path, rel string) error {
+		if excludedPath != "" && (rel == excludedPath || strings.HasPrefix(rel, excludedPath+"/")) {
+			return nil
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		digest := sha256.Sum256(data)
-		records = append(records, rel+"\x00"+hex.EncodeToString(digest[:]))
+		records = append(records, rel+"\x00"+info.Mode().String()+"\x00"+hex.EncodeToString(digest[:]))
 		return nil
 	})
 	if err != nil {
@@ -106,6 +122,37 @@ func treeDigest(root string) (string, error) {
 	sort.Strings(records)
 	digest := sha256.Sum256([]byte(strings.Join(records, "\n")))
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func removeDeclaredOutput(root, relative string) error {
+	if relative == "." {
+		return fmt.Errorf("declared output must not be the repository root")
+	}
+	parent := filepath.Dir(relative)
+	current := root
+	if parent != "." {
+		for _, component := range strings.Split(parent, string(filepath.Separator)) {
+			current = filepath.Join(current, component)
+			info, err := os.Lstat(current)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("declared output parent %q is a symbolic link", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("declared output parent %q is not a directory", current)
+			}
+		}
+	}
+	target := filepath.Join(root, relative)
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("remove previous declared output %q: %w", target, err)
+	}
+	return nil
 }
 
 func outputDigest(path string) (string, error) {

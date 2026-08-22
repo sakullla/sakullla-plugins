@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -144,6 +146,143 @@ func TestReproducibleCommandOnCleanCopies(t *testing.T) {
 	}
 }
 
+func TestReproducibleCommandOnCleanCopiesUsesIsolatedResources(t *testing.T) {
+	root := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace.txt")
+	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("stable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAKULLA_REPRO_HELPER", "stable")
+	t.Setenv("SAKULLA_REPRO_TRACE", trace)
+	if err := CheckReproducible(context.Background(), root, "out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err != nil {
+		t.Fatal(err)
+	}
+	records := readReproducibleTrace(t, trace)
+	if len(records) != 2 {
+		t.Fatalf("isolated execution count = %d, want 2: %q", len(records), records)
+	}
+	first := strings.Split(records[0], "\x00")
+	second := strings.Split(records[1], "\x00")
+	if len(first) != 3 || len(second) != 3 {
+		t.Fatalf("malformed isolated execution trace: %q", records)
+	}
+	for index, label := range []string{"worktree", "Go cache", "Cargo target"} {
+		if first[index] == second[index] {
+			t.Errorf("isolated %s was shared: %q", label, first[index])
+		}
+	}
+}
+
+func TestReproducibleInPlaceRunsTwiceAndKeepsOutput(t *testing.T) {
+	root := newReproducibleFixture(t)
+	trace := filepath.Join(t.TempDir(), "trace.txt")
+	t.Setenv("SAKULLA_REPRO_HELPER", "stable")
+	t.Setenv("SAKULLA_REPRO_TRACE", trace)
+	if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err != nil {
+		t.Fatal(err)
+	}
+	records := readReproducibleTrace(t, trace)
+	if len(records) != 2 {
+		t.Fatalf("in-place execution count = %d, want 2: %q", len(records), records)
+	}
+	first := strings.Split(records[0], "\x00")
+	second := strings.Split(records[1], "\x00")
+	if len(first) != 3 || len(second) != 3 {
+		t.Fatalf("malformed in-place execution trace: %q", records)
+	}
+	wantRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, record := range [][]string{first, second} {
+		if record[0] != wantRoot {
+			t.Errorf("execution %d worktree = %q, want %q", index+1, record[0], wantRoot)
+		}
+	}
+	if first[1] != second[1] || first[2] != second[2] {
+		t.Fatalf("in-place executions did not share caches: first %q, second %q", first, second)
+	}
+	artifact, err := os.ReadFile(filepath.Join(root, "target", "out", "artifact.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(artifact) != "stable" {
+		t.Fatalf("retained artifact = %q, want stable", artifact)
+	}
+}
+
+func TestReproducibleInPlaceRejectsBuildFailures(t *testing.T) {
+	for _, mode := range []string{"fail-first", "fail-second"} {
+		t.Run(mode, func(t *testing.T) {
+			root := newReproducibleFixture(t)
+			trace := filepath.Join(t.TempDir(), "trace.txt")
+			t.Setenv("SAKULLA_REPRO_HELPER", mode)
+			t.Setenv("SAKULLA_REPRO_TRACE", trace)
+			if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err == nil {
+				t.Fatalf("%s build failure was accepted", mode)
+			}
+			wantExecutions := 1
+			if mode == "fail-second" {
+				wantExecutions = 2
+			}
+			if records := readReproducibleTrace(t, trace); len(records) != wantExecutions {
+				t.Fatalf("%s execution count = %d, want %d", mode, len(records), wantExecutions)
+			}
+		})
+	}
+}
+
+func TestReproducibleInPlaceRejectsMissingFreshOutput(t *testing.T) {
+	for _, mode := range []string{"missing-first", "missing-second"} {
+		t.Run(mode, func(t *testing.T) {
+			root := newReproducibleFixture(t)
+			output := filepath.Join(root, "target", "out")
+			if err := os.MkdirAll(output, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(output, "artifact.bin"), []byte("historical"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SAKULLA_REPRO_HELPER", mode)
+			if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err == nil {
+				t.Fatalf("%s reused a historical declared output", mode)
+			}
+		})
+	}
+}
+
+func TestReproducibleInPlaceRejectsNondeterministicOutput(t *testing.T) {
+	root := newReproducibleFixture(t)
+	t.Setenv("SAKULLA_REPRO_HELPER", "different")
+	if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err == nil {
+		t.Fatal("different declared outputs were accepted")
+	}
+}
+
+func TestReproducibleInPlaceAcceptsDirtyWorktree(t *testing.T) {
+	root := newReproducibleFixture(t)
+	runGit(t, root, "init", "--quiet")
+	runGit(t, root, "add", "input.txt")
+	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("uncommitted change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("also an input\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAKULLA_REPRO_HELPER", "stable")
+	if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReproducibleInPlaceRejectsInputChangesDuringBuilds(t *testing.T) {
+	root := newReproducibleFixture(t)
+	t.Setenv("SAKULLA_REPRO_HELPER", "mutate-input")
+	if err := CheckReproducibleInPlace(context.Background(), root, "target/out", os.Args[0], []string{"-test.run=TestReproducibleHelperProcess"}); err == nil {
+		t.Fatal("input changed during the two builds was accepted")
+	}
+}
+
 func TestReproducibleRejectsNondeterministicOutput(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("stable\n"), 0o644); err != nil {
@@ -160,7 +299,51 @@ func TestReproducibleHelperProcess(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	if err := os.MkdirAll("out", 0o755); err != nil {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		os.Exit(2)
+	}
+	if trace := os.Getenv("SAKULLA_REPRO_TRACE"); trace != "" {
+		record := strings.Join([]string{workingDirectory, os.Getenv("GOCACHE"), os.Getenv("CARGO_TARGET_DIR")}, "\x00") + "\n"
+		file, err := os.OpenFile(trace, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			os.Exit(2)
+		}
+		if _, err := file.WriteString(record); err != nil || file.Close() != nil {
+			os.Exit(2)
+		}
+	}
+	outputDirectory := os.Getenv("SAKULLA_REPRO_OUTPUT")
+	if outputDirectory == "" {
+		outputDirectory = "out"
+	}
+	countPath := filepath.Join("target", "reproducible-helper-count")
+	if err := os.MkdirAll(filepath.Dir(countPath), 0o755); err != nil {
+		os.Exit(2)
+	}
+	execution := 1
+	if encoded, err := os.ReadFile(countPath); err == nil {
+		execution, err = strconv.Atoi(strings.TrimSpace(string(encoded)))
+		if err != nil {
+			os.Exit(2)
+		}
+		execution++
+	} else if !os.IsNotExist(err) {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(countPath, []byte(strconv.Itoa(execution)), 0o644); err != nil {
+		os.Exit(2)
+	}
+	if (mode == "fail-first" && execution == 1) || (mode == "fail-second" && execution == 2) {
+		os.Exit(3)
+	}
+	if (mode == "missing-first" && execution == 1) || (mode == "missing-second" && execution == 2) {
+		if err := os.RemoveAll(outputDirectory); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
 		os.Exit(2)
 	}
 	contents := []byte("stable")
@@ -169,11 +352,37 @@ func TestReproducibleHelperProcess(t *testing.T) {
 		if _, err := rand.Read(contents); err != nil {
 			os.Exit(2)
 		}
+	} else if mode == "different" {
+		contents = []byte(strconv.Itoa(execution))
 	}
-	if err := os.WriteFile(filepath.Join("out", "artifact.bin"), contents, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(outputDirectory, "artifact.bin"), contents, 0o644); err != nil {
 		os.Exit(2)
 	}
+	if mode == "mutate-input" && execution == 1 {
+		if err := os.WriteFile("input.txt", []byte("changed during build\n"), 0o644); err != nil {
+			os.Exit(2)
+		}
+	}
 	os.Exit(0)
+}
+
+func newReproducibleFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("SAKULLA_REPRO_OUTPUT", filepath.Join("target", "out"))
+	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("stable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func readReproducibleTrace(t *testing.T, path string) []string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(contents)), "\n")
 }
 
 func writeCargoLock(t *testing.T, root, packages string) {

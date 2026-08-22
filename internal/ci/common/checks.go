@@ -262,12 +262,9 @@ func CheckGenerated(ctx context.Context, root string) error {
 }
 
 func CheckReproducible(ctx context.Context, root, outputPath, commandName string, args []string) error {
-	if commandName == "" || outputPath == "" {
-		return fmt.Errorf("reproducibility command and declared output are required")
-	}
-	cleanOutput := filepath.Clean(outputPath)
-	if filepath.IsAbs(cleanOutput) || cleanOutput == ".." || strings.HasPrefix(cleanOutput, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("declared output must stay within each clean checkout")
+	cleanOutput, err := validateReproducibleRequest(outputPath, commandName)
+	if err != nil {
+		return err
 	}
 	temporary, err := os.MkdirTemp("", "sakullla-reproducible-")
 	if err != nil {
@@ -280,17 +277,12 @@ func CheckReproducible(ctx context.Context, root, outputPath, commandName string
 		if err := copyRepository(root, checkout); err != nil {
 			return err
 		}
-		command := exec.CommandContext(ctx, commandName, args...)
-		command.Dir = checkout
-		command.Env = append(os.Environ(),
+		environment := append(os.Environ(),
 			"GOTOOLCHAIN=local", "SOURCE_DATE_EPOCH=0", "TZ=UTC",
 			"GOCACHE="+filepath.Join(temporary, fmt.Sprintf("go-cache-%d", index+1)),
 			"CARGO_TARGET_DIR="+filepath.Join(temporary, fmt.Sprintf("cargo-target-%d", index+1)),
 		)
-		if output, err := command.CombinedOutput(); err != nil {
-			return fmt.Errorf("clean build %d failed: %w: %s", index+1, err, strings.TrimSpace(string(output)))
-		}
-		digests[index], err = outputDigest(filepath.Join(checkout, cleanOutput))
+		digests[index], err = runReproducibleBuild(ctx, checkout, cleanOutput, commandName, args, environment, fmt.Sprintf("clean build %d", index+1), false)
 		if err != nil {
 			return err
 		}
@@ -299,4 +291,94 @@ func CheckReproducible(ctx context.Context, root, outputPath, commandName string
 		return fmt.Errorf("clean builds are not reproducible: %s != %s", digests[0], digests[1])
 	}
 	return nil
+}
+
+// CheckReproducibleInPlace runs both builds in the caller's current worktree.
+// Stable repository-local build caches are shared by both executions and across
+// invocations, while the declared output is removed before each execution so a
+// historical artifact cannot satisfy the current reproducibility check.
+func CheckReproducibleInPlace(ctx context.Context, root, outputPath, commandName string, args []string) error {
+	cleanOutput, err := validateReproducibleRequest(outputPath, commandName)
+	if err != nil {
+		return err
+	}
+	if cleanOutput == "." {
+		return fmt.Errorf("declared output must not be the repository root")
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve repository root symlinks: %w", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("inspect repository root: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("repository root %q is not a directory", root)
+	}
+	inputBefore, err := treeDigestExcluding(root, cleanOutput)
+	if err != nil {
+		return fmt.Errorf("fingerprint repository inputs before builds: %w", err)
+	}
+	cacheRoot := filepath.Join(root, "target", "nre-ci", "cache", "reproducible")
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		return fmt.Errorf("create reproducibility cache: %w", err)
+	}
+	environment := append(os.Environ(),
+		"GOTOOLCHAIN=local", "SOURCE_DATE_EPOCH=0", "TZ=UTC",
+		"GOCACHE="+filepath.Join(cacheRoot, "go-build"),
+		"CARGO_TARGET_DIR="+filepath.Join(cacheRoot, "cargo-target"),
+	)
+	digests := make([]string, 2)
+	for index := range digests {
+		digests[index], err = runReproducibleBuild(ctx, root, cleanOutput, commandName, args, environment, fmt.Sprintf("build %d", index+1), true)
+		if err != nil {
+			return err
+		}
+	}
+	inputAfter, err := treeDigestExcluding(root, cleanOutput)
+	if err != nil {
+		return fmt.Errorf("fingerprint repository inputs after builds: %w", err)
+	}
+	if inputBefore != inputAfter {
+		return fmt.Errorf("repository inputs changed during reproducibility builds: %s != %s", inputBefore, inputAfter)
+	}
+	if digests[0] != digests[1] {
+		return fmt.Errorf("builds are not reproducible: %s != %s", digests[0], digests[1])
+	}
+	return nil
+}
+
+func validateReproducibleRequest(outputPath, commandName string) (string, error) {
+	if commandName == "" || outputPath == "" {
+		return "", fmt.Errorf("reproducibility command and declared output are required")
+	}
+	cleanOutput := filepath.Clean(outputPath)
+	if filepath.IsAbs(cleanOutput) || cleanOutput == ".." || strings.HasPrefix(cleanOutput, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("declared output must stay within the repository")
+	}
+	return cleanOutput, nil
+}
+
+func runReproducibleBuild(ctx context.Context, root, outputPath, commandName string, args, environment []string, label string, removeOutput bool) (string, error) {
+	if removeOutput {
+		if err := removeDeclaredOutput(root, outputPath); err != nil {
+			return "", fmt.Errorf("prepare %s: %w", label, err)
+		}
+	}
+	command := exec.CommandContext(ctx, commandName, args...)
+	command.Dir = root
+	command.Env = environment
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%s failed: %w: %s", label, err, strings.TrimSpace(string(output)))
+	}
+	digest, err := outputDigest(filepath.Join(root, outputPath))
+	if err != nil {
+		return "", fmt.Errorf("inspect %s declared output: %w", label, err)
+	}
+	return digest, nil
 }

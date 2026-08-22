@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +26,134 @@ import (
 	shadowsocksserver "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
 	"github.com/sakullla/sakullla-plugins/plugins/webdav"
 )
+
+func TestReproducibleCLIUsesCurrentWorktreeAndRunsTwice(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "input.txt"), []byte("uncommitted input\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "trace.txt")
+	t.Setenv("SAKULLA_NRE_CI_REPRO_HELPER", trace)
+	if err := run(context.Background(), []string{
+		"reproducible", "--root", root, "--output", "target/out", "--",
+		os.Args[0], "-test.run=TestNRECIMainReproducibleHelperProcess",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := strings.Split(strings.TrimSpace(string(encoded)), "\n")
+	if len(records) != 2 {
+		t.Fatalf("CLI target execution count = %d, want 2: %q", len(records), records)
+	}
+	wantRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, record := range records {
+		fields := strings.Split(record, "\x00")
+		if len(fields) != 3 {
+			t.Fatalf("execution %d trace is malformed: %q", index+1, record)
+		}
+		if fields[0] != wantRoot {
+			t.Errorf("execution %d worktree = %q, want %q", index+1, fields[0], wantRoot)
+		}
+		if fields[1] != filepath.Join(wantRoot, "target", "nre-ci", "cache", "reproducible", "go-build") {
+			t.Errorf("execution %d Go cache = %q", index+1, fields[1])
+		}
+		if fields[2] != filepath.Join(wantRoot, "target", "nre-ci", "cache", "reproducible", "cargo-target") {
+			t.Errorf("execution %d Cargo target = %q", index+1, fields[2])
+		}
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "target", "out", "artifact.bin")); err != nil || string(contents) != "stable" {
+		t.Fatalf("retained CLI artifact = %q, %v", contents, err)
+	}
+}
+
+func TestNRECIMainReproducibleHelperProcess(t *testing.T) {
+	trace := os.Getenv("SAKULLA_NRE_CI_REPRO_HELPER")
+	if trace == "" {
+		return
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		os.Exit(2)
+	}
+	record := strings.Join([]string{workingDirectory, os.Getenv("GOCACHE"), os.Getenv("CARGO_TARGET_DIR")}, "\x00") + "\n"
+	file, err := os.OpenFile(trace, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		os.Exit(2)
+	}
+	if _, err := file.WriteString(record); err != nil || file.Close() != nil {
+		os.Exit(2)
+	}
+	countPath := filepath.Join("target", "nre-ci-reproducible-main-count")
+	if err := os.MkdirAll(filepath.Dir(countPath), 0o755); err != nil {
+		os.Exit(2)
+	}
+	execution := 1
+	if encoded, err := os.ReadFile(countPath); err == nil {
+		execution, err = strconv.Atoi(strings.TrimSpace(string(encoded)))
+		if err != nil {
+			os.Exit(2)
+		}
+		execution++
+	} else if !os.IsNotExist(err) {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(countPath, []byte(strconv.Itoa(execution)), 0o644); err != nil {
+		os.Exit(2)
+	}
+	output := filepath.Join("target", "out")
+	if err := os.MkdirAll(output, 0o755); err != nil {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(filepath.Join(output, "artifact.bin"), []byte("stable"), 0o644); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func TestReleaseReproducibilityKeepsIsolatedStrategy(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedCalls, inPlaceCalls := 0, 0
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "checkRelease" {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			owner, ok := selector.X.(*ast.Ident)
+			if !ok || owner.Name != "common" {
+				return true
+			}
+			switch selector.Sel.Name {
+			case "CheckReproducible":
+				isolatedCalls++
+			case "CheckReproducibleInPlace":
+				inPlaceCalls++
+			}
+			return true
+		})
+	}
+	if isolatedCalls != 1 || inPlaceCalls != 0 {
+		t.Fatalf("release reproducibility strategies: isolated=%d in-place=%d, want isolated=1 in-place=0", isolatedCalls, inPlaceCalls)
+	}
+}
 
 func TestRPCPluginBinaryIdentityMatchesManifest(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
