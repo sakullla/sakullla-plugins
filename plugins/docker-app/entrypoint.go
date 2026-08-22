@@ -10,7 +10,7 @@ import (
 const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 
 func productionControllerConfig() ControllerConfig {
-	return ControllerConfig{UIEngineSource: NewReportedEngineCatalog()}
+	return bindProductionHostCapabilities(ControllerConfig{})
 }
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {

@@ -28,10 +28,14 @@ The canonical `nre:rpc/v1` manifest and executable support a CI handshake
 self-check. Required grants are `http.rule` and `ui.dynamic`. Docker/Compose
 API is not a plugin permission: Handshake and Activate do not require
 `container.compose`, and install/deploy overlays have no Docker host, socket,
-or API key fields. Engine readiness is consumed from generic Agent node-channel reports
-(`online`, `installed`, `version`) and is not a connection form. Offline or
-missing reports are not treated as ready. The resource-group page lists
-Agents, shows a copy-only official install command when the engine is missing,
-and deploys compose only after that Agent is online and ready. This plugin is
-not configured onto the selected Agent. No private Host wire contract
-substitutes for the remaining public grants.
+or API key fields. Engine readiness is consumed from the generic host runtime
+(`agent.engine.report`: `online`, `installed`, `version`) and is not a
+connection form. Compose apply/start/stop/restart/logs/remove are dispatched
+through the same host runtime (`agent.compose`) with the target `agent_id`.
+Missing or unsupported handles fail closed; they never fall back to the
+control-plane `docker.socket` or `/var/run/docker.sock`. Offline or missing
+reports are not treated as ready. The resource-group page lists Agents, shows
+a copy-only official install command when the engine is missing, and deploys
+compose only after that Agent is online and ready. This plugin is not
+configured onto the selected Agent. No private Host wire contract substitutes
+for the remaining public grants.

@@ -27,6 +27,8 @@ func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 }
 
 func TestRunEntrypointProductionWiresReportedEngineSource(t *testing.T) {
+	t.Setenv("NRE_PLUGIN_HOST_ENDPOINT", "")
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
 	config := productionControllerConfig()
 	if config.UIEngineSource == nil {
 		t.Fatal("production entrypoint still pins a zero UIEngine as the only observation path")

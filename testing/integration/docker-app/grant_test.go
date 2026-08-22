@@ -66,6 +66,34 @@ func TestHandshakeStillAcceptsRedundantComposeGrant(t *testing.T) {
 	}
 }
 
+func TestProductionSourcesDoNotDialControlPlaneDockerSocket(t *testing.T) {
+	pluginDir := filepath.Join("..", "..", "..", "plugins", "docker-app")
+	entries, err := os.ReadDir(pluginDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(pluginDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		if strings.Contains(text, "unix:///var/run/docker.sock") {
+			t.Fatalf("%s still targets control-plane docker.sock", name)
+		}
+		if strings.Contains(text, "DialContext") && (strings.Contains(text, "docker.sock") || strings.Contains(text, "docker.socket")) {
+			t.Fatalf("%s dials a Docker socket as the Agent engine", name)
+		}
+		if strings.Contains(text, "RPCResourceDockerRequest") {
+			t.Fatalf("%s still emits the control-plane docker.socket resource call", name)
+		}
+	}
+}
+
 func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	pluginDir := filepath.Join("..", "..", "..", "plugins", "docker-app")
 	manifest, err := os.ReadFile(filepath.Join(pluginDir, "plugin.yaml"))

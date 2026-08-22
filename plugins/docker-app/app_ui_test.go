@@ -684,7 +684,8 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 }
 
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
-	t.Parallel()
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
 	config := productionControllerConfig()
 	if config.UIEngineSource == nil {
 		t.Fatal("production runtime still treats a zero UIEngine as the only observation path")
