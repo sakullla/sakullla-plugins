@@ -20,6 +20,7 @@ import (
 	"github.com/sakullla/sakullla-plugins/plugins/doh"
 	reversel4 "github.com/sakullla/sakullla-plugins/plugins/reverse-l4"
 	shadowsocksserver "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
+	"github.com/sakullla/sakullla-plugins/plugins/webdav"
 )
 
 func TestRPCPluginBinaryIdentityMatchesManifest(t *testing.T) {
@@ -36,6 +37,7 @@ func TestRPCPluginBinaryIdentityMatchesManifest(t *testing.T) {
 		{"doh", doh.PluginID, doh.PluginVersion},
 		{"reverse-l4", reversel4.PluginID, reversel4.PluginVersion},
 		{"shadowsocks-server", shadowsocksserver.PluginID, shadowsocksserver.PluginVersion},
+		{"webdav", webdav.PluginID, webdav.PluginVersion},
 	}
 	for _, test := range tests {
 		t.Run(test.id, func(t *testing.T) {
@@ -164,6 +166,7 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 		{id: "doh", kind: artifactRPCService, sourceNeedle: "doh/cmd/doh"},
 		{id: "cloudflare-dns", kind: artifactRPCService, sourceNeedle: "cloudflare-dns/cmd/cloudflare-dns"},
 		{id: "shadowsocks-server", kind: artifactRPCService, sourceNeedle: "shadowsocks-server/cmd/shadowsocks-server"},
+		{id: "webdav", kind: artifactRPCService, sourceNeedle: "webdav/cmd/webdav"},
 		{id: "waf", kind: artifactWASMPolicy, packageName: "sakullla-waf"},
 		{id: "ip-policy", kind: artifactWASMPolicy, packageName: "sakullla-ip-policy"},
 		{id: "rate-limit", kind: artifactWASMPolicy, packageName: "sakullla-rate-limit"},
