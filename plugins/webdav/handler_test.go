@@ -29,6 +29,10 @@ func TestConfigSchemaDeclaresClosedLoadableObject(t *testing.T) {
 	if len(properties) != 2 || properties["password"] == nil || properties["root_path"] == nil {
 		t.Fatalf("webdav config schema must only declare password and root_path: %#v", properties)
 	}
+	required, _ := schema["required"].([]any)
+	if len(required) != 1 || required[0] != "password" {
+		t.Fatalf("webdav config schema must require password: %#v", schema["required"])
+	}
 }
 
 func TestPluginManifestIsAgentHTTPBackendWithoutControlPlaneUI(t *testing.T) {
@@ -75,7 +79,10 @@ func TestServeHTTPIs503UntilActivateAndAfterStop(t *testing.T) {
 	}
 	assertHTTPStatus(t, controller, http.StatusServiceUnavailable)
 	activateController(t, controller, "generation-one")
-	assertHTTPStatus(t, controller, http.StatusOK)
+	recorder := doShareRequest(t, controller, http.MethodGet, "http://provider.test/", testSharePassword, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
 	if result := controller.Stop(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-one"}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
@@ -110,13 +117,16 @@ func TestDefaultShareRootIsOwnedDirectoryNotFilesystemRoot(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsUnknownFieldsAndAcceptsEmptyObject(t *testing.T) {
-	got, err := loadConfig([]byte(`{}`))
-	if err != nil || got.Password != "" || got.RootPath != "" {
-		t.Fatalf("empty object = %+v err=%v", got, err)
+func TestLoadConfigRequiresPasswordAndRejectsUnknownFields(t *testing.T) {
+	if _, err := loadConfig([]byte(`{}`)); err == nil {
+		t.Fatal("missing password was accepted")
 	}
-	if _, err := loadConfig(nil); err != nil {
-		t.Fatal(err)
+	if _, err := loadConfig(nil); err == nil {
+		t.Fatal("empty config was accepted")
+	}
+	got, err := loadConfig([]byte(`{"password":"share-pass"}`))
+	if err != nil || got.Password != "share-pass" || got.RootPath != "" {
+		t.Fatalf("password only = %+v err=%v", got, err)
 	}
 	if _, err := loadConfig([]byte(`{"legacy":true}`)); err == nil {
 		t.Fatal("unknown field was accepted")
@@ -140,6 +150,11 @@ func assertHTTPStatus(t *testing.T, handler http.Handler, want int) {
 
 func activateController(t *testing.T, controller *Controller, generation string) {
 	t.Helper()
+	activateControllerWithConfig(t, controller, generation, testShareConfig(testSharePassword, ""))
+}
+
+func activateControllerWithConfig(t *testing.T, controller *Controller, generation string, config []byte) {
+	t.Helper()
 	request := pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact",
@@ -149,7 +164,7 @@ func activateController(t *testing.T, controller *Controller, generation string)
 	if _, err := controller.Handshake(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: generation, Config: []byte(`{}`)}); result.Error != nil {
+	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: generation, Config: config}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	if result := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: generation}); result.Error != nil {

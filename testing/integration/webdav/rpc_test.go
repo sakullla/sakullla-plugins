@@ -58,7 +58,7 @@ func TestProductionEntrypointServesLifecycleAndPrivateProvider(t *testing.T) {
 	if _, err := client.handshake(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := client.lifecycle(t.Context(), "Prepare", pluginsdk.LifecycleRequest{Generation: request.Generation, Config: []byte(`{}`)}); err != nil || result.Error != nil {
+	if result, err := client.lifecycle(t.Context(), "Prepare", pluginsdk.LifecycleRequest{Generation: request.Generation, Config: []byte(`{"password":"share-pass"}`)}); err != nil || result.Error != nil {
 		t.Fatalf("prepare = %+v, %v", result, err)
 	}
 	if result, err := client.lifecycle(t.Context(), "Activate", pluginsdk.LifecycleRequest{Generation: request.Generation}); err != nil || result.Error != nil {
@@ -97,6 +97,7 @@ func TestProductionEntrypointServesLifecycleAndPrivateProvider(t *testing.T) {
 	}
 	providerRequest, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://provider.nre.internal/", nil)
 	setProviderHeaders(providerRequest, endpointConfig.Providers[0])
+	providerRequest.SetBasicAuth(webdav.DavMountUsername, "share-pass")
 	response := doEventually(t, httpClient, providerRequest)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {

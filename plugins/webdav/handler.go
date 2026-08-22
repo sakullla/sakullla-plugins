@@ -1,91 +1,102 @@
 package webdav
 
 import (
+	"crypto/subtle"
+	"embed"
 	"errors"
-	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	xwebdav "golang.org/x/net/webdav"
 )
 
-const OwnedShareName = "share"
+const (
+	DavPrefix         = "/dav"
+	DavMountUsername  = "webdav"
+	pageIndexName     = "static/index.html"
+	pageScriptName    = "static/app.js"
+	pageStyleName     = "static/style.css"
+	authenticateRealm = `Basic realm="webdav"`
+)
+
+//go:embed static/index.html static/app.js static/style.css
+var pageAssets embed.FS
 
 type Handler struct {
-	root string
+	root     string
+	password string
+	dav      *xwebdav.Handler
 }
 
-func NewHandler(root string) (*Handler, error) {
+func NewHandler(root, password string) (*Handler, error) {
+	if password == "" {
+		return nil, errors.New("password is required")
+	}
 	cleaned, err := validateShareRoot(root, false)
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{root: cleaned}, nil
+	return &Handler{
+		root:     cleaned,
+		password: password,
+		dav: &xwebdav.Handler{
+			Prefix:     DavPrefix,
+			FileSystem: shareFS{root: cleaned},
+			LockSystem: xwebdav.NewMemLS(),
+		},
+	}, nil
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet && request.Method != http.MethodHead {
-		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+	if handler.password == "" {
+		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
-	writer.WriteHeader(http.StatusOK)
+	if !handler.authorize(writer, request) {
+		return
+	}
+	switch {
+	case request.URL.Path == DavPrefix || strings.HasPrefix(request.URL.Path, DavPrefix+"/"):
+		handler.dav.ServeHTTP(writer, request)
+	case strings.HasPrefix(request.URL.Path, "/api/"):
+		handler.serveAPI(writer, request)
+	default:
+		handler.servePage(writer, request)
+	}
 }
 
 func (handler *Handler) Close() error { return nil }
 
 func (handler *Handler) Root() string { return handler.root }
 
-func resolveShareRoot(ownedRoot, configuredRoot string) (string, error) {
-	configuredRoot = strings.TrimSpace(configuredRoot)
-	if configuredRoot != "" {
-		if !filepath.IsAbs(configuredRoot) {
-			return "", errors.New("root_path must be an absolute path")
-		}
-		return validateShareRoot(configuredRoot, false)
-	}
-	if strings.TrimSpace(ownedRoot) != "" {
-		return validateShareRoot(ownedRoot, true)
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return validateShareRoot(filepath.Join(cwd, OwnedShareName), true)
-}
-
-func validateShareRoot(root string, create bool) (string, error) {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return "", errors.New("share root is required")
-	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	if isVolumeRoot(abs) {
-		return "", errors.New("share root must not be the filesystem root")
-	}
-	if create {
-		if err := os.MkdirAll(abs, 0o700); err != nil {
-			return "", err
-		}
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("share root is not accessible: %w", err)
-	}
-	if !info.IsDir() {
-		return "", errors.New("share root is not a directory")
-	}
-	return abs, nil
-}
-
-func isVolumeRoot(path string) bool {
-	cleaned := filepath.Clean(path)
-	separator := string(os.PathSeparator)
-	if cleaned == separator {
+func (handler *Handler) authorize(writer http.ResponseWriter, request *http.Request) bool {
+	_, password, ok := request.BasicAuth()
+	if ok && subtle.ConstantTimeCompare([]byte(password), []byte(handler.password)) == 1 {
 		return true
 	}
-	volume := filepath.VolumeName(cleaned)
-	return volume != "" && (cleaned == volume+separator || cleaned == volume+`\` || cleaned == volume+`/`)
+	writer.Header().Set("WWW-Authenticate", authenticateRealm)
+	http.Error(writer, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+func (handler *Handler) servePage(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writeMethodNotAllowed(writer, "GET, HEAD")
+		return
+	}
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	name := ""
+	switch request.URL.Path {
+	case "/", "/index.html":
+		name = pageIndexName
+	case "/static/app.js":
+		name = pageScriptName
+	case "/static/style.css":
+		name = pageStyleName
+	default:
+		http.NotFound(writer, request)
+		return
+	}
+	http.ServeFileFS(writer, request, pageAssets, name)
 }

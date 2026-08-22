@@ -13,6 +13,8 @@ import (
 	"github.com/sakullla/sakullla-plugins/plugins/webdav"
 )
 
+const testSharePassword = "share-pass"
+
 type fakeService struct {
 	body    string
 	root    string
@@ -46,7 +48,7 @@ func TestGenerationLifecycleIsZeroConfigAndGenerationOwned(t *testing.T) {
 	if len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureHTTPBackendProviderV1 || len(response.Capabilities) != 1 || response.Capabilities[0] != pluginsdk.PermissionHTTPOutbound {
 		t.Fatalf("handshake response = %+v", response)
 	}
-	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: request.Generation, Config: []byte(`{}`)}); result.Error != nil {
+	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: request.Generation, Config: shareConfig()}); result.Error != nil {
 		t.Fatalf("prepare: %+v", result.Error)
 	}
 	assertProviderStatus(t, controller, http.StatusServiceUnavailable, "")
@@ -106,7 +108,7 @@ func TestInactiveAndStoppedGenerationsReturn503WithoutFilesystemRoot(t *testing.
 	if isVolumeRoot(status.Root) {
 		t.Fatalf("owned share used the filesystem root: %q", status.Root)
 	}
-	assertProviderStatus(t, controller, http.StatusOK, "")
+	assertProviderStatusWithAuth(t, controller, http.StatusOK, "")
 	if result := controller.Stop(t.Context(), pluginsdk.LifecycleRequest{Generation: "owned-generation"}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
@@ -130,7 +132,7 @@ func TestTimedOutPrepareRevokesLateService(t *testing.T) {
 	if _, err := controller.Handshake(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: request.Generation, Config: []byte(`{}`)})
+	result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: request.Generation, Config: shareConfig()})
 	if result.Error == nil {
 		t.Fatal("blocked prepare did not time out")
 	}
@@ -162,7 +164,7 @@ func activateController(t *testing.T, controller *webdav.Controller, generation 
 	if _, err := controller.Handshake(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: generation, Config: []byte(`{}`)}); result.Error != nil {
+	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: generation, Config: shareConfig()}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	if result := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: generation}); result.Error != nil {
@@ -172,11 +174,29 @@ func activateController(t *testing.T, controller *webdav.Controller, generation 
 
 func assertProviderStatus(t *testing.T, handler http.Handler, wantStatus int, wantBody string) {
 	t.Helper()
+	assertProviderResponse(t, handler, "", wantStatus, wantBody)
+}
+
+func assertProviderStatusWithAuth(t *testing.T, handler http.Handler, wantStatus int, wantBody string) {
+	t.Helper()
+	assertProviderResponse(t, handler, testSharePassword, wantStatus, wantBody)
+}
+
+func assertProviderResponse(t *testing.T, handler http.Handler, password string, wantStatus int, wantBody string) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "http://provider.test/", nil)
+	if password != "" {
+		request.SetBasicAuth(webdav.DavMountUsername, password)
+	}
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://provider.test/", nil))
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != wantStatus || (wantBody != "" && recorder.Body.String() != wantBody) {
 		t.Fatalf("provider response = %d %q, want %d %q", recorder.Code, recorder.Body.String(), wantStatus, wantBody)
 	}
+}
+
+func shareConfig() []byte {
+	return []byte(`{"password":"` + testSharePassword + `"}`)
 }
 
 func isVolumeRoot(path string) bool {

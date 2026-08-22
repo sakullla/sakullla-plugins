@@ -1,0 +1,196 @@
+:root,
+[data-theme="sakura-day"] {
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --radius-md: 0.625rem;
+  --radius-xl: 1.125rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --font-sans: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Sarasa Mono SC", ui-monospace, monospace;
+  --accent: #e1437f;
+  --accent-deep: #c2296b;
+  --color-text-primary: #1f2937;
+  --color-text-secondary: #6b7280;
+  --color-text-inverse: #ffffff;
+  --color-bg-canvas: #fbfbfc;
+  --color-bg-surface: #ffffff;
+  --color-bg-sunken: #f6f6f8;
+  --color-border-subtle: rgba(17, 24, 39, 0.05);
+  --color-border-default: rgba(17, 24, 39, 0.09);
+  --color-danger: #dc2626;
+  --color-primary-subtle: rgba(225, 67, 127, 0.08);
+  --shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.05);
+  --shadow-sm: 0 2px 8px -2px rgba(17, 24, 39, 0.08);
+  --wash-a: rgba(225, 67, 127, 0.10);
+  --wash-b: rgba(148, 163, 184, 0.10);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  background: var(--color-bg-canvas);
+}
+
+.wash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(52rem 22rem at 50% -14rem, var(--wash-a), transparent 72%),
+    radial-gradient(30rem 16rem at 92% 4rem, var(--wash-b), transparent 70%);
+}
+
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: color-mix(in srgb, var(--color-bg-canvas) 86%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.masthead-inner, main {
+  width: min(64rem, calc(100% - 2.5rem));
+  margin: 0 auto;
+}
+
+.masthead-inner { padding: 0.7rem 0; }
+
+.wordmark {
+  font-size: 1.0625rem;
+  font-weight: 700;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+  padding: 3rem 0 5.5rem;
+}
+
+.hero {
+  max-width: 44rem;
+  margin: 0 auto 2rem;
+  text-align: center;
+}
+
+.hero h1 {
+  margin: 0.5rem 0 var(--space-3);
+  font-size: clamp(1.8rem, 1.3rem + 1.5vw, 2.4rem);
+  letter-spacing: -0.03em;
+}
+
+.eyebrow, .kicker {
+  margin: 0 0 0.5rem;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.14em;
+}
+
+.lede, .hint, td, th {
+  color: var(--color-text-secondary);
+  line-height: 1.65;
+}
+
+.card {
+  margin-top: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.host-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  background: var(--color-bg-surface);
+  font-size: var(--text-sm);
+}
+
+.host-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+code, #dav-url {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.files-head, .actions, .crumbs, .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.files-head { justify-content: space-between; }
+
+button, .upload {
+  min-height: 2.25rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: 0 0.9rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button, .upload {
+  color: var(--color-text-inverse);
+  background: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+button.ghost {
+  color: var(--accent-deep);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+}
+
+button.danger { color: var(--color-danger); }
+
+.upload { position: relative; overflow: hidden; display: inline-flex; align-items: center; }
+.upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+.crumbs button {
+  min-height: 1.75rem;
+  padding: 0 0.55rem;
+  color: var(--accent-deep);
+  background: var(--color-primary-subtle);
+}
+
+.listing {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--space-4);
+}
+
+th, td {
+  padding: 0.65rem 0.4rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+  text-align: left;
+  font-size: var(--text-sm);
+}
+
+th { color: var(--color-text-secondary); font-weight: 650; }
+
+#status[data-error="true"] { color: var(--color-danger); }
+#status { margin: 0.75rem 0 0; }

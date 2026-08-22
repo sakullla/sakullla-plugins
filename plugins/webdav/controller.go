@@ -97,11 +97,15 @@ func NewController(config ControllerConfig) (*Controller, error) {
 }
 
 func (controller *Controller) newConfiguredService() (GenerationService, error) {
-	root, err := resolveShareRoot(controller.config.OwnedRoot, controller.snapshotConfig().RootPath)
+	config := controller.snapshotConfig()
+	if config.Password == "" {
+		return nil, errors.New("password is required")
+	}
+	root, err := resolveShareRoot(controller.config.OwnedRoot, config.RootPath)
 	if err != nil {
 		return nil, err
 	}
-	return NewHandler(root)
+	return NewHandler(root, config.Password)
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -188,14 +192,14 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return PluginConfig{}, errors.New("webdav configuration must contain one object")
 	}
-	config := PluginConfig{}
-	if document.Password != nil {
-		password := *document.Password
-		if password == "" || len(password) > MaxPasswordBytes {
-			return PluginConfig{}, errors.New("password is invalid")
-		}
-		config.Password = password
+	if document.Password == nil {
+		return PluginConfig{}, errors.New("password is required")
 	}
+	password := *document.Password
+	if password == "" || len(password) > MaxPasswordBytes {
+		return PluginConfig{}, errors.New("password is invalid")
+	}
+	config := PluginConfig{Password: password}
 	if document.RootPath != nil {
 		rootPath := strings.TrimSpace(*document.RootPath)
 		if rootPath == "" || len(rootPath) > MaxRootPathBytes {
