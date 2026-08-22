@@ -12,7 +12,7 @@ fn generated_contract_identity_and_values_match_canonical_sdk() {
     assert_eq!(ABI_MAJOR_VERSION, 1);
     assert_eq!(
         CANONICAL_DESCRIPTOR_SET_SHA256,
-        "9bd720a647d0da83d8427c47df9d89bebf2463a4304fa5fee83cbc59dd7578ee"
+        "47c0dc758ccc30fb596dfe078419aeb1effe8b266ed28d729c64334a09881628"
     );
     assert_eq!(AbiStatus::ResourceExhausted as u32, 3);
     assert_eq!(RuntimeErrorCode::IncompatibleAbi as u32, 6);

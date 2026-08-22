@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestBuildRustWorkspaceAllowsGoPluginDirectory(t *testing.T) {
+func TestBuildRustWorkspaceAllowsGoPluginDirectories(t *testing.T) {
 	t.Parallel()
 	cargo := findCargo(t)
 	_, sourceFile, _, ok := runtime.Caller(0)
@@ -28,8 +28,10 @@ func TestBuildRustWorkspaceAllowsGoPluginDirectory(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "plugins", "_workspace", "src", "lib.rs"), []byte("pub const READY: bool = true;\n"))
 	writeTestFile(t, filepath.Join(root, "plugins", "waf", "Cargo.toml"), []byte("[package]\nname='fixture-waf'\nversion='0.0.0'\nedition.workspace=true\nlicense.workspace=true\nrust-version.workspace=true\n"))
 	writeTestFile(t, filepath.Join(root, "plugins", "waf", "src", "lib.rs"), []byte("pub const READY: bool = true;\n"))
-	if err := os.MkdirAll(filepath.Join(root, "plugins", "reverse-l4"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, pluginID := range []string{"reverse-l4", "webdav"} {
+		if err := os.MkdirAll(filepath.Join(root, "plugins", pluginID), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	command := exec.Command(cargo, "metadata", "--no-deps", "--format-version", "1")
 	command.Dir = root
