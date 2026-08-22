@@ -179,7 +179,6 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		for index := range next {
 			if next[index].ID == body.ID {
 				next[index].AutoUpdate = cloneBool(&body.AutoUpdate)
-				next[index].AgentID = agentID
 			}
 		}
 		controller.replaceApps(next)
@@ -358,7 +357,7 @@ func appStatus(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrAgentOffline):
+	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrEngineNotReady), errors.Is(err, ErrTypedHandlesUnavailable):
 		return http.StatusServiceUnavailable
@@ -385,6 +384,8 @@ func publicAppError(err error) string {
 		return ErrEngineNotReady.Error()
 	case errors.Is(err, ErrAgentOffline):
 		return ErrAgentOffline.Error()
+	case errors.Is(err, ErrAppAgentConflict):
+		return ErrAppAgentConflict.Error()
 	case errors.Is(err, ErrTypedHandlesUnavailable):
 		return ErrTypedHandlesUnavailable.Error()
 	default:

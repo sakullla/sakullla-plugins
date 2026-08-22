@@ -7,7 +7,7 @@ import (
 )
 
 type ComposeDeploySpec struct {
-	AppID, Generation, Compose, RuleRef, WorkDirRoot string
+	AppID, Generation, Compose, RuleRef, WorkDirRoot, AgentID string
 }
 
 type AppApplyExecutor interface {
@@ -83,16 +83,21 @@ func DeployComposeAppForAgent(ctx context.Context, apps []App, spec ComposeDeplo
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrAgentOffline.Error()})
 		return preserved, ErrAgentOffline
 	}
-	next, err := DeployComposeApp(ctx, apps, spec, ObservationFromReport(report), executor, auditor)
-	if err != nil {
-		return next, err
+	spec.AgentID = report.AgentID
+	return DeployComposeApp(ctx, apps, spec, ObservationFromReport(report), executor, auditor)
+}
+
+func bindAppToAgent(app *App, apps []App, agentID string) error {
+	if !validAgentID(agentID) {
+		return ErrAgentOffline
 	}
-	for index := range next {
-		if next[index].ID == spec.AppID {
-			next[index].AgentID = report.AgentID
+	for _, existing := range apps {
+		if existing.ID == app.ID && existing.AgentID != "" && existing.AgentID != agentID {
+			return ErrAppAgentConflict
 		}
 	}
-	return next, nil
+	app.AgentID = agentID
+	return nil
 }
 
 func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, engine EngineObservation, executor AppApplyExecutor, auditor Auditor) ([]App, error) {
@@ -111,6 +116,12 @@ func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, e
 			return preserved, ErrInvalidPreview
 		}
 		app.RuleRef = spec.RuleRef
+	}
+	if spec.AgentID != "" {
+		if err := bindAppToAgent(&app, apps, spec.AgentID); err != nil {
+			audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: err.Error()})
+			return preserved, err
+		}
 	}
 	if !ProjectEngine(engine).Ready {
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrEngineNotReady.Error()})

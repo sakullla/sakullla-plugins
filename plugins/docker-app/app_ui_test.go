@@ -172,6 +172,35 @@ func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
 	}
 }
 
+func TestAppUIRejectsSameAppIDOnAnotherAgent(t *testing.T) {
+	t.Parallel()
+	catalog := NewReportedEngineCatalog()
+	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"})
+	catalog.Replace(AgentEngineReport{AgentID: "agent-2", Online: true, Installed: true, Version: "27.1.1"})
+	controller := newUIControllerWithSource(t, catalog, `{"apps":[]}`)
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"agent_id":"agent-1"`) {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	stolen := httptest.NewRecorder()
+	controller.ServeHTTP(stolen, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-2","compose":"services:\n  web:\n    image: nginx:1.28\n"}`))
+	if stolen.Code != http.StatusConflict || !strings.Contains(stolen.Body.String(), ErrAppAgentConflict.Error()) {
+		t.Fatalf("cross-agent deploy status=%d body=%s", stolen.Code, stolen.Body.String())
+	}
+	apps := controller.Apps()
+	if len(apps) != 1 || apps[0].ID != "media" || apps[0].AgentID != "agent-1" || apps[0].Image != "nginx:1.27" {
+		t.Fatalf("cross-agent deploy mutated apps=%#v", apps)
+	}
+
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-2", ""))
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), `"id":"media"`) {
+		t.Fatalf("agent-2 listed foreign app: %s", listed.Body.String())
+	}
+}
+
 func TestAppUIRejectsOfflineAgentDeploy(t *testing.T) {
 	t.Parallel()
 	catalog := NewReportedEngineCatalog()

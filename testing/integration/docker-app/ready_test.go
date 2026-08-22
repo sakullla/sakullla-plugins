@@ -62,6 +62,28 @@ func TestDockerGenericAgentReportFeedsEngineStatusWithoutRemoteInstall(t *testin
 	}
 }
 
+func TestDockerComposeAppForAgentKeepsPerAgentBinding(t *testing.T) {
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	var applied dockerapp.App
+	executor := dockerapp.AppApplyExecutorFunc(func(_ context.Context, app dockerapp.App) error {
+		applied = app
+		return nil
+	})
+	first := dockerapp.AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"}
+	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: "services:\n  web:\n    image: nginx:1.27\n"}
+	apps, err := dockerapp.DeployComposeAppForAgent(context.Background(), nil, spec, first, executor, auditor)
+	if err != nil || applied.AgentID != "agent-1" || len(apps) != 1 || apps[0].AgentID != "agent-1" {
+		t.Fatalf("first deploy apps=%#v applied=%#v err=%v", apps, applied, err)
+	}
+
+	applied = dockerapp.App{}
+	second := dockerapp.AgentEngineReport{AgentID: "agent-2", Online: true, Installed: true, Version: "27.1.1"}
+	next, err := dockerapp.DeployComposeAppForAgent(context.Background(), apps, spec, second, executor, auditor)
+	if !errors.Is(err, dockerapp.ErrAppAgentConflict) || applied.ID != "" || len(next) != 1 || next[0].AgentID != "agent-1" {
+		t.Fatalf("second agent stole app apps=%#v applied=%#v err=%v", next, applied, err)
+	}
+}
+
 func TestDockerAppUIDoesNotConfigureInstanceOntoSelectedAgent(t *testing.T) {
 	pluginDir := filepath.Join("..", "..", "..", "plugins", "docker-app")
 	script, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "app.js"))

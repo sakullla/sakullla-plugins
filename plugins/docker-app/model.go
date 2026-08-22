@@ -35,6 +35,7 @@ var (
 	ErrDeleteUnconfirmed       = errors.New("delete was not confirmed")
 	ErrEngineNotReady          = errors.New("Docker engine is not ready")
 	ErrAgentOffline            = errors.New("target Agent is offline")
+	ErrAppAgentConflict        = errors.New("app is already bound to another Agent")
 	ErrUnknownService          = errors.New("compose service is unknown")
 	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
 	ErrNoPublishedPort         = errors.New("app has no published port")
