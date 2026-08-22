@@ -10,6 +10,8 @@ runtime:
   kind: rpc-service
   abi: nre:rpc/v1
   host_scope: control-plane
+  host_scopes:
+    - agent
   entry: docker-app
 artifacts:
   - path: artifacts/linux-amd64/docker-app
@@ -19,7 +21,6 @@ artifacts:
     goos: linux
     goarch: amd64
 extension_points:
-  - container.provider
   - ui.route
   - resource.group
 ui_route_id: docker-app

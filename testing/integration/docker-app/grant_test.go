@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -104,6 +105,12 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if !strings.Contains(text, "host_scope: control-plane") || !strings.Contains(text, `agent: "*"`) {
 		t.Fatalf("plugin.yaml is not control-plane / non-local: %s", text)
 	}
+	if !strings.Contains(text, "host_scopes:") || (!strings.Contains(text, "- agent") && !strings.Contains(text, "[agent]")) {
+		t.Fatalf("plugin.yaml must declare host_scopes including agent: %s", text)
+	}
+	if regexp.MustCompile(`(?m)^[[:space:]]*host_scope:[[:space:]]*agent[[:space:]]*$`).MatchString(text) {
+		t.Fatal("docker-app primary host_scope must not be agent")
+	}
 	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: docker-app") {
 		t.Fatalf("plugin.yaml must register a plugin-owned UI route: %s", text)
 	}
@@ -113,7 +120,7 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatalf("plugin.yaml must ship frontend files below assets/: %s", text)
 	}
-	if strings.Contains(text, "host_scope: agent") || strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") || strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
+	if strings.Contains(text, "host_scope: local") || strings.Contains(text, "container.compose") || strings.Contains(text, "container.provider") || strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
 		t.Fatalf("plugin.yaml still gates Docker API, agent install, or HTTP backend publish: %s", text)
 	}
 

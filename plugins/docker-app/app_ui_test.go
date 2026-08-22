@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,8 +36,17 @@ func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	if !strings.Contains(text, "host_scope: control-plane") {
 		t.Fatalf("plugin.yaml must declare control-plane host_scope: %s", text)
 	}
-	if strings.Contains(text, "host_scope: agent") || strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
-		t.Fatal("docker-app must not use agent host_scope or install-time HTTP backend publish")
+	if !strings.Contains(text, "host_scopes:") || (!strings.Contains(text, "- agent") && !strings.Contains(text, "[agent]")) {
+		t.Fatalf("plugin.yaml must declare host_scopes including agent: %s", text)
+	}
+	if regexp.MustCompile(`(?m)^[[:space:]]*host_scope:[[:space:]]*agent[[:space:]]*$`).MatchString(text) {
+		t.Fatal("docker-app primary host_scope must not be agent")
+	}
+	if strings.Contains(text, "container.provider") {
+		t.Fatal("docker-app must not declare container.provider")
+	}
+	if strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
+		t.Fatal("docker-app must not use install-time HTTP backend publish")
 	}
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatal("plugin.yaml must declare frontend files below assets/")
