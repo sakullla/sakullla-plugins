@@ -175,7 +175,14 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if _, err := controller.runCommand(ctx, dir, "docker", "compose", "ps"); err != nil {
 			return nil, err
 		}
-		return json.Marshal(RuntimeState{})
+		instanceID := strings.TrimSpace(request.InstanceID)
+		if instanceID == "" {
+			instanceID = request.AppID
+		}
+		return json.Marshal(RuntimeState{
+			CandidateInstance: instanceID,
+			Instances:         map[string]bool{instanceID: true},
+		})
 	default:
 		return nil, fmt.Errorf("compose action %q is unknown", action)
 	}

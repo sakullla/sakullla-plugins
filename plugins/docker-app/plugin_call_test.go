@@ -138,6 +138,73 @@ func TestControllerCallUnknownComposeActionDoesNotWriteWorkspace(t *testing.T) {
 	}
 }
 
+func TestControllerCallComposeInspectReportsLiveInstance(t *testing.T) {
+	t.Parallel()
+	const appID = "media"
+	root := t.TempDir()
+	workdir := filepath.Join(root, appID)
+	t.Run("successful compose ps populates RuntimeState", func(t *testing.T) {
+		var argv [][]string
+		runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+			if dir != workdir {
+				t.Fatalf("compose dir=%q want %q", dir, workdir)
+			}
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("NAME IMAGE COMMAND SERVICE CREATED STATUS PORTS"), nil
+		})
+		controller := newCallController(t, root, runner, nil)
+		payload, err := json.Marshal(map[string]any{"action": "inspect", "app_id": appID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(argv) != 1 || argv[0][0] != "docker" || strings.Join(argv[0][1:], " ") != "compose ps" {
+			t.Fatalf("compose argv=%#v", argv)
+		}
+		var state RuntimeState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatal(err)
+		}
+		if state.CandidateInstance != appID {
+			t.Fatalf("CandidateInstance=%q want %q", state.CandidateInstance, appID)
+		}
+		if !state.Instances[appID] {
+			t.Fatalf("Instances=%#v want %q present", state.Instances, appID)
+		}
+	})
+	t.Run("failed compose ps does not look like gone instances", func(t *testing.T) {
+		composeErr := errors.New("compose ps failed")
+		runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			return nil, composeErr
+		})
+		controller := newCallController(t, root, runner, nil)
+		payload, err := json.Marshal(map[string]any{"action": "inspect", "app_id": appID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload)
+		if err == nil {
+			t.Fatal("inspect succeeded when compose ps failed")
+		}
+		if !errors.Is(err, composeErr) {
+			t.Fatalf("inspect err=%v want %v", err, composeErr)
+		}
+		if len(raw) == 0 {
+			return
+		}
+		var state RuntimeState
+		if json.Unmarshal(raw, &state) != nil {
+			return
+		}
+		if state.CandidateInstance == "" && len(state.Instances) == 0 {
+			t.Fatalf("failed inspect returned empty RuntimeState payload=%s", raw)
+		}
+	})
+}
+
 func newCallController(t *testing.T, root string, runner CommandRunner, images ImageUpdateObserver) *Controller {
 	t.Helper()
 	controller, err := NewController(ControllerConfig{
