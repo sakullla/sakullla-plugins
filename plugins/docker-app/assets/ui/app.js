@@ -397,6 +397,7 @@ const renderApp = (app) => {
         showStatus("已创建 HTTP 规则。", false);
         form.hidden = true;
         form.reset();
+        await renderWorkspace();
       } catch (error) {
         showStatus(error.message, true);
       } finally {
@@ -404,6 +405,11 @@ const renderApp = (app) => {
       }
     });
     card.append(form);
+  } else {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "没有可挂的端口";
+    card.append(hint);
   }
   return card;
 };

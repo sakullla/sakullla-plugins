@@ -96,6 +96,7 @@ type Controller struct {
 	uiRollout        Rollout
 	uiImageObserver  ImageUpdateObserver
 	appRuntime       map[string]bool
+	hostRules        []HostHTTPRule
 }
 
 type commitEpoch struct {
@@ -137,6 +138,18 @@ func (controller *Controller) Apps() []App {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	return cloneApps(controller.apps)
+}
+
+func (controller *Controller) HostHTTPRules() []HostHTTPRule {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return cloneHTTPRules(controller.hostRules)
+}
+
+func (controller *Controller) replaceHostHTTPRules(rules []HostHTTPRule) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.hostRules = cloneHTTPRules(rules)
 }
 
 func (controller *Controller) RegistryMirror() string {
@@ -192,6 +205,7 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			controller.resourceGroupRef = ""
 			controller.commit = nil
 			controller.epoch = nil
+			controller.hostRules = nil
 		}
 		controller.mu.Unlock()
 	})
@@ -253,6 +267,7 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.resourceGroupRef = ""
 	controller.commit = nil
 	controller.epoch = nil
+	controller.hostRules = nil
 	controller.mu.Unlock()
 	return nil
 }

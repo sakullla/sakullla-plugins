@@ -65,6 +65,7 @@ type appAPIResponse struct {
 	Logs   string         `json:"logs,omitempty"`
 	Error  string         `json:"error,omitempty"`
 	Engine *engineAPIView `json:"engine,omitempty"`
+	Rules  []HostHTTPRule `json:"rules,omitempty"`
 	Access struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
@@ -260,12 +261,14 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrEmptyIngressDomain.Error()})
 			return
 		}
-		_, err = CreateHTTPRuleFromPublishedPort(request.Context(), controller.uiHTTPRule, nil, app, nil, body.Domain, body.Port, controller.uiAuditor)
+		existing := controller.HostHTTPRules()
+		rules, err := CreateHTTPRuleFromPublishedPort(request.Context(), controller.uiHTTPRule, existing, app, nil, body.Domain, body.Port, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err), Rules: existing, Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		controller.replaceHostHTTPRules(rules)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID), Rules: rules})
 	case "logs":
 		body, _ := decodeAppWrite(request)
 		service := body.Service

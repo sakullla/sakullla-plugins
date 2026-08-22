@@ -110,7 +110,7 @@ func TestHTTPOfferCutoverFailureKeepsOldRuleTarget(t *testing.T) {
 
 func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	app := dockerapp.App{
-		ID: "media", Image: "nginx:1.27", Generation: "generation-1",
+		ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
 		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n      - \"127.0.0.1:9090:90\"\n      - target: 443\n        published: 8443\n",
 	}
 	observations := []dockerapp.ContainerObservation{
@@ -138,8 +138,9 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 			Ref:     "rule-media-8080",
 			Domain:  spec.Domain,
 			Port:    spec.Port,
-			Backend: fmt.Sprintf("127.0.0.1:%d", spec.Port),
+			Backend: fmt.Sprintf("%s:%d", spec.AgentID, spec.Port),
 			AppID:   spec.AppID,
+			AgentID: spec.AgentID,
 		}, nil
 	})
 	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
@@ -148,22 +149,22 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 1 || calls[0].AppID != app.ID || calls[0].Domain != "app.example.com" || calls[0].Port != 8080 {
+	if len(calls) != 1 || calls[0].AppID != app.ID || calls[0].AgentID != app.AgentID || calls[0].Domain != "app.example.com" || calls[0].Port != 8080 {
 		t.Fatalf("create spec = %#v", calls)
 	}
 	if len(rules) != 2 || rules[0] != existing[0] {
 		t.Fatalf("host rules = %#v", rules)
 	}
 	created := rules[1]
-	if created.Ref != "rule-media-8080" || created.Domain != "app.example.com" || created.Port != 8080 || created.AppID != app.ID {
+	if created.Ref != "rule-media-8080" || created.Domain != "app.example.com" || created.Port != 8080 || created.AppID != app.ID || created.AgentID != app.AgentID {
 		t.Fatalf("created rule = %#v", created)
 	}
-	if created.Backend != "127.0.0.1:8080" || !strings.Contains(created.Backend, "8080") {
-		t.Fatalf("backend does not point at published port: %#v", created)
+	if created.Backend != "agent-1:8080" || !strings.Contains(created.Backend, "8080") {
+		t.Fatalf("backend does not point at Agent published port: %#v", created)
 	}
 
 	containerOnly := dockerapp.App{
-		ID: "sidecar", Image: "nginx:1.27", Generation: "generation-1",
+		ID: "sidecar", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
 		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"80\"\n",
 	}
 	runtimeHost := []dockerapp.ContainerObservation{
@@ -174,22 +175,22 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	if err != nil || len(calls) != 1 || calls[0].Port != 32768 {
 		t.Fatalf("runtime host create spec=%#v rules=%#v err=%v", calls, rules, err)
 	}
-	if rules[len(rules)-1].Backend != "127.0.0.1:32768" {
+	if rules[len(rules)-1].Backend != "agent-1:32768" || rules[len(rules)-1].AgentID != containerOnly.AgentID {
 		t.Fatalf("runtime backend = %#v", rules[len(rules)-1])
 	}
 }
 
 func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 	httpApp := dockerapp.App{
-		ID: "media", Image: "nginx:1.27", Generation: "generation-1",
+		ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
 		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n",
 	}
 	worker := dockerapp.App{
-		ID: "worker", Image: "batch:latest", Generation: "generation-1",
+		ID: "worker", AgentID: "agent-1", Image: "batch:latest", Generation: "generation-1",
 		Compose: "services:\n  job:\n    image: batch:latest\n",
 	}
 	containerOnly := dockerapp.App{
-		ID: "sidecar", Image: "nginx:1.27", Generation: "generation-1",
+		ID: "sidecar", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
 		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"80\"\n      - 443\n      - \":8080\"\n      - \"80/tcp\"\n      - target: 9000\n",
 	}
 	httpObservations := []dockerapp.ContainerObservation{

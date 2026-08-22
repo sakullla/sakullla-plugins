@@ -28,17 +28,22 @@ func (function HTTPRuleHandleFunc) Cutover(ctx context.Context, fence uint64, ru
 }
 
 // HTTPRuleSpec is the plugin-side create request for a host HTTP rule.
-// The host owns the resulting rule object; backend is the published port.
+// The host owns the resulting rule object; backend is that Agent's published port.
 type HTTPRuleSpec struct {
-	AppID  string
-	Domain string
-	Port   uint16
+	AppID   string
+	AgentID string
+	Domain  string
+	Port    uint16
 }
 
 // HostHTTPRule is one entry in the host HTTP rule list after a create request.
 type HostHTTPRule struct {
-	Ref, Domain, Backend, AppID string
-	Port                        uint16
+	Ref     string `json:"ref,omitempty"`
+	Domain  string `json:"domain,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	AppID   string `json:"app_id,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	Port    uint16 `json:"port,omitempty"`
 }
 
 // AppHTTPIngress is the application-page projection of published host ports.
@@ -164,19 +169,22 @@ func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateH
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return preserved, ErrTypedHandlesUnavailable
 	}
-	created, err := handle.Create(ctx, HTTPRuleSpec{AppID: app.ID, Domain: normalized, Port: port})
+	created, err := handle.Create(ctx, HTTPRuleSpec{AppID: app.ID, AgentID: app.AgentID, Domain: normalized, Port: port})
 	if err != nil {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return preserved, safeFailure(ErrOperationFailed, err)
 	}
-	created = normalizeCreatedHTTPRule(created, app.ID, normalized, port)
+	created = normalizeCreatedHTTPRule(created, app, normalized, port)
 	audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "succeeded", Detail: app.ID})
 	return append(preserved, created), nil
 }
 
-func normalizeCreatedHTTPRule(rule HostHTTPRule, appID, domain string, port uint16) HostHTTPRule {
+func normalizeCreatedHTTPRule(rule HostHTTPRule, app App, domain string, port uint16) HostHTTPRule {
 	if rule.AppID == "" {
-		rule.AppID = appID
+		rule.AppID = app.ID
+	}
+	if rule.AgentID == "" {
+		rule.AgentID = app.AgentID
 	}
 	if rule.Domain == "" {
 		rule.Domain = domain
@@ -185,9 +193,13 @@ func normalizeCreatedHTTPRule(rule HostHTTPRule, appID, domain string, port uint
 		rule.Port = port
 	}
 	if rule.Backend == "" {
-		rule.Backend = ":" + strconv.Itoa(int(port))
+		rule.Backend = publishedPortBackend(app.AgentID, port)
 	}
 	return rule
+}
+
+func publishedPortBackend(agentID string, port uint16) string {
+	return strings.TrimSpace(agentID) + ":" + strconv.Itoa(int(port))
 }
 
 func normalizeIngressDomain(value string) (string, bool) {

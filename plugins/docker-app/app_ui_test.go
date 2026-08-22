@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -104,6 +106,9 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 	if emptyDomain.Code != http.StatusBadRequest || !strings.Contains(emptyDomain.Body.String(), ErrEmptyIngressDomain.Error()) {
 		t.Fatalf("empty domain status=%d body=%s", emptyDomain.Code, emptyDomain.Body.String())
 	}
+	if len(controller.Apps()) != 1 || len(controller.HostHTTPRules()) != 0 {
+		t.Fatalf("empty domain mutated apps=%#v rules=%#v", controller.Apps(), controller.HostHTTPRules())
+	}
 
 	deleted := httptest.NewRecorder()
 	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
@@ -112,6 +117,115 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 	}
 	if len(controller.Apps()) != 0 {
 		t.Fatalf("delete left apps: %#v", controller.Apps())
+	}
+}
+
+func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK || len(controller.Apps()) != 1 {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK {
+		t.Fatalf("http-rule status=%d body=%s", rule.Code, rule.Body.String())
+	}
+	if len(handle.specs) != 1 || handle.specs[0].AppID != "media" || handle.specs[0].AgentID != "agent-1" || handle.specs[0].Domain != "app.example.com" || handle.specs[0].Port != 8080 {
+		t.Fatalf("host create spec=%#v", handle.specs)
+	}
+	rules := controller.HostHTTPRules()
+	if len(rules) != 1 || rules[0].Domain != "app.example.com" || rules[0].Port != 8080 || rules[0].AgentID != "agent-1" || rules[0].AppID != "media" {
+		t.Fatalf("host rules=%#v", rules)
+	}
+	if rules[0].Backend != "agent-1:8080" {
+		t.Fatalf("backend does not point at Agent port: %#v", rules[0])
+	}
+	if !strings.Contains(rule.Body.String(), `"domain":"app.example.com"`) || !strings.Contains(rule.Body.String(), `"backend":"agent-1:8080"`) {
+		t.Fatalf("http-rule response omitted host rule: %s", rule.Body.String())
+	}
+	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" || controller.Apps()[0].Image != "nginx:1.27" {
+		t.Fatalf("http-rule mutated apps=%#v", controller.Apps())
+	}
+}
+
+func TestAppUIDoesNotCreateHTTPRuleWithoutPortOrDomain(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	seeded := httptest.NewRecorder()
+	controller.ServeHTTP(seeded, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if seeded.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", seeded.Code, seeded.Body.String())
+	}
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"kept.example.com","port":8080}`))
+	if created.Code != http.StatusOK || len(controller.HostHTTPRules()) != 1 {
+		t.Fatalf("seed rule status=%d rules=%#v body=%s", created.Code, controller.HostHTTPRules(), created.Body.String())
+	}
+	existing := controller.HostHTTPRules()
+	apps := controller.Apps()
+
+	emptyDomain := httptest.NewRecorder()
+	controller.ServeHTTP(emptyDomain, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"","port":8080}`))
+	if emptyDomain.Code != http.StatusBadRequest || !strings.Contains(emptyDomain.Body.String(), ErrEmptyIngressDomain.Error()) {
+		t.Fatalf("empty domain status=%d body=%s", emptyDomain.Code, emptyDomain.Body.String())
+	}
+
+	worker := httptest.NewRecorder()
+	controller.ServeHTTP(worker, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"worker","agent_id":"agent-1","compose":"services:\n  job:\n    image: batch:latest\n"}`))
+	if worker.Code != http.StatusOK {
+		t.Fatalf("worker status=%d body=%s", worker.Code, worker.Body.String())
+	}
+	apps = controller.Apps()
+	noPort := httptest.NewRecorder()
+	controller.ServeHTTP(noPort, uiJSONRequest(http.MethodPost, "/api/apps/worker/http-rule", `{"domain":"app.example.com","port":8080}`))
+	if noPort.Code != http.StatusBadRequest || !strings.Contains(noPort.Body.String(), ErrNoPublishedPort.Error()) {
+		t.Fatalf("no-port status=%d body=%s", noPort.Code, noPort.Body.String())
+	}
+
+	if len(handle.specs) != 1 {
+		t.Fatalf("denied creates still invoked host: %#v", handle.specs)
+	}
+	if len(controller.HostHTTPRules()) != 1 || controller.HostHTTPRules()[0] != existing[0] {
+		t.Fatalf("denied creates changed rules: %#v", controller.HostHTTPRules())
+	}
+	got := controller.Apps()
+	if len(got) != len(apps) || got[0].ID != apps[0].ID || got[0].Image != apps[0].Image || got[0].Compose != apps[0].Compose || got[1].ID != "worker" || got[1].Image != apps[1].Image {
+		t.Fatalf("denied creates mutated apps=%#v want=%#v", got, apps)
+	}
+}
+
+func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
+	t.Parallel()
+	page := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
+	html := page.Body.String()
+	scriptRec := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(scriptRec, uiRequest(http.MethodGet, "/app.js", ""))
+	script := scriptRec.Body.String()
+	if !strings.Contains(html, "入口域名") {
+		t.Fatalf("page missing group HTTP ingress copy: %s", html)
+	}
+	if strings.Contains(html, `name="domain"`) && strings.Contains(html, `id="create-form"`) {
+		t.Fatal("create form still requires an ingress domain")
+	}
+	for _, token := range []string{
+		"挂 HTTP",
+		"入口域名",
+		"无发布端口",
+		"没有可挂的端口",
+		"/http-rule",
+		`name = "domain"`,
+		`name = "port"`,
+	} {
+		if !strings.Contains(script, token) {
+			t.Fatalf("app.js missing %q", token)
+		}
 	}
 }
 
@@ -605,6 +719,7 @@ type uiControllerOptions struct {
 	workDirRoot   *string
 	observer      ImageUpdateObserver
 	rollout       RolloutExecutor
+	httpRule      HTTPRuleCreateHandle
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -640,6 +755,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIRestart:         runtime,
 		UILogs:            runtime,
 		UIRemove:          runtime,
+		UIHTTPRule:        opts.httpRule,
 		UIWorkDirRoot:     workDirRoot,
 		UIImageObserver:   opts.observer,
 		UIRolloutExecutor: opts.rollout,
@@ -734,6 +850,22 @@ func hasAppAction(view uiAppView, id string) bool {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+type recordingHTTPRuleCreate struct {
+	specs []HTTPRuleSpec
+}
+
+func (handle *recordingHTTPRuleCreate) Create(_ context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
+	handle.specs = append(handle.specs, spec)
+	return HostHTTPRule{
+		Ref:     fmt.Sprintf("rule-%s-%d", spec.AppID, spec.Port),
+		Domain:  spec.Domain,
+		Port:    spec.Port,
+		Backend: spec.AgentID + ":" + strconv.Itoa(int(spec.Port)),
+		AppID:   spec.AppID,
+		AgentID: spec.AgentID,
+	}, nil
 }
 
 type uiTestRuntime struct {
