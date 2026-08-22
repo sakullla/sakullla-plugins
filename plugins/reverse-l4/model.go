@@ -43,6 +43,11 @@ var (
 	ErrHostOperationFailed    = errors.New("host runtime operation failed")
 	ErrHostRejectedRequest    = errors.New("host runtime rejected the request")
 	ErrStateUnavailable       = errors.New("mapping state store is unavailable")
+
+	// Management-page surface errors.
+	ErrUnauthorized      = errors.New("mapping page authorization denied")
+	ErrDeleteUnconfirmed = errors.New("delete requires the mapping id as confirmation")
+	ErrOperationFailed   = errors.New("mapping operation failed")
 )
 
 // Mapping is one user-created tunnel mapping. EntryAgentID is the publicly

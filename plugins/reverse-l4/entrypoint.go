@@ -13,7 +13,8 @@ const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 // RunEntrypoint runs the canonical RPC plugin process: the build-time
 // handshake probe with an isolated lifecycle, or the supervised runtime whose
 // mapping orchestration talks to the host through the public SDK runtime
-// client only.
+// client only. The runtime lifecycle also serves the plugin-owned management
+// page on the host-provisioned private UI endpoint.
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
 		Declaration: pluginsdk.RPCPluginDeclaration{
@@ -26,5 +27,6 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 			})
 		},
 		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(ControllerConfig{}) },
+		Services:            pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true},
 	})
 }

@@ -67,6 +67,36 @@ func (service *Service) Status(ctx context.Context, id string) (MappingStatus, e
 	if !ok {
 		return MappingStatus{}, ErrMappingNotFound
 	}
+	return service.channelStatusFor(ctx, mapping)
+}
+
+// Statuses projects the whole catalog with per-mapping reverse-channel
+// connectivity for the management page. A failing channel poll degrades that
+// single mapping to unknown instead of hiding the catalog.
+func (service *Service) Statuses(ctx context.Context) ([]MappingStatus, error) {
+	if service == nil {
+		return nil, ErrStateUnavailable
+	}
+	service.mu.Lock()
+	snapshot, err := service.state.Load(ctx)
+	service.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]MappingStatus, 0, len(snapshot.Mappings))
+	for _, mapping := range snapshot.Mappings {
+		status, err := service.channelStatusFor(ctx, mapping)
+		if err != nil {
+			status = MappingStatus{Mapping: mapping, ChannelState: ChannelUnknown}
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+// channelStatusFor derives the management-page connectivity projection of one
+// durable mapping record.
+func (service *Service) channelStatusFor(ctx context.Context, mapping Mapping) (MappingStatus, error) {
 	status := MappingStatus{Mapping: mapping, ChannelState: ChannelUnknown}
 	switch {
 	case !mapping.Enabled:

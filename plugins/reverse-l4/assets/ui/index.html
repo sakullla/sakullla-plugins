@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="sakura-day">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>四层反向穿透</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wash" aria-hidden="true"></div>
+  <main>
+    <header class="page-head">
+      <p class="kicker">四层反向穿透</p>
+      <h1>反向穿透映射</h1>
+      <p class="lede">每条映射把内网 TCP/UDP 服务经入口节点的 L4 规则与出口节点的反向通道发布到公网。列表展示入口、出口、协议、启停与通道连通状态；通道离线表示出口节点不可达或通道已被拆除。</p>
+    </header>
+    <p id="map-loading" role="status">正在加载映射…</p>
+    <p id="map-unavailable" role="status" hidden>暂时无法管理反向穿透映射。</p>
+    <p id="map-denied" role="alert" hidden>无权管理反向穿透映射。</p>
+    <div id="map-workspace" hidden>
+      <div class="toolbar-bar">
+        <p class="engine-status">通道状态由宿主反向通道实时投影</p>
+        <button id="create-toggle" class="btn-primary" type="button">新建映射</button>
+      </div>
+      <section class="panel" id="map-form" aria-labelledby="map-form-title" hidden>
+        <div class="section-head">
+          <h2 id="map-form-title">新建映射</h2>
+          <button id="form-cancel" class="btn-link" type="button">取消</button>
+        </div>
+        <form id="mapping-form" method="post">
+          <label>映射 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="nas-web" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
+          <label>名称 <input name="name" autocomplete="off" spellcheck="false" maxlength="128" placeholder="内网 Web"></label>
+          <label>协议
+            <select name="protocol" required>
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+            </select>
+          </label>
+          <label>入口节点 ID <input name="entry_agent_id" required autocomplete="off" spellcheck="false" placeholder="edge-agent"></label>
+          <label>出口节点 ID <input name="exit_agent_id" required autocomplete="off" spellcheck="false" placeholder="home-agent"></label>
+          <label>入口监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
+          <label>内网服务地址 <input name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
+          <label>内网服务端口 <input name="backend_port" type="number" required min="1" max="65535" placeholder="9443"></label>
+          <label>中继链（可选） <input name="relay_chain" autocomplete="off" spellcheck="false" placeholder="监听器 ID，逗号分隔，如 4, 5"></label>
+          <div class="form-footer">
+            <p class="hint">入口与出口节点不能相同。中继链留空时出口直拨入口。</p>
+            <button type="submit" class="btn-primary" id="form-submit">创建</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="map-list-title">
+        <div class="section-head">
+          <h2 id="map-list-title">映射</h2>
+          <p id="map-count" class="count" hidden></p>
+        </div>
+        <div id="map-list" class="map-list"></div>
+        <p id="map-empty" hidden>还没有映射。点右上角新建映射。</p>
+      </section>
+      <p id="map-status" role="status" hidden></p>
+    </div>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

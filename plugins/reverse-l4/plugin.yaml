@@ -13,18 +13,26 @@ runtime:
   entry: reverse-l4
 artifacts:
   - path: artifacts/linux-amd64/reverse-l4
-    sha256: e1cf389af0367b8830c87942c0db8b056283785f845096dfc263390b094a6b23
-    size: 20050479
+    sha256: 80592c2eec951147a9cc4a1d2c43a9ab896959a0944f188fe1e202add1920a3c
+    size: 20254129
     mode: executable
     goos: linux
     goarch: amd64
 extension_points:
+  - ui.route
   - resource.group
+ui_route_id: reverse-l4
 resource_group_id: reverse-l4
 metadata:
+  ui.nav.group: 网络
+  ui.nav.label: 四层反向穿透
   resource.group.ref: resource-group/reverse-l4
   resource.group.label: 四层反向穿透
   resource.group.description: 管理反向穿透映射、入口 L4 规则与通道状态
+assets:
+  - assets/ui/index.html
+  - assets/ui/app.js
+  - assets/ui/style.css
 permissions:
   - name: l4.rule
   - name: channel.reverse

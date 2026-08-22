@@ -24,3 +24,17 @@ enabling re-ensures the channel and re-points the rule; deleting removes all
 of them. A mapping may optionally reference user-managed relay listeners to
 route the channel through a relay chain; without a reference the exit agent
 dials the entry agent directly.
+
+## Management page
+
+The plugin declares the generic `ui.route` extension point with `ui.nav`
+metadata, so an installed and enabled plugin gets a panel navigation entry
+mounted at `/panel-api/plugins/reverse-l4/`. The page is served from canonical
+`assets/` paths by the plugin process itself on the host-provisioned private
+UI endpoint and carries the full mapping lifecycle: create, update, enable,
+disable, and confirmed delete. Every card lists the entry agent, exit agent,
+protocol, listen port, enabled state, and the live reverse-channel
+connectivity projected from the host (`online`, `offline`, or `unknown`), so an
+offline exit side is distinguishable at a glance. Management RPC calls are
+authenticated by the actor / resource-group / operation-key headers the panel
+injects; calls without an actor identity are rejected.
