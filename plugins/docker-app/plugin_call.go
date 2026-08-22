@@ -59,6 +59,13 @@ type imageCallRequest struct {
 	Image   string `json:"image"`
 }
 
+const (
+	localImageDigestFormat      = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}"
+	registryImagetoolsFormat    = "{{.Manifest.Digest}}"
+	emptyImageDigestMessage     = "image digest is empty"
+	imageObserveRequiredMessage = "image is required"
+)
+
 // Call is the Agent execution face. Host forwards plugin.call Name+Payload here.
 func (controller *Controller) Call(ctx context.Context, generation, name string, payload []byte) ([]byte, error) {
 	if controller == nil {
@@ -235,15 +242,21 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 		})
 	}
 	if strings.TrimSpace(request.Image) == "" {
-		return nil, errors.New("image is required")
+		return nil, errors.New(imageObserveRequiredMessage)
 	}
-	digest, err := controller.dockerImageDigest(ctx, request.Image)
+	current, err := controller.dockerImageDigest(ctx, request.Image)
 	if err != nil {
 		return nil, err
 	}
+	latest := current
+	if registry := controller.dockerRegistryDigest(ctx, request.Image); registry != "" {
+		if formed := sameFormDigest(current, registry); formed != "" {
+			latest = formed
+		}
+	}
 	return json.Marshal(map[string]any{
-		"current_digest": digest,
-		"latest_digest":  digest,
+		"current_digest": current,
+		"latest_digest":  latest,
 	})
 }
 
@@ -256,15 +269,31 @@ func (controller *Controller) dockerServerVersion(ctx context.Context) (string, 
 }
 
 func (controller *Controller) dockerImageDigest(ctx context.Context, image string) (string, error) {
-	output, err := controller.runCommand(ctx, "", "docker", "image", "inspect", "--format", "{{.Id}}", image)
+	output, err := controller.runCommand(ctx, "", "docker", "image", "inspect", "--format", localImageDigestFormat, image)
 	if err != nil {
-		return "", err
+		return "", sanitizeDockerError(err, emptyImageDigestMessage)
 	}
-	digest := strings.TrimSpace(string(bytes.TrimSpace(output)))
+	digest := parseLocalImageDigest(output)
 	if digest == "" {
-		return "", errors.New("image digest is empty")
+		return "", errors.New(emptyImageDigestMessage)
 	}
 	return digest, nil
+}
+
+func (controller *Controller) dockerRegistryDigest(ctx context.Context, image string) string {
+	output, err := controller.runCommand(ctx, "", "docker", "manifest", "inspect", "--verbose", image)
+	if err == nil {
+		if digest := parseRegistryDigest(output); digest != "" {
+			return digest
+		}
+	}
+	output, err = controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image)
+	if err == nil {
+		if digest := parseRegistryDigest(output); digest != "" {
+			return digest
+		}
+	}
+	return ""
 }
 
 func (controller *Controller) runCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
@@ -301,4 +330,215 @@ func agentIDFromPayload(payload []byte) (string, error) {
 		return "", errors.New("agent id is invalid")
 	}
 	return agentID, nil
+}
+
+func parseLocalImageDigest(output []byte) string {
+	text := normalizeCommandOutput(output)
+	if digest := imageDigestValue(text); digest != "" {
+		return digest
+	}
+	var payload any
+	if json.Unmarshal([]byte(text), &payload) == nil {
+		if digest := localDigestFromInspectJSON(payload); digest != "" {
+			return digest
+		}
+	}
+	return firstLineDigest(text)
+}
+
+func parseRegistryDigest(output []byte) string {
+	text := normalizeCommandOutput(output)
+	if digest := imageDigestValue(text); digest != "" {
+		return digest
+	}
+	var payload any
+	if json.Unmarshal([]byte(text), &payload) == nil {
+		if digest := registryDigestFromJSON(payload); digest != "" {
+			return digest
+		}
+	}
+	return firstLineDigest(text)
+}
+
+func localDigestFromInspectJSON(payload any) string {
+	switch typed := payload.(type) {
+	case []any:
+		for _, item := range typed {
+			if digest := localDigestFromInspectJSON(item); digest != "" {
+				return digest
+			}
+		}
+	case map[string]any:
+		if digest := firstRepoDigest(typed["RepoDigests"]); digest != "" {
+			return digest
+		}
+		if digest := firstRepoDigest(typed["repoDigests"]); digest != "" {
+			return digest
+		}
+		if digest := imageDigestValue(stringField(typed, "Id")); digest != "" {
+			return digest
+		}
+		if digest := imageDigestValue(stringField(typed, "id")); digest != "" {
+			return digest
+		}
+	}
+	return ""
+}
+
+func firstRepoDigest(value any) string {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if digest := imageDigestValue(text); digest != "" {
+				return digest
+			}
+		}
+	case []string:
+		for _, text := range typed {
+			if digest := imageDigestValue(text); digest != "" {
+				return digest
+			}
+		}
+	case string:
+		return imageDigestValue(typed)
+	}
+	return ""
+}
+
+func registryDigestFromJSON(payload any) string {
+	switch typed := payload.(type) {
+	case []any:
+		for _, item := range typed {
+			if digest := registryDigestFromJSON(item); digest != "" {
+				return digest
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"Descriptor", "descriptor"} {
+			nested, ok := typed[key].(map[string]any)
+			if !ok {
+				continue
+			}
+			if digest := imageDigestValue(stringField(nested, "digest")); digest != "" {
+				return digest
+			}
+			if digest := imageDigestValue(stringField(nested, "Digest")); digest != "" {
+				return digest
+			}
+		}
+		for _, key := range []string{"Manifest", "manifest"} {
+			nested, ok := typed[key].(map[string]any)
+			if !ok {
+				continue
+			}
+			if digest := registryDigestFromJSON(nested); digest != "" {
+				return digest
+			}
+		}
+		if digest := imageDigestValue(stringField(typed, "digest")); digest != "" {
+			return digest
+		}
+		if digest := imageDigestValue(stringField(typed, "Digest")); digest != "" {
+			return digest
+		}
+	case string:
+		return imageDigestValue(typed)
+	}
+	return ""
+}
+
+func sameFormDigest(current, latest string) string {
+	core := digestCore(latest)
+	if core == "" {
+		return ""
+	}
+	if at := strings.LastIndex(current, "@"); at >= 0 {
+		prefix := strings.TrimSpace(current[:at])
+		if prefix != "" && imageDigestValue(prefix+"@"+core) != "" {
+			return prefix + "@" + core
+		}
+	}
+	return core
+}
+
+func firstLineDigest(text string) string {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if digest := imageDigestValue(lines[i]); digest != "" {
+			return digest
+		}
+	}
+	return ""
+}
+
+func imageDigestValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.Trim(value, `"'`)
+	if value == "" || value == "<no value>" {
+		return ""
+	}
+	if containsLocalDockerMarker(strings.ToLower(value)) {
+		return ""
+	}
+	if digestCore(value) == "" {
+		return ""
+	}
+	if at := strings.LastIndex(value, "@"); at >= 0 {
+		prefix := strings.TrimSpace(value[:at])
+		if prefix == "" {
+			return digestCore(value)
+		}
+		return prefix + "@" + digestCore(value)
+	}
+	return digestCore(value)
+}
+
+func digestCore(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	if at := strings.LastIndex(value, "@"); at >= 0 {
+		value = value[at+1:]
+	}
+	algo, hex, ok := strings.Cut(value, ":")
+	if !ok {
+		return ""
+	}
+	algo = strings.ToLower(strings.TrimSpace(algo))
+	hex = strings.ToLower(strings.TrimSpace(hex))
+	if algo != "sha256" || len(hex) < 8 || !isHexDigest(hex) {
+		return ""
+	}
+	return algo + ":" + hex
+}
+
+func isHexDigest(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func normalizeCommandOutput(output []byte) string {
+	return strings.ReplaceAll(string(bytes.TrimSpace(output)), "\r\n", "\n")
+}
+
+func sanitizeDockerError(err error, fallback string) error {
+	if err == nil {
+		return errors.New(fallback)
+	}
+	if containsLocalDockerMarker(strings.ToLower(err.Error())) {
+		return errors.New(fallback)
+	}
+	return err
 }

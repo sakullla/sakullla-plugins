@@ -119,6 +119,114 @@ func TestControllerCallImageUsesInjectedObserver(t *testing.T) {
 	}
 }
 
+func TestControllerCallImageObserveComparesRepoDigestWithRegistryManifest(t *testing.T) {
+	t.Parallel()
+	current := "nginx@sha256:" + strings.Repeat("a", 64)
+	latest := "sha256:" + strings.Repeat("b", 64)
+	var argv [][]string
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		argv = append(argv, append([]string{name}, args...))
+		switch dockerObserveCommand(name, args) {
+		case "image-inspect":
+			if !strings.Contains(strings.Join(args, " "), "RepoDigests") {
+				t.Fatalf("image inspect must prefer RepoDigests, args=%q", args)
+			}
+			return []byte(current + "\n"), nil
+		case "manifest-inspect":
+			return []byte(`{"Descriptor":{"digest":"` + latest + `"}}`), nil
+		case "imagetools":
+			return []byte(latest + "\n"), nil
+		default:
+			t.Fatalf("unexpected command %s %q", name, args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	decoded := callImageObserve(t, runner, "nginx:latest")
+	wantLatest := sameFormDigest(current, latest)
+	if decoded["current_digest"] != current {
+		t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
+	}
+	if decoded["latest_digest"] != wantLatest {
+		t.Fatalf("latest_digest=%q want %q", decoded["latest_digest"], wantLatest)
+	}
+	if decoded["current_digest"] == decoded["latest_digest"] {
+		t.Fatal("moved registry tag still equalized current and latest")
+	}
+	assertNoImageMutation(t, argv)
+}
+
+func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T) {
+	t.Parallel()
+	current := "nginx@sha256:" + strings.Repeat("c", 64)
+	var argv [][]string
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		argv = append(argv, append([]string{name}, args...))
+		switch dockerObserveCommand(name, args) {
+		case "image-inspect":
+			return []byte(current), nil
+		case "manifest-inspect", "imagetools":
+			return nil, errors.New("dial unix:///var/run/docker.sock: registry offline")
+		default:
+			t.Fatalf("unexpected command %s %q", name, args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	decoded := callImageObserve(t, runner, "nginx:latest")
+	if decoded["current_digest"] != current || decoded["latest_digest"] != current {
+		t.Fatalf("registry failure should equalize digests, got %#v", decoded)
+	}
+	assertNoImageMutation(t, argv)
+	for _, value := range decoded {
+		text, _ := value.(string)
+		if containsLocalDockerMarker(strings.ToLower(text)) {
+			t.Fatalf("observe leaked docker socket marker: %#v", decoded)
+		}
+	}
+}
+
+func TestControllerCallImageObserveFallsBackToImageIDWithoutRepoDigest(t *testing.T) {
+	t.Parallel()
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	latest := "sha256:" + strings.Repeat("e", 64)
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		switch dockerObserveCommand(name, args) {
+		case "image-inspect":
+			return []byte(`{"Id":"` + imageID + `","RepoDigests":[]}`), nil
+		case "manifest-inspect":
+			return []byte(latest), nil
+		default:
+			t.Fatalf("unexpected command %s %q", name, args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	decoded := callImageObserve(t, runner, "nginx:latest")
+	if decoded["current_digest"] != imageID {
+		t.Fatalf("current_digest=%q want image id fallback %q", decoded["current_digest"], imageID)
+	}
+	if decoded["latest_digest"] != latest || decoded["latest_digest"] == decoded["current_digest"] {
+		t.Fatalf("latest_digest=%q want %q", decoded["latest_digest"], latest)
+	}
+}
+
+func TestControllerCallImageObserveFailsWhenLocalDigestMissing(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		if dockerObserveCommand(name, args) == "image-inspect" {
+			return nil, errors.New("Error: No such image: nginx:latest")
+		}
+		t.Fatalf("registry lookup must not run when local inspect fails: %s %q", name, args)
+		return nil, errors.New("unexpected command")
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "observe", "app_id": "media", "image": "nginx:latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload); err == nil {
+		t.Fatal("missing local digest succeeded")
+	}
+}
+
 func TestControllerCallUnknownComposeActionDoesNotWriteWorkspace(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -203,6 +311,51 @@ func TestControllerCallComposeInspectReportsLiveInstance(t *testing.T) {
 			t.Fatalf("failed inspect returned empty RuntimeState payload=%s", raw)
 		}
 	})
+}
+
+func callImageObserve(t *testing.T, runner CommandRunner, image string) map[string]any {
+	t.Helper()
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "observe", "app_id": "media", "image": image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+func dockerObserveCommand(name string, args []string) string {
+	if name != "docker" {
+		return strings.Join(append([]string{name}, args...), " ")
+	}
+	joined := strings.Join(args, " ")
+	switch {
+	case len(args) >= 2 && args[0] == "image" && args[1] == "inspect":
+		return "image-inspect"
+	case strings.Contains(joined, "manifest inspect") || (len(args) > 0 && args[0] == "manifest"):
+		return "manifest-inspect"
+	case strings.Contains(joined, "imagetools"):
+		return "imagetools"
+	default:
+		return joined
+	}
+}
+
+func assertNoImageMutation(t *testing.T, argv [][]string) {
+	t.Helper()
+	for _, args := range argv {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, " pull") || strings.HasSuffix(joined, " pull") || strings.Contains(joined, "compose up") {
+			t.Fatalf("observe mutated local image: %q", joined)
+		}
+	}
 }
 
 func newCallController(t *testing.T, root string, runner CommandRunner, images ImageUpdateObserver) *Controller {
