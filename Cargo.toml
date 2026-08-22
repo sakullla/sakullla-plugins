@@ -7,6 +7,7 @@ exclude = [
   "plugins/doh",
   "plugins/reverse-l4",
   "plugins/shadowsocks-server",
+  "plugins/webdav",
 ]
 resolver = "3"
 

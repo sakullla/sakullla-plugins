@@ -1,31 +1,35 @@
 schema_version: 1
 id: reverse-l4
-version: 0.1.0
-name: 四层反代
-description: 把 TCP 与 UDP 流量反代到后端服务
+version: 0.2.0
+name: 四层反向穿透
+description: 把内网 TCP/UDP 服务经入口 L4 规则与出口反向通道发布到公网入口
 compatibility:
   host: "*"
   agent: "*"
 runtime:
   kind: rpc-service
   abi: nre:rpc/v1
-  host_scope: agent
+  host_scope: control-plane
   entry: reverse-l4
 artifacts:
   - path: artifacts/linux-amd64/reverse-l4
-    sha256: d54a0a912a155c0cfa59af56c930b8e8b2ec93f5a6806364db44f9e8a49212d8
-    size: 8336537
+    sha256: e1cf389af0367b8830c87942c0db8b056283785f845096dfc263390b094a6b23
+    size: 20050479
     mode: executable
     goos: linux
     goarch: amd64
 extension_points:
-  - l4.accept
-  - tunnel.provider
+  - resource.group
+resource_group_id: reverse-l4
+metadata:
+  resource.group.ref: resource-group/reverse-l4
+  resource.group.label: 四层反向穿透
+  resource.group.description: 管理反向穿透映射、入口 L4 规则与通道状态
 permissions:
-  - name: l4.inspect
-  - name: l4.respond
-  - name: event.emit
-  - name: service.revocable-resource-handle
+  - name: l4.rule
+  - name: channel.reverse
+  - name: storage.read
+  - name: storage.write
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

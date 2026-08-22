@@ -152,7 +152,7 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		"cloudflare-dns":      {name: "Cloudflare DNS"},
 		"docker-app":          {name: "Docker 应用"},
 		"doh":                 {name: "HTTPS 域名解析"},
-		"reverse-l4":          {name: "四层反代"},
+		"reverse-l4":          {name: "四层反向穿透"},
 		"shadowsocks-server":  {name: "Shadowsocks 服务"},
 		"waf":                 {name: "Web 防火墙", declaredUI: true},
 		"webdav":              {name: "文件共享"},

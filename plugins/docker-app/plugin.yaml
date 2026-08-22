@@ -19,7 +19,6 @@ artifacts:
     goos: linux
     goarch: amd64
 extension_points:
-  - container.provider
   - ui.route
   - resource.group
 ui_route_id: docker-app

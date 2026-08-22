@@ -2,26 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["mappings"],
-  "properties": {
-    "mappings": {
-      "type": "array",
-      "maxItems": 256,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "private_agent_id", "public_agent_id", "protocol", "listen_port", "backend_host", "backend_port", "enabled"],
-        "properties": {
-          "id": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
-          "private_agent_id": {"type": "string", "minLength": 1, "maxLength": 128},
-          "public_agent_id": {"type": "string", "minLength": 1, "maxLength": 128},
-          "protocol": {"enum": ["tcp", "udp"]},
-          "listen_port": {"type": "integer", "minimum": 1, "maximum": 65535},
-          "backend_host": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[^\\s/\\\\]+$"},
-          "backend_port": {"type": "integer", "minimum": 1, "maximum": 65535},
-          "enabled": {"type": "boolean"}
-        }
-      }
-    }
-  }
+  "description": "插件零配置：没有服务端地址、Token、证书等任何必填项。穿透映射是运行时资源，由插件管理页创建并编排。",
+  "properties": {}
 }

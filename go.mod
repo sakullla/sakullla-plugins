@@ -9,7 +9,7 @@ require (
 
 require (
 	github.com/klauspost/compress v1.19.2
-	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.7.10
+	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.7.12
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/mod v0.40.0
