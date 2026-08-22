@@ -62,11 +62,15 @@ type ControllerConfig struct {
 	UIEngineSource                                             AgentEngineSource
 	UIApply                                                    AppApplyExecutor
 	UIStart                                                    StartExecutor
+	UIStop                                                     StopExecutor
 	UIRestart                                                  RestartExecutor
 	UILogs                                                     ServiceLogReader
 	UIRemove                                                   AppRemoveExecutor
 	UIHTTPRule                                                 HTTPRuleCreateHandle
 	UIAuditor                                                  Auditor
+	UIWorkDirRoot                                              string
+	UIRolloutExecutor                                          RolloutExecutor
+	UIImageObserver                                            ImageUpdateObserver
 }
 
 type Controller struct {
@@ -82,11 +86,16 @@ type Controller struct {
 	uiEngineSource   AgentEngineSource
 	uiApply          AppApplyExecutor
 	uiStart          StartExecutor
+	uiStop           StopExecutor
 	uiRestart        RestartExecutor
 	uiLogs           ServiceLogReader
 	uiRemove         AppRemoveExecutor
 	uiHTTPRule       HTTPRuleCreateHandle
 	uiAuditor        Auditor
+	uiWorkDirRoot    string
+	uiRollout        Rollout
+	uiImageObserver  ImageUpdateObserver
+	appRuntime       map[string]bool
 }
 
 type commitEpoch struct {
@@ -105,8 +114,11 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	controller := &Controller{
 		admission: config.Admission, prepareGate: config.PrepareGate,
-		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiRestart: config.UIRestart,
-		uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule, uiAuditor: auditor,
+		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
+		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
+		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
+		appRuntime: map[string]bool{},
+		uiRollout:  Rollout{Store: NewDeploymentStore(), Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,

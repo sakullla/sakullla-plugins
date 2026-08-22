@@ -1,6 +1,7 @@
 package dockerapp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,14 +23,15 @@ const (
 )
 
 type appView struct {
-	ID      string      `json:"id"`
-	AgentID string      `json:"agent_id,omitempty"`
-	Name    string      `json:"name"`
-	Status  string      `json:"status"`
-	Version string      `json:"version"`
-	Compose string      `json:"compose,omitempty"`
-	Ports   []uint16    `json:"ports,omitempty"`
-	Actions []OpsAction `json:"actions,omitempty"`
+	ID       string      `json:"id"`
+	AgentID  string      `json:"agent_id,omitempty"`
+	Name     string      `json:"name"`
+	Status   string      `json:"status"`
+	Version  string      `json:"version"`
+	Compose  string      `json:"compose,omitempty"`
+	Ports    []uint16    `json:"ports,omitempty"`
+	Services []string    `json:"services,omitempty"`
+	Actions  []OpsAction `json:"actions,omitempty"`
 }
 
 type appWriteRequest struct {
@@ -144,7 +146,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			return
 		}
 		agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(agentID), Access: struct {
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), agentID), Access: struct {
 			CanRead  bool `json:"can_read"`
 			CanWrite bool `json:"can_write"`
 		}{CanRead: true, CanWrite: true}})
@@ -170,7 +172,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		generation := controller.lifecycleGeneration()
 		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
-			AppID: body.ID, Generation: generation, Compose: body.Compose,
+			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
@@ -182,7 +184,8 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			}
 		}
 		controller.replaceApps(next)
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(agentID)})
+		controller.setAppRunning(body.ID, true)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), agentID)})
 	default:
 		writer.Header().Set("Allow", "GET, HEAD, POST")
 		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
@@ -211,7 +214,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
 			return
 		}
-		view := projectAppView(app)
+		view := controller.appViewFor(request.Context(), app)
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
@@ -221,19 +224,35 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		controller.replaceApps(next)
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
+		controller.clearAppRuntime(appID)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "start":
 		if err := StartManaged(request.Context(), app, controller.uiStart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
+		controller.setAppRunning(appID, true)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+	case "stop":
+		if err := StopManaged(request.Context(), app, controller.uiStop, controller.uiAuditor); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			return
+		}
+		controller.setAppRunning(appID, false)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "restart":
 		if err := RestartManaged(request.Context(), app, controller.uiRestart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
+		controller.setAppRunning(appID, true)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+	case "update":
+		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			return
+		}
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "http-rule":
 		body, err := decodeAppWrite(request)
 		if err != nil {
@@ -245,7 +264,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(app.AgentID)})
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "logs":
 		body, _ := decodeAppWrite(request)
 		service := body.Service
@@ -286,6 +305,31 @@ func (controller *Controller) replaceApps(apps []App) {
 	controller.apps = cloneApps(apps)
 }
 
+func (controller *Controller) setAppRunning(appID string, running bool) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.appRuntime == nil {
+		controller.appRuntime = map[string]bool{}
+	}
+	controller.appRuntime[appID] = running
+}
+
+func (controller *Controller) clearAppRuntime(appID string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	delete(controller.appRuntime, appID)
+}
+
+func (controller *Controller) appIsRunning(appID string) bool {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	running, ok := controller.appRuntime[appID]
+	if !ok {
+		return true
+	}
+	return running
+}
+
 func (controller *Controller) appByID(appID string) (App, bool) {
 	for _, app := range controller.Apps() {
 		if app.ID == appID {
@@ -295,24 +339,42 @@ func (controller *Controller) appByID(appID string) (App, bool) {
 	return App{}, false
 }
 
-func (controller *Controller) projectAppViews(agentID string) []appView {
+func (controller *Controller) projectAppViews(ctx context.Context, agentID string) []appView {
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
 	for _, app := range apps {
 		if agentID != "" && app.AgentID != agentID {
 			continue
 		}
-		views = append(views, projectAppView(app))
+		views = append(views, controller.appViewFor(ctx, app))
 	}
 	return views
 }
 
-func projectAppView(app App) appView {
-	document := ProjectOpsDocument(app, AppStatusRunning)
+func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
+	running := controller.appIsRunning(app.ID)
+	latest := ""
+	if controller.uiImageObserver != nil {
+		if observed, err := controller.uiImageObserver.ObserveImage(ctx, app); err == nil {
+			latest = observed.LatestDigest
+			_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
+		}
+	}
+	var deployment Deployment
+	if controller.uiRollout.Store != nil {
+		if record, ok, err := controller.uiRollout.Store.Load(ctx, app.ID); err == nil && ok {
+			deployment = record.Value
+		}
+	}
+	return projectAppView(app, running, deployment, latest)
+}
+
+func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {
+	document := ProjectOpsDocumentFromRuntime(app, running, false, deployment, UpdatePolicy{AutoUpdate: app.AutoUpdate}, latestDigest)
 	ports, _ := ListPublishedPorts(app, nil)
 	return appView{
 		ID: app.ID, AgentID: app.AgentID, Name: document.Name, Status: document.Status, Version: document.Version,
-		Compose: app.Compose, Ports: ports, Actions: document.Actions,
+		Compose: app.Compose, Ports: ports, Services: composeServiceNames(app.Compose), Actions: document.Actions,
 	}
 }
 
@@ -330,7 +392,7 @@ func parseAppAPIPath(path string) (appID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "delete", "start", "restart", "http-rule", "logs":
+	case "delete", "start", "stop", "restart", "update", "http-rule", "logs":
 		return decoded, action, true
 	default:
 		return "", "", false
@@ -355,7 +417,7 @@ func appStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusForbidden
-	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService):
+	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
 		return http.StatusConflict
@@ -380,6 +442,8 @@ func publicAppError(err error) string {
 		return ErrNoPublishedPort.Error()
 	case errors.Is(err, ErrUnknownService):
 		return ErrUnknownService.Error()
+	case errors.Is(err, ErrInvalidPreview):
+		return ErrInvalidPreview.Error()
 	case errors.Is(err, ErrEngineNotReady):
 		return ErrEngineNotReady.Error()
 	case errors.Is(err, ErrAgentOffline):

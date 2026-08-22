@@ -2,9 +2,12 @@ package dockerapp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -251,6 +254,206 @@ func TestAppUIDoesNotConfigurePluginOntoAgentOrOfferRemoteInstall(t *testing.T) 
 	}
 }
 
+func TestAppUIRejectsInvalidComposeWithoutMutatingExisting(t *testing.T) {
+	t.Parallel()
+	controller := newUIController(t)
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	invalid := httptest.NewRecorder()
+	controller.ServeHTTP(invalid, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"broken","agent_id":"agent-1","compose":"::: not yaml"}`))
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), ErrInvalidCompose.Error()) {
+		t.Fatalf("invalid YAML status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	missing := httptest.NewRecorder()
+	controller.ServeHTTP(missing, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"broken","agent_id":"agent-1","compose":"services:\n  web:\n    command: echo hi\n"}`))
+	if missing.Code != http.StatusBadRequest || !strings.Contains(missing.Body.String(), ErrMissingComposeImage.Error()) {
+		t.Fatalf("missing image status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	apps := controller.Apps()
+	if len(apps) != 1 || apps[0].ID != "media" || apps[0].Image != "nginx:1.27" {
+		t.Fatalf("rejected compose mutated apps=%#v", apps)
+	}
+}
+
+func TestAppUIDeploysRelativeBindsAgainstWorkDir(t *testing.T) {
+	t.Parallel()
+	controller := newUIController(t)
+	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n"
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
+		t.Fatalf("relative bind deploy status=%d body=%s", created.Code, created.Body.String())
+	}
+	apps := controller.Apps()
+	if len(apps) != 1 || apps[0].WorkDir == "" {
+		t.Fatalf("relative bind workdir missing: %#v", apps)
+	}
+	if _, err := os.Stat(filepath.Join(apps[0].WorkDir, "data")); err != nil {
+		t.Fatalf("relative bind data dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(apps[0].WorkDir, ComposeFileName)); err != nil {
+		t.Fatalf("relative bind compose file: %v", err)
+	}
+
+	emptyRoot := newUIControllerWithOptions(t, uiControllerOptions{workDirRoot: stringPtr("")})
+	accepted := httptest.NewRecorder()
+	emptyRoot.ServeHTTP(accepted, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("./ bind was rejected without workdir root: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+}
+
+func TestAppUIStartStopRestartLogsAndConfirmedDelete(t *testing.T) {
+	t.Parallel()
+	controller := newUIController(t)
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	listed := decodeAppList(t, created.Body.Bytes())
+	if len(listed) != 1 || listed[0].Status != OpsStatusRunning || !hasAppAction(listed[0], OpsActionStop) || !hasAppAction(listed[0], OpsActionRestart) {
+		t.Fatalf("deployed view=%#v", listed)
+	}
+
+	stopped := httptest.NewRecorder()
+	controller.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
+	if stopped.Code != http.StatusOK {
+		t.Fatalf("stop status=%d body=%s", stopped.Code, stopped.Body.String())
+	}
+	listed = decodeAppList(t, stopped.Body.Bytes())
+	if listed[0].Status != OpsStatusStopped || !hasAppAction(listed[0], OpsActionStart) || !hasAppAction(listed[0], OpsActionDelete) {
+		t.Fatalf("stopped view=%#v", listed)
+	}
+
+	started := httptest.NewRecorder()
+	controller.ServeHTTP(started, uiJSONRequest(http.MethodPost, "/api/apps/media/start", `{}`))
+	if started.Code != http.StatusOK || decodeAppList(t, started.Body.Bytes())[0].Status != OpsStatusRunning {
+		t.Fatalf("start status=%d body=%s", started.Code, started.Body.String())
+	}
+
+	restarted := httptest.NewRecorder()
+	controller.ServeHTTP(restarted, uiJSONRequest(http.MethodPost, "/api/apps/media/restart", `{}`))
+	if restarted.Code != http.StatusOK {
+		t.Fatalf("restart status=%d body=%s", restarted.Code, restarted.Body.String())
+	}
+
+	logs := httptest.NewRecorder()
+	controller.ServeHTTP(logs, uiJSONRequest(http.MethodPost, "/api/apps/media/logs", `{"service":"web"}`))
+	if logs.Code != http.StatusOK || !strings.Contains(logs.Body.String(), "listening on :80") {
+		t.Fatalf("logs status=%d body=%s", logs.Code, logs.Body.String())
+	}
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":""}`))
+	if denied.Code != http.StatusBadRequest || len(controller.Apps()) != 1 {
+		t.Fatalf("unconfirmed delete status=%d apps=%#v body=%s", denied.Code, controller.Apps(), denied.Body.String())
+	}
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+}
+
+func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	observer := &uiTestObserver{current: current, latest: latest}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		engineVersion: "27.1.1",
+		observer:      observer,
+		rollout:       &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if len(apps) != 1 || apps[0].Status != OpsStatusUpdateAvailable || !hasAppAction(apps[0], OpsActionUpdate) {
+		t.Fatalf("update view=%#v", apps)
+	}
+	if apps[0].Version != "nginx:latest sha256:0123456789ab" {
+		t.Fatalf("app version = %q", apps[0].Version)
+	}
+	if strings.Contains(listed.Body.String(), "27.1.1") {
+		t.Fatalf("engine version leaked into app list: %s", listed.Body.String())
+	}
+
+	engine := httptest.NewRecorder()
+	controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+	if engine.Code != http.StatusOK || !strings.Contains(engine.Body.String(), `"version":"27.1.1"`) {
+		t.Fatalf("engine status=%d body=%s", engine.Code, engine.Body.String())
+	}
+
+	again := httptest.NewRecorder()
+	controller.ServeHTTP(again, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	unchanged := decodeAppList(t, again.Body.Bytes())
+	if unchanged[0].Version != apps[0].Version || unchanged[0].Status != OpsStatusUpdateAvailable {
+		t.Fatalf("list without update changed image: %#v", unchanged)
+	}
+	record, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
+		t.Fatalf("digest mutated without confirm: %#v ok=%v", record, ok)
+	}
+
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	published := decodeAppList(t, updated.Body.Bytes())
+	if published[0].Status == OpsStatusUpdateAvailable || !strings.Contains(published[0].Version, "sha256:fedcba987654") {
+		t.Fatalf("confirm did not switch digest: %#v", published)
+	}
+	got, _ := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	if got.ImageDigest != latest {
+		t.Fatalf("confirm digest=%#v", got)
+	}
+}
+
+func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
+	t.Parallel()
+	page := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
+	html := page.Body.String()
+	scriptRec := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(scriptRec, uiRequest(http.MethodGet, "/app.js", ""))
+	script := scriptRec.Body.String()
+	if !strings.Contains(html, `id="engine-status"`) || !strings.Contains(html, "应用镜像版本") {
+		t.Fatalf("page missing engine/app version split: %s", html)
+	}
+	for _, token := range []string{
+		`className = "chip app-version"`,
+		"api/apps/",
+		"postAppAction",
+		`dataset.action = "logs"`,
+		"/logs",
+		"有新版本",
+	} {
+		if !strings.Contains(script, token) {
+			t.Fatalf("app.js missing %q", token)
+		}
+	}
+	if strings.Contains(script, "chip(engine") || strings.Contains(script, "engine.version") && strings.Contains(script, "app.version = engine") {
+		t.Fatal("app.js still treats engine version as the app image version")
+	}
+}
+
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
 	t.Parallel()
 	config := productionControllerConfig()
@@ -272,21 +475,59 @@ func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
 
 func newUIController(t *testing.T) *Controller {
 	t.Helper()
-	catalog := NewReportedEngineCatalog()
-	catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "test"})
-	return newUIControllerWithSource(t, catalog, `{"apps":[]}`)
+	return newUIControllerWithOptions(t, uiControllerOptions{})
 }
 
 func newUIControllerWithSource(t *testing.T, source AgentEngineSource, config string) *Controller {
 	t.Helper()
+	return newUIControllerWithOptions(t, uiControllerOptions{source: source, config: config})
+}
+
+type uiControllerOptions struct {
+	source        AgentEngineSource
+	config        string
+	engineVersion string
+	workDirRoot   *string
+	observer      ImageUpdateObserver
+	rollout       RolloutExecutor
+}
+
+func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
+	t.Helper()
+	source := opts.source
+	if source == nil {
+		catalog := NewReportedEngineCatalog()
+		version := opts.engineVersion
+		if version == "" {
+			version = "test"
+		}
+		catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: version})
+		source = catalog
+	}
+	config := opts.config
+	if config == "" {
+		config = `{"apps":[]}`
+	}
+	runtime := newUITestRuntime()
+	workDirRoot := t.TempDir()
+	if opts.workDirRoot != nil {
+		workDirRoot = *opts.workDirRoot
+	}
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error) {
 			return PreparedAdmissionFuncs{}, nil
 		}),
-		UIEngineSource: source,
-		UIApply:        AppApplyExecutorFunc(func(context.Context, App) error { return nil }),
-		UIRemove:       AppRemoveExecutorFunc(func(context.Context, string) error { return nil }),
+		UIEngineSource:    source,
+		UIApply:           runtime,
+		UIStart:           runtime,
+		UIStop:            runtime,
+		UIRestart:         runtime,
+		UILogs:            runtime,
+		UIRemove:          runtime,
+		UIWorkDirRoot:     workDirRoot,
+		UIImageObserver:   opts.observer,
+		UIRolloutExecutor: opts.rollout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -346,4 +587,134 @@ func jsonQuote(value string) (string, error) {
 	}
 	b.WriteByte('"')
 	return b.String(), nil
+}
+
+type uiAppView struct {
+	ID      string
+	Status  string
+	Version string
+	Actions []OpsAction
+}
+
+func decodeAppList(t *testing.T, payload []byte) []uiAppView {
+	t.Helper()
+	var decoded struct {
+		Apps []uiAppView `json:"apps"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode apps: %v body=%s", err, payload)
+	}
+	return decoded.Apps
+}
+
+func hasAppAction(view uiAppView, id string) bool {
+	for _, action := range view.Actions {
+		if action.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+type uiTestRuntime struct {
+	applied  map[string]App
+	running  map[string]bool
+	restarts map[string]int
+	logs     map[string]string
+}
+
+func newUITestRuntime() *uiTestRuntime {
+	return &uiTestRuntime{
+		applied:  map[string]App{},
+		running:  map[string]bool{},
+		restarts: map[string]int{},
+		logs:     map[string]string{},
+	}
+}
+
+func (runtime *uiTestRuntime) ApplyApp(_ context.Context, app App) error {
+	runtime.applied[app.ID] = app
+	runtime.running[app.ID] = true
+	runtime.logs[app.ID+"/web"] = "listening on :80\n"
+	return nil
+}
+
+func (runtime *uiTestRuntime) Start(_ context.Context, appID string) error {
+	if _, ok := runtime.applied[appID]; !ok {
+		return errors.New("app is not deployed")
+	}
+	runtime.running[appID] = true
+	return nil
+}
+
+func (runtime *uiTestRuntime) Stop(_ context.Context, appID string) error {
+	if _, ok := runtime.applied[appID]; !ok {
+		return errors.New("app is not deployed")
+	}
+	runtime.running[appID] = false
+	return nil
+}
+
+func (runtime *uiTestRuntime) Restart(_ context.Context, appID string) error {
+	if _, ok := runtime.applied[appID]; !ok {
+		return errors.New("app is not deployed")
+	}
+	runtime.running[appID] = true
+	runtime.restarts[appID]++
+	return nil
+}
+
+func (runtime *uiTestRuntime) ReadLogs(_ context.Context, appID, service string) (string, error) {
+	return runtime.logs[appID+"/"+service], nil
+}
+
+func (runtime *uiTestRuntime) RemoveApp(_ context.Context, appID string) error {
+	delete(runtime.applied, appID)
+	delete(runtime.running, appID)
+	delete(runtime.logs, appID+"/web")
+	return nil
+}
+
+type uiTestObserver struct {
+	current, latest string
+}
+
+func (observer *uiTestObserver) ObserveImage(context.Context, App) (UpdateObservation, error) {
+	return UpdateObservation{CurrentDigest: observer.current, LatestDigest: observer.latest}, nil
+}
+
+type uiTestRollout struct {
+	calls []string
+}
+
+func (fake *uiTestRollout) Pull(context.Context, uint64, string) error {
+	fake.calls = append(fake.calls, "pull")
+	return nil
+}
+func (fake *uiTestRollout) Start(_ context.Context, _ uint64, _ App) (string, error) {
+	fake.calls = append(fake.calls, "start")
+	return "new", nil
+}
+func (fake *uiTestRollout) Ready(context.Context, uint64, string) error {
+	fake.calls = append(fake.calls, "ready")
+	return nil
+}
+func (fake *uiTestRollout) Cutover(_ context.Context, _ uint64, _ string, target string) error {
+	fake.calls = append(fake.calls, "cutover:"+target)
+	return nil
+}
+func (fake *uiTestRollout) Drain(_ context.Context, _ uint64, target string) error {
+	fake.calls = append(fake.calls, "drain:"+target)
+	return nil
+}
+func (fake *uiTestRollout) Remove(_ context.Context, _ uint64, target string) error {
+	fake.calls = append(fake.calls, "remove:"+target)
+	return nil
+}
+func (fake *uiTestRollout) Inspect(context.Context, uint64, string, string) (RuntimeState, error) {
+	return RuntimeState{Instances: map[string]bool{"new": true}}, nil
 }

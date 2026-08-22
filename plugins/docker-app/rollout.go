@@ -179,6 +179,16 @@ type UpdateObservation struct {
 	LatestDigest  string
 }
 
+type ImageUpdateObserver interface {
+	ObserveImage(context.Context, App) (UpdateObservation, error)
+}
+
+type ImageUpdateObserverFunc func(context.Context, App) (UpdateObservation, error)
+
+func (function ImageUpdateObserverFunc) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
+	return function(ctx, app)
+}
+
 type RolloutNotice struct {
 	UpdateAvailable bool
 	Digest          string
@@ -223,7 +233,7 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 }
 
 func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed UpdateObservation) (UpdateView, error) {
-	if err := r.ready(&app); err != nil {
+	if err := r.readyStore(&app); err != nil {
 		return UpdateView{}, err
 	}
 	view := UpdateView{AutoUpdate: AutoUpdateEnabled(flag)}
@@ -814,7 +824,7 @@ func (r Rollout) fail(err error) error {
 	return safeFailure(ErrOperationFailed, err)
 }
 
-func (r Rollout) ready(app *App) error {
+func (r Rollout) readyStore(app *App) error {
 	if r.Auditor == nil {
 		return ErrAuditRequired
 	}
@@ -824,7 +834,18 @@ func (r Rollout) ready(app *App) error {
 			return safeFailure(ErrInvalidPreview, err)
 		}
 	}
-	if r.Store == nil || r.Executor == nil {
+	if r.Store == nil {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (r Rollout) ready(app *App) error {
+	if err := r.readyStore(app); err != nil {
+		return err
+	}
+	if r.Executor == nil {
 		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
 	}

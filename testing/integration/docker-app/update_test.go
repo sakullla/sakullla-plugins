@@ -168,6 +168,30 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	}
 }
 
+func TestDockerObserveUpdateWithoutExecutorDoesNotPublish(t *testing.T) {
+	app := testApp("update-secret")
+	store := dockerapp.NewDeploymentStore()
+	rollout := dockerapp.Rollout{Store: store, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})}
+	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
+	got, ok := store.Get(app.ID)
+	if err != nil || !view.HasUpdate || view.Published || view.AutoUpdate {
+		t.Fatalf("observe without executor view=%#v err=%v", view, err)
+	}
+	if !ok || got.ImageDigest != "sha256:current" || got.AvailableDigest != "sha256:latest" || got.Phase != dockerapp.PhaseActive {
+		t.Fatalf("observe without executor mutated publish state: %#v ok=%v", got, ok)
+	}
+	if err := rollout.ConfirmUpdate(context.Background(), app); !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
+		t.Fatalf("confirm without executor err=%v", err)
+	}
+	unchanged, _ := store.Get(app.ID)
+	if unchanged.ImageDigest != "sha256:current" || unchanged.AvailableDigest != "sha256:latest" {
+		t.Fatalf("confirm without executor changed digest: %#v", unchanged)
+	}
+	if dockerapp.ProjectOpsStatus(true, false, unchanged, dockerapp.UpdatePolicy{}, "sha256:latest") != "有新版本" {
+		t.Fatalf("missing executor hid update: %#v", unchanged)
+	}
+}
+
 func TestDockerManualUpdateFailedConfirmAfterSeedRestoresActive(t *testing.T) {
 	for _, fail := range []string{"pull", "start"} {
 		t.Run(fail, func(t *testing.T) {

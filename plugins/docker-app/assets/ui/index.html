@@ -12,7 +12,7 @@
     <header class="page-head">
       <p class="kicker">Docker 应用</p>
       <h1>组内 compose 应用</h1>
-      <p class="lede">先选一台在线节点。引擎未就绪时给出本机安装命令；就绪后才能部署 compose。有发布端口时可以挂 HTTP 规则。</p>
+      <p class="lede">先选一台在线节点。引擎状态与应用镜像版本分开显示。引擎未就绪时给出本机安装命令；就绪后可部署 compose，启停、看日志、确认删除。有新版本时需手动更新。</p>
     </header>
     <p id="app-loading" role="status">正在加载应用…</p>
     <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
@@ -49,11 +49,11 @@
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
           <label>Compose YAML <textarea name="compose" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea></label>
           <div class="form-footer">
-            <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新</label>
+            <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
             <button type="submit" class="btn-primary" id="create-submit">部署</button>
           </div>
         </form>
-        <p class="hint">./ 相对路径会映射到该应用工作目录。镜像和端口从 YAML 读取。</p>
+        <p class="hint">./ 相对路径会映射到该应用工作目录。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
       </section>
       <section class="panel" aria-labelledby="app-list-title">
         <div class="section-head">

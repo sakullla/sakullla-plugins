@@ -197,12 +197,19 @@ const copyText = async (text) => {
   showStatus("已复制。", false);
 };
 
+const postAppAction = async (app, action, body = {}) => {
+  await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, body);
+  closeCreate();
+  await renderWorkspace();
+};
+
 const renderApp = (app) => {
   const card = document.createElement("article");
   card.className = "app-card";
   card.dataset.id = app.id;
-  const ports = parsePublishedPorts(app.compose);
+  const ports = Array.isArray(app.ports) && app.ports.length ? app.ports : parsePublishedPorts(app.compose);
   const version = app.version || parseImage(app.compose);
+  const services = Array.isArray(app.services) && app.services.length ? app.services : [];
 
   const head = document.createElement("div");
   head.className = "app-card-head";
@@ -211,43 +218,75 @@ const renderApp = (app) => {
   title.textContent = app.id;
   const chips = document.createElement("div");
   chips.className = "app-chips";
-  chips.append(chip(version || "未解析镜像"));
+  if (app.status) {
+    const statusChip = chip(app.status);
+    statusChip.className = app.status === "有新版本" ? "chip app-status-update" : "chip app-status";
+    chips.append(statusChip);
+  }
+  const versionChip = chip(version || "未解析镜像");
+  versionChip.className = "chip app-version";
+  chips.append(versionChip);
   if (ports.length) ports.forEach((port) => chips.append(chip(`:${port}`)));
   else chips.append(chip("无发布端口"));
   identity.append(title, chips);
 
   const actions = document.createElement("div");
   actions.className = "app-actions";
-  const edit = document.createElement("button");
-  edit.type = "button";
-  edit.className = "btn-link";
-  edit.textContent = "编辑";
-  edit.addEventListener("click", () => {
-    if (!busy) openCreate(app);
+  const apiActions = Array.isArray(app.actions) && app.actions.length
+    ? app.actions
+    : [{ id: "configure", label: "编辑" }, { id: "delete", label: "删除" }];
+  apiActions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = action.id === "delete" ? "btn-link danger" : "btn-link";
+    button.dataset.action = action.id;
+    button.textContent = action.id === "configure" ? "编辑" : (action.label || action.id);
+    button.addEventListener("click", async () => {
+      if (busy) return;
+      if (action.id === "configure") {
+        openCreate(app);
+        return;
+      }
+      if (action.id === "delete") {
+        if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
+          showStatus("已取消，应用未更改。", false);
+          return;
+        }
+        setBusy(true);
+        try {
+          await postAppAction(app, "delete", { confirm: app.id });
+          showStatus("已删除应用。", false);
+        } catch (error) {
+          showStatus(error.message, true);
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
+      setBusy(true);
+      try {
+        await postAppAction(app, action.id);
+        showStatus(action.id === "update" ? "已更新应用镜像。" : "已执行操作。", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+    actions.append(button);
   });
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "btn-link danger";
-  remove.textContent = "删除";
-  remove.addEventListener("click", async () => {
-    if (busy) return;
-    if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/delete`, { confirm: app.id });
-      closeCreate();
-      await renderWorkspace();
-      showStatus("已删除应用。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-  });
-  actions.append(edit, remove);
+  if (services.length) {
+    const logsToggle = document.createElement("button");
+    logsToggle.type = "button";
+    logsToggle.className = "btn-link";
+    logsToggle.dataset.action = "logs";
+    logsToggle.textContent = "日志";
+    logsToggle.addEventListener("click", () => {
+      const panel = card.querySelector(".app-logs");
+      if (panel) panel.hidden = !panel.hidden;
+    });
+    actions.append(logsToggle);
+  }
   if (ports.length) {
     const httpToggle = document.createElement("button");
     httpToggle.type = "button";
@@ -270,6 +309,45 @@ const renderApp = (app) => {
     pre.textContent = app.compose;
     details.append(summary, pre);
     card.append(details);
+  }
+
+  if (services.length) {
+    const logsPanel = document.createElement("div");
+    logsPanel.className = "app-logs";
+    logsPanel.hidden = true;
+    const serviceLabel = document.createElement("label");
+    serviceLabel.append("服务");
+    const serviceSelect = document.createElement("select");
+    serviceSelect.name = "service";
+    services.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      serviceSelect.append(option);
+    });
+    serviceLabel.append(serviceSelect);
+    const loadLogs = document.createElement("button");
+    loadLogs.type = "button";
+    loadLogs.className = "btn-primary";
+    loadLogs.textContent = "查看日志";
+    const logView = document.createElement("pre");
+    loadLogs.addEventListener("click", async () => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/logs`, {
+          service: serviceSelect.value,
+        });
+        logView.textContent = payload.logs || "";
+        showStatus("已加载日志。", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+    logsPanel.append(serviceLabel, loadLogs, logView);
+    card.append(logsPanel);
   }
 
   if (ports.length) {

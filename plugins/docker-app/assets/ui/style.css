@@ -339,6 +339,15 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   font-weight: 600;
 }
 
+.chip.app-version {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.chip.app-status-update {
+  color: var(--color-warning);
+  background: var(--color-warning-subtle);
+}
+
 .app-actions {
   display: flex;
   flex-wrap: wrap;
@@ -357,7 +366,8 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   font-weight: 650;
 }
 
-.app-card pre {
+.app-card pre,
+.app-logs pre {
   margin: var(--space-2) 0 0;
   max-height: 14rem;
   overflow: auto;
@@ -365,6 +375,10 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   border-radius: var(--radius-md);
   background: var(--color-bg-canvas);
   font-size: 0.75rem;
+}
+
+.app-logs {
+  margin-top: var(--space-3);
 }
 
 .http-form {
