@@ -13,7 +13,7 @@ runtime:
   entry: reverse-l4
 artifacts:
   - path: artifacts/linux-amd64/reverse-l4
-    sha256: 80592c2eec951147a9cc4a1d2c43a9ab896959a0944f188fe1e202add1920a3c
+    sha256: 46c7af01daad8868660d451ddb63ff95ab9b183d85b4a2d4794df11a69ed60cc
     size: 20254129
     mode: executable
     goos: linux
