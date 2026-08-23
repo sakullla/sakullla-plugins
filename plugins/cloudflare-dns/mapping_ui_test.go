@@ -375,6 +375,32 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	}
 }
 
+func TestMappingUIViewportLayout(t *testing.T) {
+	t.Parallel()
+	css, err := mappingUIAssets.ReadFile("ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	for _, want := range []string{
+		"@media (max-width: 720px)",
+		"grid-template-columns: 1fr",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"min(52rem",
+		"flex-wrap: wrap",
+		"overflow-wrap: anywhere",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stylesheet missing viewport rule %q", want)
+		}
+	}
+	if strings.Contains(text, "flex-wrap: nowrap") || strings.Contains(text, "white-space: nowrap") {
+		t.Fatal("action bar still forces nowrap overflow")
+	}
+}
+
 func TestPluginYAMLDeclaresUIRouteNotPanelPage(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("plugin.yaml")

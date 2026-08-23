@@ -163,6 +163,7 @@ h2 { font-size: var(--text-sm); }
 
 .section-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
@@ -271,7 +272,7 @@ input:focus-visible {
 
 .toolbar, .inline {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: var(--space-4);
   align-items: center;
 }
@@ -308,7 +309,7 @@ td.suffix { font-weight: 650; overflow-wrap: anywhere; }
 
 td.status, td.revision { width: 5.5em; color: var(--color-text-secondary); }
 
-td.actions { width: 1%; white-space: nowrap; }
+td.actions { min-width: 0; }
 
 tr.mapping td { transition: background 120ms var(--ease); }
 
@@ -416,4 +417,14 @@ tr.mapping:hover td:last-child { border-radius: 0 var(--radius-sm) var(--radius-
 
 @media (min-width: 2560px) {
   html { font-size: 18px; }
+}
+
+@media (min-width: 3840px) {
+  html { font-size: 20px; }
+  :root {
+    --space-4: 1.25rem;
+    --space-5: 1.5rem;
+    --space-8: 2.5rem;
+  }
+  main { width: min(52rem, calc(100% - 4rem)); padding: 3rem 0 7rem; }
 }
