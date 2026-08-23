@@ -54,6 +54,13 @@ func (unavailableAdmission) Prepare(context.Context, pluginsdk.RPCHandshakeReque
 	return nil, ErrTypedHandlesUnavailable
 }
 
+type AppStateStore interface {
+	LoadApps(context.Context) ([]App, bool, error)
+	StoreApps(context.Context, []App) error
+	LoadRuntime(context.Context) (map[string]bool, bool, error)
+	StoreRuntime(context.Context, map[string]bool) error
+}
+
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	Admission                                                  TypedHandleAdmission
@@ -73,6 +80,7 @@ type ControllerConfig struct {
 	UIImageObserver                                            ImageUpdateObserver
 	CommandRunner                                              CommandRunner
 	CallImages                                                 ImageUpdateObserver
+	UIAppState                                                 AppStateStore
 }
 
 type Controller struct {
@@ -99,8 +107,18 @@ type Controller struct {
 	uiImageObserver  ImageUpdateObserver
 	commandRunner    CommandRunner
 	callImages       ImageUpdateObserver
+	uiAppState       AppStateStore
 	appRuntime       map[string]bool
 	hostRules        []HostHTTPRule
+	imageCache       map[string]cachedImageObservation
+	imageRefresh     map[string]bool
+	imageSlots       chan struct{}
+}
+
+type cachedImageObservation struct {
+	Image        string
+	LatestDigest string
+	ObservedAt   time.Time
 }
 
 type commitEpoch struct {
@@ -122,9 +140,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
 		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
-		commandRunner: config.CommandRunner, callImages: config.CallImages,
+		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
 		appRuntime: map[string]bool{},
-		uiRollout:  Rollout{Store: NewDeploymentStore(), Executor: config.UIRolloutExecutor, Auditor: auditor},
+		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageSlots: make(chan struct{}, 2),
+		uiRollout: Rollout{Store: NewDeploymentStore(), Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
@@ -189,6 +208,32 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 	if err != nil {
 		return err
 	}
+	var restoredRuntime map[string]bool
+	if controller.uiAppState != nil {
+		persisted, found, loadErr := controller.uiAppState.LoadApps(ctx)
+		if loadErr != nil {
+			return loadErr
+		}
+		if found {
+			for index := range persisted {
+				persisted[index].Generation = generation.ID()
+				if err := persisted[index].bindCompose(); err != nil {
+					return err
+				}
+			}
+			configuration.Apps = persisted
+			if err := configuration.Validate(); err != nil {
+				return err
+			}
+		}
+		persistedRuntime, runtimeFound, runtimeErr := controller.uiAppState.LoadRuntime(ctx)
+		if runtimeErr != nil {
+			return runtimeErr
+		}
+		if runtimeFound {
+			restoredRuntime = cloneAppRuntime(persistedRuntime)
+		}
+	}
 	for _, app := range configuration.Apps {
 		if app.Generation != generation.ID() {
 			return errors.New("app generation does not match lifecycle generation")
@@ -227,6 +272,9 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			return rpcplugin.ErrRevoked
 		}
 		controller.apps = cloneApps(configuration.Apps)
+		if restoredRuntime != nil {
+			controller.appRuntime = restoredRuntime
+		}
 		controller.registryMirror = configuration.RegistryMirror
 		controller.resourceGroupRef = configuration.ResourceGroupRef
 		controller.commit = handle
@@ -278,11 +326,10 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 }
 
 // generationHandleScope binds process-local overlay state to the panel grant.
-// Docker/Compose API is not a plugin permission and is not required to start.
 const generationHandleScope = "ui.dynamic"
 
 func requiredGrants() []string {
-	return []string{"http.rule", "ui.dynamic"}
+	return []string{"http.rule", "ui.dynamic", "service.revocable-resource-handle", "storage.read", "storage.write"}
 }
 
 func cloneApps(apps []App) []App {
@@ -290,6 +337,14 @@ func cloneApps(apps []App) []App {
 	for index := range result {
 		result[index].SecretRefs = append([]string(nil), result[index].SecretRefs...)
 		result[index].AutoUpdate = cloneBool(result[index].AutoUpdate)
+	}
+	return result
+}
+
+func cloneAppRuntime(values map[string]bool) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for key, value := range values {
+		result[key] = value
 	}
 	return result
 }

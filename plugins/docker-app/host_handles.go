@@ -14,6 +14,8 @@ const (
 	pluginCallComposeName = "compose"
 	pluginCallImageName   = "image"
 	hostHTTPRuleOperation = pluginsdk.HostRuntimeHTTPRule
+	pluginAppsStateKey    = "apps"
+	pluginRuntimeStateKey = "app-runtime"
 )
 
 type hostRuntimeCaller interface {
@@ -22,6 +24,24 @@ type hostRuntimeCaller interface {
 
 type hostCapabilityRuntime struct {
 	client hostRuntimeCaller
+}
+
+type hostOperationKeyContextKey struct{}
+
+func withHostOperationKey(ctx context.Context, operationID string) context.Context {
+	operationID = strings.TrimSpace(operationID)
+	if ctx == nil || operationID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hostOperationKeyContextKey{}, operationID)
+}
+
+func hostOperationKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(hostOperationKeyContextKey{}).(string)
+	return strings.TrimSpace(value)
 }
 
 func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
@@ -56,13 +76,95 @@ func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string
 	return normalizeAgentEngineReport(report), nil
 }
 
+func (runtime *hostCapabilityRuntime) LoadApps(ctx context.Context) ([]App, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginAppsStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var apps []App
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &apps) != nil || len(apps) > MaxApps {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	return cloneApps(apps), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreApps(ctx context.Context, apps []App) error {
+	if runtime == nil || runtime.client == nil || len(apps) > MaxApps {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(cloneApps(apps))
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginAppsStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (runtime *hostCapabilityRuntime) LoadRuntime(ctx context.Context) (map[string]bool, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginRuntimeStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var values map[string]bool
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &values) != nil || len(values) > MaxApps {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	return cloneAppRuntime(values), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreRuntime(ctx context.Context, values map[string]bool) error {
+	if runtime == nil || runtime.client == nil || len(values) > MaxApps {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(cloneAppRuntime(values))
+	if err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginRuntimeStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
 func (runtime *hostCapabilityRuntime) ApplyApp(ctx context.Context, app App) error {
 	if !validAgentID(app.AgentID) {
 		return ErrAgentOffline
 	}
 	return runtime.compose(ctx, map[string]any{
 		"action": "apply", "agent_id": app.AgentID, "app_id": app.ID,
-		"compose": app.Compose, "workdir": app.WorkDir,
+		"compose": app.Compose, "workdir": app.WorkDir, "env": app.Env,
 	}, nil)
 }
 
@@ -100,7 +202,7 @@ func (runtime *hostCapabilityRuntime) Create(ctx context.Context, spec HTTPRuleS
 		return HostHTTPRule{}, ErrAgentOffline
 	}
 	var created HostHTTPRule
-	if err := callHost(ctx, runtime.client, hostHTTPRuleOperation, map[string]any{
+	if err := callHostWithOperation(ctx, runtime.client, hostHTTPRuleOperation, hostOperationKeyFromContext(ctx), map[string]any{
 		"action": "create", "app_id": spec.AppID, "agent_id": spec.AgentID,
 		"domain": spec.Domain, "port": spec.Port,
 	}, &created); err != nil {
@@ -192,6 +294,7 @@ func (runtime *hostCapabilityRuntime) composeApp(ctx context.Context, app App, p
 	}
 	payload["agent_id"] = app.AgentID
 	payload["app_id"] = app.ID
+	payload["compose"] = app.Compose
 	return runtime.compose(ctx, payload, result)
 }
 
@@ -258,6 +361,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	}
 	runtime := newHostCapabilityRuntime(client)
 	config.UIEngineSource = runtime
+	config.UIAppState = runtime
 	config.UIApply = runtime
 	config.UIStart = runtime
 	config.UIStop = runtime
@@ -271,6 +375,10 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 }
 
 func callHost(ctx context.Context, client hostRuntimeCaller, operation string, payload any, result any) error {
+	return callHostWithOperation(ctx, client, operation, "", payload, result)
+}
+
+func callHostWithOperation(ctx context.Context, client hostRuntimeCaller, operation, operationID string, payload any, result any) error {
 	if client == nil {
 		return ErrTypedHandlesUnavailable
 	}
@@ -279,7 +387,7 @@ func callHost(ctx context.Context, client hostRuntimeCaller, operation string, p
 		return ErrTypedHandlesUnavailable
 	}
 	var raw json.RawMessage
-	if err := client.Call(ctx, pluginsdk.HostRuntimeCall{Operation: operation, Payload: encoded}, &raw); err != nil {
+	if err := client.Call(ctx, pluginsdk.HostRuntimeCall{Operation: operation, OperationID: strings.TrimSpace(operationID), Payload: encoded}, &raw); err != nil {
 		return ErrTypedHandlesUnavailable
 	}
 	if localDockerEngineTarget(raw) {

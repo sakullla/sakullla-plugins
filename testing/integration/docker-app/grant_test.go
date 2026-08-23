@@ -13,7 +13,7 @@ import (
 	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
 )
 
-func TestHandshakeWithoutComposeGrantReachesDeployableState(t *testing.T) {
+func TestHandshakeWithoutLegacyContainerComposeGrantReachesDeployableState(t *testing.T) {
 	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		Admission: dockerapp.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []dockerapp.App) (dockerapp.PreparedAdmission, error) {
@@ -23,14 +23,14 @@ func TestHandshakeWithoutComposeGrantReachesDeployableState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grants := []string{"http.rule", "ui.dynamic"}
+	grants := requiredGrants()
 	for _, grant := range grants {
 		if grant == "container.compose" {
 			t.Fatal("test grants must omit container.compose")
 		}
 	}
 	if _, err := controller.Handshake(context.Background(), handshake(grants)); err != nil {
-		t.Fatalf("handshake without container.compose: %v", err)
+		t.Fatalf("handshake with scoped command handle and without container.compose: %v", err)
 	}
 	document := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:1.27\n","generation":"generation-1"}]}`)
 	if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: document}); response.Error != nil {

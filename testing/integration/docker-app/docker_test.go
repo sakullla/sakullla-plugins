@@ -265,7 +265,7 @@ func TestDockerControllerRPCGrantGenerationRevokeAndBounds(t *testing.T) {
 		return controller
 	}
 	request := handshake(requiredGrants())
-	if _, err := newController(nil).Handshake(context.Background(), handshake([]string{"http.rule", "ui.dynamic"})); err != nil {
+	if _, err := newController(nil).Handshake(context.Background(), handshake(requiredGrants())); err != nil {
 		t.Fatalf("handshake without container.compose: %v", err)
 	}
 	for _, grants := range [][]string{
@@ -380,10 +380,13 @@ func TestDockerEntrypointCanonicalRPCAndSDKServers(t *testing.T) {
 			t.Fatalf("plugin.yaml missing %q", required)
 		}
 	}
-	for _, retired := range []string{"container.provider", "container.compose", "container.read", "container.manage", "ui.dynamic-actions", "docker-compose", "dynamic-ui", "http-rule", "http.backend-provider", "http_backend_providers", "host_scope: agent"} {
+	for _, retired := range []string{"container.provider", "container.compose", "container.read", "container.manage", "ui.dynamic-actions", "dynamic-ui", "http-rule", "http.backend-provider", "http_backend_providers", "host_scope: agent"} {
 		if strings.Contains(text, retired) {
 			t.Fatalf("plugin.yaml still declares %q", retired)
 		}
+	}
+	if !strings.Contains(text, "resource: docker-compose:managed") {
+		t.Fatal("plugin.yaml must scope the revocable resource handle to managed Docker Compose")
 	}
 	if !strings.Contains(text, "host_scopes:") {
 		t.Fatal("plugin.yaml missing host_scopes:")
@@ -1259,7 +1262,7 @@ func configWire(t *testing.T, count int) []byte {
 }
 
 func requiredGrants() []string {
-	return []string{"http.rule", "ui.dynamic"}
+	return []string{"http.rule", "ui.dynamic", "service.revocable-resource-handle", "storage.read", "storage.write"}
 }
 
 func handshake(grants []string) pluginsdk.RPCHandshakeRequest {

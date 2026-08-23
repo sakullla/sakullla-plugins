@@ -7,7 +7,7 @@ import (
 )
 
 type ComposeDeploySpec struct {
-	AppID, Generation, Compose, RuleRef, WorkDirRoot, AgentID string
+	AppID, Generation, Compose, RuleRef, WorkDirRoot, AgentID, Env string
 }
 
 type AppApplyExecutor interface {
@@ -110,6 +110,7 @@ func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, e
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: deployDenial(err)})
 		return preserved, err
 	}
+	app.Env = spec.Env
 	if spec.RuleRef != "" {
 		if !boundedText(spec.RuleRef, 128) {
 			audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrInvalidPreview.Error()})

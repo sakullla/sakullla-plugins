@@ -19,7 +19,7 @@ import (
 
 const (
 	PluginID                 = "docker-app"
-	PluginVersion            = "0.1.6"
+	PluginVersion            = "0.1.7"
 	DeclaredResourceGroupRef = "resource-group/docker-app"
 	MaxApps                  = 128
 	MaxDiscoveries           = 512
@@ -42,6 +42,7 @@ var (
 	ErrUnknownService          = errors.New("compose service is unknown")
 	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
 	ErrNoPublishedPort         = errors.New("app has no published port")
+	ErrMissingComposeVariable  = errors.New("compose environment variable is missing")
 )
 
 type App struct {
@@ -54,6 +55,7 @@ type App struct {
 	Image      string   `json:"-"`
 	RuleRef    string   `json:"-"`
 	WorkDir    string   `json:"-"`
+	Env        string   `json:"-"`
 }
 
 func (app App) Validate() error {
@@ -62,6 +64,9 @@ func (app App) Validate() error {
 	}
 	if app.Compose != "" && !boundedCompose(app.Compose, MaxConfigBytes) {
 		return ErrInvalidCompose
+	}
+	if len(app.Env) > MaxConfigBytes || strings.ContainsRune(app.Env, '\x00') {
+		return errors.New("compose environment is invalid")
 	}
 	if !boundedText(app.Image, 512) {
 		return errors.New("app image is invalid")

@@ -42,6 +42,7 @@ const copyScript = document.querySelector("#copy-install-script");
 const copyDaemon = document.querySelector("#copy-daemon-json");
 const idInput = createForm ? createForm.querySelector('input[name="id"]') : null;
 const composeInput = createForm ? createForm.querySelector('textarea[name="compose"]') : null;
+const envInput = createForm ? createForm.querySelector('textarea[name="env"]') : null;
 const autoUpdateInput = createForm ? createForm.querySelector('input[name="auto_update"]') : null;
 
 let busy = false;
@@ -132,6 +133,7 @@ const openCreate = (app) => {
     idInput.readOnly = Boolean(editingID);
   }
   if (composeInput) composeInput.value = app?.compose || "";
+  if (envInput) envInput.value = "";
   if (autoUpdateInput) autoUpdateInput.checked = app?.auto_update === true;
   createPanel.hidden = false;
   deployToggle.hidden = true;
@@ -591,15 +593,21 @@ if (createForm) {
       id: String(data.get("id") || "").trim(),
       agent_id: selectedAgentID,
       compose: String(data.get("compose") || ""),
+      env: String(data.get("env") || ""),
       auto_update: data.get("auto_update") === "on",
     };
     const updating = Boolean(editingID);
     setBusy(true);
+    showStatus(updating ? "正在更新应用…" : "正在部署应用…", false);
     try {
       await sendPluginJSON("api/apps", nextApp);
       closeCreate();
-      await renderWorkspace();
       showStatus(updating ? "已更新应用。" : "已部署应用。", false);
+      try {
+        await renderWorkspace();
+      } catch (refreshError) {
+        showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true);
+      }
     } catch (error) {
       showStatus(error.message, true);
     } finally {
