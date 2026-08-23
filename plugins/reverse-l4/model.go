@@ -24,6 +24,10 @@ const (
 	// MaxRelayHops bounds the optional relay listener chain a mapping may
 	// reference for channel path optimization.
 	MaxRelayHops = 32
+	// mappingIDRandomBytes is the entropy used when Create mints a mapping id.
+	mappingIDRandomBytes = 8
+	// mappingIDAllocTries bounds unique-id retries against the in-memory catalog.
+	mappingIDAllocTries = 8
 
 	ProtocolTCP = pluginsdk.L4RuleProtocolTCP
 	ProtocolUDP = pluginsdk.L4RuleProtocolUDP

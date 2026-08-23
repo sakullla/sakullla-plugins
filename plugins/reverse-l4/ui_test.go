@@ -2,6 +2,7 @@ package reversel4
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -81,13 +82,52 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="map-workspace"`) || !strings.Contains(page.Body.String(), `id="create-toggle"`) {
 		t.Fatalf("page status=%d body=%s", page.Code, page.Body.String())
 	}
+	html := page.Body.String()
+	if strings.Contains(html, `name="id"`) || strings.Contains(html, `input name="id"`) {
+		t.Fatalf("create form still has a mapping id input: %s", html)
+	}
+	for _, want := range []string{
+		`select name="entry_agent_id"`,
+		`select name="exit_agent_id"`,
+		`id="relay-hops"`,
+		`id="relay-add"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("page missing %q: %s", want, html)
+		}
+	}
+	if strings.Contains(html, `name="relay_chain"`) || strings.Contains(html, "逗号分隔") {
+		t.Fatalf("create form still uses a free-text relay chain: %s", html)
+	}
 	script := serveManagement(controller, managementRequest(http.MethodGet, "/app.js", ""))
 	if script.Code != http.StatusOK || !strings.Contains(script.Body.String(), "channel_state") {
 		t.Fatalf("script status=%d", script.Code)
 	}
+	js := script.Body.String()
+	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("script missing catalog %q", want)
+		}
+	}
+	if strings.Contains(js, `.split(",")`) {
+		t.Fatal("script still parses relay hops from comma-separated text")
+	}
 	stylesheet := serveManagement(controller, managementRequest(http.MethodGet, "/style.css", ""))
 	if stylesheet.Code != http.StatusOK || !strings.Contains(stylesheet.Body.String(), "chip-state-offline") {
 		t.Fatalf("stylesheet status=%d", stylesheet.Code)
+	}
+	css := stylesheet.Body.String()
+	for _, want := range []string{
+		"@media (max-width: 720px)",
+		"grid-template-columns: 1fr",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"min(52rem",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("stylesheet missing viewport rule %q", want)
+		}
 	}
 
 	anonymous := serveManagement(controller, httptest.NewRequest(http.MethodGet, "/api/mappings", nil))
@@ -172,6 +212,71 @@ func TestManagementPageCRUDWithChannelStateProjection(t *testing.T) {
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("deleted mapping get status=%d body=%s", missing.Code, missing.Body.String())
 	}
+}
+
+func TestManagementPageCreatesWithoutIDAndRejectsSameAgents(t *testing.T) {
+	t.Parallel()
+	controller, _ := newManagementController(t)
+
+	created := serveManagement(controller, managementJSONRequest(http.MethodPost, "/api/mappings", `{"name":"内网 Web","entry_agent_id":"entry-agent","exit_agent_id":"exit-agent","protocol":"tcp","listen_port":8443,"backend_host":"127.0.0.1","backend_port":9443}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create without id status=%d body=%s", created.Code, created.Body.String())
+	}
+	first := decodeManagement(t, created)
+	if len(first.Mappings) != 1 || !validMappingID(first.Mappings[0].ID) {
+		t.Fatalf("generated mapping = %#v", first.Mappings)
+	}
+	if first.Mappings[0].Name != "内网 Web" || len(first.Mappings[0].RelayChain) != 0 {
+		t.Fatalf("created mapping = %#v", first.Mappings[0])
+	}
+	generatedID := first.Mappings[0].ID
+
+	second := serveManagement(controller, managementJSONRequest(http.MethodPost, "/api/mappings", `{"name":"第二","entry_agent_id":"entry-agent","exit_agent_id":"exit-agent","protocol":"tcp","listen_port":8444,"backend_host":"127.0.0.1","backend_port":9443}`))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second create status=%d body=%s", second.Code, second.Body.String())
+	}
+	listed := decodeManagement(t, second)
+	if len(listed.Mappings) != 2 {
+		t.Fatalf("catalog after second create = %#v", listed.Mappings)
+	}
+	if listed.Mappings[0].ID == listed.Mappings[1].ID {
+		t.Fatalf("generated mapping ids collided: %#v", listed.Mappings)
+	}
+
+	sameAgents := serveManagement(controller, managementJSONRequest(http.MethodPost, "/api/mappings", `{"entry_agent_id":"entry-agent","exit_agent_id":"entry-agent","protocol":"tcp","listen_port":9000,"backend_host":"127.0.0.1","backend_port":9443}`))
+	if sameAgents.Code != http.StatusBadRequest || !strings.Contains(sameAgents.Body.String(), ErrInvalidMapping.Error()) {
+		t.Fatalf("same-agent create status=%d body=%s", sameAgents.Code, sameAgents.Body.String())
+	}
+
+	updated := serveManagement(controller, managementJSONRequest(http.MethodPost, "/api/mappings/"+generatedID+"/update", `{"id":"forged-id","name":"内网 Web","entry_agent_id":"entry-agent","exit_agent_id":"exit-agent","protocol":"tcp","listen_port":9443,"backend_host":"127.0.0.1","backend_port":8080,"relay_chain":[4,5]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	afterUpdate := decodeManagement(t, updated)
+	var found mappingView
+	for _, mapping := range afterUpdate.Mappings {
+		if mapping.ID == generatedID {
+			found = mapping
+		}
+		if mapping.ID == "forged-id" {
+			t.Fatalf("update changed mapping id: %#v", afterUpdate.Mappings)
+		}
+	}
+	if found.ID != generatedID || found.ListenPort != 9443 || found.BackendPort != 8080 {
+		t.Fatalf("updated mapping = %#v", found)
+	}
+	if len(found.RelayChain) != 2 || found.RelayChain[0] != 4 || found.RelayChain[1] != 5 {
+		t.Fatalf("relay chain order = %v", found.RelayChain)
+	}
+}
+
+func decodeManagement(t *testing.T, recorder *httptest.ResponseRecorder) mappingAPIResponse {
+	t.Helper()
+	var payload mappingAPIResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode management response: %v body=%s", err, recorder.Body.String())
+	}
+	return payload
 }
 
 func TestManagementPageRejectsMethodAndRouteMisuse(t *testing.T) {

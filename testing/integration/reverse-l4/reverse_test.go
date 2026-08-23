@@ -57,6 +57,9 @@ func TestReverseControllerZeroConfigLifecycleWithoutHostRuntime(t *testing.T) {
 		if _, err := service.Create(context.Background(), testMapping("tcp-map", reversel4.ProtocolTCP)); !errors.Is(err, reversel4.ErrHostRuntimeUnavailable) {
 			t.Fatalf("orchestration without host runtime error = %v", err)
 		}
+		if _, err := service.Create(context.Background(), testMapping("", reversel4.ProtocolTCP)); !errors.Is(err, reversel4.ErrHostRuntimeUnavailable) {
+			t.Fatalf("create without mapping id error = %v", err)
+		}
 		if listed, err := service.List(context.Background()); err != nil || len(listed) != 0 {
 			t.Fatalf("listing without host runtime = %#v err=%v", listed, err)
 		}
@@ -228,6 +231,54 @@ func withoutGrant(grants []string, missing string) []string {
 		}
 	}
 	return kept
+}
+
+func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
+	pluginDir := filepath.Join("..", "..", "..", "plugins", "reverse-l4")
+	htmlBytes, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	if strings.Contains(html, `name="id"`) {
+		t.Fatal("management page still has a mapping id input")
+	}
+	for _, want := range []string{`select name="entry_agent_id"`, `select name="exit_agent_id"`, `id="relay-hops"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("management page missing %q", want)
+		}
+	}
+	if strings.Contains(html, `name="relay_chain"`) || strings.Contains(html, "逗号分隔") {
+		t.Fatal("management page still uses comma-separated relay ids")
+	}
+	jsBytes, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(jsBytes)
+	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("management script missing catalog %q", want)
+		}
+	}
+	if strings.Contains(js, `.split(",")`) {
+		t.Fatal("management script still parses relay hops from comma-separated text")
+	}
+	cssBytes, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBytes)
+	for _, want := range []string{
+		"@media (max-width: 720px)",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("management stylesheet missing viewport rule %q", want)
+		}
+	}
 }
 
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {

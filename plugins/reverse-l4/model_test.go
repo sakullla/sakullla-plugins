@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestGenerateMappingIDMatchesValidMappingID(t *testing.T) {
+	t.Parallel()
+	seen := map[string]struct{}{}
+	for i := 0; i < 32; i++ {
+		id, err := generateMappingID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !validMappingID(id) {
+			t.Fatalf("generated id %q", id)
+		}
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate generated id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
 func TestMappingValidateAcceptsTCPAndUDP(t *testing.T) {
 	t.Parallel()
 	for _, protocol := range []string{ProtocolTCP, ProtocolUDP} {

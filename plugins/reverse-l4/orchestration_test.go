@@ -632,6 +632,58 @@ func TestStatusDistinguishesChannelConnectivity(t *testing.T) {
 	}
 }
 
+func TestCreateGeneratesMappingIDAndKeepsRelayOrder(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+
+	spec := orchestrationMapping("", ProtocolTCP)
+	spec.Name = "内网 Web"
+	spec.RelayChain = []int{4, 5, 7}
+	created, err := service.Create(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validMappingID(created.ID) {
+		t.Fatalf("generated id %q is invalid", created.ID)
+	}
+	if created.Name != "内网 Web" {
+		t.Fatalf("created name = %q", created.Name)
+	}
+	session := host.session(created.SessionRef)
+	if session == nil || len(session.relayChain) != 3 || session.relayChain[0] != 4 || session.relayChain[1] != 5 || session.relayChain[2] != 7 {
+		t.Fatalf("host relay chain = %#v", session)
+	}
+
+	direct := orchestrationMapping("", ProtocolTCP)
+	direct.ListenPort = 8444
+	second, err := service.Create(t.Context(), direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == created.ID || !validMappingID(second.ID) {
+		t.Fatalf("second generated id = %q first = %q", second.ID, created.ID)
+	}
+	if len(second.RelayChain) != 0 {
+		t.Fatalf("empty relay create = %#v", second)
+	}
+
+	same := orchestrationMapping("same-agents", ProtocolTCP)
+	same.ExitAgentID = same.EntryAgentID
+	if _, err := service.Create(t.Context(), same); !errors.Is(err, ErrInvalidMapping) {
+		t.Fatalf("same-agent create error = %v", err)
+	}
+
+	kept := created
+	kept.ListenPort = 9543
+	updated, err := service.Update(t.Context(), kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != created.ID {
+		t.Fatalf("update changed id from %q to %q", created.ID, updated.ID)
+	}
+}
+
 func TestCreateRejectsDuplicatesAndBound(t *testing.T) {
 	host := newFakeHostRuntime(t)
 	service := newOrchestrationService(t, host)

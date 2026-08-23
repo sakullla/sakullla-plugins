@@ -93,6 +93,7 @@ main {
   width: min(52rem, calc(100% - 2.5rem));
   margin: 0 auto;
   padding: 2.5rem 0 6rem;
+  overflow-wrap: break-word;
 }
 
 /* 页头 */
@@ -166,6 +167,41 @@ h2 { font-size: 0.875rem; }
 }
 
 .form-footer .hint { margin: 0; }
+
+.mapping-id {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--rl4-ink-2);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.relay-field {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--rl4-gap-s);
+}
+
+.relay-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rl4-gap-m);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.relay-hops { display: grid; gap: var(--rl4-gap-s); }
+
+.relay-hop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--rl4-gap-m);
+  align-items: center;
+}
+
+#catalog-error { grid-column: 1 / -1; }
 
 label { display: grid; gap: 6px; font-size: 0.75rem; font-weight: 650; }
 
@@ -263,12 +299,15 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 .chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   padding: 2px 8px;
   border-radius: var(--rl4-round-pill);
   background: var(--rl4-brand-soft);
   color: var(--rl4-ink-2);
   font-size: 0.75rem;
   font-weight: 600;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .chip-protocol { font-family: var(--rl4-mono); text-transform: uppercase; }
@@ -339,4 +378,26 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   #mapping-form { grid-template-columns: 1fr; }
   .toolbar-bar { align-items: stretch; }
   .toolbar-bar .btn-primary { width: 100%; }
+  .section-head, .form-footer, .map-card-head { flex-wrap: wrap; }
+  .form-footer { align-items: stretch; }
+  .form-footer .btn-primary { width: 100%; }
+  .relay-hop { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 1920px) {
+  html { font-size: 17px; }
+}
+
+@media (min-width: 2560px) {
+  html { font-size: 18px; }
+}
+
+@media (min-width: 3840px) {
+  html { font-size: 20px; }
+  :root {
+    --rl4-gap-m: 16px;
+    --rl4-gap-l: 28px;
+    --rl4-gap-xl: 40px;
+  }
+  main { width: min(52rem, calc(100% - 4rem)); padding: 3rem 0 7rem; }
 }

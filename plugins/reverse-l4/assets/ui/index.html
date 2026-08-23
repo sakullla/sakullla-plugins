@@ -28,7 +28,7 @@
           <button id="form-cancel" class="btn-link" type="button">取消</button>
         </div>
         <form id="mapping-form" method="post">
-          <label>映射 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="nas-web" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
+          <p id="mapping-id-display" class="mapping-id" hidden></p>
           <label>名称 <input name="name" autocomplete="off" spellcheck="false" maxlength="128" placeholder="内网 Web"></label>
           <label>协议
             <select name="protocol" required>
@@ -36,14 +36,30 @@
               <option value="udp">UDP</option>
             </select>
           </label>
-          <label>入口节点 ID <input name="entry_agent_id" required autocomplete="off" spellcheck="false" placeholder="edge-agent"></label>
-          <label>出口节点 ID <input name="exit_agent_id" required autocomplete="off" spellcheck="false" placeholder="home-agent"></label>
+          <label>入口节点
+            <select name="entry_agent_id" required>
+              <option value="">选择入口节点</option>
+            </select>
+          </label>
+          <label>出口节点
+            <select name="exit_agent_id" required>
+              <option value="">选择出口节点</option>
+            </select>
+          </label>
           <label>入口监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
           <label>内网服务地址 <input name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
           <label>内网服务端口 <input name="backend_port" type="number" required min="1" max="65535" placeholder="9443"></label>
-          <label>中继链（可选） <input name="relay_chain" autocomplete="off" spellcheck="false" placeholder="监听器 ID，逗号分隔，如 4, 5"></label>
+          <div class="relay-field">
+            <div class="relay-head">
+              <span>中继链（可选）</span>
+              <button id="relay-add" class="btn-link" type="button">添加跳</button>
+            </div>
+            <div id="relay-hops" class="relay-hops"></div>
+            <p class="hint">不添加跳数时出口直拨入口。每跳从已有监听器中选择，顺序即链路顺序。</p>
+          </div>
+          <p id="catalog-error" class="map-error" role="alert" hidden></p>
           <div class="form-footer">
-            <p class="hint">入口与出口节点不能相同。中继链留空时出口直拨入口。</p>
+            <p class="hint">入口与出口节点不能相同。映射 ID 由系统在创建时生成，编辑时不可更改。</p>
             <button type="submit" class="btn-primary" id="form-submit">创建</button>
           </div>
         </form>

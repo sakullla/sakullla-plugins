@@ -2,6 +2,8 @@ package reversel4
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -132,8 +134,11 @@ func (service *Service) Create(ctx context.Context, mapping Mapping) (Mapping, e
 	mapping.RuleRef, mapping.SessionRef, mapping.BridgeHost, mapping.BridgePort = "", "", "", 0
 	mapping.Enabled = true
 	mapping.Revision = 0
-	if err := mapping.Validate(); err != nil {
-		return Mapping{}, err
+	assignID := mapping.ID == ""
+	if !assignID {
+		if err := mapping.Validate(); err != nil {
+			return Mapping{}, err
+		}
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -141,7 +146,16 @@ func (service *Service) Create(ctx context.Context, mapping Mapping) (Mapping, e
 	if err != nil {
 		return Mapping{}, err
 	}
-	if _, exists := snapshot.mapping(mapping.ID); exists {
+	if assignID {
+		id, err := allocateMappingID(snapshot)
+		if err != nil {
+			return Mapping{}, err
+		}
+		mapping.ID = id
+		if err := mapping.Validate(); err != nil {
+			return Mapping{}, err
+		}
+	} else if _, exists := snapshot.mapping(mapping.ID); exists {
 		return Mapping{}, ErrMappingExists
 	}
 	if len(snapshot.Mappings) >= MaxMappings {
@@ -413,6 +427,31 @@ func ruleRequest(mapping Mapping, session channelSession) pluginsdk.L4RuleReques
 
 func ruleRefRequest(ruleRef, entryAgentID string) pluginsdk.L4RuleRequest {
 	return pluginsdk.L4RuleRequest{RuleRef: ruleRef, AgentID: entryAgentID}
+}
+
+func generateMappingID() (string, error) {
+	var raw [mappingIDRandomBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("%w: id", ErrInvalidMapping)
+	}
+	id := hex.EncodeToString(raw[:])
+	if !validMappingID(id) {
+		return "", fmt.Errorf("%w: id", ErrInvalidMapping)
+	}
+	return id, nil
+}
+
+func allocateMappingID(snapshot mappingStateSnapshot) (string, error) {
+	for attempt := 0; attempt < mappingIDAllocTries; attempt++ {
+		id, err := generateMappingID()
+		if err != nil {
+			return "", err
+		}
+		if _, exists := snapshot.mapping(id); !exists {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("%w: generated mapping id", ErrMappingExists)
 }
 
 // commit persists one mutated mapping (or removes it when removedID is set)
