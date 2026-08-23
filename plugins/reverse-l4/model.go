@@ -16,7 +16,7 @@ import (
 
 const (
 	PluginID                 = "reverse-l4"
-	PluginVersion            = "0.3.1"
+	PluginVersion            = "0.3.2"
 	DeclaredResourceGroupRef = "resource-group/reverse-l4"
 
 	// MaxMappings bounds the durable mapping catalog.
