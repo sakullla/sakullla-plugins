@@ -1,17 +1,24 @@
 package webdav
 
 import (
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
-const OwnedShareName = "share"
+const (
+	OwnedShareName        = "share"
+	MaxBasicUsernameBytes = 128
+	basicNamespacePrefix  = "user-"
+)
 
 var errPathEscape = errors.New("path is outside the share root")
+var errInvalidBasicUsername = errors.New("basic username is invalid")
 
 func resolveShareRoot(ownedRoot, configuredRoot string) (string, error) {
 	configuredRoot = strings.TrimSpace(configuredRoot)
@@ -56,6 +63,42 @@ func validateShareRoot(root string, create bool) (string, error) {
 		return "", errors.New("share root is not a directory")
 	}
 	return abs, nil
+}
+
+func ensureBasicNamespace(root, username string) (string, string, error) {
+	component, err := basicNamespaceComponent(username)
+	if err != nil {
+		return "", "", err
+	}
+	target, err := resolveInsideRoot(root, component)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.Mkdir(target, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", "", fmt.Errorf("basic namespace cannot be created: %w", err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return "", "", fmt.Errorf("basic namespace is not accessible: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("basic namespace is not a directory")
+	}
+	return target, component, nil
+}
+
+func basicNamespaceComponent(username string) (string, error) {
+	if username == "" || len(username) > MaxBasicUsernameBytes || !utf8.ValidString(username) || strings.ContainsRune(username, '\x00') || strings.ContainsAny(username, `/\\`) || username == "." || username == ".." {
+		return "", errInvalidBasicUsername
+	}
+	if filepath.IsAbs(username) || filepath.VolumeName(username) != "" || path.IsAbs(strings.ReplaceAll(username, `\`, "/")) {
+		return "", errInvalidBasicUsername
+	}
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(username))
+	if encoded == "" {
+		return "", errInvalidBasicUsername
+	}
+	return basicNamespacePrefix + encoded, nil
 }
 
 func isVolumeRoot(path string) bool {
@@ -106,7 +149,31 @@ func resolveInsideRoot(root, name string) (string, error) {
 	if err != nil || !relativePathInside(relative) {
 		return "", errPathEscape
 	}
+	if err := rejectSymlinkTraversal(root, relative); err != nil {
+		return "", err
+	}
 	return target, nil
+}
+
+func rejectSymlinkTraversal(root, relative string) error {
+	if relative == "." {
+		return nil
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errPathEscape
+		}
+	}
+	return nil
 }
 
 func relativePathInside(rel string) bool {

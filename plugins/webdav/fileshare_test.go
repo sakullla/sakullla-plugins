@@ -166,7 +166,7 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 		t.Fatalf("web list missing dav file: %d %q", listed.Code, listed.Body.String())
 	}
 	move := httptest.NewRequest("MOVE", "http://share.test/dav/folder/from-dav.txt", nil)
-	move.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(move, testSharePassword)
 	move.Header.Set("Destination", "http://share.test/dav/folder/moved.txt")
 	move.Header.Set("Overwrite", "T")
 	moved := httptest.NewRecorder()
@@ -175,7 +175,7 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 		t.Fatalf("move status = %d body=%q", moved.Code, moved.Body.String())
 	}
 	propfind := httptest.NewRequest("PROPFIND", "http://share.test/dav/folder", http.NoBody)
-	propfind.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(propfind, testSharePassword)
 	propfind.Header.Set("Depth", "1")
 	found := httptest.NewRecorder()
 	controller.ServeHTTP(found, propfind)
@@ -344,7 +344,7 @@ func doShareRequest(t *testing.T, handler http.Handler, method, target, password
 	t.Helper()
 	request := httptest.NewRequest(method, target, body)
 	if password != "" {
-		request.SetBasicAuth(DavMountUsername, password)
+		setBearerAuth(request, password)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -370,10 +370,14 @@ func uploadShareFile(t *testing.T, handler http.Handler, dir, name, contents str
 	}
 	request := httptest.NewRequest(http.MethodPost, "http://share.test/api/upload", &buffer)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(request, testSharePassword)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func setBearerAuth(request *http.Request, token string) {
+	request.Header.Set("Authorization", "Bearer "+token)
 }
 
 func jsonString(value string) string {

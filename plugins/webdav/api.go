@@ -65,7 +65,7 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 		writeMethodNotAllowed(writer, "GET, HEAD")
 		return
 	}
-	target, err := handler.queryPath(request, true)
+	root, target, err := handler.queryPath(request, true)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -98,7 +98,7 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 		}
 		return listed[i].Name < listed[j].Name
 	})
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, listResponse{Path: virtualPath(handler.root, target), Entries: listed})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, listResponse{Path: virtualPath(root, target), Entries: listed})
 }
 
 func (handler *Handler) apiDownload(writer http.ResponseWriter, request *http.Request) {
@@ -106,7 +106,7 @@ func (handler *Handler) apiDownload(writer http.ResponseWriter, request *http.Re
 		writeMethodNotAllowed(writer, "GET, HEAD")
 		return
 	}
-	target, err := handler.queryPath(request, false)
+	_, target, err := handler.queryPath(request, false)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -154,7 +154,12 @@ func (handler *Handler) apiUpload(writer http.ResponseWriter, request *http.Requ
 	if dir == "" {
 		dir = "/"
 	}
-	target, err := resolveInsideRoot(handler.root, path.Join(strings.TrimPrefix(dir, "/"), name))
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, path.Join(strings.TrimPrefix(dir, "/"), name))
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -163,7 +168,7 @@ func (handler *Handler) apiUpload(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(handler.root, target)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(root, target)})
 }
 
 func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Request) {
@@ -176,12 +181,17 @@ func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Reque
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
-	target, err := resolveInsideRoot(handler.root, body.Path)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, body.Path)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if target == handler.root {
+	if target == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
@@ -189,7 +199,7 @@ func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Reque
 		writeAPIError(writer, http.StatusBadRequest, errors.New("directory cannot be created"))
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(handler.root, target)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(root, target)})
 }
 
 func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Request) {
@@ -202,17 +212,22 @@ func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename is invalid"))
 		return
 	}
-	from, err := resolveInsideRoot(handler.root, body.From)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	from, err := resolveInsideRoot(root, body.From)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	to, err := resolveInsideRoot(handler.root, body.To)
+	to, err := resolveInsideRoot(root, body.To)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if from == handler.root || to == handler.root {
+	if from == root || to == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename is invalid"))
 		return
 	}
@@ -220,7 +235,7 @@ func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename failed"))
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, map[string]string{"path": virtualPath(handler.root, to)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, map[string]string{"path": virtualPath(root, to)})
 }
 
 func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Request) {
@@ -233,12 +248,17 @@ func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
-	target, err := resolveInsideRoot(handler.root, body.Path)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, body.Path)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if target == handler.root {
+	if target == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
@@ -253,19 +273,23 @@ func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Requ
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func (handler *Handler) queryPath(request *http.Request, allowRoot bool) (string, error) {
+func (handler *Handler) queryPath(request *http.Request, allowRoot bool) (string, string, error) {
+	root, err := requestRoot(request)
+	if err != nil {
+		return "", "", err
+	}
 	value := request.URL.Query().Get("path")
 	if strings.TrimSpace(value) == "" {
 		value = "/"
 	}
-	target, err := resolveInsideRoot(handler.root, value)
+	target, err := resolveInsideRoot(root, value)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if !allowRoot && target == handler.root {
-		return "", errPathEscape
+	if !allowRoot && target == root {
+		return "", "", errPathEscape
 	}
-	return target, nil
+	return root, target, nil
 }
 
 func writeFile(target string, source io.Reader) error {

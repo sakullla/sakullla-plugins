@@ -17,12 +17,12 @@
     <section class="hero">
       <p class="eyebrow">网页 · WebDAV</p>
       <h1>同一入口管理这份共享</h1>
-      <p class="lede">浏览、下载、上传、新建目录、重命名和删除都使用部署时配置的共享口令。WebDAV 客户端挂载同一地址即可读写同一共享根。</p>
+      <p class="lede">浏览、下载、上传、新建目录、重命名和删除都使用部署时配置的共享口令。Basic 用户访问按用户名隔离的目录；Bearer 客户端访问共享根。</p>
     </section>
     <section class="card mount-card">
       <p class="kicker">挂载说明</p>
       <h2>当前入口的 WebDAV</h2>
-      <p>把下面的地址填入系统映射网络驱动器、rclone 或同类客户端。认证方式为 HTTP Basic，用户名 <code>webdav</code>，口令为共享口令。</p>
+      <p>把下面的地址填入系统映射网络驱动器、rclone 或同类客户端。HTTP Basic 的用户名会选择独立目录，口令为共享口令；使用同一口令作为 Bearer token 时访问共享根。</p>
       <p class="host-line"><span class="host-dot" aria-hidden="true"></span>挂载地址<code id="dav-url">/dav/</code></p>
       <p class="hint">地址由当前页面的 <code>window.location.origin</code> 加上 <code>/dav/</code> 生成，不必猜测插件内部地址。</p>
     </section>
