@@ -614,17 +614,48 @@ func (service *Service) recoverMapping(ctx context.Context, id string) error {
 		return err
 	}
 
+	attempted := claimed
 	session, err := service.ensureChannelRecovery(attemptCtx, claimed)
 	if err != nil {
-		return err
+		return service.compensateClaimedRecovery(ctx, claimed, attempted, err)
 	}
-	restored := claimed
-	restored.SessionRef = session.SessionRef
-	restored.BridgeHost, restored.BridgePort = session.BridgeHost, session.BridgePort
-	if err := service.alignRecoveredRule(attemptCtx, &restored, session); err != nil {
-		return err
+	attempted.SessionRef = session.SessionRef
+	attempted.BridgeHost, attempted.BridgePort = session.BridgeHost, session.BridgePort
+	if err := service.alignRecoveredRule(attemptCtx, &attempted, session); err != nil {
+		return service.compensateClaimedRecovery(ctx, claimed, attempted, err)
 	}
-	return service.commitRecoveredMapping(attemptCtx, claimed, restored)
+	return service.commitRecoveredMapping(attemptCtx, claimed, attempted)
+}
+
+// recoveryWorkContext keeps catalog reload and stale-effect teardown usable
+// after a claimed attempt's deadline or cancel. Live contexts are reused.
+func recoveryWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), recoveryAttemptTimeout)
+}
+
+func (service *Service) compensateClaimedRecovery(parent context.Context, claimed, attempted Mapping, cause error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), recoveryAttemptTimeout)
+	defer cancel()
+	current, ok, err := service.loadMapping(ctx, claimed.ID)
+	if err != nil {
+		return cause
+	}
+	if ok && current.Enabled && current.Revision == claimed.Revision && current.RecoveryGeneration == claimed.RecoveryGeneration {
+		return cause
+	}
+	if err := service.abandonStaleRecovery(ctx, attempted, current, ok); err != nil {
+		if cause == nil {
+			return err
+		}
+		return errors.Join(cause, err)
+	}
+	return nil
 }
 
 func (service *Service) loadMapping(ctx context.Context, id string) (Mapping, bool, error) {
@@ -657,8 +688,10 @@ func (service *Service) claimRecoveryAttempt(ctx context.Context, observed Mappi
 }
 
 func (service *Service) commitRecoveredMapping(ctx context.Context, claimed, restored Mapping) error {
+	commitCtx, cancel := recoveryWorkContext(ctx)
+	defer cancel()
 	service.mu.Lock()
-	snapshot, err := service.state.Load(ctx)
+	snapshot, err := service.state.Load(commitCtx)
 	if err != nil {
 		service.mu.Unlock()
 		return err
@@ -666,29 +699,31 @@ func (service *Service) commitRecoveredMapping(ctx context.Context, claimed, res
 	current, ok := snapshot.mapping(claimed.ID)
 	if !ok || !current.Enabled || current.Revision != claimed.Revision || current.RecoveryGeneration != claimed.RecoveryGeneration {
 		service.mu.Unlock()
-		return service.abandonStaleRecovery(ctx, restored, current, ok)
+		return service.abandonStaleRecovery(commitCtx, restored, current, ok)
 	}
-	err = service.commit(ctx, snapshot, restored, nil)
+	err = service.commit(commitCtx, snapshot, restored, nil)
 	service.mu.Unlock()
 	return err
 }
 
 func (service *Service) abandonStaleRecovery(ctx context.Context, attempted, current Mapping, exists bool) error {
+	workCtx, cancel := recoveryWorkContext(ctx)
+	defer cancel()
 	if !exists {
-		return service.discardRecoveredHostEffects(ctx, attempted, true)
+		return service.discardRecoveredHostEffects(workCtx, attempted, true)
 	}
 	if !current.Enabled {
-		if err := service.discardRecoveredHostEffects(ctx, attempted, false); err != nil {
+		if err := service.discardRecoveredHostEffects(workCtx, attempted, false); err != nil {
 			return err
 		}
 		if current.SessionRef != "" && current.SessionRef != attempted.SessionRef {
-			if err := service.discardRecoveredHostEffects(ctx, current, false); err != nil {
+			if err := service.discardRecoveredHostEffects(workCtx, current, false); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return service.realignHostToMapping(ctx, current)
+	return service.realignHostToMapping(workCtx, current)
 }
 
 func (service *Service) discardRecoveredHostEffects(ctx context.Context, mapping Mapping, removeRule bool) error {
@@ -716,30 +751,35 @@ func (service *Service) discardRecoveredHostEffects(ctx context.Context, mapping
 }
 
 func (service *Service) realignHostToMapping(ctx context.Context, mapping Mapping) error {
+	attempted := mapping
 	session, err := service.ensureChannelRecovery(ctx, mapping)
 	if err != nil {
-		return err
+		return service.compensateClaimedRecovery(ctx, mapping, attempted, err)
 	}
-	restored := mapping
-	restored.SessionRef = session.SessionRef
-	restored.BridgeHost, restored.BridgePort = session.BridgeHost, session.BridgePort
-	if err := service.alignRecoveredRule(ctx, &restored, session); err != nil {
-		return err
+	attempted.SessionRef = session.SessionRef
+	attempted.BridgeHost, attempted.BridgePort = session.BridgeHost, session.BridgePort
+	if err := service.alignRecoveredRule(ctx, &attempted, session); err != nil {
+		return service.compensateClaimedRecovery(ctx, mapping, attempted, err)
 	}
+	commitCtx, cancel := recoveryWorkContext(ctx)
+	defer cancel()
 	service.mu.Lock()
-	snapshot, err := service.state.Load(ctx)
+	snapshot, err := service.state.Load(commitCtx)
 	if err != nil {
 		service.mu.Unlock()
-		return err
+		return service.compensateClaimedRecovery(ctx, mapping, attempted, err)
 	}
 	current, ok := snapshot.mapping(mapping.ID)
 	if !ok || !current.Enabled || current.Revision != mapping.Revision || current.RecoveryGeneration != mapping.RecoveryGeneration {
 		service.mu.Unlock()
-		return service.abandonStaleRecovery(ctx, restored, current, ok)
+		return service.abandonStaleRecovery(commitCtx, attempted, current, ok)
 	}
-	err = service.commit(ctx, snapshot, restored, nil)
+	err = service.commit(commitCtx, snapshot, attempted, nil)
 	service.mu.Unlock()
-	return err
+	if err != nil {
+		return service.compensateClaimedRecovery(ctx, mapping, attempted, err)
+	}
+	return nil
 }
 
 func (service *Service) mappingNeedsRecovery(ctx context.Context, mapping Mapping) (bool, error) {
