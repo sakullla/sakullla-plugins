@@ -676,6 +676,17 @@ func (service *Service) ensureChannelRecovery(ctx context.Context, mapping Mappi
 	return service.runtime.ensureChannel(ctx, operation, request)
 }
 
+// recoveryOperationKey derives the host operation id for one recovery
+// attempt. Mapping ID, user revision, generation, and action keep retries of
+// the same attempt stable while later session-loss events mint a new id.
+func recoveryOperationKey(action, mappingID string, revision, generation uint64) string {
+	return stableOperationKey("reverse-l4", "recovery", action, mappingID, revisionString(revision), generationString(generation))
+}
+
+func generationString(generation uint64) string {
+	return fmt.Sprintf("gen-%d", generation)
+}
+
 func (service *Service) alignRecoveredRule(ctx context.Context, mapping *Mapping, session channelSession) error {
 	operation := func(action string) string {
 		return recoveryOperationKey(action, mapping.ID, mapping.Revision, mapping.RecoveryGeneration)
