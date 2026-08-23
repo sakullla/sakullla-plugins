@@ -723,7 +723,28 @@ func (service *Service) abandonStaleRecovery(ctx context.Context, attempted, cur
 		}
 		return nil
 	}
+	if err := service.discardDivergentRecoveredHostEffects(workCtx, attempted, current); err != nil {
+		return err
+	}
 	return service.realignHostToMapping(workCtx, current)
+}
+
+// discardDivergentRecoveredHostEffects tears down a claimed recovery's
+// session and rule only when they no longer match the latest durable
+// mapping, so an owner-move Update is not left with the old channel or an
+// extra L4 rule.
+func (service *Service) discardDivergentRecoveredHostEffects(ctx context.Context, attempted, current Mapping) error {
+	divergent := attempted
+	if attempted.SessionRef == current.SessionRef {
+		divergent.SessionRef = ""
+	}
+	if attempted.RuleRef == current.RuleRef {
+		divergent.RuleRef = ""
+	}
+	if divergent.SessionRef == "" && divergent.RuleRef == "" {
+		return nil
+	}
+	return service.discardRecoveredHostEffects(ctx, divergent, true)
 }
 
 func (service *Service) discardRecoveredHostEffects(ctx context.Context, mapping Mapping, removeRule bool) error {

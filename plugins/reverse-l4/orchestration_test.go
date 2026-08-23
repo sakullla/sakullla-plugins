@@ -1634,6 +1634,76 @@ func TestRecoveryRacesWithUpdateDisableAndDelete(t *testing.T) {
 	})
 }
 
+func TestRecoveryRacesWithOwnerMoveUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(*Mapping)
+	}{
+		{
+			name: "entry",
+			move: func(spec *Mapping) {
+				spec.EntryAgentID = "edge-agent"
+				spec.ListenPort = 9543
+			},
+		},
+		{
+			name: "exit",
+			move: func(spec *Mapping) {
+				spec.ExitAgentID = "core-agent"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, service, created, unblockEnsure, done := startRecoveryEnsureBlocked(t)
+			spec := created
+			tc.move(&spec)
+			if _, err := service.Update(t.Context(), spec); err != nil {
+				t.Fatal(err)
+			}
+			unblockEnsure()
+			waitRecoveryDone(t, done)
+
+			listed, err := service.List(t.Context())
+			if err != nil || len(listed) != 1 {
+				t.Fatalf("listed mappings = %#v err=%v", listed, err)
+			}
+			final := listed[0]
+			assertMappingUserSpec(t, final, spec)
+			if !final.Enabled {
+				t.Fatalf("owner-move race disabled the mapping: %#v", final)
+			}
+			if final.SessionRef == "" || final.SessionRef == created.SessionRef {
+				t.Fatalf("owner-move race reused the old session: %#v", final)
+			}
+			if tc.name == "entry" && (final.RuleRef == "" || final.RuleRef == created.RuleRef) {
+				t.Fatalf("entry move reused the old rule: %#v", final)
+			}
+			assertRecoveredOnline(t, host, final)
+			if host.sessionCount() != 1 || host.ruleCount() != 1 {
+				t.Fatalf("owner-move race host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+			}
+			if stale := host.session(created.SessionRef); stale != nil {
+				t.Fatalf("owner-move left the old channel established: %#v", stale)
+			}
+			if tc.name == "entry" {
+				if stale := host.rule(created.RuleRef); stale != nil {
+					t.Fatalf("entry move left the rule on the old agent: %#v", stale)
+				}
+			}
+			service.recoverAll(t.Context())
+			after, err := service.List(t.Context())
+			if err != nil || len(after) != 1 {
+				t.Fatalf("post-tick mappings = %#v err=%v", after, err)
+			}
+			assertMappingUserSpec(t, after[0], spec)
+			assertRecoveredOnline(t, host, after[0])
+			if host.sessionCount() != 1 || host.ruleCount() != 1 {
+				t.Fatalf("post-tick host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+			}
+		})
+	}
+}
+
 func TestClaimedRecoveryAbandonsStaleHostEffectsOnTimeoutAndFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
