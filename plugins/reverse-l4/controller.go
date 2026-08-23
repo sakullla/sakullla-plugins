@@ -56,7 +56,6 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:   []string{"reverse-l4.mapping-owner"},
 		RequiredGrants: requiredGrants(),
 		Timeouts: (rpcplugin.Timeouts{
 			Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout,

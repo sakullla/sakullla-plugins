@@ -109,8 +109,12 @@ func TestReverseHandshakeEnforcesGenericCapabilityGrants(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := controller.Handshake(context.Background(), handshakeRequest(reverseL4Grants())); err != nil {
+		response, err := controller.Handshake(context.Background(), handshakeRequest(reverseL4Grants()))
+		if err != nil {
 			t.Fatalf("handshake with every declared grant error = %v", err)
+		}
+		if len(response.Capabilities) != 0 {
+			t.Fatalf("handshake exposed plugin-private capabilities as Host grants: %v", response.Capabilities)
 		}
 	})
 	t.Run("redundant-extra-grant-accepted", func(t *testing.T) {
@@ -228,7 +232,7 @@ func withoutGrant(grants []string, missing string) []string {
 
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{
-		ABI: pluginsdk.RPCABIV1, PluginID: "reverse-l4", PluginVersion: "0.2.0",
+		ABI: pluginsdk.RPCABIV1, PluginID: "reverse-l4", PluginVersion: "0.2.1",
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		GrantedScopes: grants, Generation: "generation-1",
 	}
