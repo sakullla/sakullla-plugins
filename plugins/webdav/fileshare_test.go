@@ -114,6 +114,139 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	}
 }
 
+func TestFormatIECSize(t *testing.T) {
+	tests := []struct {
+		name string
+		size int64
+		want string
+	}{
+		{name: "zero bytes", size: 0, want: "0 B"},
+		{name: "largest byte value", size: 1023, want: "1023 B"},
+		{name: "one kibibyte", size: 1 << 10, want: "1 KiB"},
+		{name: "fractional kibibytes", size: 1536, want: "1.5 KiB"},
+		{name: "trailing zero removed", size: 10 << 10, want: "10 KiB"},
+		{name: "below mebibyte threshold", size: 1<<20 - 1, want: "1024 KiB"},
+		{name: "one mebibyte", size: 1 << 20, want: "1 MiB"},
+		{name: "fractional mebibytes", size: 3 << 19, want: "1.5 MiB"},
+		{name: "below gibibyte threshold", size: 1<<30 - 1, want: "1024 MiB"},
+		{name: "one gibibyte", size: 1 << 30, want: "1 GiB"},
+		{name: "below tebibyte threshold", size: 1<<40 - 1, want: "1024 GiB"},
+		{name: "one tebibyte", size: 1 << 40, want: "1 TiB"},
+		{name: "below pebibyte threshold", size: 1<<50 - 1, want: "1024 TiB"},
+		{name: "one pebibyte", size: 1 << 50, want: "1 PiB"},
+		{name: "below exbibyte threshold", size: 1<<60 - 1, want: "1024 PiB"},
+		{name: "one exbibyte", size: 1 << 60, want: "1 EiB"},
+		{name: "largest int64", size: 1<<63 - 1, want: "8 EiB"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatIECSize(test.size); got != test.want {
+				t.Fatalf("formatIECSize(%d) = %q, want %q", test.size, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPageUsesReadableExactSizes(t *testing.T) {
+	controller, owned := startShare(t, "")
+	if err := os.WriteFile(filepath.Join(owned, "sized.bin"), bytes.Repeat([]byte{'x'}, 1536), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, "empty.bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(owned, "folder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	response := doShareRequest(t, controller, http.MethodGet, "http://share.test/api/list?path=/", testSharePassword, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%q", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Entries []map[string]json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	entries := make(map[string]map[string]json.RawMessage, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		var name string
+		if err := json.Unmarshal(entry["name"], &name); err != nil {
+			t.Fatalf("decode entry name: %v", err)
+		}
+		entries[name] = entry
+	}
+	assertFileEntry := func(name string, wantSize int64, wantText, wantExact string) {
+		t.Helper()
+		fileEntry, ok := entries[name]
+		if !ok {
+			t.Fatalf("list response missing %s: %s", name, response.Body.String())
+		}
+		var size int64
+		if err := json.Unmarshal(fileEntry["size"], &size); err != nil || size != wantSize {
+			t.Fatalf("%s size = %d err=%v, want %d", name, size, err, wantSize)
+		}
+		var sizeText, sizeExact string
+		if err := json.Unmarshal(fileEntry["size_text"], &sizeText); err != nil || sizeText != wantText {
+			t.Fatalf("%s size_text = %q err=%v, want %q", name, sizeText, err, wantText)
+		}
+		if err := json.Unmarshal(fileEntry["size_exact"], &sizeExact); err != nil || sizeExact != wantExact {
+			t.Fatalf("%s size_exact = %q err=%v, want %q", name, sizeExact, err, wantExact)
+		}
+	}
+	assertFileEntry("sized.bin", 1536, "1.5 KiB", "1536")
+	assertFileEntry("empty.bin", 0, "0 B", "0")
+	dirEntry, ok := entries["folder"]
+	if !ok {
+		t.Fatalf("list response missing folder: %s", response.Body.String())
+	}
+	for _, field := range []string{"size", "size_text", "size_exact"} {
+		if _, exists := dirEntry[field]; exists {
+			t.Fatalf("directory unexpectedly includes %s: %s", field, response.Body.String())
+		}
+	}
+
+	scriptResponse := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", testSharePassword, nil)
+	if scriptResponse.Code != http.StatusOK {
+		t.Fatalf("script status = %d body=%q", scriptResponse.Code, scriptResponse.Body.String())
+	}
+	script := scriptResponse.Body.String()
+	lineContains := func(fragments ...string) bool {
+		for _, line := range strings.Split(script, "\n") {
+			matched := true
+			for _, fragment := range fragments {
+				if !strings.Contains(line, fragment) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	}
+	if !lineContains("const sizeText", "entry.size_text") || !lineContains("sizeCell.textContent", "sizeText") {
+		t.Fatal("page does not render the API size_text for files")
+	}
+	if !lineContains("sizeCell.textContent", "—") {
+		t.Fatal("page does not retain the directory dash")
+	}
+	if !lineContains("const sizeExact", "entry.size_exact") {
+		t.Fatal("page does not consume the API size_exact field")
+	}
+	if !lineContains("sizeCell.title", "sizeExact", "bytes") {
+		t.Fatal("page does not expose exact bytes in the size cell title")
+	}
+	if !lineContains("aria-label", "sizeExact", "字节") {
+		t.Fatal("page does not expose exact bytes in a Chinese aria-label")
+	}
+	if strings.Contains(script, "String(entry.size || 0)") {
+		t.Fatal("page still renders the legacy raw numeric size")
+	}
+}
+
 func TestWebpageAPIsBrowseDownloadUploadMkdirRenameDelete(t *testing.T) {
 	controller, owned := startShare(t, "")
 	listed := doShareRequest(t, controller, http.MethodGet, "http://share.test/api/list?path=/", testSharePassword, nil)

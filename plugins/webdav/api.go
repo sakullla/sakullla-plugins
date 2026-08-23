@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/bits"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -21,9 +23,11 @@ type apiError struct {
 }
 
 type listEntry struct {
-	Name string `json:"name"`
-	Dir  bool   `json:"dir"`
-	Size int64  `json:"size,omitempty"`
+	Name      string `json:"name"`
+	Dir       bool   `json:"dir"`
+	Size      *int64 `json:"size,omitempty"`
+	SizeText  string `json:"size_text,omitempty"`
+	SizeExact string `json:"size_exact,omitempty"`
 }
 
 type listResponse struct {
@@ -88,7 +92,10 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 	for _, entry := range entries {
 		item := listEntry{Name: entry.Name(), Dir: entry.IsDir()}
 		if info, err := entry.Info(); err == nil && !entry.IsDir() {
-			item.Size = info.Size()
+			size := info.Size()
+			item.Size = &size
+			item.SizeText = formatIECSize(size)
+			item.SizeExact = strconv.FormatInt(size, 10)
 		}
 		listed = append(listed, item)
 	}
@@ -99,6 +106,36 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 		return listed[i].Name < listed[j].Name
 	})
 	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, listResponse{Path: virtualPath(root, target), Entries: listed})
+}
+
+func formatIECSize(size int64) string {
+	const step = int64(1024)
+	units := [...]string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	if size < step {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	unitIndex := 0
+	unit := int64(1)
+	for unitIndex+1 < len(units) && size >= unit*step {
+		unit *= step
+		unitIndex++
+	}
+	whole := size / unit
+	remainder := uint64(size % unit)
+	hi, lo := bits.Mul64(remainder, 10)
+	digit, roundingRemainder := bits.Div64(hi, lo, uint64(unit))
+	if roundingRemainder >= (uint64(unit)+1)/2 {
+		digit++
+	}
+	if digit == 10 {
+		whole++
+		digit = 0
+	}
+	formatted := strconv.FormatInt(whole, 10)
+	if digit != 0 {
+		formatted += "." + strconv.FormatUint(digit, 10)
+	}
+	return formatted + " " + units[unitIndex]
 }
 
 func (handler *Handler) apiDownload(writer http.ResponseWriter, request *http.Request) {
