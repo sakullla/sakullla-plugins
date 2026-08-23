@@ -243,10 +243,13 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	if strings.Contains(html, `name="id"`) {
 		t.Fatal("management page still has a mapping id input")
 	}
-	for _, want := range []string{`select name="entry_agent_id"`, `select name="exit_agent_id"`, `id="relay-hops"`} {
+	for _, want := range []string{`name="entry_agent_id"`, `name="exit_agent_id"`, `data-agent-picker="entry"`, `data-agent-picker="exit"`, `id="relay-hops"`} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("management page missing %q", want)
 		}
+	}
+	if strings.Contains(html, `select name="entry_agent_id"`) || strings.Contains(html, `select name="exit_agent_id"`) {
+		t.Fatal("management page still uses a native agent <select>")
 	}
 	if strings.Contains(html, `name="relay_chain"`) || strings.Contains(html, "逗号分隔") {
 		t.Fatal("management page still uses comma-separated relay ids")
@@ -256,7 +259,7 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 		t.Fatal(err)
 	}
 	js := string(jsBytes)
-	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners"} {
+	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners", "搜索节点", "最近活跃", "mountAgentSearchSelect"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("management script missing catalog %q", want)
 		}

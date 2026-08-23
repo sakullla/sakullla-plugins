@@ -87,8 +87,10 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		t.Fatalf("create form still has a mapping id input: %s", html)
 	}
 	for _, want := range []string{
-		`select name="entry_agent_id"`,
-		`select name="exit_agent_id"`,
+		`name="entry_agent_id"`,
+		`name="exit_agent_id"`,
+		`data-agent-picker="entry"`,
+		`data-agent-picker="exit"`,
 		`id="relay-hops"`,
 		`id="relay-add"`,
 	} {
@@ -104,10 +106,19 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		t.Fatalf("script status=%d", script.Code)
 	}
 	js := script.Body.String()
-	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners"} {
+	for _, want := range []string{
+		"/panel-api/agents",
+		"/panel-api/relay-listeners",
+		"搜索节点",
+		"最近活跃",
+		"mountAgentSearchSelect",
+	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing catalog %q", want)
 		}
+	}
+	if strings.Contains(html, `select name="entry_agent_id"`) || strings.Contains(html, `select name="exit_agent_id"`) {
+		t.Fatal("create form still uses a native agent <select>")
 	}
 	if strings.Contains(js, `.split(",")`) {
 		t.Fatal("script still parses relay hops from comma-separated text")
@@ -124,6 +135,7 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
 		"min(52rem",
+		".agent-search-select",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)

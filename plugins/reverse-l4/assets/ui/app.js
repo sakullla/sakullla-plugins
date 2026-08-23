@@ -30,8 +30,10 @@ const formNode = document.querySelector("#mapping-form");
 const formSubmit = document.querySelector("#form-submit");
 const formCancel = document.querySelector("#form-cancel");
 const createToggle = document.querySelector("#create-toggle");
-const entrySelect = formNode ? formNode.querySelector('select[name="entry_agent_id"]') : null;
-const exitSelect = formNode ? formNode.querySelector('select[name="exit_agent_id"]') : null;
+const entryInput = formNode ? formNode.querySelector('input[name="entry_agent_id"]') : null;
+const exitInput = formNode ? formNode.querySelector('input[name="exit_agent_id"]') : null;
+const entryPickerRoot = formNode ? formNode.querySelector('[data-agent-picker="entry"]') : null;
+const exitPickerRoot = formNode ? formNode.querySelector('[data-agent-picker="exit"]') : null;
 const relayHops = document.querySelector("#relay-hops");
 const relayAdd = document.querySelector("#relay-add");
 const catalogErrorNode = document.querySelector("#catalog-error");
@@ -112,7 +114,33 @@ const pluginJSON = async (path, options = {}) => {
   return payload;
 };
 
-const isAgentOnline = (agent) => Boolean(agent) && (agent.online === true || agent.status === "online");
+const parseAgentTime = (value) => {
+  if (value == null || value === "") return 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value < 1e12 ? value * 1000 : value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const timeAgo = (value) => {
+  const ts = parseAgentTime(value);
+  if (!ts) return "";
+  const delta = Date.now() - ts;
+  if (delta < 60 * 1000) return "刚刚";
+  if (delta < 60 * 60 * 1000) return `${Math.floor(delta / 60000)} 分钟前`;
+  if (delta < 24 * 60 * 60 * 1000) return `${Math.floor(delta / 3600000)} 小时前`;
+  return `${Math.floor(delta / 86400000)} 天前`;
+};
+
+const getAgentStatus = (agent) => {
+  if (!agent) return "offline";
+  if (agent.status === "offline" || agent.online === false) return "offline";
+  if (agent.status === "failed") return "failed";
+  if (agent.status === "pending") return "pending";
+  if (agent.online === true || agent.status === "online") return "online";
+  return "offline";
+};
+
+const isAgentOnline = (agent) => getAgentStatus(agent) === "online";
 
 const listenerID = (listener) => {
   const raw = listener && (listener.id ?? listener.listener_id);
@@ -120,10 +148,277 @@ const listenerID = (listener) => {
   return Number.isInteger(id) && id > 0 ? id : 0;
 };
 
+const agentDisplayName = (agent) => {
+  if (!agent) return "";
+  return agent.name && agent.name !== agent.id ? agent.name : (agent.name || agent.id || "");
+};
+
+const agentSearchText = (agent) => [
+  agent && agent.name,
+  agent && agent.id,
+  agent && agent.ddns_domain,
+  agent && agent.last_seen_ip,
+  agent && agent.agent_url,
+].filter(Boolean).join(" ").toLowerCase();
+
 const agentLabel = (agent) => {
   const label = agent.name && agent.name !== agent.id ? `${agent.name} · ${agent.id}` : (agent.name || agent.id);
   return isAgentOnline(agent) ? label : `${label}（离线）`;
 };
+
+const closeAllAgentPickers = (except) => {
+  agentPickers.forEach((picker) => {
+    if (picker !== except) picker.close();
+  });
+};
+
+const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
+  const picker = {
+    root,
+    hiddenInput,
+    placeholder,
+    open: false,
+    disabled: false,
+    statusFilter: "",
+    sortBy: "last_seen",
+    search: "",
+    selected: "",
+    close() {},
+    setValue() {},
+    setDisabled() {},
+    refresh() {},
+  };
+  if (!root || !hiddenInput) return picker;
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "agent-search-select__trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const statusDot = document.createElement("span");
+  statusDot.className = "agent-search-select__status";
+  statusDot.hidden = true;
+  const label = document.createElement("span");
+  label.className = "agent-search-select__label";
+  const chevron = document.createElement("span");
+  chevron.className = "agent-search-select__chevron";
+  chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+  trigger.append(statusDot, label, chevron);
+
+  const dropdown = document.createElement("div");
+  dropdown.className = "agent-search-select__dropdown";
+  dropdown.hidden = true;
+  dropdown.setAttribute("role", "listbox");
+
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "agent-search-select__search";
+  const searchShell = document.createElement("div");
+  searchShell.className = "agent-search-select__search-shell";
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.className = "agent-search-select__search-input";
+  searchInput.placeholder = "搜索节点...";
+  searchInput.setAttribute("aria-label", "搜索节点");
+  searchInput.autocomplete = "off";
+  searchShell.append(searchInput);
+  searchWrap.append(searchShell);
+
+  const filters = document.createElement("div");
+  filters.className = "agent-search-select__filters";
+  const filterButtons = [
+    { value: "", text: "全部" },
+    { value: "online", text: "在线" },
+    { value: "offline", text: "离线" },
+  ].map((opt) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-search-select__chip";
+    button.textContent = opt.text;
+    button.dataset.status = opt.value;
+    button.addEventListener("click", () => {
+      picker.statusFilter = opt.value;
+      renderList();
+    });
+    filters.append(button);
+    return button;
+  });
+
+  const list = document.createElement("div");
+  list.className = "agent-search-select__list";
+
+  const sortBar = document.createElement("div");
+  sortBar.className = "agent-search-select__sort";
+  sortBar.append(document.createTextNode("排序:"));
+  const sortButtons = [
+    { value: "last_seen", text: "最近活跃" },
+    { value: "name", text: "名称" },
+  ].map((opt) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-search-select__chip";
+    button.textContent = opt.text;
+    button.dataset.sort = opt.value;
+    button.addEventListener("click", () => {
+      picker.sortBy = opt.value;
+      renderList();
+    });
+    sortBar.append(button);
+    return button;
+  });
+
+  dropdown.append(searchWrap, filters, list, sortBar);
+  root.replaceChildren(trigger, dropdown);
+
+  const selectedAgent = () => agentsCache.find((agent) => agent && agent.id === picker.selected) || null;
+
+  const syncTrigger = () => {
+    hiddenInput.value = picker.selected;
+    const agent = selectedAgent();
+    if (agent) {
+      label.textContent = agentDisplayName(agent);
+      label.dataset.empty = "false";
+      statusDot.hidden = false;
+      statusDot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
+      trigger.title = agentLabel(agent);
+    } else if (picker.selected) {
+      label.textContent = picker.selected;
+      label.dataset.empty = "false";
+      statusDot.hidden = true;
+      trigger.title = picker.selected;
+    } else {
+      label.textContent = placeholder;
+      label.dataset.empty = "true";
+      statusDot.hidden = true;
+      trigger.title = placeholder;
+    }
+  };
+
+  const filteredAgents = () => {
+    const query = picker.search.trim().toLowerCase();
+    let result = agentsCache.slice();
+    if (picker.statusFilter) {
+      result = result.filter((agent) => getAgentStatus(agent) === picker.statusFilter);
+    }
+    if (query) {
+      result = result.filter((agent) => agentSearchText(agent).includes(query));
+    }
+    result.sort((left, right) => {
+      if (picker.sortBy === "name") {
+        return String(agentDisplayName(left)).localeCompare(String(agentDisplayName(right)), "zh");
+      }
+      return parseAgentTime(right.last_seen_at) - parseAgentTime(left.last_seen_at);
+    });
+    return result;
+  };
+
+  const renderList = () => {
+    filterButtons.forEach((button) => {
+      button.setAttribute("aria-pressed", button.dataset.status === picker.statusFilter ? "true" : "false");
+    });
+    sortButtons.forEach((button) => {
+      button.setAttribute("aria-pressed", button.dataset.sort === picker.sortBy ? "true" : "false");
+    });
+    const items = filteredAgents();
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "agent-search-select__empty";
+      empty.textContent = agentsCache.length ? "没有匹配的节点" : "暂无可用节点";
+      list.append(empty);
+      return;
+    }
+    items.forEach((agent) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "agent-search-select__option";
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", agent.id === picker.selected ? "true" : "false");
+      const dot = document.createElement("span");
+      dot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
+      const name = document.createElement("span");
+      name.className = "agent-search-select__option-name";
+      name.textContent = agentDisplayName(agent);
+      const meta = document.createElement("span");
+      meta.className = "agent-search-select__option-meta";
+      meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
+      option.append(dot, name, meta);
+      option.addEventListener("click", () => {
+        picker.setValue(agent.id);
+        picker.close();
+      });
+      list.append(option);
+    });
+  };
+
+  picker.close = () => {
+    picker.open = false;
+    picker.search = "";
+    picker.statusFilter = "";
+    picker.sortBy = "last_seen";
+    searchInput.value = "";
+    dropdown.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+  };
+
+  picker.setValue = (value) => {
+    picker.selected = String(value || "");
+    syncTrigger();
+  };
+
+  picker.setDisabled = (next) => {
+    picker.disabled = Boolean(next);
+    trigger.disabled = picker.disabled;
+    searchInput.disabled = picker.disabled;
+  };
+
+  picker.refresh = (selected) => {
+    if (selected !== undefined) picker.selected = String(selected || "");
+    syncTrigger();
+    if (picker.open) renderList();
+  };
+
+  trigger.addEventListener("click", () => {
+    if (picker.disabled) return;
+    if (picker.open) {
+      picker.close();
+      return;
+    }
+    closeAllAgentPickers(picker);
+    picker.open = true;
+    dropdown.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    renderList();
+    searchInput.focus();
+  });
+
+  searchInput.addEventListener("input", () => {
+    picker.search = searchInput.value;
+    renderList();
+  });
+
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      picker.close();
+      trigger.focus();
+    }
+  });
+
+  document.addEventListener("mousedown", (event) => {
+    if (!picker.open) return;
+    if (root.contains(event.target)) return;
+    picker.close();
+  });
+
+  syncTrigger();
+  return picker;
+};
+
+const agentPickers = [];
+const entryPicker = mountAgentSearchSelect(entryPickerRoot, entryInput, "选择入口节点");
+const exitPicker = mountAgentSearchSelect(exitPickerRoot, exitInput, "选择出口节点");
+if (entryPicker.root) agentPickers.push(entryPicker);
+if (exitPicker.root) agentPickers.push(exitPicker);
 
 const listenerLabel = (listener, id) => {
   const name = String((listener && listener.name) || "").trim();
@@ -136,28 +431,9 @@ const listenerLabel = (listener, id) => {
   return label + disabled;
 };
 
-const fillAgentSelect = (select, selected) => {
-  if (!select) return;
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = agentsCache.length ? "选择节点" : "暂无节点";
-  select.replaceChildren(placeholder);
-  const seen = new Set();
-  agentsCache.forEach((agent) => {
-    if (!agent || !agent.id) return;
-    seen.add(agent.id);
-    const option = document.createElement("option");
-    option.value = agent.id;
-    option.textContent = agentLabel(agent);
-    select.append(option);
-  });
-  if (selected && !seen.has(selected)) {
-    const option = document.createElement("option");
-    option.value = selected;
-    option.textContent = selected;
-    select.append(option);
-  }
-  select.value = selected || "";
+const fillAgentPickers = (entryID, exitID) => {
+  entryPicker.refresh(entryID || "");
+  exitPicker.refresh(exitID || "");
 };
 
 const fillListenerSelect = (select, selected) => {
@@ -203,9 +479,12 @@ const syncFormControls = () => {
 
 const setBusy = (next) => {
   busy = next;
+  if (next) closeAllAgentPickers();
   workspaceNode.querySelectorAll("button, input, select").forEach((node) => {
     node.disabled = next;
   });
+  entryPicker.setDisabled(next);
+  exitPicker.setDisabled(next);
   if (!next) syncFormControls();
 };
 
@@ -311,8 +590,7 @@ const openForm = async (mapping) => {
   createToggle.hidden = true;
   try {
     await loadCatalogs();
-    fillAgentSelect(entrySelect, mapping ? mapping.entry_agent_id : "");
-    fillAgentSelect(exitSelect, mapping ? mapping.exit_agent_id : "");
+    fillAgentPickers(mapping ? mapping.entry_agent_id : "", mapping ? mapping.exit_agent_id : "");
     renderRelayHops(mapping ? mapping.relay_chain : []);
     if (!editingID && agentsCache.length === 0) {
       showCatalogError("暂无可用节点，无法创建映射。");
@@ -321,8 +599,7 @@ const openForm = async (mapping) => {
     catalogReady = false;
     agentsCache = [];
     listenersCache = [];
-    fillAgentSelect(entrySelect, mapping ? mapping.entry_agent_id : "");
-    fillAgentSelect(exitSelect, mapping ? mapping.exit_agent_id : "");
+    fillAgentPickers(mapping ? mapping.entry_agent_id : "", mapping ? mapping.exit_agent_id : "");
     renderRelayHops([]);
     showCatalogError(error.message || "无法加载节点或中继目录，不能手输 ID 创建映射。");
   }
@@ -333,6 +610,8 @@ const openForm = async (mapping) => {
 const closeForm = () => {
   editingID = "";
   formNode.reset();
+  closeAllAgentPickers();
+  fillAgentPickers("", "");
   if (relayHops) relayHops.replaceChildren();
   if (mappingIDDisplay) {
     mappingIDDisplay.hidden = true;
