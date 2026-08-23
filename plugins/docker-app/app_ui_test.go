@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -49,6 +50,14 @@ func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	}
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatal("plugin.yaml must declare frontend files below assets/")
+	}
+	for _, permission := range []string{"storage.read", "storage.write"} {
+		if !strings.Contains(text, "- name: "+permission) {
+			t.Fatalf("plugin.yaml must declare %s for durable app state", permission)
+		}
+	}
+	if !strings.Contains(text, "resource: docker-compose:managed") {
+		t.Fatal("plugin.yaml must request the scoped managed Docker Compose handle")
 	}
 	if strings.Contains(text, "ui_schema:") {
 		t.Fatal("compose UI must not use host config ui_schema")
@@ -129,6 +138,80 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 	}
 }
 
+func TestAppUIRejectsMissingRequiredComposeEnvironmentBeforeDeploy(t *testing.T) {
+	t.Parallel()
+	controller := newUIController(t)
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}\n"
+	response := httptest.NewRecorder()
+	controller.ServeHTTP(response, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "DATABASE_PASSWORD") || !strings.Contains(response.Body.String(), "set DATABASE_PASSWORD in .env") {
+		t.Fatalf("missing-variable response is not actionable: %s", response.Body.String())
+	}
+	if len(controller.Apps()) != 0 {
+		t.Fatalf("rejected deployment mutated apps: %#v", controller.Apps())
+	}
+}
+
+type uiMemoryAppState struct {
+	apps    []App
+	runtime map[string]bool
+	found   bool
+	stores  int
+}
+
+func (state *uiMemoryAppState) LoadApps(context.Context) ([]App, bool, error) {
+	return cloneApps(state.apps), state.found, nil
+}
+
+func (state *uiMemoryAppState) StoreApps(_ context.Context, apps []App) error {
+	state.apps = cloneApps(apps)
+	state.found = true
+	state.stores++
+	return nil
+}
+
+func (state *uiMemoryAppState) LoadRuntime(context.Context) (map[string]bool, bool, error) {
+	return cloneAppRuntime(state.runtime), state.found, nil
+}
+
+func (state *uiMemoryAppState) StoreRuntime(_ context.Context, values map[string]bool) error {
+	state.runtime = cloneAppRuntime(values)
+	state.found = true
+	return nil
+}
+
+func TestAppUIRestoresPersistedAppsAfterControllerRestart(t *testing.T) {
+	state := &uiMemoryAppState{}
+	first := newUIControllerWithOptions(t, uiControllerOptions{appState: state})
+	created := httptest.NewRecorder()
+	first.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"hubproxy","agent_id":"agent-1","compose":"services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n    ports:\n      - \"5000:5000\"\n","env":"DATABASE_PASSWORD=fixture-value\n"}`))
+	if created.Code != http.StatusOK || state.stores != 1 || len(state.apps) != 1 {
+		t.Fatalf("create status=%d stores=%d apps=%#v body=%s", created.Code, state.stores, state.apps, created.Body.String())
+	}
+	if state.apps[0].Env != "" || strings.Contains(created.Body.String(), "fixture-value") {
+		t.Fatalf("compose environment leaked into persisted/UI state: app=%#v body=%s", state.apps[0], created.Body.String())
+	}
+	stopped := httptest.NewRecorder()
+	first.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/hubproxy/stop", `{}`))
+	if stopped.Code != http.StatusOK || state.runtime["hubproxy"] {
+		t.Fatalf("stop status=%d runtime=%#v body=%s", stopped.Code, state.runtime, stopped.Body.String())
+	}
+
+	restarted := newUIControllerWithOptions(t, uiControllerOptions{appState: state})
+	listed := httptest.NewRecorder()
+	restarted.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if listed.Code != http.StatusOK || len(apps) != 1 || apps[0].ID != "hubproxy" || apps[0].Status != OpsStatusStopped || restarted.Apps()[0].AgentID != "agent-1" {
+		t.Fatalf("restored status=%d apps=%#v body=%s", listed.Code, apps, listed.Body.String())
+	}
+	if restarted.Apps()[0].Generation != "generation-1" {
+		t.Fatalf("restored generation=%q", restarted.Apps()[0].Generation)
+	}
+}
+
 func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	t.Parallel()
 	handle := &recordingHTTPRuleCreate{}
@@ -144,17 +227,17 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	if rule.Code != http.StatusOK {
 		t.Fatalf("http-rule status=%d body=%s", rule.Code, rule.Body.String())
 	}
-	if len(handle.specs) != 1 || handle.specs[0].AppID != "media" || handle.specs[0].AgentID != "agent-1" || handle.specs[0].Domain != "app.example.com" || handle.specs[0].Port != 8080 {
+	if len(handle.specs) != 1 || handle.specs[0].AppID != "media" || handle.specs[0].AgentID != "agent-1" || handle.specs[0].Domain != "https://app.example.com" || handle.specs[0].Port != 8080 {
 		t.Fatalf("host create spec=%#v", handle.specs)
 	}
 	rules := controller.HostHTTPRules()
-	if len(rules) != 1 || rules[0].Domain != "app.example.com" || rules[0].Port != 8080 || rules[0].AgentID != "agent-1" || rules[0].AppID != "media" {
+	if len(rules) != 1 || rules[0].Domain != "https://app.example.com" || rules[0].Port != 8080 || rules[0].AgentID != "agent-1" || rules[0].AppID != "media" {
 		t.Fatalf("host rules=%#v", rules)
 	}
 	if rules[0].Backend != "agent-1:8080" {
 		t.Fatalf("backend does not point at Agent port: %#v", rules[0])
 	}
-	if !strings.Contains(rule.Body.String(), `"domain":"app.example.com"`) || !strings.Contains(rule.Body.String(), `"backend":"agent-1:8080"`) {
+	if !strings.Contains(rule.Body.String(), `"domain":"https://app.example.com"`) || !strings.Contains(rule.Body.String(), `"backend":"agent-1:8080"`) {
 		t.Fatalf("http-rule response omitted host rule: %s", rule.Body.String())
 	}
 	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" || controller.Apps()[0].Image != "nginx:1.27" {
@@ -162,6 +245,26 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	}
 	if controller.Apps()[0].RuleRef != "" {
 		t.Fatalf("http-rule bound App.RuleRef=%q", controller.Apps()[0].RuleRef)
+	}
+}
+
+func TestAppUIHTTPRuleFailureNamesStageWithoutLeakingCause(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{err: errors.New("upstream rejected fixture-value")}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusInternalServerError {
+		t.Fatalf("http-rule status=%d body=%s", rule.Code, rule.Body.String())
+	}
+	if !strings.Contains(rule.Body.String(), "HTTP 规则创建失败") || strings.Contains(rule.Body.String(), ErrOperationFailed.Error()) || strings.Contains(rule.Body.String(), "fixture-value") {
+		t.Fatalf("http-rule response is not actionable and safe: %s", rule.Body.String())
 	}
 }
 
@@ -542,6 +645,9 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
 
 	listed := httptest.NewRecorder()
 	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
@@ -600,6 +706,67 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	}
 }
 
+type blockingImageObserver struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (observer *blockingImageObserver) ObserveImage(ctx context.Context, _ App) (UpdateObservation, error) {
+	select {
+	case observer.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-observer.release:
+		return UpdateObservation{}, errors.New("registry unavailable")
+	case <-ctx.Done():
+		return UpdateObservation{}, ctx.Err()
+	}
+}
+
+func TestAppUIDeployDoesNotWaitForRegistryObservation(t *testing.T) {
+	observer := &blockingImageObserver{started: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(observer.release)
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	started := time.Now()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: registry.example.test/media:latest\n"}`))
+	if created.Code != http.StatusOK || time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("deploy waited for registry: status=%d elapsed=%s body=%s", created.Code, time.Since(started), created.Body.String())
+	}
+	select {
+	case <-observer.started:
+	case <-time.After(time.Second):
+		t.Fatal("background registry observation did not start")
+	}
+}
+
+func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
+	script, err := os.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	success := strings.Index(text, `showStatus(updating ? "已更新应用。" : "已部署应用。", false);`)
+	refresh := -1
+	if success >= 0 {
+		if relative := strings.Index(text[success:], "await renderWorkspace();"); relative >= 0 {
+			refresh = success + relative
+		}
+	}
+	failure := strings.Index(text, "但列表刷新失败")
+	if success < 0 || refresh < 0 || failure < 0 || success > refresh {
+		t.Fatalf("deploy success/refresh ordering is missing: success=%d refresh=%d failure=%d", success, refresh, failure)
+	}
+	page, err := os.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), `textarea name="env"`) || !strings.Contains(text, `env: String(data.get("env") || "")`) {
+		t.Fatal("Compose .env input is not wired through the deployment form")
+	}
+}
+
 func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
@@ -613,10 +780,19 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
-	if createdApps := decodeAppList(t, created.Body.Bytes()); len(createdApps) != 1 || createdApps[0].Notice != OpsStatusUpdateAvailable || createdApps[0].Status != OpsStatusRunning {
-		t.Fatalf("auto_update hid 有新版本: %#v", createdApps)
+	if createdApps := decodeAppList(t, created.Body.Bytes()); len(createdApps) != 1 || createdApps[0].Status != OpsStatusRunning {
+		t.Fatalf("create response did not return immediately: %#v", createdApps)
 	}
-	record, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	record := waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	refreshed := httptest.NewRecorder()
+	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	refreshedApps := decodeAppList(t, refreshed.Body.Bytes())
+	if len(refreshedApps) != 1 || refreshedApps[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("background observation did not publish update notice: %#v", refreshedApps)
+	}
+	_, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
 	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
 		t.Fatalf("auto_update published without confirm: %#v ok=%v", record, ok)
 	}
@@ -663,6 +839,20 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
 		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
+}
+
+func waitForDeployment(t *testing.T, controller *Controller, appID string, ready func(Deployment) bool) Deployment {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if record, ok := controller.uiRollout.Store.(*DeploymentStore).Get(appID); ok && ready(record) {
+			return record
+		}
+		time.Sleep(time.Millisecond)
+	}
+	record, _ := controller.uiRollout.Store.(*DeploymentStore).Get(appID)
+	t.Fatalf("deployment observation did not reach expected state: %#v", record)
+	return Deployment{}
 }
 
 func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
@@ -795,6 +985,7 @@ type uiControllerOptions struct {
 	observer      ImageUpdateObserver
 	rollout       RolloutExecutor
 	httpRule      HTTPRuleCreateHandle
+	appState      AppStateStore
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -834,6 +1025,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIWorkDirRoot:     workDirRoot,
 		UIImageObserver:   opts.observer,
 		UIRolloutExecutor: opts.rollout,
+		UIAppState:        opts.appState,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -929,10 +1121,14 @@ func stringPtr(value string) *string {
 
 type recordingHTTPRuleCreate struct {
 	specs []HTTPRuleSpec
+	err   error
 }
 
 func (handle *recordingHTTPRuleCreate) Create(_ context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
 	handle.specs = append(handle.specs, spec)
+	if handle.err != nil {
+		return HostHTTPRule{}, handle.err
+	}
 	return HostHTTPRule{
 		Ref:     fmt.Sprintf("rule-%s-%d", spec.AppID, spec.Port),
 		Domain:  spec.Domain,

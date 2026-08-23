@@ -58,6 +58,8 @@
         <form id="create-form" method="post">
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
           <label>Compose YAML <textarea name="compose" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea></label>
+          <label>Compose .env（可选） <textarea name="env" spellcheck="false" autocomplete="off" placeholder="POSTGRES_PASSWORD=change-me&#10;JWT_SECRET=..."></textarea></label>
+          <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
           <div class="form-footer">
             <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
             <button type="submit" class="btn-primary" id="create-submit">部署</button>

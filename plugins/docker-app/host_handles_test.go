@@ -101,6 +101,53 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	}
 }
 
+func TestHostCapabilityRuntimePersistsAppsThroughHostState(t *testing.T) {
+	stored := map[string]json.RawMessage{}
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		calls = append(calls, call)
+		var payload struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			return err
+		}
+		if payload.Key != pluginAppsStateKey && payload.Key != pluginRuntimeStateKey {
+			t.Fatalf("state key=%q", payload.Key)
+		}
+		switch call.Operation {
+		case "state.put":
+			stored[payload.Key] = append(json.RawMessage(nil), payload.Value...)
+			return copyHostResult(map[string]any{"stored": true}, target)
+		case "state.get":
+			return copyHostResult(map[string]any{"found": true, "value": stored[payload.Key]}, target)
+		default:
+			t.Fatalf("state operation=%q", call.Operation)
+			return nil
+		}
+	})
+	runtime := newHostCapabilityRuntime(client)
+	want := []App{{ID: "hubproxy", AgentID: "agent-1", Generation: "generation-1", Compose: "services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n"}}
+	if err := runtime.StoreApps(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := runtime.LoadApps(context.Background())
+	if err != nil || !found || len(got) != 1 || got[0].ID != want[0].ID || got[0].AgentID != want[0].AgentID {
+		t.Fatalf("LoadApps()=(%#v,%t,%v)", got, found, err)
+	}
+	if err := runtime.StoreRuntime(context.Background(), map[string]bool{"hubproxy": false}); err != nil {
+		t.Fatal(err)
+	}
+	runtimeState, found, err := runtime.LoadRuntime(context.Background())
+	if err != nil || !found || runtimeState["hubproxy"] {
+		t.Fatalf("LoadRuntime()=(%#v,%t,%v)", runtimeState, found, err)
+	}
+	if len(calls) != 4 || calls[0].Operation != "state.put" || calls[1].Operation != "state.get" || calls[2].Operation != "state.put" || calls[3].Operation != "state.get" {
+		t.Fatalf("state calls=%#v", calls)
+	}
+}
+
 func TestHostCapabilityRuntimeFailClosedWithoutClientOrOnLocalSocket(t *testing.T) {
 	t.Parallel()
 	if runtime := newHostCapabilityRuntime(nil); runtime != nil {
@@ -199,7 +246,7 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact",
-		GrantedScopes: []string{"http.rule", "ui.dynamic"}, Generation: "generation-1",
+		GrantedScopes: requiredGrants(), Generation: "generation-1",
 	}); err != nil {
 		t.Fatalf("handshake without container.compose: %v", err)
 	}
@@ -291,7 +338,8 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 		return client, nil
 	})
 	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest"}
-	rule, err := config.UIHTTPRule.Create(context.Background(), HTTPRuleSpec{
+	ruleContext := withHostOperationKey(context.Background(), "operation/ui-test")
+	rule, err := config.UIHTTPRule.Create(ruleContext, HTTPRuleSpec{
 		AppID: "media", AgentID: "agent-1", Domain: "app.example.com", Port: 8080,
 	})
 	if err != nil || rule.Backend != "agent-1:8080" || rule.AgentID != "agent-1" {
@@ -325,7 +373,7 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 		t.Fatalf("host calls = %d", len(calls))
 	}
 	assertNoNamedAgentHostOps(t, calls)
-	if calls[0].Operation != hostHTTPRuleOperation || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
+	if calls[0].Operation != hostHTTPRuleOperation || calls[0].OperationID != "operation/ui-test" || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
 		t.Fatalf("http.rule call = %#v", calls[0])
 	}
 	image := decodePluginCallRequest(t, calls[1])

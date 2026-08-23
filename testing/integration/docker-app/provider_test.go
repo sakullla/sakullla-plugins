@@ -149,14 +149,14 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 1 || calls[0].AppID != app.ID || calls[0].AgentID != app.AgentID || calls[0].Domain != "app.example.com" || calls[0].Port != 8080 {
+	if len(calls) != 1 || calls[0].AppID != app.ID || calls[0].AgentID != app.AgentID || calls[0].Domain != "https://app.example.com" || calls[0].Port != 8080 {
 		t.Fatalf("create spec = %#v", calls)
 	}
 	if len(rules) != 2 || rules[0] != existing[0] {
 		t.Fatalf("host rules = %#v", rules)
 	}
 	created := rules[1]
-	if created.Ref != "rule-media-8080" || created.Domain != "app.example.com" || created.Port != 8080 || created.AppID != app.ID || created.AgentID != app.AgentID {
+	if created.Ref != "rule-media-8080" || created.Domain != "https://app.example.com" || created.Port != 8080 || created.AppID != app.ID || created.AgentID != app.AgentID {
 		t.Fatalf("created rule = %#v", created)
 	}
 	if created.Backend != "agent-1:8080" || !strings.Contains(created.Backend, "8080") {

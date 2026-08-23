@@ -208,10 +208,13 @@ func normalizeIngressDomain(value string) (string, bool) {
 		return "", false
 	}
 	lower := strings.ToLower(value)
+	scheme := ""
 	switch {
 	case strings.HasPrefix(lower, "https://"):
+		scheme = "https://"
 		value = value[len("https://"):]
 	case strings.HasPrefix(lower, "http://"):
+		scheme = "http://"
 		value = value[len("http://"):]
 	}
 	if cut := strings.IndexAny(value, "/?#"); cut >= 0 {
@@ -224,7 +227,7 @@ func normalizeIngressDomain(value string) (string, bool) {
 	if !boundedText(value, 253) {
 		return "", false
 	}
-	return value, true
+	return scheme + value, true
 }
 
 func containsPort(ports []uint16, want uint16) bool {

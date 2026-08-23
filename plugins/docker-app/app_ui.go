@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"embed"
 
@@ -39,6 +40,7 @@ type appWriteRequest struct {
 	ID         string `json:"id"`
 	AgentID    string `json:"agent_id"`
 	Compose    string `json:"compose"`
+	Env        string `json:"env"`
 	AutoUpdate bool   `json:"auto_update"`
 	Confirm    string `json:"confirm"`
 	Domain     string `json:"domain"`
@@ -167,26 +169,40 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
 			return
 		}
+		_, existing := controller.appByID(body.ID)
+		if !existing || strings.TrimSpace(body.Env) != "" {
+			if err := validateRequiredComposeVariables(body.Compose, body.Env); err != nil {
+				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+				return
+			}
+		}
 		report, err := controller.observeAgent(request.Context(), agentID)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "engine")})
 			return
 		}
 		generation := controller.lifecycleGeneration()
 		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
-			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot,
+			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: body.Env,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
 			return
 		}
 		for index := range next {
 			if next[index].ID == body.ID {
 				next[index].AutoUpdate = cloneBool(&body.AutoUpdate)
 			}
+			next[index].Env = ""
 		}
-		controller.replaceApps(next)
-		controller.setAppRunning(body.ID, true)
+		if err := controller.replaceApps(request.Context(), next); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
+		if err := controller.setAppRunning(request.Context(), body.ID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), agentID)})
 	default:
 		writer.Header().Set("Allow", "GET, HEAD, POST")
@@ -211,7 +227,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 	}
 	if action != "get" && action != "http-rule" {
 		if err := controller.requireMutableAgent(request.Context(), app); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, action)})
 			return
 		}
 	}
@@ -228,36 +244,51 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		body, _ := decodeAppWrite(request)
 		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, body.Confirm == appID, controller.uiRemove, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "delete")})
 			return
 		}
-		controller.replaceApps(next)
-		controller.clearAppRuntime(appID)
+		if err := controller.replaceApps(request.Context(), next); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
+		if err := controller.clearAppRuntime(request.Context(), appID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "start":
 		if err := StartManaged(request.Context(), app, controller.uiStart, controller.uiAuditor); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "start")})
 			return
 		}
-		controller.setAppRunning(appID, true)
+		if err := controller.setAppRunning(request.Context(), appID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "stop":
 		if err := StopManaged(request.Context(), app, controller.uiStop, controller.uiAuditor); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "stop")})
 			return
 		}
-		controller.setAppRunning(appID, false)
+		if err := controller.setAppRunning(request.Context(), appID, false); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "restart":
 		if err := RestartManaged(request.Context(), app, controller.uiRestart, controller.uiAuditor); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "restart")})
 			return
 		}
-		controller.setAppRunning(appID, true)
+		if err := controller.setAppRunning(request.Context(), appID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 	case "update":
 		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return
 		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
@@ -268,9 +299,10 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		existing := controller.HostHTTPRules()
-		rules, err := CreateHTTPRuleFromPublishedPort(request.Context(), controller.uiHTTPRule, existing, app, nil, body.Domain, body.Port, controller.uiAuditor)
+		operationCtx := withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader))
+		rules, err := CreateHTTPRuleFromPublishedPort(operationCtx, controller.uiHTTPRule, existing, app, nil, body.Domain, body.Port, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err), Rules: existing, Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "http-rule"), Rules: existing, Apps: controller.projectAppViews(request.Context(), app.AgentID)})
 			return
 		}
 		controller.replaceHostHTTPRules(rules)
@@ -283,7 +315,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		}
 		text, err := ReadServiceLogs(request.Context(), app, service, controller.uiLogs, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "logs")})
 			return
 		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Logs: text})
@@ -326,25 +358,53 @@ func (controller *Controller) lifecycleGeneration() string {
 	return controller.epoch.generation
 }
 
-func (controller *Controller) replaceApps(apps []App) {
+func (controller *Controller) replaceApps(ctx context.Context, apps []App) error {
+	if controller.uiAppState != nil {
+		if err := controller.uiAppState.StoreApps(ctx, apps); err != nil {
+			return err
+		}
+	}
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.apps = cloneApps(apps)
+	return nil
 }
 
-func (controller *Controller) setAppRunning(appID string, running bool) {
+func (controller *Controller) setAppRunning(ctx context.Context, appID string, running bool) error {
 	controller.mu.Lock()
-	defer controller.mu.Unlock()
 	if controller.appRuntime == nil {
 		controller.appRuntime = map[string]bool{}
 	}
-	controller.appRuntime[appID] = running
+	next := cloneAppRuntime(controller.appRuntime)
+	next[appID] = running
+	controller.mu.Unlock()
+	if controller.uiAppState != nil {
+		if err := controller.uiAppState.StoreRuntime(ctx, next); err != nil {
+			return err
+		}
+	}
+	controller.mu.Lock()
+	controller.appRuntime = next
+	controller.mu.Unlock()
+	return nil
 }
 
-func (controller *Controller) clearAppRuntime(appID string) {
+func (controller *Controller) clearAppRuntime(ctx context.Context, appID string) error {
 	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	delete(controller.appRuntime, appID)
+	next := cloneAppRuntime(controller.appRuntime)
+	delete(next, appID)
+	controller.mu.Unlock()
+	if controller.uiAppState != nil {
+		if err := controller.uiAppState.StoreRuntime(ctx, next); err != nil {
+			return err
+		}
+	}
+	controller.mu.Lock()
+	controller.appRuntime = next
+	delete(controller.imageCache, appID)
+	delete(controller.imageRefresh, appID)
+	controller.mu.Unlock()
+	return nil
 }
 
 func (controller *Controller) appIsRunning(appID string) bool {
@@ -380,13 +440,8 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 
 func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
 	running := controller.appIsRunning(app.ID)
-	latest := ""
-	if controller.uiImageObserver != nil {
-		if observed, err := controller.uiImageObserver.ObserveImage(ctx, app); err == nil {
-			latest = observed.LatestDigest
-			_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
-		}
-	}
+	latest := controller.cachedLatestDigest(app)
+	controller.scheduleImageObservation(app)
 	var deployment Deployment
 	if controller.uiRollout.Store != nil {
 		if record, ok, err := controller.uiRollout.Store.Load(ctx, app.ID); err == nil && ok {
@@ -394,6 +449,64 @@ func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
 		}
 	}
 	return projectAppView(app, running, deployment, latest)
+}
+
+func (controller *Controller) cachedLatestDigest(app App) string {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached, ok := controller.imageCache[app.ID]
+	if !ok || cached.Image != app.Image {
+		return ""
+	}
+	return cached.LatestDigest
+}
+
+func (controller *Controller) scheduleImageObservation(app App) {
+	if controller.uiImageObserver == nil || app.ID == "" || app.Image == "" {
+		return
+	}
+	controller.mu.Lock()
+	cached, cachedOK := controller.imageCache[app.ID]
+	if controller.imageRefresh[app.ID] || cachedOK && cached.Image == app.Image && time.Since(cached.ObservedAt) < 5*time.Minute {
+		controller.mu.Unlock()
+		return
+	}
+	controller.imageRefresh[app.ID] = true
+	controller.mu.Unlock()
+	select {
+	case controller.imageSlots <- struct{}{}:
+		go controller.observeImageInBackground(app)
+	default:
+		controller.mu.Lock()
+		controller.imageRefresh[app.ID] = false
+		controller.mu.Unlock()
+	}
+}
+
+func (controller *Controller) observeImageInBackground(app App) {
+	defer func() { <-controller.imageSlots }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
+	if err == nil {
+		_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.imageRefresh[app.ID] = false
+	if err != nil || !controller.hasCurrentAppLocked(app) {
+		return
+	}
+	controller.imageCache[app.ID] = cachedImageObservation{Image: app.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+}
+
+func (controller *Controller) hasCurrentAppLocked(app App) bool {
+	for _, current := range controller.apps {
+		if current.ID == app.ID {
+			return current.Image == app.Image && current.Generation == app.Generation
+		}
+	}
+	return false
 }
 
 func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {
@@ -505,7 +618,7 @@ func appStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusForbidden
-	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
+	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
 		return http.StatusConflict
@@ -526,6 +639,8 @@ func publicAppError(err error) string {
 		return ErrEmptyIngressDomain.Error()
 	case errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage):
 		return err.Error()
+	case errors.Is(err, ErrMissingComposeVariable):
+		return err.Error()
 	case errors.Is(err, ErrNoPublishedPort):
 		return ErrNoPublishedPort.Error()
 	case errors.Is(err, ErrUnknownService):
@@ -540,6 +655,36 @@ func publicAppError(err error) string {
 		return ErrAppAgentConflict.Error()
 	case errors.Is(err, ErrTypedHandlesUnavailable):
 		return ErrTypedHandlesUnavailable.Error()
+	default:
+		return ErrOperationFailed.Error()
+	}
+}
+
+func publicAppActionError(err error, action string) string {
+	if !errors.Is(err, ErrOperationFailed) && !errors.Is(err, ErrTypedHandlesUnavailable) {
+		return publicAppError(err)
+	}
+	switch action {
+	case "engine":
+		return "读取目标 Agent 的 Docker 状态失败，请确认 Agent 在线并重试"
+	case "deploy":
+		return "Docker Compose 部署失败，请检查镜像、.env 必填变量和目标 Agent 的 Docker 状态"
+	case "persist":
+		return "Docker 操作已完成，但应用状态保存失败，请刷新页面后重试"
+	case "start":
+		return "启动应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+	case "stop":
+		return "停止应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+	case "restart":
+		return "重启应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+	case "delete":
+		return "删除应用失败，请检查目标 Agent 的 Docker 状态和 Compose 工作目录"
+	case "update":
+		return "更新应用失败，请检查镜像拉取结果和目标 Agent 的 Docker 状态"
+	case "http-rule":
+		return "HTTP 规则创建失败，请检查域名冲突、发布端口和目标 Agent 状态"
+	case "logs":
+		return "读取 Docker Compose 日志失败，请检查服务名和目标 Agent 状态"
 	default:
 		return ErrOperationFailed.Error()
 	}

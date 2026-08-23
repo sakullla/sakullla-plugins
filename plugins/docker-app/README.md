@@ -23,10 +23,11 @@ This plugin does not declare `http.backend-provider`,
 the resource-group page, not on the generic config form.
 
 The canonical `nre:rpc/v1` manifest and executable support a CI handshake
-self-check. Required grants are `http.rule` and `ui.dynamic`. Docker/Compose
-API is not a plugin permission: Handshake and Activate do not require
-`container.compose`, and install/deploy overlays have no Docker host, socket,
-or API key fields.
+self-check. The plugin requires `http.rule`, `ui.dynamic`, `storage.read`,
+`storage.write`, and a `service.revocable-resource-handle` scoped to
+`docker-compose:managed`. That scoped generation grant activates the Agent's
+private, allowlisted Compose command proxy; no node-local Docker host, socket,
+API key, or per-Agent plugin configuration is required.
 
 The control-plane management face reaches the Agent execution face through
 the generic host runtime `plugin.call` (`engine.report`, `compose`, `image`)

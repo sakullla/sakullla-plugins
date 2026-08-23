@@ -44,6 +44,7 @@ type composeCallRequest struct {
 	AgentID    string `json:"agent_id"`
 	AppID      string `json:"app_id"`
 	Compose    string `json:"compose"`
+	Env        string `json:"env"`
 	WorkDir    string `json:"workdir"`
 	Service    string `json:"service"`
 	Fence      uint64 `json:"fence"`
@@ -130,12 +131,17 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
+		if strings.TrimSpace(request.Env) != "" {
+			if err := writeAppEnvironment(workspace.Dir, request.Env); err != nil {
+				return nil, err
+			}
+		}
 		if _, err := controller.runCommand(ctx, workspace.Dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, err
 		}
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
 	case "start", "stop", "restart", "remove", "pull", "ready", "drain", "remove-instance":
-		dir, err := AppWorkDir(root, request.AppID)
+		dir, err := controller.prepareComposeCallWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +154,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
-		dir, err := AppWorkDir(root, request.AppID)
+		dir, err := controller.prepareComposeCallWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +168,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		return json.Marshal(map[string]any{"logs": string(output)})
 	case "start-instance":
-		dir, err := AppWorkDir(root, request.AppID)
+		dir, err := controller.prepareComposeCallWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +181,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		return json.Marshal(map[string]any{"accepted": true, "instance_id": instanceID})
 	case "inspect":
-		dir, err := AppWorkDir(root, request.AppID)
+		dir, err := controller.prepareComposeCallWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -193,6 +199,22 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 	default:
 		return nil, fmt.Errorf("compose action %q is unknown", action)
 	}
+}
+
+func (controller *Controller) prepareComposeCallWorkspace(root string, request composeCallRequest) (string, error) {
+	if strings.TrimSpace(request.Compose) == "" {
+		return AppWorkDir(root, request.AppID)
+	}
+	workspace, err := PrepareAppWorkspace(root, request.AppID, request.Compose)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(request.Env) != "" {
+		if err := writeAppEnvironment(workspace.Dir, request.Env); err != nil {
+			return "", err
+		}
+	}
+	return workspace.Dir, nil
 }
 
 func composeCommandArgs(action string) ([]string, error) {
@@ -312,6 +334,34 @@ func (controller *Controller) executionWorkDirRoot() string {
 		return env
 	}
 	return filepath.Join(os.TempDir(), "nre-docker-app")
+}
+
+func writeAppEnvironment(dir, value string) error {
+	if len(value) > MaxConfigBytes || strings.ContainsRune(value, '\x00') {
+		return errors.New("compose environment is invalid")
+	}
+	temporary, err := os.CreateTemp(dir, ".env-*")
+	if err != nil {
+		return err
+	}
+	path := temporary.Name()
+	defer func() { _ = os.Remove(path) }()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.WriteString(value); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(path, filepath.Join(dir, ".env"))
 }
 
 func agentIDFromPayload(payload []byte) (string, error) {
