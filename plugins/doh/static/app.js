@@ -1,5 +1,11 @@
-const origin = window.location.origin.replace(/\/$/, "");
-const dohUrl = origin + "/dns-query";
+const publicBase = () => {
+  const origin = window.location.origin.replace(/\/$/, "");
+  let pathname = String(window.location.pathname || "/");
+  pathname = pathname.replace(/\/index\.html$/i, "");
+  pathname = pathname.replace(/\/+$/, "");
+  return origin + pathname;
+};
+const dohUrl = publicBase() + "/dns-query";
 
 const urlNode = document.querySelector("#doh-url");
 if (urlNode) {

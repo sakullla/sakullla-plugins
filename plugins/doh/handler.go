@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -21,50 +22,85 @@ const (
 var pageAssets embed.FS
 
 func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Path != DNSQueryPath {
-		service.servePage(writer, request)
+	kind, redirect := classifyPublicPath(request.URL.Path)
+	if kind == publicPathDNS {
+		body, err := readDNSBody(request)
+		if err != nil {
+			writeDoHError(writer, err)
+			return
+		}
+		response, err := service.Serve(request.Context(), HTTPRequest{
+			Method:      request.Method,
+			Query:       request.URL.RawQuery,
+			ContentType: request.Header.Get("Content-Type"),
+			Accept:      request.Header.Get("Accept"),
+			Forwarded:   singleForwarded(request.Header.Values("Forwarded")),
+			Body:        body,
+		})
+		if err != nil {
+			writeDoHError(writer, err)
+			return
+		}
+		writer.Header().Set("Content-Type", response.ContentType)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write(response.Body)
 		return
 	}
-	body, err := readDNSBody(request)
-	if err != nil {
-		writeDoHError(writer, err)
-		return
-	}
-	response, err := service.Serve(request.Context(), HTTPRequest{
-		Method:      request.Method,
-		Query:       request.URL.RawQuery,
-		ContentType: request.Header.Get("Content-Type"),
-		Accept:      request.Header.Get("Accept"),
-		Forwarded:   singleForwarded(request.Header.Values("Forwarded")),
-		Body:        body,
-	})
-	if err != nil {
-		writeDoHError(writer, err)
-		return
-	}
-	writer.Header().Set("Content-Type", response.ContentType)
-	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(response.Body)
+	service.servePage(writer, request, kind, redirect)
 }
 
-func (service *Service) servePage(writer http.ResponseWriter, request *http.Request) {
+const (
+	publicPathDNS  = "dns"
+	publicPathHTML = "html"
+	publicPathJS   = "js"
+	publicPathCSS  = "css"
+)
+
+func classifyPublicPath(raw string) (kind, redirect string) {
+	if raw == "" {
+		raw = "/"
+	}
+	cleaned := path.Clean(raw)
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	switch {
+	case cleaned == DNSQueryPath || strings.HasSuffix(cleaned, DNSQueryPath):
+		return publicPathDNS, ""
+	case cleaned == "/app.js" || strings.HasSuffix(cleaned, "/app.js"):
+		return publicPathJS, ""
+	case cleaned == "/style.css" || strings.HasSuffix(cleaned, "/style.css"):
+		return publicPathCSS, ""
+	case cleaned == "/index.html" || strings.HasSuffix(cleaned, "/index.html"):
+		return publicPathHTML, ""
+	}
+	if raw != "/" && !strings.HasSuffix(raw, "/") {
+		return publicPathHTML, cleaned + "/"
+	}
+	return publicPathHTML, ""
+}
+
+func (service *Service) servePage(writer http.ResponseWriter, request *http.Request, kind, redirect string) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.Header().Set("Allow", "GET, HEAD")
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
-	name := ""
-	switch request.URL.Path {
-	case "/", "/index.html":
-		name = pageIndexName
-	case "/app.js":
-		name = pageScriptName
-	case "/style.css":
-		name = pageStyleName
-	default:
-		http.NotFound(writer, request)
+	if redirect != "" {
+		location := redirect
+		if request.URL.RawQuery != "" {
+			location += "?" + request.URL.RawQuery
+		}
+		http.Redirect(writer, request, location, http.StatusPermanentRedirect)
 		return
+	}
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	name := pageIndexName
+	switch kind {
+	case publicPathJS:
+		name = pageScriptName
+	case publicPathCSS:
+		name = pageStyleName
 	}
 	serveEmbeddedPage(writer, request, name)
 }

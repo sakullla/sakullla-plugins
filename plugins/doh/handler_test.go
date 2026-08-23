@@ -43,8 +43,8 @@ func TestHomepageServesChineseGuideWithoutDNS(t *testing.T) {
 		`id="doh-url"`,
 		`id="copy-doh-url"`,
 		"复制地址",
-		`href="/style.css"`,
-		`src="/app.js"`,
+		`href="style.css"`,
+		`src="app.js"`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("homepage missing %q", want)
@@ -68,7 +68,7 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 	js := script.Body.String()
 	for _, want := range []string{
 		"window.location.origin",
-		`replace(/\/$/, "")`,
+		"window.location.pathname",
 		`"/dns-query"`,
 		"navigator.clipboard",
 		"#copy-doh-url",
@@ -104,10 +104,20 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 		t.Fatalf("index.html status=%d", index.Code)
 	}
 
-	unknown := httptest.NewRecorder()
-	service.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/resolve", nil))
-	if unknown.Code != http.StatusNotFound || calls.Load() != 0 {
-		t.Fatalf("unknown status=%d calls=%d", unknown.Code, calls.Load())
+	prefixed := httptest.NewRecorder()
+	service.ServeHTTP(prefixed, httptest.NewRequest(http.MethodGet, "/doh/", nil))
+	if prefixed.Code != http.StatusOK || !strings.Contains(prefixed.Body.String(), "DNS over HTTPS") || calls.Load() != 0 {
+		t.Fatalf("prefixed homepage status=%d calls=%d", prefixed.Code, calls.Load())
+	}
+	redirect := httptest.NewRecorder()
+	service.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/doh", nil))
+	if redirect.Code != http.StatusPermanentRedirect || redirect.Header().Get("Location") != "/doh/" {
+		t.Fatalf("prefix redirect status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	}
+	prefixedScript := httptest.NewRecorder()
+	service.ServeHTTP(prefixedScript, httptest.NewRequest(http.MethodGet, "/doh/app.js", nil))
+	if prefixedScript.Code != http.StatusOK || !strings.Contains(prefixedScript.Body.String(), "window.location.pathname") {
+		t.Fatalf("prefixed script status=%d", prefixedScript.Code)
 	}
 
 	post := httptest.NewRecorder()
@@ -140,8 +150,44 @@ func TestDNSQueryPathStillRFC8484(t *testing.T) {
 	if invalid.Code < 400 || invalid.Code >= 500 || !strings.Contains(invalid.Body.String(), "Bad Request") {
 		t.Fatalf("invalid /dns-query status=%d body=%q", invalid.Code, invalid.Body.String())
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("invalid query hit upstream calls=%d", calls.Load())
+
+	prefixed := homepageDNSRequest(http.MethodPost, homepageDNSQuery(5, "prefixed.example", 1))
+	prefixed.URL.Path = "/doh/dns-query"
+	prefixedPost := httptest.NewRecorder()
+	service.ServeHTTP(prefixedPost, prefixed)
+	if prefixedPost.Code != http.StatusOK || prefixedPost.Header().Get("Content-Type") != "application/dns-message" {
+		t.Fatalf("POST /doh/dns-query status=%d type=%q", prefixedPost.Code, prefixedPost.Header().Get("Content-Type"))
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("resolver calls=%d", calls.Load())
+	}
+}
+
+func TestClassifyPublicPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path     string
+		kind     string
+		redirect string
+	}{
+		{path: "/", kind: publicPathHTML},
+		{path: "/index.html", kind: publicPathHTML},
+		{path: "/app.js", kind: publicPathJS},
+		{path: "/style.css", kind: publicPathCSS},
+		{path: "/dns-query", kind: publicPathDNS},
+		{path: "/doh", kind: publicPathHTML, redirect: "/doh/"},
+		{path: "/doh/", kind: publicPathHTML},
+		{path: "/doh/index.html", kind: publicPathHTML},
+		{path: "/doh/app.js", kind: publicPathJS},
+		{path: "/doh/style.css", kind: publicPathCSS},
+		{path: "/doh/dns-query", kind: publicPathDNS},
+		{path: "/gateway/v1/dns-query", kind: publicPathDNS},
+	}
+	for _, test := range cases {
+		kind, redirect := classifyPublicPath(test.path)
+		if kind != test.kind || redirect != test.redirect {
+			t.Fatalf("path %q kind=%q redirect=%q want %q %q", test.path, kind, redirect, test.kind, test.redirect)
+		}
 	}
 }
 
