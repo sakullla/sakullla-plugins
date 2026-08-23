@@ -74,6 +74,10 @@ type Mapping struct {
 	BridgeHost   string `json:"bridge_host,omitempty"`
 	BridgePort   int    `json:"bridge_port,omitempty"`
 	Revision     uint64 `json:"revision"`
+	// RecoveryGeneration is a monotonic attempt counter used only to mint
+	// recovery host operation ids. Zero is compatible with older snapshots
+	// and is not part of the user-facing mapping specification.
+	RecoveryGeneration uint64 `json:"recovery_generation,omitempty"`
 }
 
 // MappingStatus is the management-page projection of one mapping: the record

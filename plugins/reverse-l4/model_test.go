@@ -79,7 +79,7 @@ func TestMappingStateRoundTripRejectsUnknownFieldsAndDuplicates(t *testing.T) {
 		ID: "tcp-map", EntryAgentID: "entry-agent", ExitAgentID: "exit-agent",
 		Protocol: ProtocolTCP, ListenPort: 8443, BackendHost: "127.0.0.1", BackendPort: 9443,
 		Enabled: true, RuleRef: "12", SessionRef: "channel/entry-agent/exit-agent",
-		BridgeHost: "127.0.0.1", BridgePort: 6001, Revision: 3, RelayChain: []int{4, 5},
+		BridgeHost: "127.0.0.1", BridgePort: 6001, Revision: 3, RecoveryGeneration: 4, RelayChain: []int{4, 5},
 	}}}
 	encoded, err := encodeMappingState(snapshot)
 	if err != nil {
@@ -92,8 +92,18 @@ func TestMappingStateRoundTripRejectsUnknownFieldsAndDuplicates(t *testing.T) {
 	if decoded.Revision != 7 || len(decoded.Mappings) != 1 || decoded.Mappings[0].ID != "tcp-map" {
 		t.Fatalf("round trip = %#v", decoded)
 	}
+	if decoded.Mappings[0].RecoveryGeneration != 4 {
+		t.Fatalf("round trip recovery generation = %d", decoded.Mappings[0].RecoveryGeneration)
+	}
 	if chain := decoded.Mappings[0].RelayChain; len(chain) != 2 || chain[0] != 4 || chain[1] != 5 {
 		t.Fatalf("round trip relay chain = %v", chain)
+	}
+	legacy, err := decodeMappingState([]byte(`{"revision":1,"mappings":[{"id":"tcp-map","entry_agent_id":"entry-agent","exit_agent_id":"exit-agent","protocol":"tcp","listen_port":8443,"backend_host":"127.0.0.1","backend_port":9443,"enabled":true,"revision":3}]}`))
+	if err != nil {
+		t.Fatalf("legacy snapshot without recovery generation error = %v", err)
+	}
+	if legacy.Mappings[0].RecoveryGeneration != 0 {
+		t.Fatalf("legacy recovery generation = %d", legacy.Mappings[0].RecoveryGeneration)
 	}
 	duplicated, err := json.Marshal(mappingStateSnapshot{Mappings: []Mapping{snapshot.Mappings[0], snapshot.Mappings[0]}})
 	if err != nil {
@@ -171,5 +181,28 @@ func TestStableOperationKeysAreDeterministicAndRevisionDistinct(t *testing.T) {
 	}
 	if len(first) > 512 {
 		t.Fatalf("operation key exceeds the policy identity bound: %d", len(first))
+	}
+}
+
+func TestRecoveryOperationKeysAreAttemptScoped(t *testing.T) {
+	t.Parallel()
+	first := recoveryOperationKey("channel.ensure", "tcp-map", 3, 1)
+	if first != recoveryOperationKey("channel.ensure", "tcp-map", 3, 1) {
+		t.Fatal("recovery operation key is not deterministic")
+	}
+	if first == recoveryOperationKey("channel.ensure", "tcp-map", 3, 2) {
+		t.Fatal("recovery operation key ignores generation")
+	}
+	if first == recoveryOperationKey("channel.ensure", "tcp-map", 4, 1) {
+		t.Fatal("recovery operation key ignores the mapping revision")
+	}
+	if first == recoveryOperationKey("rule.update", "tcp-map", 3, 1) {
+		t.Fatal("recovery operation key ignores the action")
+	}
+	if first == mutationOperationKey("channel.ensure", "tcp-map", 3) {
+		t.Fatal("recovery operation key collides with an admin mutation key")
+	}
+	if len(first) > 512 {
+		t.Fatalf("recovery operation key exceeds the policy identity bound: %d", len(first))
 	}
 }

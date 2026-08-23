@@ -33,7 +33,8 @@ type fakeHostRuntime struct {
 	nextRuleID     int
 	nextBridgePort int
 
-	failRuleCreateAttempts int
+	failRuleCreateAttempts    int
+	failChannelEnsureAttempts int
 
 	blockStatusRefs map[string]struct{}
 	statusEntered   map[string]chan struct{}
@@ -52,6 +53,8 @@ type fakeSession struct {
 	relayChain                         []int
 	bridgeHost                         string
 	bridgePort                         int
+	entryLost                          bool
+	exitLost                           bool
 }
 
 type fakeRule struct {
@@ -179,6 +182,10 @@ func (host *fakeHostRuntime) dispatch(call pluginsdk.HostRuntimeCall) (string, e
 func (host *fakeHostRuntime) dispatchChannel(request pluginsdk.ChannelReverseRequest) (string, error) {
 	switch request.Action {
 	case pluginsdk.ChannelReverseActionEnsure:
+		if host.failChannelEnsureAttempts > 0 {
+			host.failChannelEnsureAttempts--
+			return "", &pluginsdk.RuntimeError{Code: pluginsdk.ErrorUnavailable, Message: "injected channel failure", Retryable: true}
+		}
 		sessionRef := request.SessionRef
 		if sessionRef == "" {
 			sessionRef = fmt.Sprintf("channel/%s/%s", request.EntryAgentID, request.ExitAgentID)
@@ -188,16 +195,36 @@ func (host *fakeHostRuntime) dispatchChannel(request pluginsdk.ChannelReverseReq
 			host.nextBridgePort++
 			session = &fakeSession{bridgeHost: "127.0.0.1", bridgePort: host.nextBridgePort}
 			host.sessions[sessionRef] = session
+		} else if session.entryLost {
+			host.nextBridgePort++
+			session.bridgeHost = "127.0.0.1"
+			session.bridgePort = host.nextBridgePort
+			session.entryLost = false
 		}
+		session.exitLost = false
 		session.entry, session.exit = request.EntryAgentID, request.ExitAgentID
 		session.protocol, session.backendHost, session.backendPort = request.Protocol, request.BackendHost, request.BackendPort
 		session.relayChain = append([]int(nil), request.RelayChain...)
 		return fmt.Sprintf(`{"session_ref":%q,"state":"online","bridge_host":%q,"bridge_port":%d}`, sessionRef, session.bridgeHost, session.bridgePort), nil
 	case pluginsdk.ChannelReverseActionStatus:
-		if _, ok := host.sessions[request.SessionRef]; !ok {
+		session, ok := host.sessions[request.SessionRef]
+		if !ok {
 			return fmt.Sprintf(`{"session_ref":%q,"state":"offline","last_error":"reverse channel is not established"}`, request.SessionRef), nil
 		}
-		return fmt.Sprintf(`{"session_ref":%q,"state":"online"}`, request.SessionRef), nil
+		if session.entryLost || session.exitLost {
+			lastError := "reverse channel is not established"
+			switch {
+			case session.entryLost && !session.exitLost:
+				lastError = "entry session is gone"
+			case session.exitLost && !session.entryLost:
+				lastError = "exit session is gone"
+			}
+			if !session.entryLost {
+				return fmt.Sprintf(`{"session_ref":%q,"state":"offline","last_error":%q,"bridge_host":%q,"bridge_port":%d}`, request.SessionRef, lastError, session.bridgeHost, session.bridgePort), nil
+			}
+			return fmt.Sprintf(`{"session_ref":%q,"state":"offline","last_error":%q}`, request.SessionRef, lastError), nil
+		}
+		return fmt.Sprintf(`{"session_ref":%q,"state":"online","bridge_host":%q,"bridge_port":%d}`, request.SessionRef, session.bridgeHost, session.bridgePort), nil
 	case pluginsdk.ChannelReverseActionTeardown:
 		delete(host.sessions, request.SessionRef)
 		return fmt.Sprintf(`{"session_ref":%q,"state":"offline"}`, request.SessionRef), nil
@@ -286,7 +313,8 @@ func (host *fakeHostRuntime) session(sessionRef string) *fakeSession {
 	if session, ok := host.sessions[sessionRef]; ok {
 		return &fakeSession{entry: session.entry, exit: session.exit, protocol: session.protocol,
 			backendHost: session.backendHost, backendPort: session.backendPort,
-			relayChain: append([]int(nil), session.relayChain...), bridgeHost: session.bridgeHost, bridgePort: session.bridgePort}
+			relayChain: append([]int(nil), session.relayChain...), bridgeHost: session.bridgeHost, bridgePort: session.bridgePort,
+			entryLost: session.entryLost, exitLost: session.exitLost}
 	}
 	return nil
 }
@@ -295,6 +323,34 @@ func (host *fakeHostRuntime) dropChannel(sessionRef string) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	delete(host.sessions, sessionRef)
+}
+
+func (host *fakeHostRuntime) dropEntry(sessionRef string) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if session, ok := host.sessions[sessionRef]; ok {
+		session.entryLost = true
+	}
+}
+
+func (host *fakeHostRuntime) dropExit(sessionRef string) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if session, ok := host.sessions[sessionRef]; ok {
+		session.exitLost = true
+	}
+}
+
+func (host *fakeHostRuntime) sessionCount() int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return len(host.sessions)
+}
+
+func (host *fakeHostRuntime) ruleCount() int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return len(host.rules)
 }
 
 func (host *fakeHostRuntime) forgetRule(ruleRef string) {
@@ -1118,4 +1174,435 @@ func containsTag(tags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func recoveryMappingSpec() Mapping {
+	spec := orchestrationMapping("tcp-map", ProtocolTCP)
+	spec.Name = "内网 Web"
+	spec.RelayChain = []int{4, 5, 7}
+	return spec
+}
+
+func assertMappingUserSpec(t *testing.T, got, want Mapping) {
+	t.Helper()
+	if got.ID != want.ID || got.Name != want.Name || got.EntryAgentID != want.EntryAgentID || got.ExitAgentID != want.ExitAgentID {
+		t.Fatalf("mapping identity = %#v, want %#v", got, want)
+	}
+	if got.Protocol != want.Protocol || got.ListenPort != want.ListenPort || got.BackendHost != want.BackendHost || got.BackendPort != want.BackendPort {
+		t.Fatalf("mapping spec = %#v, want %#v", got, want)
+	}
+	if len(got.RelayChain) != len(want.RelayChain) {
+		t.Fatalf("relay chain = %v, want %v", got.RelayChain, want.RelayChain)
+	}
+	for index, hop := range want.RelayChain {
+		if got.RelayChain[index] != hop {
+			t.Fatalf("relay chain = %v, want %v", got.RelayChain, want.RelayChain)
+		}
+	}
+}
+
+func assertRecoveredOnline(t *testing.T, host *fakeHostRuntime, mapping Mapping) {
+	t.Helper()
+	session := host.session(mapping.SessionRef)
+	if session == nil || session.entryLost || session.exitLost {
+		t.Fatalf("recovered session = %#v", session)
+	}
+	if session.entry != mapping.EntryAgentID || session.exit != mapping.ExitAgentID || session.protocol != mapping.Protocol {
+		t.Fatalf("recovered session owners = %#v", session)
+	}
+	if session.backendHost != mapping.BackendHost || session.backendPort != mapping.BackendPort {
+		t.Fatalf("recovered session backend = %s:%d", session.backendHost, session.backendPort)
+	}
+	if len(session.relayChain) != len(mapping.RelayChain) {
+		t.Fatalf("recovered relay chain = %v, want %v", session.relayChain, mapping.RelayChain)
+	}
+	for index, hop := range mapping.RelayChain {
+		if session.relayChain[index] != hop {
+			t.Fatalf("recovered relay chain = %v, want %v", session.relayChain, mapping.RelayChain)
+		}
+	}
+	rule := host.rule(mapping.RuleRef)
+	if rule == nil || !rule.enabled || rule.agentID != mapping.EntryAgentID || rule.protocol != mapping.Protocol || rule.listenPort != mapping.ListenPort {
+		t.Fatalf("recovered rule = %#v", rule)
+	}
+	if len(rule.backends) != 1 || rule.backends[0].Host != mapping.BridgeHost || rule.backends[0].Port != mapping.BridgePort {
+		t.Fatalf("recovered rule backends = %#v, want %s:%d", rule.backends, mapping.BridgeHost, mapping.BridgePort)
+	}
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
+func TestRecoveryRestoresLostEntryOrExitSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drop func(*fakeHostRuntime, string)
+	}{
+		{name: "entry", drop: (*fakeHostRuntime).dropEntry},
+		{name: "exit", drop: (*fakeHostRuntime).dropExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := newFakeHostRuntime(t)
+			service := newOrchestrationService(t, host)
+
+			disabledSpec := orchestrationMapping("disabled-map", ProtocolTCP)
+			disabledSpec.EntryAgentID = "disabled-entry"
+			disabledSpec.ExitAgentID = "disabled-exit"
+			disabledSpec.ListenPort = 8444
+			disabled, err := service.Create(t.Context(), disabledSpec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.SetEnabled(t.Context(), disabled.ID, false); err != nil {
+				t.Fatal(err)
+			}
+
+			created, err := service.Create(t.Context(), recoveryMappingSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalBridge := created.BridgePort
+			tc.drop(host, created.SessionRef)
+			offline, err := service.Status(t.Context(), created.ID)
+			if err != nil || offline.ChannelState != ChannelOffline {
+				t.Fatalf("dropped status = %#v err=%v", offline, err)
+			}
+
+			if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+				t.Fatal(err)
+			}
+			listed, err := service.List(t.Context())
+			if err != nil || len(listed) != 2 {
+				t.Fatalf("listed mappings = %#v err=%v", listed, err)
+			}
+			var recovered, keptDisabled Mapping
+			for _, mapping := range listed {
+				switch mapping.ID {
+				case created.ID:
+					recovered = mapping
+				case disabled.ID:
+					keptDisabled = mapping
+				}
+			}
+			assertMappingUserSpec(t, recovered, created)
+			if recovered.Revision != created.Revision {
+				t.Fatalf("recovery changed user revision from %d to %d", created.Revision, recovered.Revision)
+			}
+			if recovered.SessionRef != created.SessionRef {
+				t.Fatalf("recovery changed logical session from %q to %q", created.SessionRef, recovered.SessionRef)
+			}
+			if recovered.RecoveryGeneration == 0 {
+				t.Fatal("recovery did not advance generation")
+			}
+			online, err := service.Status(t.Context(), created.ID)
+			if err != nil || online.ChannelState != ChannelOnline {
+				t.Fatalf("recovered status = %#v err=%v", online, err)
+			}
+			assertRecoveredOnline(t, host, recovered)
+			if tc.name == "entry" && recovered.BridgePort == originalBridge {
+				t.Fatal("entry recovery kept the lost entry bridge")
+			}
+			if tc.name == "exit" && recovered.BridgePort != originalBridge {
+				t.Fatalf("exit recovery changed bridge from %d to %d", originalBridge, recovered.BridgePort)
+			}
+			if host.sessionCount() != 1 || host.ruleCount() != 2 {
+				t.Fatalf("host sessions=%d rules=%d, want one channel and the disabled mapping's kept rule", host.sessionCount(), host.ruleCount())
+			}
+			if keptDisabled.ID != disabled.ID || keptDisabled.Enabled {
+				t.Fatalf("disabled mapping = %#v", keptDisabled)
+			}
+			if session := host.session(disabled.SessionRef); session != nil {
+				t.Fatalf("disabled mapping was rebuilt: %#v", session)
+			}
+			if err := service.recoverMapping(t.Context(), disabled.ID); err != nil {
+				t.Fatal(err)
+			}
+			if session := host.session(disabled.SessionRef); session != nil {
+				t.Fatalf("disabled mapping recovered after explicit tick: %#v", session)
+			}
+		})
+	}
+}
+
+func TestRecoveryRepeatsKeepSingleLogicalSessionAndRule(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), recoveryMappingSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 2; round++ {
+		host.dropEntry(created.SessionRef)
+		if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+			t.Fatalf("recovery round %d: %v", round, err)
+		}
+	}
+	listed, err := service.List(t.Context())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("listed mappings = %#v err=%v", listed, err)
+	}
+	recovered := listed[0]
+	assertMappingUserSpec(t, recovered, created)
+	if recovered.SessionRef != created.SessionRef {
+		t.Fatalf("repeated recovery changed session ref from %q to %q", created.SessionRef, recovered.SessionRef)
+	}
+	if host.sessionCount() != 1 || host.ruleCount() != 1 {
+		t.Fatalf("host sessions=%d rules=%d after repeated recovery", host.sessionCount(), host.ruleCount())
+	}
+	assertRecoveredOnline(t, host, recovered)
+	if recovered.RuleRef != created.RuleRef {
+		t.Fatalf("repeated recovery created a new rule %q, want %q", recovered.RuleRef, created.RuleRef)
+	}
+}
+
+func TestRecoveryFailureKeepsMappingAndRetryEligibility(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), recoveryMappingSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.dropExit(created.SessionRef)
+	host.failChannelEnsureAttempts = 1
+	if err := service.recoverMapping(t.Context(), created.ID); !errors.Is(err, ErrHostRuntimeUnavailable) {
+		t.Fatalf("injected recovery failure = %v", err)
+	}
+	listed, err := service.List(t.Context())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("failed recovery listed = %#v err=%v", listed, err)
+	}
+	failed := listed[0]
+	if !failed.Enabled {
+		t.Fatalf("recovery failure disabled the mapping: %#v", failed)
+	}
+	assertMappingUserSpec(t, failed, created)
+	if failed.SessionRef != created.SessionRef || failed.RuleRef != created.RuleRef {
+		t.Fatalf("recovery failure rewrote refs: %#v", failed)
+	}
+	if failed.RecoveryGeneration == 0 {
+		t.Fatal("failed recovery did not keep the advanced generation")
+	}
+	offline, err := service.Status(t.Context(), created.ID)
+	if err != nil || offline.ChannelState != ChannelOffline {
+		t.Fatalf("failed recovery status = %#v err=%v", offline, err)
+	}
+
+	if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := service.List(t.Context())
+	if err != nil || len(retried) != 1 {
+		t.Fatalf("retried recovery listed = %#v err=%v", retried, err)
+	}
+	if retried[0].RecoveryGeneration <= failed.RecoveryGeneration {
+		t.Fatalf("retry reused generation %d", retried[0].RecoveryGeneration)
+	}
+	online, err := service.Status(t.Context(), created.ID)
+	if err != nil || online.ChannelState != ChannelOnline {
+		t.Fatalf("retried recovery status = %#v err=%v", online, err)
+	}
+	assertRecoveredOnline(t, host, retried[0])
+}
+
+func TestRecoveryRacesWithUpdateDisableAndDelete(t *testing.T) {
+	t.Run("update", func(t *testing.T) {
+		host := newFakeHostRuntime(t)
+		service := newOrchestrationService(t, host)
+		created, err := service.Create(t.Context(), recoveryMappingSpec())
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.dropEntry(created.SessionRef)
+		spec := created
+		spec.ListenPort = 9543
+		spec.BackendPort = 8080
+		spec.Name = "更新后的 Web"
+		spec.RelayChain = []int{8, 9}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = service.recoverMapping(t.Context(), created.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = service.Update(t.Context(), spec)
+		}()
+		wg.Wait()
+
+		listed, err := service.List(t.Context())
+		if err != nil || len(listed) != 1 {
+			t.Fatalf("listed mappings = %#v err=%v", listed, err)
+		}
+		final := listed[0]
+		assertMappingUserSpec(t, final, spec)
+		if !final.Enabled {
+			t.Fatalf("update race disabled the mapping: %#v", final)
+		}
+		assertRecoveredOnline(t, host, final)
+		if host.sessionCount() != 1 || host.ruleCount() != 1 {
+			t.Fatalf("update race host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+		}
+		service.recoverAll(t.Context())
+		after, err := service.List(t.Context())
+		if err != nil || len(after) != 1 {
+			t.Fatalf("post-tick mappings = %#v err=%v", after, err)
+		}
+		assertMappingUserSpec(t, after[0], spec)
+	})
+
+	t.Run("disable", func(t *testing.T) {
+		host := newFakeHostRuntime(t)
+		service := newOrchestrationService(t, host)
+		created, err := service.Create(t.Context(), recoveryMappingSpec())
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.dropExit(created.SessionRef)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = service.recoverMapping(t.Context(), created.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = service.SetEnabled(t.Context(), created.ID, false)
+		}()
+		wg.Wait()
+
+		listed, err := service.List(t.Context())
+		if err != nil || len(listed) != 1 || listed[0].Enabled {
+			t.Fatalf("disabled race listed = %#v err=%v", listed, err)
+		}
+		assertMappingUserSpec(t, listed[0], created)
+		if session := host.session(listed[0].SessionRef); session != nil {
+			t.Fatalf("disabled mapping left a live session: %#v", session)
+		}
+		rule := host.rule(listed[0].RuleRef)
+		if rule == nil || rule.enabled {
+			t.Fatalf("disabled mapping host rule = %#v", rule)
+		}
+		if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+			t.Fatal(err)
+		}
+		service.recoverAll(t.Context())
+		if session := host.session(listed[0].SessionRef); session != nil {
+			t.Fatalf("later tick rebuilt a disabled mapping: %#v", session)
+		}
+		kept, err := service.List(t.Context())
+		if err != nil || len(kept) != 1 || kept[0].Enabled {
+			t.Fatalf("later tick listed = %#v err=%v", kept, err)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		host := newFakeHostRuntime(t)
+		service := newOrchestrationService(t, host)
+		created, err := service.Create(t.Context(), recoveryMappingSpec())
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.dropEntry(created.SessionRef)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = service.recoverMapping(t.Context(), created.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = service.Delete(t.Context(), created.ID)
+		}()
+		wg.Wait()
+
+		listed, err := service.List(t.Context())
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("deleted race listed = %#v err=%v", listed, err)
+		}
+		if host.sessionCount() != 0 || host.ruleCount() != 0 {
+			t.Fatalf("deleted race left host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+		}
+		if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+			t.Fatal(err)
+		}
+		service.recoverAll(t.Context())
+		if remaining, err := service.List(t.Context()); err != nil || len(remaining) != 0 {
+			t.Fatalf("later tick rebuilt a deleted mapping: %#v err=%v", remaining, err)
+		}
+		if host.sessionCount() != 0 || host.ruleCount() != 0 {
+			t.Fatalf("later tick left host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+		}
+	})
+}
+
+func TestControllerActivateRecoversLostSessionsAndStopHaltsTicks(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	runtime := bindHostRuntime(host)
+	controller, err := NewController(ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		State:       newDurableMappingState(runtime),
+		Runtime:     runtime,
+		BindRuntime: func() *hostRuntime { return runtime },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.stop(t.Context(), nil) })
+	if err := controller.prepare(t.Context(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := controller.Service()
+	if service == nil {
+		t.Fatal("prepared controller exposes no orchestration service")
+	}
+	created, err := service.Create(t.Context(), recoveryMappingSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.dropEntry(created.SessionRef)
+
+	started := time.Now()
+	if err := controller.activate(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("activate blocked on recovery host I/O for %s", elapsed)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		status, err := service.Status(t.Context(), created.ID)
+		return err == nil && status.ChannelState == ChannelOnline
+	}, "activate scan did not restore the lost entry session")
+	listed, err := service.List(t.Context())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("listed mappings = %#v err=%v", listed, err)
+	}
+	assertMappingUserSpec(t, listed[0], created)
+	assertRecoveredOnline(t, host, listed[0])
+
+	if err := controller.stop(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if controller.Service() != nil {
+		t.Fatal("stop left the orchestration service mounted")
+	}
+	host.dropExit(listed[0].SessionRef)
+	time.Sleep(2 * recoveryScanInterval)
+	offline, err := service.Status(t.Context(), created.ID)
+	if err != nil || offline.ChannelState != ChannelOffline {
+		t.Fatalf("stopped controller kept recovering: %#v err=%v", offline, err)
+	}
 }

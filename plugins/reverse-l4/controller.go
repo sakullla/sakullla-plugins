@@ -124,13 +124,18 @@ func (controller *Controller) activate(context.Context, *rpcplugin.Generation) e
 	if controller.service == nil {
 		return errors.New("mapping service was not prepared")
 	}
+	controller.service.startRecovery()
 	return nil
 }
 
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
 	controller.mu.Lock()
+	service := controller.service
 	controller.service = nil
 	controller.mu.Unlock()
+	if service != nil {
+		service.stopRecovery()
+	}
 	return nil
 }
 

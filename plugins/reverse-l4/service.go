@@ -18,6 +18,15 @@ import (
 // entries to unknown instead of blocking the catalog.
 const statusCollectionTimeout = 5 * time.Second
 
+// recoveryScanInterval is the background retry period after the immediate
+// activate scan. It is kept short relative to ordinary admin wait time and
+// is package-internal; the external status SLA remains five seconds.
+const recoveryScanInterval = time.Second
+
+// recoveryAttemptTimeout bounds one locked recovery attempt so a hung host
+// call cannot stall Create/Update/SetEnabled/Delete indefinitely.
+const recoveryAttemptTimeout = 3 * time.Second
+
 // Service orchestrates mapping records against two generic host effects: the
 // entry-side host L4 rule and the host-managed reverse channel. Every mutation
 // persists the durable catalog only after its host effects succeeded, and
@@ -27,6 +36,10 @@ type Service struct {
 	mu      sync.Mutex
 	state   mappingState
 	runtime *hostRuntime
+
+	recoveryMu     sync.Mutex
+	recoveryCancel context.CancelFunc
+	recoveryDone   <-chan struct{}
 }
 
 func NewService(state mappingState, runtime *hostRuntime) (*Service, error) {
@@ -228,6 +241,7 @@ func (service *Service) Create(ctx context.Context, mapping Mapping) (Mapping, e
 	mapping.RuleRef, mapping.SessionRef, mapping.BridgeHost, mapping.BridgePort = "", "", "", 0
 	mapping.Enabled = true
 	mapping.Revision = 0
+	mapping.RecoveryGeneration = 0
 	assignID := mapping.ID == ""
 	if !assignID {
 		if err := mapping.Validate(); err != nil {
@@ -299,6 +313,7 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 	updated.RuleRef, updated.SessionRef = existing.RuleRef, existing.SessionRef
 	updated.BridgeHost, updated.BridgePort = existing.BridgeHost, existing.BridgePort
 	updated.Revision = existing.Revision
+	updated.RecoveryGeneration = existing.RecoveryGeneration
 	if err := updated.Validate(); err != nil {
 		return Mapping{}, err
 	}
@@ -477,6 +492,217 @@ func (service *Service) Delete(ctx context.Context, id string) error {
 		}
 	}
 	return service.commit(ctx, snapshot, Mapping{}, &existing.ID)
+}
+
+// startRecovery launches one immediate catalog scan and a periodic retry
+// loop. Activate must return without waiting for host I/O; Stop cancels the
+// loop and waits for in-flight attempts to observe the cancel.
+func (service *Service) startRecovery() {
+	if service == nil {
+		return
+	}
+	service.stopRecovery()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	service.recoveryMu.Lock()
+	service.recoveryCancel = cancel
+	service.recoveryDone = done
+	service.recoveryMu.Unlock()
+	go func() {
+		defer close(done)
+		service.recoveryLoop(ctx)
+	}()
+}
+
+func (service *Service) stopRecovery() {
+	if service == nil {
+		return
+	}
+	service.recoveryMu.Lock()
+	cancel := service.recoveryCancel
+	done := service.recoveryDone
+	service.recoveryCancel = nil
+	service.recoveryDone = nil
+	service.recoveryMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (service *Service) recoveryLoop(ctx context.Context) {
+	service.recoverAll(ctx)
+	ticker := time.NewTicker(recoveryScanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			service.recoverAll(ctx)
+		}
+	}
+}
+
+func (service *Service) recoverAll(ctx context.Context) {
+	if service == nil || !service.runtimeAvailable() {
+		return
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+	}
+	service.mu.Lock()
+	snapshot, err := service.state.Load(ctx)
+	service.mu.Unlock()
+	if err != nil {
+		return
+	}
+	for _, mapping := range snapshot.Mappings {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return
+			}
+		}
+		if !mapping.Enabled {
+			continue
+		}
+		_ = service.recoverMapping(ctx, mapping.ID)
+	}
+}
+
+func (service *Service) recoverMapping(ctx context.Context, id string) error {
+	if service == nil {
+		return ErrStateUnavailable
+	}
+	if !service.runtimeAvailable() {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	attemptCtx, cancel := context.WithTimeout(ctx, recoveryAttemptTimeout)
+	defer cancel()
+
+	snapshot, err := service.state.Load(attemptCtx)
+	if err != nil {
+		return err
+	}
+	mapping, ok := snapshot.mapping(id)
+	if !ok || !mapping.Enabled {
+		return nil
+	}
+
+	needed, err := service.mappingNeedsRecovery(attemptCtx, mapping)
+	if err != nil {
+		return err
+	}
+	if !needed {
+		return nil
+	}
+
+	mapping.RecoveryGeneration++
+	if err := service.commit(attemptCtx, snapshot, mapping, nil); err != nil {
+		return err
+	}
+	snapshot, err = service.state.Load(attemptCtx)
+	if err != nil {
+		return err
+	}
+	current, ok := snapshot.mapping(id)
+	if !ok || !current.Enabled || current.Revision != mapping.Revision {
+		return nil
+	}
+
+	session, err := service.ensureChannelRecovery(attemptCtx, current)
+	if err != nil {
+		return err
+	}
+	restored := current
+	restored.SessionRef = session.SessionRef
+	restored.BridgeHost, restored.BridgePort = session.BridgeHost, session.BridgePort
+	if err := service.alignRecoveredRule(attemptCtx, &restored, session); err != nil {
+		return err
+	}
+	return service.commit(attemptCtx, snapshot, restored, nil)
+}
+
+func (service *Service) mappingNeedsRecovery(ctx context.Context, mapping Mapping) (bool, error) {
+	if mapping.SessionRef == "" || mapping.RuleRef == "" {
+		return true, nil
+	}
+	session, err := service.runtime.channelStatus(ctx, mapping.SessionRef)
+	if err != nil {
+		if errors.Is(err, ErrHostRejectedRequest) {
+			return true, nil
+		}
+		return false, err
+	}
+	if channelStateNormalize(session.State) != ChannelOnline {
+		return true, nil
+	}
+	if session.BridgeHost != "" && session.BridgePort > 0 &&
+		(session.BridgeHost != mapping.BridgeHost || session.BridgePort != mapping.BridgePort) {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (service *Service) ensureChannelRecovery(ctx context.Context, mapping Mapping) (channelSession, error) {
+	request := pluginsdk.ChannelReverseRequest{
+		Action:       pluginsdk.ChannelReverseActionEnsure,
+		EntryAgentID: mapping.EntryAgentID,
+		ExitAgentID:  mapping.ExitAgentID,
+		Protocol:     mapping.Protocol,
+		BackendHost:  mapping.BackendHost,
+		BackendPort:  mapping.BackendPort,
+		RelayChain:   append([]int(nil), mapping.RelayChain...),
+		SessionRef:   mapping.SessionRef,
+	}
+	if err := request.Validate(); err != nil {
+		return channelSession{}, fmt.Errorf("%w: %v", ErrInvalidMapping, err)
+	}
+	operation := recoveryOperationKey("channel.ensure", mapping.ID, mapping.Revision, mapping.RecoveryGeneration)
+	return service.runtime.ensureChannel(ctx, operation, request)
+}
+
+func (service *Service) alignRecoveredRule(ctx context.Context, mapping *Mapping, session channelSession) error {
+	operation := func(action string) string {
+		return recoveryOperationKey(action, mapping.ID, mapping.Revision, mapping.RecoveryGeneration)
+	}
+	if mapping.RuleRef == "" {
+		rule, err := service.runtime.createRule(ctx, operation("rule.create"), ruleRequest(*mapping, session))
+		if err != nil {
+			return err
+		}
+		mapping.RuleRef = rule.RuleRef
+		return nil
+	}
+	request := ruleRequest(*mapping, session)
+	request.RuleRef = mapping.RuleRef
+	enabled := true
+	request.Enabled = &enabled
+	if _, err := service.runtime.updateRule(ctx, operation("rule.update"), request); err != nil {
+		if !errors.Is(err, ErrHostRejectedRequest) {
+			return err
+		}
+		rule, createErr := service.runtime.createRule(ctx, operation("rule.create"), ruleRequest(*mapping, session))
+		if createErr != nil {
+			return createErr
+		}
+		mapping.RuleRef = rule.RuleRef
+	}
+	return nil
 }
 
 func (service *Service) ensureChannelFor(ctx context.Context, mapping Mapping, sessionRef string, revision uint64) (channelSession, error) {
