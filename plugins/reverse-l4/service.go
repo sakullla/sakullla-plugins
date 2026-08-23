@@ -8,9 +8,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+// statusCollectionTimeout is the single GET /api/mappings budget shared by
+// every enabled mapping lookup. Deadline or cancel degrades unfinished
+// entries to unknown instead of blocking the catalog.
+const statusCollectionTimeout = 5 * time.Second
 
 // Service orchestrates mapping records against two generic host effects: the
 // entry-side host L4 rule and the host-managed reverse channel. Every mutation
@@ -73,11 +79,15 @@ func (service *Service) Status(ctx context.Context, id string) (MappingStatus, e
 }
 
 // Statuses projects the whole catalog with per-mapping reverse-channel
-// connectivity for the management page. A failing channel poll degrades that
-// single mapping to unknown instead of hiding the catalog.
+// connectivity for the management page. Enabled mappings are looked up
+// concurrently under one five-second budget; a failing, canceled, or
+// timed-out lookup degrades only that mapping to unknown.
 func (service *Service) Statuses(ctx context.Context) ([]MappingStatus, error) {
 	if service == nil {
 		return nil, ErrStateUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	service.mu.Lock()
 	snapshot, err := service.state.Load(ctx)
@@ -85,13 +95,72 @@ func (service *Service) Statuses(ctx context.Context) ([]MappingStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	statuses := make([]MappingStatus, 0, len(snapshot.Mappings))
-	for _, mapping := range snapshot.Mappings {
-		status, err := service.channelStatusFor(ctx, mapping)
-		if err != nil {
-			status = MappingStatus{Mapping: mapping, ChannelState: ChannelUnknown}
+	statuses := make([]MappingStatus, len(snapshot.Mappings))
+	filled := make([]bool, len(snapshot.Mappings))
+	type lookupJob struct {
+		index   int
+		mapping Mapping
+	}
+	jobs := make([]lookupJob, 0, len(snapshot.Mappings))
+	for index, mapping := range snapshot.Mappings {
+		if mapping.Enabled && mapping.SessionRef != "" && service.runtimeAvailable() {
+			jobs = append(jobs, lookupJob{index: index, mapping: mapping})
+			continue
 		}
-		statuses = append(statuses, status)
+		status, _ := service.lookupChannelStatus(ctx, mapping)
+		statuses[index] = status
+		filled[index] = true
+	}
+	if len(jobs) == 0 {
+		return statuses, nil
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, statusCollectionTimeout)
+	defer cancel()
+	type lookupResult struct {
+		index  int
+		status MappingStatus
+	}
+	results := make(chan lookupResult, len(jobs))
+	for _, job := range jobs {
+		go func(job lookupJob) {
+			status, _ := service.lookupChannelStatus(lookupCtx, job.mapping)
+			results <- lookupResult{index: job.index, status: status}
+		}(job)
+	}
+
+	remaining := len(jobs)
+	for remaining > 0 {
+		select {
+		case got := <-results:
+			statuses[got.index] = got.status
+			filled[got.index] = true
+			remaining--
+		case <-lookupCtx.Done():
+			remaining = 0
+		}
+	}
+	if lookupCtx.Err() != nil {
+	drainStatusResults:
+		for {
+			select {
+			case got := <-results:
+				statuses[got.index] = got.status
+				filled[got.index] = true
+			default:
+				break drainStatusResults
+			}
+		}
+		for _, job := range jobs {
+			if filled[job.index] {
+				continue
+			}
+			statuses[job.index] = MappingStatus{
+				Mapping:      job.mapping,
+				ChannelState: ChannelUnknown,
+				LastError:    statusLookupLastError(lookupCtx.Err()),
+			}
+		}
 	}
 	return statuses, nil
 }
@@ -99,28 +168,53 @@ func (service *Service) Statuses(ctx context.Context) ([]MappingStatus, error) {
 // channelStatusFor derives the management-page connectivity projection of one
 // durable mapping record.
 func (service *Service) channelStatusFor(ctx context.Context, mapping Mapping) (MappingStatus, error) {
+	return service.lookupChannelStatus(ctx, mapping)
+}
+
+// lookupChannelStatus projects one mapping's live reverse-channel state.
+// Host lookup errors are returned for single-item Status callers; Statuses
+// keeps the unknown projection and bounded LastError instead.
+func (service *Service) lookupChannelStatus(ctx context.Context, mapping Mapping) (MappingStatus, error) {
 	status := MappingStatus{Mapping: mapping, ChannelState: ChannelUnknown}
 	switch {
 	case !mapping.Enabled:
 		status.ChannelState = ChannelOffline
+		return status, nil
 	case mapping.SessionRef == "":
-		status.ChannelState = ChannelUnknown
+		return status, nil
 	case !service.runtimeAvailable():
-		// keep unknown: connectivity is not observable without the host runtime
+		status.LastError = statusLookupLastError(ErrHostRuntimeUnavailable)
+		return status, nil
 	default:
-		session, err := service.runtime.channelStatus(ctx, pollOperationKey("channel.status", mapping.ID), mapping.SessionRef)
+		session, err := service.runtime.channelStatus(ctx, mapping.SessionRef)
 		if err != nil {
 			if errors.Is(err, ErrHostRejectedRequest) {
 				status.ChannelState = ChannelOffline
 				status.LastError = "reverse channel session is gone"
-				break
+				return status, nil
 			}
-			return MappingStatus{}, err
+			status.LastError = statusLookupLastError(err)
+			return status, err
 		}
 		status.ChannelState = channelStateNormalize(session.State)
-		status.LastError = session.LastError
+		status.LastError = safeHostText(session.LastError)
+		return status, nil
 	}
-	return status, nil
+}
+
+func statusLookupLastError(err error) string {
+	kind := "host-error"
+	message := "channel status is unavailable"
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			kind = "timeout"
+		case errors.Is(err, context.Canceled):
+			kind = "cancel"
+		}
+		message = err.Error()
+	}
+	return safeHostText(kind + ": " + message)
 }
 
 // Create provisions a new mapping: establish the reverse channel first, then

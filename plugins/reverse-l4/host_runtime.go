@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -81,10 +80,12 @@ func (runtime *hostRuntime) ensureChannel(ctx context.Context, operationID strin
 	return result, nil
 }
 
-func (runtime *hostRuntime) channelStatus(ctx context.Context, operationID, sessionRef string) (channelSession, error) {
+// channelStatus is a live read-only lookup. It never sends an operation id,
+// so the host cannot pin the result to a cached mutation outcome.
+func (runtime *hostRuntime) channelStatus(ctx context.Context, sessionRef string) (channelSession, error) {
 	request := pluginsdk.ChannelReverseRequest{Action: pluginsdk.ChannelReverseActionStatus, SessionRef: sessionRef}
 	var result channelSession
-	err := runtime.call(ctx, operationID, pluginsdk.HostRuntimeChannelReverse, request, &result)
+	err := runtime.call(ctx, "", pluginsdk.HostRuntimeChannelReverse, request, &result)
 	if err != nil {
 		return channelSession{}, err
 	}
@@ -183,6 +184,11 @@ func (runtime *hostRuntime) call(ctx context.Context, operationID, operation str
 	if !runtime.available() {
 		return ErrHostRuntimeUnavailable
 	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("%w: encode %s request", ErrHostOperationFailed, operation)
@@ -195,6 +201,14 @@ func (runtime *hostRuntime) call(ctx context.Context, operationID, operation str
 		return fmt.Errorf("%w: %s request is invalid: %v", ErrHostOperationFailed, operation, err)
 	}
 	if err := runtime.client.Call(ctx, call, result); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if ctx != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+		}
 		var runtimeErr *pluginsdk.RuntimeError
 		if errors.As(err, &runtimeErr) {
 			switch runtimeErr.Code {
@@ -218,12 +232,6 @@ func mutationOperationKey(action, mappingID string, revision uint64) string {
 	return stableOperationKey("reverse-l4", action, mappingID, revisionString(revision))
 }
 
-// pollOperationKey mints a fresh operation id for read-only status polls so
-// each poll observes the current channel state instead of a cached outcome.
-func pollOperationKey(action, mappingID string) string {
-	return stableOperationKey("reverse-l4", action, mappingID, randomToken())
-}
-
 func stableOperationKey(fields ...string) string {
 	digest := sha256.New()
 	for _, field := range fields {
@@ -235,14 +243,6 @@ func stableOperationKey(fields ...string) string {
 
 func revisionString(revision uint64) string {
 	return fmt.Sprintf("rev-%d", revision)
-}
-
-func randomToken() string {
-	var buffer [16]byte
-	if _, err := rand.Read(buffer[:]); err != nil {
-		return fmt.Sprintf("nonce-%d", rand.Int63())
-	}
-	return hex.EncodeToString(buffer[:])
 }
 
 // safeHostText keeps host-provided messages bounded and single-line.

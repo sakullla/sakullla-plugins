@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -33,6 +34,10 @@ type fakeHostRuntime struct {
 	nextBridgePort int
 
 	failRuleCreateAttempts int
+
+	blockStatusRefs map[string]struct{}
+	statusEntered   map[string]chan struct{}
+	statusExited    map[string]chan struct{}
 }
 
 type fakeHostCall struct {
@@ -73,13 +78,26 @@ func newFakeHostRuntime(t *testing.T) *fakeHostRuntime {
 	}
 }
 
-func (host *fakeHostRuntime) Call(_ context.Context, call pluginsdk.HostRuntimeCall, result any) error {
+func (host *fakeHostRuntime) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, result any) error {
 	if err := call.Validate(); err != nil {
 		return err
 	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	host.mu.Lock()
+	host.calls = append(host.calls, fakeHostCall{Operation: call.Operation, OperationID: call.OperationID, Payload: string(call.Payload)})
+	sessionRef, isStatus := channelStatusSessionRef(call)
+	_, block := host.blockStatusRefs[sessionRef]
+	host.mu.Unlock()
+	if isStatus && block {
+		return host.waitBlockedStatus(ctx, sessionRef)
+	}
+
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	host.calls = append(host.calls, fakeHostCall{Operation: call.Operation, OperationID: call.OperationID, Payload: string(call.Payload)})
 
 	if call.OperationID != "" {
 		fingerprint := call.Operation + "\x00" + string(call.Payload)
@@ -290,6 +308,96 @@ func (host *fakeHostRuntime) resetCalls() {
 	defer host.mu.Unlock()
 	host.calls = nil
 	host.executedCalls = nil
+}
+
+func (host *fakeHostRuntime) blockChannelStatus(sessionRef string) (entered, exited <-chan struct{}) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if host.blockStatusRefs == nil {
+		host.blockStatusRefs = map[string]struct{}{}
+		host.statusEntered = map[string]chan struct{}{}
+		host.statusExited = map[string]chan struct{}{}
+	}
+	enteredCh := make(chan struct{})
+	exitedCh := make(chan struct{})
+	host.blockStatusRefs[sessionRef] = struct{}{}
+	host.statusEntered[sessionRef] = enteredCh
+	host.statusExited[sessionRef] = exitedCh
+	return enteredCh, exitedCh
+}
+
+func (host *fakeHostRuntime) waitBlockedStatus(ctx context.Context, sessionRef string) error {
+	host.mu.Lock()
+	entered := host.statusEntered[sessionRef]
+	exited := host.statusExited[sessionRef]
+	host.mu.Unlock()
+	closeSignal(entered)
+	defer closeSignal(exited)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (host *fakeHostRuntime) outcomeKeys() []string {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	keys := make([]string, 0, len(host.outcomes))
+	for key := range host.outcomes {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (host *fakeHostRuntime) statusLookups() []fakeHostCall {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	matched := make([]fakeHostCall, 0, len(host.calls))
+	for _, call := range host.calls {
+		if _, ok := channelStatusSessionRef(pluginsdk.HostRuntimeCall{Operation: call.Operation, OperationID: call.OperationID, Payload: json.RawMessage(call.Payload)}); ok {
+			matched = append(matched, call)
+		}
+	}
+	return matched
+}
+
+func channelStatusSessionRef(call pluginsdk.HostRuntimeCall) (string, bool) {
+	if call.Operation != pluginsdk.HostRuntimeChannelReverse {
+		return "", false
+	}
+	var request pluginsdk.ChannelReverseRequest
+	if json.Unmarshal(call.Payload, &request) != nil {
+		return "", false
+	}
+	if request.Action != pluginsdk.ChannelReverseActionStatus {
+		return "", false
+	}
+	return request.SessionRef, true
+}
+
+func closeSignal(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}
+
+func assertBoundedLastError(t *testing.T, lastError string) {
+	t.Helper()
+	if lastError == "" {
+		t.Fatal("LastError is empty")
+	}
+	if strings.ContainsAny(lastError, "\r\n") {
+		t.Fatalf("LastError contains a newline: %q", lastError)
+	}
+	if len(lastError) > 200 {
+		t.Fatalf("LastError length %d exceeds 200: %q", len(lastError), lastError)
+	}
 }
 
 func (host *fakeHostRuntime) callCount(operation string) int {
@@ -610,6 +718,7 @@ func TestStatusDistinguishesChannelConnectivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	outcomeCount := len(host.outcomeKeys())
 	online, err := service.Status(t.Context(), "tcp-map")
 	if err != nil || online.ChannelState != ChannelOnline {
 		t.Fatalf("online status = %#v err=%v", online, err)
@@ -622,14 +731,240 @@ func TestStatusDistinguishesChannelConnectivity(t *testing.T) {
 	if host.callCount("channel.reverse") <= before {
 		t.Fatal("status polls must not be pinned to one cached durable outcome")
 	}
+	listed, err := service.Statuses(t.Context())
+	if err != nil || len(listed) != 1 || listed[0].ChannelState != ChannelOnline {
+		t.Fatalf("catalog statuses = %#v err=%v", listed, err)
+	}
 	host.dropChannel(created.SessionRef)
 	gone, err := service.Status(t.Context(), "tcp-map")
 	if err != nil || gone.ChannelState != ChannelOffline || gone.LastError == "" {
 		t.Fatalf("offline status = %#v err=%v", gone, err)
 	}
+	repeated, err := service.Statuses(t.Context())
+	if err != nil || len(repeated) != 1 || repeated[0].ChannelState != ChannelOffline || repeated[0].LastError == "" {
+		t.Fatalf("repeated statuses after drop = %#v err=%v", repeated, err)
+	}
+	for _, call := range host.statusLookups() {
+		if call.OperationID != "" {
+			t.Fatalf("status lookup carried operation id %#v", call)
+		}
+	}
+	if got := len(host.outcomeKeys()); got != outcomeCount {
+		t.Fatalf("status lookup created mutation outcomes: before=%d after=%d", outcomeCount, got)
+	}
 	if _, err := service.Status(t.Context(), "missing-map"); !errors.Is(err, ErrMappingNotFound) {
 		t.Fatalf("unknown mapping status error = %v", err)
 	}
+}
+
+func TestStatusesBoundsConcurrentLookupsAndDegradesBlockedMapping(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+
+	disabledSpec := orchestrationMapping("alpha-disabled", ProtocolTCP)
+	disabledSpec.EntryAgentID = "disabled-entry"
+	disabledSpec.ExitAgentID = "disabled-exit"
+	disabledSpec.ListenPort = 8441
+	if _, err := service.Create(t.Context(), disabledSpec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetEnabled(t.Context(), "alpha-disabled", false); err != nil {
+		t.Fatal(err)
+	}
+
+	onlineSpec := orchestrationMapping("beta-online", ProtocolTCP)
+	onlineSpec.EntryAgentID = "online-entry"
+	onlineSpec.ExitAgentID = "online-exit"
+	onlineSpec.ListenPort = 8442
+	online, err := service.Create(t.Context(), onlineSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blockedSpec := orchestrationMapping("gamma-blocked", ProtocolTCP)
+	blockedSpec.EntryAgentID = "blocked-entry"
+	blockedSpec.ExitAgentID = "blocked-exit"
+	blockedSpec.ListenPort = 8443
+	blocked, err := service.Create(t.Context(), blockedSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, exited := host.blockChannelStatus(blocked.SessionRef)
+	host.resetCalls()
+
+	started := time.Now()
+	statuses, err := service.Statuses(t.Context())
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > statusCollectionTimeout+time.Second {
+		t.Fatalf("Statuses took %s, want within the 5s collection budget", elapsed)
+	}
+	if elapsed < statusCollectionTimeout-250*time.Millisecond {
+		t.Fatalf("Statuses returned in %s, want to wait the 5s budget for the blocked lookup", elapsed)
+	}
+	if len(statuses) != 3 {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if statuses[0].ID != "alpha-disabled" || statuses[0].ChannelState != ChannelOffline || statuses[0].LastError != "" {
+		t.Fatalf("disabled status = %#v", statuses[0])
+	}
+	if statuses[1].ID != "beta-online" || statuses[1].ChannelState != ChannelOnline || statuses[1].SessionRef != online.SessionRef {
+		t.Fatalf("online status = %#v", statuses[1])
+	}
+	if statuses[2].ID != "gamma-blocked" || statuses[2].ChannelState != ChannelUnknown || statuses[2].SessionRef != blocked.SessionRef {
+		t.Fatalf("blocked status = %#v", statuses[2])
+	}
+	assertBoundedLastError(t, statuses[2].LastError)
+	if !strings.HasPrefix(statuses[2].LastError, "timeout:") {
+		t.Fatalf("blocked LastError = %q, want timeout prefix", statuses[2].LastError)
+	}
+
+	lookups := host.statusLookups()
+	if len(lookups) != 2 {
+		t.Fatalf("channel status calls = %d, want 2 enabled lookups: %#v", len(lookups), lookups)
+	}
+	for _, lookup := range lookups {
+		if lookup.OperationID != "" {
+			t.Fatalf("status lookup carried operation id %q", lookup.OperationID)
+		}
+		ref, _ := channelStatusSessionRef(pluginsdk.HostRuntimeCall{Operation: lookup.Operation, Payload: json.RawMessage(lookup.Payload)})
+		if ref == "" || strings.Contains(ref, "disabled") {
+			t.Fatalf("disabled mapping triggered a status lookup: %#v", lookup)
+		}
+	}
+	waitClosed(t, exited, time.Second, "blocked status worker did not exit after the collection deadline")
+}
+
+func TestStatusesStopsWhenRequestContextCanceled(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+
+	firstSpec := orchestrationMapping("alpha-map", ProtocolTCP)
+	firstSpec.EntryAgentID = "alpha-entry"
+	firstSpec.ExitAgentID = "alpha-exit"
+	firstSpec.ListenPort = 8441
+	first, err := service.Create(t.Context(), firstSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSpec := orchestrationMapping("beta-map", ProtocolTCP)
+	secondSpec.EntryAgentID = "beta-entry"
+	secondSpec.ExitAgentID = "beta-exit"
+	secondSpec.ListenPort = 8442
+	second, err := service.Create(t.Context(), secondSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enteredFirst, exitedFirst := host.blockChannelStatus(first.SessionRef)
+	enteredSecond, exitedSecond := host.blockChannelStatus(second.SessionRef)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		statuses []MappingStatus
+		err      error
+	}, 1)
+	go func() {
+		statuses, err := service.Statuses(ctx)
+		done <- struct {
+			statuses []MappingStatus
+			err      error
+		}{statuses, err}
+	}()
+	waitClosed(t, enteredFirst, 2*time.Second, "first status worker did not start")
+	waitClosed(t, enteredSecond, 2*time.Second, "second status worker did not start")
+	cancel()
+
+	var result struct {
+		statuses []MappingStatus
+		err      error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Statuses kept waiting after the request context was canceled")
+	}
+	if result.err != nil {
+		t.Fatalf("canceled Statuses error = %v", result.err)
+	}
+	if len(result.statuses) != 2 {
+		t.Fatalf("canceled statuses = %#v", result.statuses)
+	}
+	for _, status := range result.statuses {
+		if status.ChannelState != ChannelUnknown {
+			t.Fatalf("canceled status = %#v", status)
+		}
+		assertBoundedLastError(t, status.LastError)
+		if !strings.HasPrefix(status.LastError, "cancel:") {
+			t.Fatalf("canceled LastError = %q, want cancel prefix", status.LastError)
+		}
+	}
+	waitClosed(t, exitedFirst, time.Second, "first status worker did not exit after cancel")
+	waitClosed(t, exitedSecond, time.Second, "second status worker did not exit after cancel")
+}
+
+func TestStatusesObservesLiveHostStateWithoutMutationOutcome(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), orchestrationMapping("tcp-map", ProtocolTCP))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeOutcomes := append([]string(nil), host.outcomeKeys()...)
+	host.resetCalls()
+
+	first, err := service.Statuses(t.Context())
+	if err != nil || len(first) != 1 || first[0].ChannelState != ChannelOnline || first[0].SessionRef != created.SessionRef || first[0].RuleRef != created.RuleRef {
+		t.Fatalf("live statuses = %#v err=%v", first, err)
+	}
+	if lookups := host.statusLookups(); len(lookups) != 1 || lookups[0].OperationID != "" {
+		t.Fatalf("first status lookups = %#v", lookups)
+	}
+	if after := host.outcomeKeys(); !sameStrings(beforeOutcomes, after) {
+		t.Fatalf("status lookup mutated outcomes: before=%v after=%v", beforeOutcomes, after)
+	}
+
+	host.dropChannel(created.SessionRef)
+	second, err := service.Statuses(t.Context())
+	if err != nil || len(second) != 1 || second[0].ChannelState != ChannelOffline || second[0].LastError == "" {
+		t.Fatalf("dropped-session statuses = %#v err=%v", second, err)
+	}
+	if second[0].SessionRef != created.SessionRef || second[0].RuleRef != created.RuleRef {
+		t.Fatalf("status lookup changed mapping refs: %#v", second[0])
+	}
+	if lookups := host.statusLookups(); len(lookups) != 2 {
+		t.Fatalf("repeated status lookups = %d, want a fresh host read", len(lookups))
+	}
+	if after := host.outcomeKeys(); !sameStrings(beforeOutcomes, after) {
+		t.Fatalf("repeated status lookup mutated outcomes: before=%v after=%v", beforeOutcomes, after)
+	}
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, message string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+		t.Fatal(message)
+	}
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, value := range left {
+		counts[value]++
+	}
+	for _, value := range right {
+		counts[value]--
+		if counts[value] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestCreateGeneratesMappingIDAndKeepsRelayOrder(t *testing.T) {
