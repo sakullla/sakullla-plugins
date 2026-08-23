@@ -997,6 +997,49 @@ func TestStatusesObservesLiveHostStateWithoutMutationOutcome(t *testing.T) {
 	}
 }
 
+func TestStatusesDoesNotWaitOnInFlightRecoveryHostLookup(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), orchestrationMapping("tcp-map", ProtocolTCP))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, exited := host.blockChannelStatus(created.SessionRef)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- service.recoverMapping(t.Context(), created.ID)
+	}()
+	waitClosed(t, entered, 2*time.Second, "recovery status lookup did not start")
+
+	started := time.Now()
+	statuses, err := service.Statuses(t.Context())
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > statusCollectionTimeout+time.Second {
+		t.Fatalf("Statuses waited %s on recovery host I/O, want within the 5s collection budget", elapsed)
+	}
+	if elapsed < statusCollectionTimeout-250*time.Millisecond {
+		t.Fatalf("Statuses returned in %s, want to wait the 5s budget for the blocked lookup", elapsed)
+	}
+	if len(statuses) != 1 || statuses[0].ID != created.ID || statuses[0].ChannelState != ChannelUnknown {
+		t.Fatalf("statuses during blocked recovery = %#v", statuses)
+	}
+	assertBoundedLastError(t, statuses[0].LastError)
+
+	select {
+	case recErr := <-done:
+		if !errors.Is(recErr, context.DeadlineExceeded) {
+			t.Fatalf("blocked recovery error = %v", recErr)
+		}
+	case <-time.After(recoveryAttemptTimeout + time.Second):
+		t.Fatal("recovery did not observe its attempt deadline")
+	}
+	waitClosed(t, exited, time.Second, "recovery status worker did not exit after the attempt deadline")
+}
+
 func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, message string) {
 	t.Helper()
 	select {
