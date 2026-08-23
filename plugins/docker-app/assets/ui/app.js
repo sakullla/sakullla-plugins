@@ -492,7 +492,9 @@ const renderWorkspace = async () => {
 
 const loadAgents = async () => {
   const payload = await panelJSON("/panel-api/agents");
-  agentsCache = Array.isArray(payload.agents) ? payload.agents : [];
+  agentsCache = Array.isArray(payload.agents)
+    ? payload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local")
+    : [];
   const requested = new URLSearchParams(window.location.search).get("agent_id") || "";
   agentSelect.replaceChildren();
   const placeholder = document.createElement("option");

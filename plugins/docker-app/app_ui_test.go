@@ -378,6 +378,9 @@ func TestAppUIDoesNotConfigurePluginOntoAgentOrOfferRemoteInstall(t *testing.T) 
 	if strings.Contains(script, "targets") && strings.Contains(script, "selectedAgentID") && strings.Contains(script, "configure") {
 		t.Fatal("plugin page still configures docker-app onto the selected Agent")
 	}
+	if !strings.Contains(script, `agent.is_local !== true`) || !strings.Contains(script, `agent.mode !== "local"`) {
+		t.Fatal("plugin page does not exclude the embedded local management Agent from execution targets")
+	}
 }
 
 func TestAppUIRejectsInvalidComposeWithoutMutatingExisting(t *testing.T) {
