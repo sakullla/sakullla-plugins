@@ -308,6 +308,14 @@ func TestProjectHTTPBackendCatalogUsesComposePortsAndAvailability(t *testing.T) 
 	if err != nil || len(stopped) != 1 || stopped[0].Available {
 		t.Fatalf("stopped catalog = %#v err=%v", stopped, err)
 	}
+	missingOverlay, err := dockerapp.ProjectHTTPBackendCatalog([]dockerapp.App{hub}, nil, map[string]bool{}, true)
+	if err != nil || len(missingOverlay) != 1 || !missingOverlay[0].Available {
+		t.Fatalf("missing runtime overlay catalog = %#v err=%v", missingOverlay, err)
+	}
+	otherAppOnly, err := dockerapp.ProjectHTTPBackendCatalog([]dockerapp.App{hub}, nil, map[string]bool{"worker": false}, true)
+	if err != nil || len(otherAppOnly) != 1 || !otherAppOnly[0].Available {
+		t.Fatalf("unrelated runtime overlay catalog = %#v err=%v", otherAppOnly, err)
+	}
 	ungranted, err := dockerapp.ProjectHTTPBackendCatalog([]dockerapp.App{hub}, nil, map[string]bool{"hubproxy": true}, false)
 	if err != nil || len(ungranted) != 0 {
 		t.Fatalf("ungranted catalog = %#v err=%v", ungranted, err)

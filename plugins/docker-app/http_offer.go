@@ -167,10 +167,7 @@ func ProjectHTTPBackendCatalog(apps []App, observations []ContainerObservation, 
 		if name == "" {
 			name = offer.AppID
 		}
-		available := offer.Available
-		if running != nil {
-			available = running[offer.AppID]
-		}
+		available := catalogOfferAvailable(offer, running)
 		for _, port := range offer.Ports {
 			if port == 0 {
 				continue
@@ -200,6 +197,17 @@ func ProjectHTTPBackendCatalog(apps []App, observations []ContainerObservation, 
 		return catalog[i].Port < catalog[j].Port
 	})
 	return catalog, nil
+}
+
+func catalogOfferAvailable(offer HTTPOffer, running map[string]bool) bool {
+	if running == nil {
+		return offer.Available
+	}
+	stored, ok := running[offer.AppID]
+	if !ok {
+		return offer.Available
+	}
+	return stored
 }
 
 // ListHTTPBackendProviders is the backend-provider catalog projection.

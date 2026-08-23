@@ -300,6 +300,27 @@ func TestAppUIPublishesHTTPBackendOffersAfterDeployAndStop(t *testing.T) {
 	}
 }
 
+func TestAppUIPublishesHTTPBackendOffersAvailableWhenRuntimeOverlayIsMissing(t *testing.T) {
+	t.Parallel()
+	offers := &recordingHTTPBackendOffers{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		httpOffers: offers,
+		config:     `{"apps":[{"id":"hubproxy","agent_id":"agent-1","compose":"services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n    ports:\n      - \"5000:5000\"\n","generation":"generation-1"}]}`,
+	})
+	if len(controller.Apps()) != 1 || controller.appIsRunning("hubproxy") != true {
+		t.Fatalf("seeded app should project running without overlay: apps=%#v", controller.Apps())
+	}
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK || len(offers.offers) == 0 {
+		t.Fatalf("list status=%d offers=%#v body=%s", listed.Code, offers.offers, listed.Body.String())
+	}
+	last := offers.offers[len(offers.offers)-1]
+	if len(last) != 1 || last[0].ResourceID != "hubproxy" || last[0].Port != 5000 || !last[0].Available {
+		t.Fatalf("missing overlay catalog=%#v", last)
+	}
+}
+
 func TestAppUIHTTPRuleListFailureDoesNotRecordLocalSuccess(t *testing.T) {
 	t.Parallel()
 	handle := &recordingHTTPRuleCreate{listErr: errors.New("host list rejected fixture-value")}
