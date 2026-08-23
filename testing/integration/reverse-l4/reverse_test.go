@@ -286,7 +286,7 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{
-		ABI: pluginsdk.RPCABIV1, PluginID: "reverse-l4", PluginVersion: "0.2.1",
+		ABI: pluginsdk.RPCABIV1, PluginID: reversel4.PluginID, PluginVersion: reversel4.PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		GrantedScopes: grants, Generation: "generation-1",
 	}
