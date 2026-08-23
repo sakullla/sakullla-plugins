@@ -127,12 +127,34 @@ func writeUnauthorized(writer http.ResponseWriter) {
 }
 
 func (handler *Handler) serveDAV(writer http.ResponseWriter, request *http.Request, scope requestScope) {
+	if isConditionalCreate(request) {
+		ctx, state := withConditionalCreate(request.Context())
+		request = request.WithContext(ctx)
+		writer = &conditionalCreateResponseWriter{ResponseWriter: writer, state: state}
+	}
 	dav := &xwebdav.Handler{
 		Prefix:     DavPrefix,
 		FileSystem: shareFS{root: scope.root},
 		LockSystem: handler.lockSystem(scope.lockKey),
 	}
 	dav.ServeHTTP(writer, request)
+}
+
+func isConditionalCreate(request *http.Request) bool {
+	values := request.Header.Values("If-None-Match")
+	return request.Method == http.MethodPut && len(values) == 1 && strings.TrimSpace(values[0]) == "*"
+}
+
+type conditionalCreateResponseWriter struct {
+	http.ResponseWriter
+	state *conditionalCreateState
+}
+
+func (writer *conditionalCreateResponseWriter) WriteHeader(status int) {
+	if writer.state.preconditionFailed() {
+		status = http.StatusPreconditionFailed
+	}
+	writer.ResponseWriter.WriteHeader(status)
 }
 
 func (handler *Handler) lockSystem(key string) xwebdav.LockSystem {

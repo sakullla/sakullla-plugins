@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -189,6 +190,177 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(owned, "folder", "moved.txt")); !os.IsNotExist(err) {
 		t.Fatalf("dav delete left file: %v", err)
 	}
+}
+
+func TestWebDAVConditionalPut(t *testing.T) {
+	conditionalPut := func(t *testing.T, handler http.Handler, target, contents string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, target, strings.NewReader(contents))
+		request.Header.Set("If-None-Match", " * ")
+		setBearerAuth(request, testSharePassword)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	t.Run("creates a missing resource", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		response := conditionalPut(t, controller, "http://share.test/dav/new.txt", "complete-body")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("conditional put status = %d, want 201 body=%q", response.Code, response.Body.String())
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "new.txt"))
+		if err != nil || string(body) != "complete-body" {
+			t.Fatalf("created file = %q err=%v", body, err)
+		}
+	})
+
+	t.Run("rejects an existing file without changing it", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "existing.txt")
+		if err := os.WriteFile(target, []byte("original-body"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := conditionalPut(t, controller, "http://share.test/dav/existing.txt", "replacement-body")
+		if response.Code != http.StatusPreconditionFailed {
+			t.Fatalf("conditional put status = %d, want 412 body=%q", response.Code, response.Body.String())
+		}
+		body, err := os.ReadFile(target)
+		if err != nil || string(body) != "original-body" {
+			t.Fatalf("existing file = %q err=%v", body, err)
+		}
+		after, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Mode() != before.Mode() {
+			t.Fatalf("existing file mode = %v, want %v", after.Mode(), before.Mode())
+		}
+	})
+
+	t.Run("rejects an existing directory", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "existing-dir")
+		if err := os.Mkdir(target, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		response := conditionalPut(t, controller, "http://share.test/dav/existing-dir", "replacement-body")
+		if response.Code != http.StatusPreconditionFailed {
+			t.Fatalf("conditional put status = %d, want 412 body=%q", response.Code, response.Body.String())
+		}
+		info, err := os.Stat(target)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("existing directory changed: info=%v err=%v", info, err)
+		}
+	})
+
+	t.Run("other conditions retain ordinary overwrite behavior", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			values []string
+		}{
+			{name: "missing header"},
+			{name: "other etag", values: []string{`"other-etag"`}},
+			{name: "combined value", values: []string{`*, "other-etag"`}},
+			{name: "repeated wildcard", values: []string{"*", "*"}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				controller, owned := startShare(t, "")
+				target := filepath.Join(owned, "ordinary.txt")
+				if err := os.WriteFile(target, []byte("old-body"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/ordinary.txt", strings.NewReader("new-body"))
+				for _, value := range test.values {
+					request.Header.Add("If-None-Match", value)
+				}
+				setBearerAuth(request, testSharePassword)
+				response := httptest.NewRecorder()
+				controller.ServeHTTP(response, request)
+				if response.Code != http.StatusCreated {
+					t.Fatalf("put with If-None-Match %q status = %d, want 201 body=%q", test.values, response.Code, response.Body.String())
+				}
+				body, err := os.ReadFile(target)
+				if err != nil || string(body) != "new-body" {
+					t.Fatalf("overwritten file = %q err=%v", body, err)
+				}
+			})
+		}
+	})
+
+	t.Run("missing parent remains a filesystem conflict", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		response := conditionalPut(t, controller, "http://share.test/dav/missing/child.txt", "body")
+		if response.Code == http.StatusPreconditionFailed {
+			t.Fatalf("missing parent was reported as 412 body=%q", response.Body.String())
+		}
+		if response.Code != http.StatusConflict {
+			t.Fatalf("conditional put status = %d, want 409 body=%q", response.Code, response.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(owned, "missing", "child.txt")); !os.IsNotExist(err) {
+			t.Fatalf("missing-parent put created a file: %v", err)
+		}
+	})
+
+	t.Run("competing creates have one winner", func(t *testing.T) {
+		owned := t.TempDir()
+		handlers := make([]http.Handler, 2)
+		for index := range handlers {
+			handler, err := NewHandler(owned, testSharePassword)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handlers[index] = handler
+		}
+		contents := []string{"first-body", "second-body"}
+		responses := make([]*httptest.ResponseRecorder, len(handlers))
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for index := range handlers {
+			wait.Add(1)
+			go func(index int) {
+				defer wait.Done()
+				<-start
+				request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/race.txt", strings.NewReader(contents[index]))
+				request.Header.Set("If-None-Match", "*")
+				setBearerAuth(request, testSharePassword)
+				response := httptest.NewRecorder()
+				handlers[index].ServeHTTP(response, request)
+				responses[index] = response
+			}(index)
+		}
+		close(start)
+		wait.Wait()
+
+		winner := -1
+		for index, response := range responses {
+			switch response.Code {
+			case http.StatusCreated:
+				if winner != -1 {
+					t.Fatalf("multiple conditional creates succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+				}
+				winner = index
+			case http.StatusPreconditionFailed:
+			default:
+				t.Fatalf("conditional create %d status = %d body=%q", index, response.Code, response.Body.String())
+			}
+		}
+		if winner == -1 {
+			t.Fatalf("no conditional create succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "race.txt"))
+		if err != nil || string(body) != contents[winner] {
+			t.Fatalf("winning file = %q, want %q err=%v", body, contents[winner], err)
+		}
+	})
 }
 
 func TestRootPathSwitchAndCloseKeepExternalFiles(t *testing.T) {

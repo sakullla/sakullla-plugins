@@ -175,6 +175,51 @@ func TestAuthenticationAndUserIsolation(t *testing.T) {
 	}
 }
 
+func TestWebDAVConditionalPut(t *testing.T) {
+	root := t.TempDir()
+	controller, err := webdav.NewController(webdav.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", OwnedRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activateController(t, controller, "conditional-put")
+
+	put := func(name, body string, conditional bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/"+name, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+testSharePassword)
+		if conditional {
+			request.Header.Set("If-None-Match", "*")
+		}
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	if created := put("created.txt", "created-body", true); created.Code != http.StatusCreated {
+		t.Fatalf("conditional create = %d %q", created.Code, created.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "created.txt")); err != nil || string(body) != "created-body" {
+		t.Fatalf("conditional create body = %q err=%v", body, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("original-body"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if rejected := put("existing.txt", "replacement-body", true); rejected.Code != http.StatusPreconditionFailed {
+		t.Fatalf("conditional overwrite = %d %q", rejected.Code, rejected.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "existing.txt")); err != nil || string(body) != "original-body" {
+		t.Fatalf("rejected overwrite body = %q err=%v", body, err)
+	}
+
+	if overwritten := put("existing.txt", "replacement-body", false); overwritten.Code != http.StatusCreated {
+		t.Fatalf("ordinary overwrite = %d %q", overwritten.Code, overwritten.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "existing.txt")); err != nil || string(body) != "replacement-body" {
+		t.Fatalf("ordinary overwrite body = %q err=%v", body, err)
+	}
+}
+
 func activateControllerWithConfig(t *testing.T, controller *webdav.Controller, generation string, config []byte) {
 	t.Helper()
 	request := handshakeRequest(generation)
