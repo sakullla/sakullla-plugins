@@ -346,7 +346,11 @@ type failingStatusHost struct {
 
 func (host *failingStatusHost) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, result any) error {
 	if call.Operation == pluginsdk.HostRuntimeChannelReverse && strings.Contains(string(call.Payload), `"status"`) {
-		return &pluginsdk.RuntimeError{Code: pluginsdk.ErrorUnavailable, Message: "channel status is unavailable", Retryable: true}
+		return &pluginsdk.RuntimeError{
+			Code:      pluginsdk.ErrorUnavailable,
+			Message:   strings.Repeat("channel status is unavailable\n", 20),
+			Retryable: true,
+		}
 	}
 	return host.fakeHostRuntime.Call(ctx, call, result)
 }
@@ -369,6 +373,10 @@ func TestStatusesDegradesPollFailureToUnknown(t *testing.T) {
 	}
 	if len(statuses) != 1 || statuses[0].ChannelState != ChannelUnknown || !statuses[0].Enabled {
 		t.Fatalf("degraded statuses = %#v err=%v", statuses, err)
+	}
+	assertBoundedLastError(t, statuses[0].LastError)
+	if !strings.HasPrefix(statuses[0].LastError, "host-error:") {
+		t.Fatalf("poll-failure LastError = %q, want host-error prefix", statuses[0].LastError)
 	}
 
 	if _, err := service.Status(t.Context(), "tcp-map"); !errors.Is(err, ErrHostRuntimeUnavailable) {

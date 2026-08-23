@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	reversel4 "github.com/sakullla/sakullla-plugins/plugins/reverse-l4"
@@ -47,8 +48,15 @@ func TestReverseControllerZeroConfigLifecycleWithoutHostRuntime(t *testing.T) {
 		if response := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
 			t.Fatalf("prepare error = %#v", response.Error)
 		}
+		started := time.Now()
 		if response := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
 			t.Fatalf("activation without host runtime failed closed: %#v", response.Error)
+		}
+		t.Cleanup(func() {
+			_ = controller.Stop(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"})
+		})
+		if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+			t.Fatalf("activation blocked on recovery host I/O for %s", elapsed)
 		}
 		service := controller.Service()
 		if service == nil {
@@ -195,6 +203,21 @@ func TestReverseManifestDeclaresControlPlaneCapabilities(t *testing.T) {
 		if strings.Contains(source, "net.Listen(") || strings.Contains(source, "net.Dial(") {
 			t.Fatalf("%s opens its own listener or dialer instead of using host effects", name)
 		}
+	}
+
+	controllerSrc, err := os.ReadFile(filepath.Join(pluginDir, "controller.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(controllerSrc), "startRecovery") || !strings.Contains(string(controllerSrc), "stopRecovery") {
+		t.Fatal("controller lifecycle does not start and stop the mapping recovery coordinator")
+	}
+	modelSrc, err := os.ReadFile(filepath.Join(pluginDir, "model.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(modelSrc), "RecoveryGeneration") {
+		t.Fatal("mapping model is missing the recovery generation used for host operation ids")
 	}
 
 	moduleBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "go.mod"))
