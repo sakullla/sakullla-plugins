@@ -128,7 +128,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:      []string{"docker-app.business-model"},
+		Capabilities:      requiredGrants(),
 		RequiredGrants:    requiredGrants(),
 		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
 		Timeouts:          timeouts,

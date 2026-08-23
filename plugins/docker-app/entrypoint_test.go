@@ -6,7 +6,33 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+func TestDockerHandshakeDoesNotAdvertiseUngrantedCapabilities(t *testing.T) {
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+	}
+	response, err := controller.Handshake(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	granted := make(map[string]bool, len(request.GrantedScopes))
+	for _, scope := range request.GrantedScopes {
+		granted[scope] = true
+	}
+	for _, capability := range response.Capabilities {
+		if !granted[capability] {
+			t.Fatalf("handshake advertised ungranted capability %q", capability)
+		}
+	}
+}
 
 func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 	t.Setenv("NRE_PLUGIN_ENDPOINT", "")
