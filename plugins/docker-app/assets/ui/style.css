@@ -133,6 +133,25 @@ h2 { font-size: var(--text-sm); }
   font-size: var(--text-sm);
 }
 
+.face-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.face-summary-item {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-subtle);
+}
+
+.face-summary-item strong { font-size: var(--text-sm); }
+.face-summary-item span { color: var(--color-text-secondary); font-size: var(--text-xs); line-height: 1.5; }
+
 .hint { margin: var(--space-3) 0 0; font-size: var(--text-xs); }
 
 .toolbar-bar {

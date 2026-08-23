@@ -731,6 +731,29 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 	}
 }
 
+func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
+	t.Parallel()
+	html, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), "本地管理面") || !strings.Contains(string(html), "Agent 执行面") {
+		t.Fatalf("dedicated UI omits runtime face labels: %s", html)
+	}
+	for _, marker := range []string{"Agent 执行面 · 节点离线", "Agent 执行面 · 引擎未就绪", "Agent 执行面 · ${app.status}"} {
+		if !strings.Contains(string(script), marker) {
+			t.Fatalf("dedicated UI script omits face-specific state %q", marker)
+		}
+	}
+	if strings.Contains(string(script), "/panel-api/plugins/docker-app/configure") {
+		t.Fatal("dedicated UI must not configure a second plugin instance")
+	}
+}
+
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")

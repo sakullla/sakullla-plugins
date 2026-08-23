@@ -219,7 +219,7 @@ const renderApp = (app) => {
   const chips = document.createElement("div");
   chips.className = "app-chips";
   if (app.status && app.status !== "有新版本") {
-    const statusChip = chip(app.status);
+    const statusChip = chip(`Agent 执行面 · ${app.status}`);
     statusChip.className = "chip app-status";
     chips.append(statusChip);
   }
@@ -458,7 +458,7 @@ const renderWorkspace = async () => {
     if (offlineNode) offlineNode.hidden = false;
     if (engineStatus) {
       engineStatus.hidden = false;
-      engineStatus.textContent = "节点离线";
+      engineStatus.textContent = "Agent 执行面 · 节点离线";
     }
     closeCreate();
     deployToggle.hidden = true;
@@ -472,8 +472,8 @@ const renderWorkspace = async () => {
   if (engineStatus) {
     engineStatus.hidden = false;
     engineStatus.textContent = engineReady
-      ? (engine.version ? `引擎 ${engine.version} 已就绪` : "引擎已就绪")
-      : "引擎未就绪";
+      ? (engine.version ? `Agent 执行面 · 引擎 ${engine.version} 已就绪` : "Agent 执行面 · 引擎已就绪")
+      : "Agent 执行面 · 引擎未就绪";
   }
   if (!engineReady) {
     renderGuide(engine);
