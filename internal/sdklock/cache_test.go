@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+)
+
+const (
+	toolchainIdentityHelperEnvironment  = "SAKULLLA_TOOLCHAIN_IDENTITY_HELPER"
+	toolchainIdentityWarningEnvironment = "SAKULLLA_TOOLCHAIN_IDENTITY_WARNING"
 )
 
 func TestVerificationCacheHitAndInputInvalidation(t *testing.T) {
@@ -117,6 +123,32 @@ func TestEnvironmentDigestPreservesPlatformKeySemanticsAndEncoding(t *testing.T)
 	separateValues := environmentDigest("linux", []string{"A=x", "B=y"})
 	if joinedValue == separateValues {
 		t.Fatal("environment digest encoding is ambiguous across entry boundaries")
+	}
+}
+
+func TestToolchainCommandVersionIgnoresSuccessfulStderr(t *testing.T) {
+	if os.Getenv(toolchainIdentityHelperEnvironment) == "1" {
+		fmt.Fprintln(os.Stdout, "stable toolchain version")
+		fmt.Fprintln(os.Stderr, os.Getenv(toolchainIdentityWarningEnvironment))
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(toolchainIdentityHelperEnvironment, "1")
+	t.Setenv(toolchainIdentityWarningEnvironment, "first transient warning")
+	first, err := toolchainCommandVersion(context.Background(), executable, "-test.run=^TestToolchainCommandVersionIgnoresSuccessfulStderr$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(toolchainIdentityWarningEnvironment, "second transient warning")
+	second, err := toolchainCommandVersion(context.Background(), executable, "-test.run=^TestToolchainCommandVersionIgnoresSuccessfulStderr$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("successful stderr changed toolchain version identity:\nfirst=%q\nsecond=%q", first, second)
 	}
 }
 

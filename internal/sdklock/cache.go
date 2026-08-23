@@ -215,16 +215,30 @@ func toolchainIdentity(ctx context.Context) (string, string, string, error) {
 		if err != nil {
 			return "", "", "", fmt.Errorf("resolve %s toolchain path: %w", invocation.name, err)
 		}
-		command := exec.CommandContext(ctx, path, invocation.args...)
-		command.Env = commandEnvironment(invocation.name)
-		output, err := command.CombinedOutput()
+		version, err := toolchainCommandVersion(ctx, path, invocation.args...)
 		if err != nil {
-			return "", "", "", fmt.Errorf("read %s toolchain identity: %w: %s", invocation.name, err, strings.TrimSpace(string(output)))
+			return "", "", "", fmt.Errorf("read %s toolchain identity: %w", invocation.name, err)
 		}
-		identities[index] = filepath.Clean(path) + "\n" + strings.TrimSpace(string(output))
+		identities[index] = filepath.Clean(path) + "\n" + version
 	}
 	identities[0] += "\nenvironment_sha256=" + commandEnvironmentDigest("go")
 	return identities[0], identities[1], identities[2], nil
+}
+
+func toolchainCommandVersion(ctx context.Context, path string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, path, args...)
+	command.Env = commandEnvironment(path)
+	stdout, err := command.Output()
+	if err == nil {
+		return strings.TrimSpace(string(stdout)), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return "", fmt.Errorf("%w: %s", err, stderr)
+		}
+	}
+	return "", err
 }
 
 func commandEnvironmentDigest(commandName string) string {
