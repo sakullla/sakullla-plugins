@@ -64,6 +64,22 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	if !strings.Contains(style, "--accent") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".usage-grid") || !strings.Contains(style, ".converter-card") {
 		t.Fatal("visitor theme is not the replacement layout")
 	}
+	for _, fragment := range []string{
+		"@media (max-width: 640px)",
+		"grid-template-columns: 1fr",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"min(64rem",
+		"overflow-wrap: anywhere",
+	} {
+		if !strings.Contains(style, fragment) {
+			t.Fatalf("visitor stylesheet missing viewport rule %q", fragment)
+		}
+	}
+	if strings.Contains(style, "overflow: auto") {
+		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")
+	}
 }
 
 func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
@@ -77,7 +93,7 @@ func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`} {
+	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`, `"640px"`, `"1920px"`, `"2560px"`, `"3840px"`, `"usage"`, `"search"`, `"tags"`, `"offline"`} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("web corpus missing %q", fragment)
 		}

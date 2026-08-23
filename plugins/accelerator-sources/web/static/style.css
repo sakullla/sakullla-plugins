@@ -89,6 +89,7 @@ body {
   font-family: var(--font-sans);
   color: var(--color-text-primary);
   background: var(--color-bg-canvas);
+  overflow-wrap: anywhere;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -183,6 +184,7 @@ main {
   position: relative;
   z-index: 1;
   width: min(64rem, calc(100% - 2.5rem));
+  min-width: 0;
   margin: 0 auto;
   padding: 3rem 0 5.5rem;
 }
@@ -211,9 +213,13 @@ main {
 }
 
 .host-line {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
+  max-width: 100%;
+  min-width: 0;
   margin: 1.15rem auto 0;
   padding: 0.4rem 0.85rem;
   border: 1px solid var(--color-border-default);
@@ -233,6 +239,7 @@ main {
 }
 
 .host-line code {
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 0.8125rem;
   color: var(--color-text-primary);
@@ -256,6 +263,7 @@ h2 {
 .usage-card p,
 .hint,
 .lede {
+  max-width: 42em;
   color: var(--color-text-secondary);
   line-height: 1.65;
 }
@@ -280,7 +288,6 @@ h2 {
 }
 
 .example {
-  overflow: auto;
   margin: 0.85rem 0 0.6rem;
   padding: 0.75rem 0.9rem;
   border-radius: var(--radius-lg);
@@ -290,6 +297,7 @@ h2 {
   font-size: 0.8125rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .converter-card {
@@ -472,8 +480,8 @@ textarea { min-height: 10rem; resize: vertical; }
   background: var(--color-bg-hover);
 }
 
-.result-card strong { font-size: var(--text-base); }
-.result-card span { color: var(--color-text-secondary); font-size: var(--text-sm); }
+.result-card strong { font-size: var(--text-base); overflow-wrap: anywhere; }
+.result-card span { color: var(--color-text-secondary); font-size: var(--text-sm); overflow-wrap: anywhere; }
 
 .tag-board { grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); }
 
@@ -530,13 +538,18 @@ textarea { min-height: 10rem; resize: vertical; }
 }
 
 @media (max-width: 640px) {
-  .masthead-inner { flex-direction: column; align-items: stretch; gap: var(--space-3); }
+  .masthead-inner { flex-direction: column; align-items: stretch; gap: var(--space-3); width: calc(100% - 1.5rem); }
   .wordmark { text-align: center; }
   .primary { display: grid; grid-template-columns: 1fr 1fr; border-radius: var(--radius-xl); }
-  .search-row { grid-template-columns: 1fr; }
-  .primary button, .search-row button, .offline-card > button { width: 100%; }
-  .offline-options { grid-template-columns: 1fr; }
-  .path-ref li { grid-template-columns: 1fr; gap: 0.15rem; }
+  .search-row,
+  .offline-options,
+  .usage-grid,
+  .tag-board,
+  .path-ref li { grid-template-columns: 1fr; }
+  .path-ref li { gap: 0.15rem; }
+  .primary button, .search-row button, .offline-card > button, .ghost { width: 100%; }
+  .hero { text-align: left; }
+  .host-line { width: 100%; justify-content: flex-start; }
   main { width: calc(100% - 1.5rem); padding-top: 1.75rem; }
 }
 
@@ -546,4 +559,16 @@ textarea { min-height: 10rem; resize: vertical; }
 
 @media (min-width: 2560px) {
   html { font-size: 18px; }
+}
+
+@media (min-width: 3840px) {
+  html { font-size: 20px; }
+  :root {
+    --space-4: 1.25rem;
+    --space-5: 1.5rem;
+    --space-8: 2.5rem;
+  }
+  .masthead-inner,
+  main { width: min(64rem, calc(100% - 4rem)); }
+  main { padding: 3rem 0 7rem; }
 }

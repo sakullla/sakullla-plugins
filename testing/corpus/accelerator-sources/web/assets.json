@@ -13,5 +13,9 @@
     "supported_hosts": ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"]
   },
   "offline_fields": ["images", "platform", "compressed_layers"],
-  "example_hosts": ["window.location.origin", "window.location.host"]
+  "example_hosts": ["window.location.origin", "window.location.host"],
+  "viewport": {
+    "mobile_max_width": "640px",
+    "large": ["1920px", "2560px", "3840px"]
+  }
 }
