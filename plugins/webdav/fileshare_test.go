@@ -35,7 +35,7 @@ func TestMissingPasswordFailsPrepareWithoutListingFiles(t *testing.T) {
 	request := pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact",
-		GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound}, Generation: "no-password",
+		GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite}, Generation: "no-password",
 		RequiredFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
 	}
 	if _, err := controller.Handshake(t.Context(), request); err != nil {

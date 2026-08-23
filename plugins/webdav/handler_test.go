@@ -63,6 +63,14 @@ func TestPluginManifestIsAgentHTTPBackendWithoutControlPlaneUI(t *testing.T) {
 	if provider["id"] != ProviderID || provider["display_name"] != "文件共享" {
 		t.Fatalf("provider = %#v", provider)
 	}
+	permissions, _ := document["permissions"].([]any)
+	if len(permissions) != 2 {
+		t.Fatalf("permissions = %#v", permissions)
+	}
+	storage, _ := permissions[1].(map[string]any)
+	if storage["name"] != pluginsdk.PermissionStorageWrite || storage["resource"] != pluginsdk.StorageResourceConfigPath+":/root_path" {
+		t.Fatalf("storage permission = %#v", storage)
+	}
 	if document["ui_route_id"] != nil || document["resource_group_id"] != nil || document["ui_schema"] != nil {
 		t.Fatalf("control-plane UI fields must be absent: %#v", document)
 	}
@@ -158,7 +166,7 @@ func activateControllerWithConfig(t *testing.T, controller *Controller, generati
 	request := pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact",
-		GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound}, Generation: generation,
+		GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite}, Generation: generation,
 		RequiredFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
 	}
 	if _, err := controller.Handshake(t.Context(), request); err != nil {

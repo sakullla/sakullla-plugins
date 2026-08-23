@@ -1,6 +1,6 @@
 schema_version: 1
 id: webdav
-version: 0.1.0
+version: 0.1.1
 name: 文件共享
 description: 在发布的自有域名上提供网页文件管理与 WebDAV 共享
 compatibility:
@@ -25,6 +25,8 @@ http_backend_providers:
     display_name: 文件共享
 permissions:
   - name: http.outbound
+  - name: storage.write
+    resource: config-path:/root_path
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

@@ -45,7 +45,7 @@ func TestGenerationLifecycleIsZeroConfigAndGenerationOwned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureHTTPBackendProviderV1 || len(response.Capabilities) != 1 || response.Capabilities[0] != pluginsdk.PermissionHTTPOutbound {
+	if len(response.Features) != 1 || response.Features[0] != pluginsdk.RPCFeatureHTTPBackendProviderV1 || len(response.Capabilities) != 2 || response.Capabilities[0] != pluginsdk.PermissionHTTPOutbound || response.Capabilities[1] != pluginsdk.PermissionStorageWrite {
 		t.Fatalf("handshake response = %+v", response)
 	}
 	if result := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: request.Generation, Config: shareConfig()}); result.Error != nil {
@@ -155,7 +155,7 @@ func newController(t *testing.T, factory webdav.ServiceFactory) *webdav.Controll
 }
 
 func handshakeRequest(generation string) pluginsdk.RPCHandshakeRequest {
-	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: webdav.PluginID, PluginVersion: webdav.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound}, Generation: generation, RequiredFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}}
+	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: webdav.PluginID, PluginVersion: webdav.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite}, Generation: generation, RequiredFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1}}
 }
 
 func activateController(t *testing.T, controller *webdav.Controller, generation string) {

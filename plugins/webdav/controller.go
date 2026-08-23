@@ -18,7 +18,7 @@ import (
 
 const (
 	PluginID         = "webdav"
-	PluginVersion    = "0.1.0"
+	PluginVersion    = "0.1.1"
 	ProviderID       = "default"
 	MaxConfigBytes   = 4096
 	MaxPasswordBytes = 256
@@ -83,8 +83,8 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:      []string{pluginsdk.PermissionHTTPOutbound},
-		RequiredGrants:    []string{pluginsdk.PermissionHTTPOutbound},
+		Capabilities:      []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite},
+		RequiredGrants:    []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite},
 		SupportedFeatures: []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
 		RequiredFeatures:  []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
 		Timeouts:          timeouts,

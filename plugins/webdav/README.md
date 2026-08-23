@@ -17,3 +17,6 @@ The default share root is an instance-owned `share/` directory, not the Agent
 filesystem root. An absolute `root_path` switches the share to that directory.
 Close and Stop do not delete files in either location. Webpage APIs and
 WebDAV both resolve paths inside the current share root and reject escapes.
+The manifest scopes `storage.write` to `config-path:/root_path`; a compatible
+Agent resolves that JSON Pointer and mounts only the configured Host directory
+into the sandbox at the same absolute path.

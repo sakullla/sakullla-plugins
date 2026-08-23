@@ -12,7 +12,7 @@ const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	declaration := pluginsdk.RPCPluginDeclaration{
 		PluginID: PluginID, PluginVersion: PluginVersion,
-		RequiredCapabilities: []string{pluginsdk.PermissionHTTPOutbound},
+		RequiredCapabilities: []string{pluginsdk.PermissionHTTPOutbound, pluginsdk.PermissionStorageWrite},
 		SupportedFeatures:    []string{pluginsdk.RPCFeatureHTTPBackendProviderV1},
 	}
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
