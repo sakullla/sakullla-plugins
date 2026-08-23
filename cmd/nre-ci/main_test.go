@@ -10,7 +10,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -272,11 +271,10 @@ func TestPluginReverseL4PostGateBuildsAndValidatesRPCArtifact(t *testing.T) {
 	if !verified {
 		t.Fatal("SDK verifier was not invoked")
 	}
-	name := "reverse-l4"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "reverse-l4", name)); err != nil || info.IsDir() {
+	// buildRPCArtifact always cross-builds the extensionless linux-amd64
+	// plugin entry, so the deterministic output name never carries a host
+	// executable suffix.
+	if info, err := os.Stat(filepath.Join("..", "..", "target", "nre-ci", "reverse-l4", "reverse-l4")); err != nil || info.IsDir() {
 		t.Fatalf("deterministic RPC artifact output missing: %v", err)
 	}
 }

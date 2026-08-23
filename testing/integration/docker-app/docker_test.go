@@ -380,7 +380,7 @@ func TestDockerEntrypointCanonicalRPCAndSDKServers(t *testing.T) {
 			t.Fatalf("plugin.yaml missing %q", required)
 		}
 	}
-	for _, retired := range []string{"container.compose", "container.read", "container.manage", "ui.dynamic-actions", "docker-compose", "dynamic-ui", "http-rule", "http.backend-provider", "http_backend_providers", "container.provider"} {
+	for _, retired := range []string{"container.provider", "container.compose", "container.read", "container.manage", "ui.dynamic-actions", "docker-compose", "dynamic-ui", "http-rule", "http.backend-provider", "http_backend_providers", "host_scope: agent"} {
 		if strings.Contains(text, retired) {
 			t.Fatalf("plugin.yaml still declares %q", retired)
 		}
