@@ -17,3 +17,5 @@ coverage/
 .env
 .env.*
 runtime-data/
+/docs/sakullla-workflow/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*/
+/docs/requirements/
