@@ -153,6 +153,13 @@ const agentDisplayName = (agent) => {
   return agent.name && agent.name !== agent.id ? agent.name : (agent.name || agent.id || "");
 };
 
+const agentIdentity = (id) => {
+  const normalizedID = String(id || "").trim();
+  const agent = agentsCache.find((candidate) => String(candidate && candidate.id || "") === normalizedID);
+  const displayName = agentDisplayName(agent) || normalizedID || "未知节点";
+  return { displayName, id: normalizedID, resolved: Boolean(agent && displayName !== normalizedID) };
+};
+
 const agentSearchText = (agent) => [
   agent && agent.name,
   agent && agent.id,
@@ -431,6 +438,18 @@ const listenerLabel = (listener, id) => {
   return label + disabled;
 };
 
+const listenerIdentity = (id) => {
+  const normalizedID = Number(id);
+  const listener = listenersCache.find((candidate) => listenerID(candidate) === normalizedID);
+  const name = String((listener && listener.name) || "").trim();
+  const agent = String((listener && (listener.agent_name || listener.agent_id || listener.agent)) || "").trim();
+  const displayName = name && name !== String(normalizedID)
+    ? name
+    : (agent && agent !== String(normalizedID) ? agent : `监听器 ${normalizedID}`);
+  const owner = name && agent && agent !== name ? agent : "";
+  return { displayName, id: normalizedID, owner };
+};
+
 const fillAgentPickers = (entryID, exitID) => {
   entryPicker.refresh(entryID || "");
   exitPicker.refresh(exitID || "");
@@ -536,8 +555,6 @@ const collectRelayHops = () => {
 
 const loadCatalogs = async () => {
   catalogReady = false;
-  agentsCache = [];
-  listenersCache = [];
   const [agentsPayload, listenersPayload] = await Promise.all([
     panelJSON("/panel-api/agents"),
     panelJSON("/panel-api/relay-listeners"),
@@ -548,8 +565,10 @@ const loadCatalogs = async () => {
   if (!Array.isArray(listenersPayload.listeners)) {
     throw new Error("中继目录缺少 listeners 集合。");
   }
-  agentsCache = agentsPayload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local");
-  listenersCache = listenersPayload.listeners.filter((listener) => listenerID(listener) > 0);
+  const nextAgents = agentsPayload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local");
+  const nextListeners = listenersPayload.listeners.filter((listener) => listenerID(listener) > 0);
+  agentsCache = nextAgents;
+  listenersCache = nextListeners;
   catalogReady = true;
 };
 
@@ -625,8 +644,15 @@ const closeForm = () => {
   syncFormControls();
 };
 
-const refresh = async () => {
+const refresh = async (loadNames = false) => {
   const payload = await pluginJSON("api/mappings");
+  if (loadNames) {
+    try {
+      await loadCatalogs();
+    } catch (_error) {
+      // Mappings remain usable with ID fallbacks when a panel catalog is temporarily unavailable.
+    }
+  }
   renderMappings(payload.mappings);
 };
 
@@ -653,6 +679,61 @@ const channelChip = (mapping) => {
 
 const mappingTitle = (mapping) => mapping.name || mapping.id;
 
+const routeConnector = () => {
+  const node = document.createElement("span");
+  node.className = "map-route-connector";
+  node.setAttribute("aria-hidden", "true");
+  node.textContent = "→";
+  return node;
+};
+
+const routeStage = (eyebrow, titleText, metaText) => {
+  const stage = document.createElement("div");
+  stage.className = "map-route-stage";
+  const label = document.createElement("span");
+  label.className = "map-route-label";
+  label.textContent = eyebrow;
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  const meta = document.createElement("small");
+  meta.textContent = metaText;
+  stage.append(label, title, meta);
+  return stage;
+};
+
+const relayRoute = (relayChain) => {
+  const stage = document.createElement("div");
+  stage.className = "map-route-stage map-route-channel";
+  const label = document.createElement("span");
+  label.className = "map-route-label";
+  label.textContent = "反向通道";
+  const title = document.createElement("strong");
+  const hops = Array.isArray(relayChain) ? relayChain : [];
+  title.textContent = hops.length ? `经 ${hops.length} 个中继` : "出口直连入口";
+  const meta = document.createElement("small");
+  meta.textContent = "由出口节点主动建立";
+  stage.append(label, title, meta);
+  if (hops.length) {
+    const list = document.createElement("ol");
+    list.className = "map-route-relays";
+    list.setAttribute("aria-label", "中继配置顺序");
+    hops.forEach((hop) => {
+      const identity = listenerIdentity(hop);
+      const item = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = identity.displayName;
+      const detail = document.createElement("small");
+      detail.textContent = identity.owner
+        ? `${identity.owner} · 监听器 ID ${identity.id}`
+        : `监听器 ID ${identity.id}`;
+      item.append(name, detail);
+      list.append(item);
+    });
+    stage.append(list);
+  }
+  return stage;
+};
+
 const renderMapping = (mapping) => {
   const card = document.createElement("article");
   card.className = "map-card";
@@ -668,12 +749,6 @@ const renderMapping = (mapping) => {
   chips.append(channelChip(mapping));
   chips.append(chip(mapping.enabled ? "已启用" : "已停用", mapping.enabled ? "chip-state-online" : "chip-state-offline"));
   chips.append(chip(String(mapping.protocol || "").toUpperCase(), "chip-protocol"));
-  chips.append(chip(`入口 ${mapping.entry_agent_id}`));
-  chips.append(chip(`出口 ${mapping.exit_agent_id}`));
-  chips.append(chip(`:${mapping.listen_port}`));
-  if (Array.isArray(mapping.relay_chain) && mapping.relay_chain.length) {
-    chips.append(chip(`中继 ${mapping.relay_chain.join("→")}`));
-  }
   identity.append(title, chips);
   if (mapping.last_error) {
     const error = document.createElement("p");
@@ -739,14 +814,30 @@ const renderMapping = (mapping) => {
   head.append(identity, actions);
   card.append(head);
 
-  const details = document.createElement("details");
-  const summary = document.createElement("summary");
-  summary.textContent = "转发目标";
-  const backend = document.createElement("p");
-  backend.className = "map-backend";
-  backend.textContent = `${mapping.protocol} :${mapping.listen_port} → ${mapping.exit_agent_id} → ${mapping.backend_host}:${mapping.backend_port}`;
-  details.append(summary, backend);
-  card.append(details);
+  const entry = agentIdentity(mapping.entry_agent_id);
+  const exit = agentIdentity(mapping.exit_agent_id);
+  const routeHeading = document.createElement("p");
+  routeHeading.className = "map-route-heading";
+  routeHeading.textContent = "流量路径";
+  const route = document.createElement("div");
+  route.className = "map-route";
+  const entryMeta = `${String(mapping.protocol || "").toUpperCase()} :${mapping.listen_port} · 客户端连接此处`;
+  const backendMeta = `${mapping.backend_host}:${mapping.backend_port} · 由出口节点访问`;
+  route.append(
+    routeStage("公网入口", entry.displayName, entryMeta),
+    routeConnector(),
+    relayRoute(mapping.relay_chain),
+    routeConnector(),
+    routeStage("出口与内网服务", exit.displayName, backendMeta),
+  );
+  const technical = document.createElement("details");
+  technical.className = "map-technical";
+  const technicalSummary = document.createElement("summary");
+  technicalSummary.textContent = "技术标识";
+  const technicalIDs = document.createElement("p");
+  technicalIDs.textContent = `入口节点 ID ${entry.id} · 出口节点 ID ${exit.id} · 映射 ID ${mapping.id}`;
+  technical.append(technicalSummary, technicalIDs);
+  card.append(routeHeading, route, technical);
   return card;
 };
 
@@ -837,7 +928,7 @@ if (formNode) {
 
 (async () => {
   try {
-    await refresh();
+    await refresh(true);
     loadingNode.hidden = true;
     workspaceNode.hidden = false;
   } catch (error) {

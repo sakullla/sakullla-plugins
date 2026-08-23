@@ -12,7 +12,25 @@
     <header class="page-head">
       <p class="kicker">四层反向穿透</p>
       <h1>反向穿透映射</h1>
-      <p class="lede">每条映射把内网 TCP/UDP 服务经入口节点的 L4 规则与出口节点的反向通道发布到公网。列表展示入口、出口、协议、启停与通道连通状态；通道离线表示出口节点不可达或通道已被拆除。</p>
+      <p class="lede">在入口节点公开一个 TCP/UDP 端口，由出口节点主动建立反向通道，并把收到的流量送到出口节点能够访问的内网服务。</p>
+      <section class="route-guide" aria-labelledby="route-guide-title">
+        <h2 id="route-guide-title" class="sr-only">流量关系说明</h2>
+        <div class="route-guide-step">
+          <span class="route-guide-index">1</span>
+          <span><strong>公网客户端连接入口</strong><small>入口节点 : 监听端口</small></span>
+        </div>
+        <span class="route-guide-arrow" aria-hidden="true">→</span>
+        <div class="route-guide-step">
+          <span class="route-guide-index">2</span>
+          <span><strong>流量进入反向通道</strong><small>出口主动建链；可按顺序经过中继</small></span>
+        </div>
+        <span class="route-guide-arrow" aria-hidden="true">→</span>
+        <div class="route-guide-step">
+          <span class="route-guide-index">3</span>
+          <span><strong>出口连接内网服务</strong><small>内网地址 : 服务端口</small></span>
+        </div>
+      </section>
+      <p class="route-guide-note"><strong>地址归属：</strong><code>127.0.0.1</code> 表示出口节点自身，不是入口节点，也不是管理面板所在机器。</p>
     </header>
     <p id="map-loading" role="status">正在加载映射…</p>
     <p id="map-unavailable" role="status" hidden>暂时无法管理反向穿透映射。</p>
@@ -36,28 +54,52 @@
               <option value="udp">UDP</option>
             </select>
           </label>
-          <label>入口节点
-            <input type="hidden" name="entry_agent_id" value="" autocomplete="off">
-            <div class="agent-search-select" data-agent-picker="entry"></div>
-          </label>
-          <label>出口节点
-            <input type="hidden" name="exit_agent_id" value="" autocomplete="off">
-            <div class="agent-search-select" data-agent-picker="exit"></div>
-          </label>
-          <label>入口监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
-          <label>内网服务地址 <input name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
-          <label>内网服务端口 <input name="backend_port" type="number" required min="1" max="65535" placeholder="9443"></label>
-          <div class="relay-field">
-            <div class="relay-head">
-              <span>中继链（可选）</span>
-              <button id="relay-add" class="btn-link" type="button">添加跳</button>
+          <section class="form-stage" aria-labelledby="entry-stage-title">
+            <div class="form-stage-head">
+              <span class="form-stage-index">1</span>
+              <span><strong id="entry-stage-title">公网入口</strong><small>客户端连接这里；监听端口属于入口节点</small></span>
             </div>
-            <div id="relay-hops" class="relay-hops"></div>
-            <p class="hint">不添加跳数时出口直拨入口。每跳从已有监听器中选择，顺序即链路顺序。</p>
-          </div>
+            <div class="form-stage-fields">
+              <label>入口节点
+                <input type="hidden" name="entry_agent_id" value="" autocomplete="off">
+                <div class="agent-search-select" data-agent-picker="entry"></div>
+              </label>
+              <label>公开监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
+            </div>
+          </section>
+          <section class="form-stage" aria-labelledby="channel-stage-title">
+            <div class="form-stage-head">
+              <span class="form-stage-index">2</span>
+              <span><strong id="channel-stage-title">反向通道</strong><small>出口节点主动连接入口；不配置中继时两端直连</small></span>
+            </div>
+            <div class="form-stage-fields form-stage-fields--single">
+              <label>出口节点
+                <input type="hidden" name="exit_agent_id" value="" autocomplete="off">
+                <div class="agent-search-select" data-agent-picker="exit"></div>
+              </label>
+            </div>
+            <div class="relay-field">
+              <div class="relay-head">
+                <span>经过的中继（可选，按顺序）</span>
+                <button id="relay-add" class="btn-link" type="button">添加一跳</button>
+              </div>
+              <div id="relay-hops" class="relay-hops"></div>
+              <p class="hint">链路按列表从上到下的顺序提交给宿主。列表末尾的数字是监听器 ID，不是跳数。</p>
+            </div>
+          </section>
+          <section class="form-stage" aria-labelledby="backend-stage-title">
+            <div class="form-stage-head">
+              <span class="form-stage-index">3</span>
+              <span><strong id="backend-stage-title">出口侧内网服务</strong><small>由出口节点访问这个地址；127.0.0.1 表示出口节点本机</small></span>
+            </div>
+            <div class="form-stage-fields">
+              <label>内网服务地址 <input name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
+              <label>内网服务端口 <input name="backend_port" type="number" required min="1" max="65535" placeholder="9443"></label>
+            </div>
+          </section>
           <p id="catalog-error" class="map-error" role="alert" hidden></p>
           <div class="form-footer">
-            <p class="hint">入口与出口节点不能相同。映射 ID 由系统在创建时生成，编辑时不可更改。</p>
+            <p class="hint">入口与出口节点不能相同。响应流量沿同一通道原路返回；映射 ID 由系统创建且不可更改。</p>
             <button type="submit" class="btn-primary" id="form-submit">创建</button>
           </div>
         </form>

@@ -93,6 +93,10 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		`data-agent-picker="exit"`,
 		`id="relay-hops"`,
 		`id="relay-add"`,
+		`class="route-guide"`,
+		"公网入口",
+		"出口侧内网服务",
+		"127.0.0.1</code> 表示出口节点自身",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("page missing %q: %s", want, html)
@@ -112,6 +116,10 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"搜索节点",
 		"最近活跃",
 		"mountAgentSearchSelect",
+		"agentIdentity",
+		"listenerIdentity",
+		"流量路径",
+		"技术标识",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing catalog %q", want)
@@ -129,6 +137,10 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 	}
 	css := stylesheet.Body.String()
 	for _, want := range []string{
+		".route-guide",
+		".form-stage",
+		".map-route",
+		".map-technical",
 		"@media (max-width: 720px)",
 		"grid-template-columns: 1fr",
 		"@media (min-width: 1920px)",
