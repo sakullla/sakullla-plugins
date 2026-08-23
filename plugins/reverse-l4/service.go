@@ -727,16 +727,19 @@ func (service *Service) realignHostToMapping(ctx context.Context, mapping Mappin
 		return err
 	}
 	service.mu.Lock()
-	defer service.mu.Unlock()
 	snapshot, err := service.state.Load(ctx)
 	if err != nil {
+		service.mu.Unlock()
 		return err
 	}
 	current, ok := snapshot.mapping(mapping.ID)
-	if !ok || !current.Enabled || current.Revision != mapping.Revision {
-		return nil
+	if !ok || !current.Enabled || current.Revision != mapping.Revision || current.RecoveryGeneration != mapping.RecoveryGeneration {
+		service.mu.Unlock()
+		return service.abandonStaleRecovery(ctx, restored, current, ok)
 	}
-	return service.commit(ctx, snapshot, restored, nil)
+	err = service.commit(ctx, snapshot, restored, nil)
+	service.mu.Unlock()
+	return err
 }
 
 func (service *Service) mappingNeedsRecovery(ctx context.Context, mapping Mapping) (bool, error) {

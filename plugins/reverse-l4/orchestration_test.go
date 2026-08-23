@@ -39,6 +39,13 @@ type fakeHostRuntime struct {
 	blockStatusRefs map[string]struct{}
 	statusEntered   map[string]chan struct{}
 	statusExited    map[string]chan struct{}
+
+	operationBlocks map[string]*operationBlock
+}
+
+type operationBlock struct {
+	entered chan struct{}
+	hold    chan struct{}
 }
 
 type fakeHostCall struct {
@@ -94,9 +101,15 @@ func (host *fakeHostRuntime) Call(ctx context.Context, call pluginsdk.HostRuntim
 	host.calls = append(host.calls, fakeHostCall{Operation: call.Operation, OperationID: call.OperationID, Payload: string(call.Payload)})
 	sessionRef, isStatus := channelStatusSessionRef(call)
 	_, block := host.blockStatusRefs[sessionRef]
+	opBlock := host.operationBlocks[call.OperationID]
 	host.mu.Unlock()
 	if isStatus && block {
 		return host.waitBlockedStatus(ctx, sessionRef)
+	}
+	if opBlock != nil {
+		if err := waitOperationBlock(ctx, opBlock); err != nil {
+			return err
+		}
 	}
 
 	host.mu.Lock()
@@ -380,6 +393,31 @@ func (host *fakeHostRuntime) blockChannelStatus(sessionRef string) (entered, exi
 	host.statusEntered[sessionRef] = enteredCh
 	host.statusExited[sessionRef] = exitedCh
 	return enteredCh, exitedCh
+}
+
+func (host *fakeHostRuntime) blockOperationID(operationID string) (entered <-chan struct{}, unblock func()) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if host.operationBlocks == nil {
+		host.operationBlocks = map[string]*operationBlock{}
+	}
+	enteredCh := make(chan struct{})
+	hold := make(chan struct{})
+	host.operationBlocks[operationID] = &operationBlock{entered: enteredCh, hold: hold}
+	return enteredCh, func() { closeSignal(hold) }
+}
+
+func waitOperationBlock(ctx context.Context, block *operationBlock) error {
+	closeSignal(block.entered)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-block.hold:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (host *fakeHostRuntime) waitBlockedStatus(ctx context.Context, sessionRef string) error {
@@ -1589,6 +1627,118 @@ func TestRecoveryRacesWithUpdateDisableAndDelete(t *testing.T) {
 			t.Fatalf("later tick left host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
 		}
 	})
+}
+
+func TestStaleUpdateRealignDiscardsLaterDeleteAndDisable(t *testing.T) {
+	t.Run("delete", func(t *testing.T) {
+		host, service, created, unblockFirst, done := startRecoveryEnsureBlocked(t)
+		spec := created
+		spec.ListenPort = 9543
+		spec.BackendPort = 8080
+		spec.Name = "更新后的 Web"
+		spec.RelayChain = []int{8, 9}
+		updated, err := service.Update(t.Context(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enteredSecond, unblockSecond := host.blockOperationID(recoveryOperationKey("channel.ensure", updated.ID, updated.Revision, updated.RecoveryGeneration))
+		unblockFirst()
+		waitClosed(t, enteredSecond, 2*time.Second, "update-compensation realign ensure did not start")
+		if err := service.Delete(t.Context(), created.ID); err != nil {
+			t.Fatal(err)
+		}
+		unblockSecond()
+		waitRecoveryDone(t, done)
+		listed, err := service.List(t.Context())
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("deleted after realign listed = %#v err=%v", listed, err)
+		}
+		if host.sessionCount() != 0 || host.ruleCount() != 0 {
+			t.Fatalf("stale realign after delete left host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+		}
+		service.recoverAll(t.Context())
+		if remaining, err := service.List(t.Context()); err != nil || len(remaining) != 0 {
+			t.Fatalf("later tick rebuilt a deleted mapping: %#v err=%v", remaining, err)
+		}
+		if host.sessionCount() != 0 || host.ruleCount() != 0 {
+			t.Fatalf("later tick left host sessions=%d rules=%d", host.sessionCount(), host.ruleCount())
+		}
+	})
+
+	t.Run("disable", func(t *testing.T) {
+		host, service, created, unblockFirst, done := startRecoveryEnsureBlocked(t)
+		spec := created
+		spec.ListenPort = 9543
+		spec.BackendPort = 8080
+		spec.Name = "更新后的 Web"
+		spec.RelayChain = []int{8, 9}
+		updated, err := service.Update(t.Context(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enteredSecond, unblockSecond := host.blockOperationID(recoveryOperationKey("channel.ensure", updated.ID, updated.Revision, updated.RecoveryGeneration))
+		unblockFirst()
+		waitClosed(t, enteredSecond, 2*time.Second, "update-compensation realign ensure did not start")
+		disabled, err := service.SetEnabled(t.Context(), created.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unblockSecond()
+		waitRecoveryDone(t, done)
+		listed, err := service.List(t.Context())
+		if err != nil || len(listed) != 1 || listed[0].Enabled {
+			t.Fatalf("disabled after realign listed = %#v err=%v", listed, err)
+		}
+		assertMappingUserSpec(t, listed[0], disabled)
+		if session := host.session(listed[0].SessionRef); session != nil {
+			t.Fatalf("stale realign after disable left a live session: %#v", session)
+		}
+		rule := host.rule(listed[0].RuleRef)
+		if rule == nil || rule.enabled {
+			t.Fatalf("stale realign after disable host rule = %#v", rule)
+		}
+		if err := service.recoverMapping(t.Context(), created.ID); err != nil {
+			t.Fatal(err)
+		}
+		service.recoverAll(t.Context())
+		if session := host.session(listed[0].SessionRef); session != nil {
+			t.Fatalf("later tick rebuilt a disabled mapping: %#v", session)
+		}
+		kept, err := service.List(t.Context())
+		if err != nil || len(kept) != 1 || kept[0].Enabled {
+			t.Fatalf("later tick listed = %#v err=%v", kept, err)
+		}
+	})
+}
+
+func startRecoveryEnsureBlocked(t *testing.T) (*fakeHostRuntime, *Service, Mapping, func(), <-chan error) {
+	t.Helper()
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), recoveryMappingSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.dropEntry(created.SessionRef)
+	entered, unblock := host.blockOperationID(recoveryOperationKey("channel.ensure", created.ID, created.Revision, created.RecoveryGeneration+1))
+	done := make(chan error, 1)
+	go func() {
+		done <- service.recoverMapping(t.Context(), created.ID)
+	}()
+	waitClosed(t, entered, 2*time.Second, "recovery ensure did not start")
+	return host, service, created, unblock, done
+}
+
+func waitRecoveryDone(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case recErr := <-done:
+		if recErr != nil {
+			t.Fatalf("stale realign recovery error = %v", recErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery did not finish after the competing mutation")
+	}
 }
 
 func TestControllerActivateRecoversLostSessionsAndStopHaltsTicks(t *testing.T) {
