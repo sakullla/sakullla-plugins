@@ -30,6 +30,10 @@ func TestConfigSchemaDeclaresClosedLoadableObject(t *testing.T) {
 	if len(properties) != 2 || properties["password"] == nil || properties["root_path"] == nil {
 		t.Fatalf("webdav config schema must only declare password and root_path: %#v", properties)
 	}
+	password, _ := properties["password"].(map[string]any)
+	if password["pattern"] != "^[A-Za-z0-9._~+/-]+=*$" {
+		t.Fatalf("webdav password schema must require Bearer token68 syntax: %#v", password)
+	}
 	required, _ := schema["required"].([]any)
 	if len(required) != 1 || required[0] != "password" {
 		t.Fatalf("webdav config schema must require password: %#v", schema["required"])
@@ -143,6 +147,24 @@ func TestLoadConfigRequiresPasswordAndRejectsUnknownFields(t *testing.T) {
 	if _, err := loadConfig([]byte(`{"password":""}`)); err == nil {
 		t.Fatal("empty password was accepted")
 	}
+	for _, password := range []string{"share pass", " share-pass", "share-pass ", "share\tpass", "share:pass", "share=pass", "==="} {
+		wire, err := json.Marshal(map[string]string{"password": password})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(wire); err == nil {
+			t.Fatalf("non-token68 password %q was accepted", password)
+		}
+	}
+	for _, password := range []string{"share-pass", "abc.DEF_123~+/", "token=="} {
+		wire, err := json.Marshal(map[string]string{"password": password})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(wire); err != nil {
+			t.Fatalf("token68 password %q was rejected: %v", password, err)
+		}
+	}
 	if _, err := loadConfig([]byte(`{}{}`)); err == nil {
 		t.Fatal("two documents were accepted")
 	}
@@ -191,7 +213,7 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 	wrongBasic := httptest.NewRequest(http.MethodGet, "http://share.test/", nil)
 	wrongBasic.SetBasicAuth("mallory", "wrong")
 	for _, path := range []string{"/", "/api/list?path=/", "/dav/missing.txt"} {
-		for _, header := range []string{"", "Basic !!!", wrongBasic.Header.Get("Authorization"), "Bearer", "Bearer wrong", "Bearer " + testSharePassword + " extra", "Digest token"} {
+		for _, header := range []string{"", "Basic !!!", wrongBasic.Header.Get("Authorization"), "Bearer", "Bearer wrong", "Bearer " + testSharePassword + " extra", "Bearer\t" + testSharePassword, "Bearer  " + testSharePassword, "Bearer " + testSharePassword + " ", "Digest token"} {
 			request := httptest.NewRequest(http.MethodGet, "http://share.test"+path, nil)
 			request.Header.Set("Authorization", header)
 			recorder := httptest.NewRecorder()

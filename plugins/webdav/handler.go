@@ -41,8 +41,8 @@ type requestScope struct {
 }
 
 func NewHandler(root, password string) (*Handler, error) {
-	if password == "" {
-		return nil, errors.New("password is required")
+	if !validPassword(password) {
+		return nil, errors.New("password is invalid")
 	}
 	cleaned, err := validateShareRoot(root, false)
 	if err != nil {
@@ -101,11 +101,23 @@ func (handler *Handler) authorize(request *http.Request) (requestScope, error) {
 		}
 		return requestScope{root: root, lockKey: key}, nil
 	}
-	fields := strings.Fields(header)
-	if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != "" && subtle.ConstantTimeCompare([]byte(fields[1]), []byte(handler.password)) == 1 {
+	credential, ok := bearerCredential(header)
+	if ok && subtle.ConstantTimeCompare([]byte(credential), []byte(handler.password)) == 1 {
 		return requestScope{root: handler.root, lockKey: "bearer"}, nil
 	}
 	return requestScope{}, errUnauthorized
+}
+
+func bearerCredential(header string) (string, bool) {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)-1], prefix[:len(prefix)-1]) || header[len(prefix)-1] != ' ' {
+		return "", false
+	}
+	credential := header[len(prefix):]
+	if !validPassword(credential) {
+		return "", false
+	}
+	return credential, true
 }
 
 func writeUnauthorized(writer http.ResponseWriter) {

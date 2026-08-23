@@ -196,7 +196,7 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 		return PluginConfig{}, errors.New("password is required")
 	}
 	password := *document.Password
-	if password == "" || len(password) > MaxPasswordBytes {
+	if !validPassword(password) {
 		return PluginConfig{}, errors.New("password is invalid")
 	}
 	config := PluginConfig{Password: password}
@@ -208,4 +208,34 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 		config.RootPath = rootPath
 	}
 	return config, nil
+}
+
+func validPassword(password string) bool {
+	if password == "" || len(password) > MaxPasswordBytes {
+		return false
+	}
+	padding := false
+	token := false
+	for index := 0; index < len(password); index++ {
+		character := password[index]
+		if character == '=' {
+			if !token {
+				return false
+			}
+			padding = true
+			continue
+		}
+		if padding || !isBearerToken68Character(character) {
+			return false
+		}
+		token = true
+	}
+	return token
+}
+
+func isBearerToken68Character(character byte) bool {
+	return character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' ||
+		strings.ContainsRune("-._~+/", rune(character))
 }

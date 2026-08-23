@@ -8,8 +8,9 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._~+/-]+=*$",
       "title": "共享口令",
-      "description": "保护发布入口上的网页与 WebDAV。"
+      "description": "保护发布入口上的网页与 WebDAV；须使用可作为 Bearer token 的字符。"
     },
     "root_path": {
       "type": "string",
