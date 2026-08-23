@@ -224,7 +224,7 @@ const renderApp = (app) => {
     chips.append(statusChip);
   }
   if (app.notice === "有新版本" || app.status === "有新版本") {
-    const noticeChip = chip("有新版本");
+    const noticeChip = chip("Agent 执行面 · 有新版本");
     noticeChip.className = "chip app-status-update";
     chips.append(noticeChip);
   }
