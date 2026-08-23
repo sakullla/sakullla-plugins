@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="sakura-day">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DNS over HTTPS 配置</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wash" aria-hidden="true"></div>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <span class="wordmark">HTTPS 域名解析</span>
+    </div>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">DNS over HTTPS</p>
+      <h1>把当前入口配进浏览器或系统</h1>
+      <p class="lede">这是 DNS over HTTPS（DoH），不是 DNS over TLS。把下面由当前页面来源生成的地址填进支持安全 DNS 或加密 DNS 的设置即可，不必猜测插件内部地址。</p>
+    </section>
+    <section class="card endpoint-card">
+      <p class="kicker">解析地址</p>
+      <h2>当前入口的 RFC 8484 端点</h2>
+      <p>地址等于当前站点来源加上 <code>/dns-query</code>。复制后可直接粘贴到下方步骤里的自定义提供商。</p>
+      <div class="endpoint">
+        <p class="host-line"><span class="host-dot" aria-hidden="true"></span><code id="doh-url">/dns-query</code></p>
+        <button type="button" id="copy-doh-url">复制地址</button>
+      </div>
+      <p id="copy-status" role="status" hidden></p>
+    </section>
+    <section class="card steps-card">
+      <p class="kicker">配置步骤</p>
+      <h2>Chrome / Edge、Firefox 与 Windows 11</h2>
+      <ol class="steps">
+        <li>
+          <h3>Chrome / Edge</h3>
+          <p>打开设置 → 隐私和安全（Edge 为「隐私、搜索和服务」）→ 安全 → 使用安全 DNS。选择自定义提供商，粘贴上方地址。</p>
+        </li>
+        <li>
+          <h3>Firefox</h3>
+          <p>打开设置 → 隐私与安全 → DNS over HTTPS。启用后选择自定义提供商，填入上方地址。</p>
+        </li>
+        <li>
+          <h3>Windows 11</h3>
+          <p>打开设置 → 网络和 Internet → 以太网或 WLAN → DNS 服务器分配 → 编辑。打开加密 DNS / DNS over HTTPS（手动模板），把上方地址填进模板。</p>
+        </li>
+      </ol>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

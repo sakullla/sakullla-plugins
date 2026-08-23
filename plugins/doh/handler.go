@@ -1,14 +1,28 @@
 package doh
 
 import (
+	"embed"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"path"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+const (
+	pageIndexName  = "static/index.html"
+	pageScriptName = "static/app.js"
+	pageStyleName  = "static/style.css"
+)
+
+//go:embed static/index.html static/app.js static/style.css
+var pageAssets embed.FS
 
 func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != DNSQueryPath {
-		http.NotFound(writer, request)
+		service.servePage(writer, request)
 		return
 	}
 	body, err := readDNSBody(request)
@@ -31,6 +45,48 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Content-Type", response.ContentType)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(response.Body)
+}
+
+func (service *Service) servePage(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", "GET, HEAD")
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	name := ""
+	switch request.URL.Path {
+	case "/", "/index.html":
+		name = pageIndexName
+	case "/app.js":
+		name = pageScriptName
+	case "/style.css":
+		name = pageStyleName
+	default:
+		http.NotFound(writer, request)
+		return
+	}
+	serveEmbeddedPage(writer, request, name)
+}
+
+func serveEmbeddedPage(writer http.ResponseWriter, request *http.Request, name string) {
+	file, err := pageAssets.Open(name)
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	defer file.Close()
+	info, err := fs.Stat(pageAssets, name)
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	seeker, ok := file.(io.ReadSeeker)
+	if !ok {
+		http.Error(writer, "page asset is unavailable", http.StatusInternalServerError)
+		return
+	}
+	http.ServeContent(writer, request, path.Base(name), info.ModTime(), seeker)
 }
 
 func readDNSBody(request *http.Request) ([]byte, error) {

@@ -97,6 +97,40 @@ func TestDoHHandlerAnswersWithoutTokenOrIPPolicy(t *testing.T) {
 	}
 }
 
+func TestDoHHomepageGuidesConfigurationWithoutUpstream(t *testing.T) {
+	var calls atomic.Int32
+	controller := activateController(t, nil, func(request doh.ResolveRequest) ([]byte, error) {
+		calls.Add(1)
+		return positiveResponse(request.DNSMessage, 30), nil
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Accept", "application/dns-message")
+	controller.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("status=%d type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	page := recorder.Body.String()
+	for _, want := range []string{"DNS over HTTPS", "/dns-query", "Chrome", "Firefox", "Windows 11", "复制地址"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("homepage missing %q", want)
+		}
+	}
+	if strings.Contains(page, "私人 DNS") || recorder.Header().Get("Content-Type") == "application/dns-message" {
+		t.Fatal("homepage is not a Chinese DoH setup page")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("homepage entered upstream calls=%d", calls.Load())
+	}
+
+	query := dnsQuery(12, "still-rfc8484.example", 1)
+	dns := httptest.NewRecorder()
+	controller.ServeHTTP(dns, dnsHTTPRequest(http.MethodPost, query, ""))
+	if dns.Code != http.StatusOK || dns.Header().Get("Content-Type") != "application/dns-message" || calls.Load() != 1 {
+		t.Fatalf("POST /dns-query status=%d type=%q calls=%d", dns.Code, dns.Header().Get("Content-Type"), calls.Load())
+	}
+}
+
 func TestDoHHandlerInvalidRFC8484Is4xxWithoutOutbound(t *testing.T) {
 	var calls atomic.Int32
 	controller := activateController(t, nil, func(request doh.ResolveRequest) ([]byte, error) {
