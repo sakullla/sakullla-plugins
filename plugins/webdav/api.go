@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/bits"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -21,9 +23,11 @@ type apiError struct {
 }
 
 type listEntry struct {
-	Name string `json:"name"`
-	Dir  bool   `json:"dir"`
-	Size int64  `json:"size,omitempty"`
+	Name      string `json:"name"`
+	Dir       bool   `json:"dir"`
+	Size      *int64 `json:"size,omitempty"`
+	SizeText  string `json:"size_text,omitempty"`
+	SizeExact string `json:"size_exact,omitempty"`
 }
 
 type listResponse struct {
@@ -65,7 +69,7 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 		writeMethodNotAllowed(writer, "GET, HEAD")
 		return
 	}
-	target, err := handler.queryPath(request, true)
+	root, target, err := handler.queryPath(request, true)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -88,7 +92,10 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 	for _, entry := range entries {
 		item := listEntry{Name: entry.Name(), Dir: entry.IsDir()}
 		if info, err := entry.Info(); err == nil && !entry.IsDir() {
-			item.Size = info.Size()
+			size := info.Size()
+			item.Size = &size
+			item.SizeText = formatIECSize(size)
+			item.SizeExact = strconv.FormatInt(size, 10)
 		}
 		listed = append(listed, item)
 	}
@@ -98,7 +105,37 @@ func (handler *Handler) apiList(writer http.ResponseWriter, request *http.Reques
 		}
 		return listed[i].Name < listed[j].Name
 	})
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, listResponse{Path: virtualPath(handler.root, target), Entries: listed})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, listResponse{Path: virtualPath(root, target), Entries: listed})
+}
+
+func formatIECSize(size int64) string {
+	const step = int64(1024)
+	units := [...]string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	if size < step {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	unitIndex := 0
+	unit := int64(1)
+	for unitIndex+1 < len(units) && size >= unit*step {
+		unit *= step
+		unitIndex++
+	}
+	whole := size / unit
+	remainder := uint64(size % unit)
+	hi, lo := bits.Mul64(remainder, 10)
+	digit, roundingRemainder := bits.Div64(hi, lo, uint64(unit))
+	if roundingRemainder >= (uint64(unit)+1)/2 {
+		digit++
+	}
+	if digit == 10 {
+		whole++
+		digit = 0
+	}
+	formatted := strconv.FormatInt(whole, 10)
+	if digit != 0 {
+		formatted += "." + strconv.FormatUint(digit, 10)
+	}
+	return formatted + " " + units[unitIndex]
 }
 
 func (handler *Handler) apiDownload(writer http.ResponseWriter, request *http.Request) {
@@ -106,7 +143,7 @@ func (handler *Handler) apiDownload(writer http.ResponseWriter, request *http.Re
 		writeMethodNotAllowed(writer, "GET, HEAD")
 		return
 	}
-	target, err := handler.queryPath(request, false)
+	_, target, err := handler.queryPath(request, false)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -154,7 +191,12 @@ func (handler *Handler) apiUpload(writer http.ResponseWriter, request *http.Requ
 	if dir == "" {
 		dir = "/"
 	}
-	target, err := resolveInsideRoot(handler.root, path.Join(strings.TrimPrefix(dir, "/"), name))
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, path.Join(strings.TrimPrefix(dir, "/"), name))
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
@@ -163,7 +205,7 @@ func (handler *Handler) apiUpload(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(handler.root, target)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(root, target)})
 }
 
 func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Request) {
@@ -176,12 +218,17 @@ func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Reque
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
-	target, err := resolveInsideRoot(handler.root, body.Path)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, body.Path)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if target == handler.root {
+	if target == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
@@ -189,7 +236,7 @@ func (handler *Handler) apiMkdir(writer http.ResponseWriter, request *http.Reque
 		writeAPIError(writer, http.StatusBadRequest, errors.New("directory cannot be created"))
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(handler.root, target)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusCreated, map[string]string{"path": virtualPath(root, target)})
 }
 
 func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Request) {
@@ -202,17 +249,22 @@ func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename is invalid"))
 		return
 	}
-	from, err := resolveInsideRoot(handler.root, body.From)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	from, err := resolveInsideRoot(root, body.From)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	to, err := resolveInsideRoot(handler.root, body.To)
+	to, err := resolveInsideRoot(root, body.To)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if from == handler.root || to == handler.root {
+	if from == root || to == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename is invalid"))
 		return
 	}
@@ -220,7 +272,7 @@ func (handler *Handler) apiRename(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("rename failed"))
 		return
 	}
-	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, map[string]string{"path": virtualPath(handler.root, to)})
+	_ = pluginsdk.WritePluginUIJSON(writer, http.StatusOK, map[string]string{"path": virtualPath(root, to)})
 }
 
 func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Request) {
@@ -233,12 +285,17 @@ func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
-	target, err := resolveInsideRoot(handler.root, body.Path)
+	root, err := requestRoot(request)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	target, err := resolveInsideRoot(root, body.Path)
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	if target == handler.root {
+	if target == root {
 		writeAPIError(writer, http.StatusBadRequest, errors.New("path is invalid"))
 		return
 	}
@@ -253,19 +310,23 @@ func (handler *Handler) apiDelete(writer http.ResponseWriter, request *http.Requ
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func (handler *Handler) queryPath(request *http.Request, allowRoot bool) (string, error) {
+func (handler *Handler) queryPath(request *http.Request, allowRoot bool) (string, string, error) {
+	root, err := requestRoot(request)
+	if err != nil {
+		return "", "", err
+	}
 	value := request.URL.Query().Get("path")
 	if strings.TrimSpace(value) == "" {
 		value = "/"
 	}
-	target, err := resolveInsideRoot(handler.root, value)
+	target, err := resolveInsideRoot(root, value)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if !allowRoot && target == handler.root {
-		return "", errPathEscape
+	if !allowRoot && target == root {
+		return "", "", errPathEscape
 	}
-	return target, nil
+	return root, target, nil
 }
 
 func writeFile(target string, source io.Reader) error {

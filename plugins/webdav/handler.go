@@ -1,23 +1,26 @@
 package webdav
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	xwebdav "golang.org/x/net/webdav"
 )
 
 const (
-	DavPrefix         = "/dav"
-	DavMountUsername  = "webdav"
-	pageIndexName     = "static/index.html"
-	pageScriptName    = "static/app.js"
-	pageStyleName     = "static/style.css"
-	authenticateRealm = `Basic realm="webdav"`
+	DavPrefix        = "/dav"
+	DavMountUsername = "webdav"
+	pageIndexName    = "static/index.html"
+	pageScriptName   = "static/app.js"
+	pageStyleName    = "static/style.css"
+	basicChallenge   = `Basic realm="webdav"`
+	bearerChallenge  = `Bearer realm="webdav"`
 )
 
 //go:embed static/index.html static/app.js static/style.css
@@ -26,12 +29,20 @@ var pageAssets embed.FS
 type Handler struct {
 	root     string
 	password string
-	dav      *xwebdav.Handler
+	locksMu  sync.Mutex
+	locks    map[string]xwebdav.LockSystem
+}
+
+type requestScopeKey struct{}
+
+type requestScope struct {
+	root    string
+	lockKey string
 }
 
 func NewHandler(root, password string) (*Handler, error) {
-	if password == "" {
-		return nil, errors.New("password is required")
+	if !validPassword(password) {
+		return nil, errors.New("password is invalid")
 	}
 	cleaned, err := validateShareRoot(root, false)
 	if err != nil {
@@ -40,11 +51,7 @@ func NewHandler(root, password string) (*Handler, error) {
 	return &Handler{
 		root:     cleaned,
 		password: password,
-		dav: &xwebdav.Handler{
-			Prefix:     DavPrefix,
-			FileSystem: shareFS{root: cleaned},
-			LockSystem: xwebdav.NewMemLS(),
-		},
+		locks:    make(map[string]xwebdav.LockSystem),
 	}, nil
 }
 
@@ -53,12 +60,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
-	if !handler.authorize(writer, request) {
+	scope, err := handler.authorize(request)
+	if errors.Is(err, errUnauthorized) {
+		writeUnauthorized(writer)
 		return
 	}
+	if err != nil {
+		http.Error(writer, "request scope is unavailable", http.StatusInternalServerError)
+		return
+	}
+	request = request.WithContext(context.WithValue(request.Context(), requestScopeKey{}, scope))
 	switch {
 	case request.URL.Path == DavPrefix || strings.HasPrefix(request.URL.Path, DavPrefix+"/"):
-		handler.dav.ServeHTTP(writer, request)
+		handler.serveDAV(writer, request, scope)
 	case strings.HasPrefix(request.URL.Path, "/api/"):
 		handler.serveAPI(writer, request)
 	default:
@@ -70,14 +84,96 @@ func (handler *Handler) Close() error { return nil }
 
 func (handler *Handler) Root() string { return handler.root }
 
-func (handler *Handler) authorize(writer http.ResponseWriter, request *http.Request) bool {
-	_, password, ok := request.BasicAuth()
-	if ok && subtle.ConstantTimeCompare([]byte(password), []byte(handler.password)) == 1 {
-		return true
+var errUnauthorized = errors.New("unauthorized")
+
+func (handler *Handler) authorize(request *http.Request) (requestScope, error) {
+	header := request.Header.Get("Authorization")
+	if username, password, ok := request.BasicAuth(); ok {
+		if subtle.ConstantTimeCompare([]byte(password), []byte(handler.password)) != 1 {
+			return requestScope{}, errUnauthorized
+		}
+		root, key, err := ensureBasicNamespace(handler.root, username)
+		if err != nil {
+			if errors.Is(err, errInvalidBasicUsername) {
+				return requestScope{}, errUnauthorized
+			}
+			return requestScope{}, err
+		}
+		return requestScope{root: root, lockKey: key}, nil
 	}
-	writer.Header().Set("WWW-Authenticate", authenticateRealm)
+	credential, ok := bearerCredential(header)
+	if ok && subtle.ConstantTimeCompare([]byte(credential), []byte(handler.password)) == 1 {
+		return requestScope{root: handler.root, lockKey: "bearer"}, nil
+	}
+	return requestScope{}, errUnauthorized
+}
+
+func bearerCredential(header string) (string, bool) {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)-1], prefix[:len(prefix)-1]) || header[len(prefix)-1] != ' ' {
+		return "", false
+	}
+	credential := header[len(prefix):]
+	if !validPassword(credential) {
+		return "", false
+	}
+	return credential, true
+}
+
+func writeUnauthorized(writer http.ResponseWriter) {
+	writer.Header().Add("WWW-Authenticate", basicChallenge)
+	writer.Header().Add("WWW-Authenticate", bearerChallenge)
 	http.Error(writer, "unauthorized", http.StatusUnauthorized)
-	return false
+}
+
+func (handler *Handler) serveDAV(writer http.ResponseWriter, request *http.Request, scope requestScope) {
+	if isConditionalCreate(request) {
+		ctx, state := withConditionalCreate(request.Context())
+		request = request.WithContext(ctx)
+		writer = &conditionalCreateResponseWriter{ResponseWriter: writer, state: state}
+	}
+	dav := &xwebdav.Handler{
+		Prefix:     DavPrefix,
+		FileSystem: shareFS{root: scope.root},
+		LockSystem: handler.lockSystem(scope.lockKey),
+	}
+	dav.ServeHTTP(writer, request)
+}
+
+func isConditionalCreate(request *http.Request) bool {
+	values := request.Header.Values("If-None-Match")
+	return request.Method == http.MethodPut && len(values) == 1 && strings.TrimSpace(values[0]) == "*"
+}
+
+type conditionalCreateResponseWriter struct {
+	http.ResponseWriter
+	state *conditionalCreateState
+}
+
+func (writer *conditionalCreateResponseWriter) WriteHeader(status int) {
+	if writer.state.preconditionFailed() {
+		status = http.StatusPreconditionFailed
+	}
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (handler *Handler) lockSystem(key string) xwebdav.LockSystem {
+	handler.locksMu.Lock()
+	defer handler.locksMu.Unlock()
+	locks := handler.locks[key]
+	if locks == nil {
+		locks = xwebdav.NewMemLS()
+		handler.locks[key] = locks
+	}
+	return locks
+}
+
+func requestRoot(request *http.Request) (string, error) {
+	scope, ok := request.Context().Value(requestScopeKey{}).(requestScope)
+	if !ok || scope.root == "" {
+		return "", errors.New("request scope is unavailable")
+	}
+	return scope.root, nil
 }
 
 func (handler *Handler) servePage(writer http.ResponseWriter, request *http.Request) {

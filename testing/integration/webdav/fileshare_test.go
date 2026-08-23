@@ -45,7 +45,7 @@ func TestFileSharePasswordWebDAVAndEscape(t *testing.T) {
 	activateController(t, controller, "file-share")
 
 	wrong := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
-	wrong.SetBasicAuth(webdav.DavMountUsername, "wrong-pass")
+	wrong.Header.Set("Authorization", "Bearer wrong-pass")
 	denied := httptest.NewRecorder()
 	controller.ServeHTTP(denied, wrong)
 	if denied.Code != http.StatusUnauthorized || strings.Contains(denied.Body.String(), "visible-inside.txt") {
@@ -53,14 +53,14 @@ func TestFileSharePasswordWebDAVAndEscape(t *testing.T) {
 	}
 
 	put := httptest.NewRequest(http.MethodPut, "http://share.test/dav/from-webdav.txt", strings.NewReader("shared-root"))
-	put.SetBasicAuth(webdav.DavMountUsername, testSharePassword)
+	put.Header.Set("Authorization", "Bearer "+testSharePassword)
 	created := httptest.NewRecorder()
 	controller.ServeHTTP(created, put)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("put status = %d body=%q", created.Code, created.Body.String())
 	}
 	listed := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
-	listed.SetBasicAuth(webdav.DavMountUsername, testSharePassword)
+	listed.Header.Set("Authorization", "Bearer "+testSharePassword)
 	listing := httptest.NewRecorder()
 	controller.ServeHTTP(listing, listed)
 	if listing.Code != http.StatusOK || !strings.Contains(listing.Body.String(), "from-webdav.txt") {
@@ -68,7 +68,7 @@ func TestFileSharePasswordWebDAVAndEscape(t *testing.T) {
 	}
 
 	escape := httptest.NewRequest(http.MethodGet, "http://share.test/api/download?path=../nre-webdav-outside-secret.txt", nil)
-	escape.SetBasicAuth(webdav.DavMountUsername, testSharePassword)
+	escape.Header.Set("Authorization", "Bearer "+testSharePassword)
 	blocked := httptest.NewRecorder()
 	controller.ServeHTTP(blocked, escape)
 	if blocked.Code < 400 || strings.Contains(blocked.Body.String(), "LEAKME-OUTSIDE") {
@@ -98,7 +98,7 @@ func TestConfiguredRootPathThenDefaultNoLongerTouchesIt(t *testing.T) {
 	}
 	activateControllerWithConfig(t, externalController, "root-path", payload)
 	put := httptest.NewRequest(http.MethodPut, "http://share.test/dav/external.txt", strings.NewReader("on-disk"))
-	put.SetBasicAuth(webdav.DavMountUsername, testSharePassword)
+	put.Header.Set("Authorization", "Bearer "+testSharePassword)
 	created := httptest.NewRecorder()
 	externalController.ServeHTTP(created, put)
 	if created.Code != http.StatusCreated {
@@ -113,7 +113,7 @@ func TestConfiguredRootPathThenDefaultNoLongerTouchesIt(t *testing.T) {
 	}
 	activateController(t, controller, "owned-again")
 	listed := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
-	listed.SetBasicAuth(webdav.DavMountUsername, testSharePassword)
+	listed.Header.Set("Authorization", "Bearer "+testSharePassword)
 	listing := httptest.NewRecorder()
 	controller.ServeHTTP(listing, listed)
 	if strings.Contains(listing.Body.String(), "external.txt") {
@@ -122,6 +122,101 @@ func TestConfiguredRootPathThenDefaultNoLongerTouchesIt(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join(external, "external.txt"))
 	if err != nil || string(body) != "on-disk" {
 		t.Fatalf("root_path file = %q err=%v", body, err)
+	}
+}
+
+func TestAuthenticationAndUserIsolation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "shared.txt"), []byte("bearer-root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := webdav.NewController(webdav.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", OwnedRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activateController(t, controller, "auth-isolation")
+
+	doBasic := func(username, method, target, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, target, strings.NewReader(body))
+		request.SetBasicAuth(username, testSharePassword)
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, request)
+		return recorder
+	}
+	if got := doBasic("alice", http.MethodPut, "http://share.test/dav/only-alice.txt", "alice"); got.Code != http.StatusCreated {
+		t.Fatalf("alice PUT = %d %q", got.Code, got.Body.String())
+	}
+	if got := doBasic("bob", http.MethodGet, "http://share.test/api/list?path=/", ""); got.Code != http.StatusOK || strings.Contains(got.Body.String(), "only-alice.txt") || strings.Contains(got.Body.String(), "shared.txt") {
+		t.Fatalf("bob listing = %d %q", got.Code, got.Body.String())
+	}
+	if got := doBasic("bob", http.MethodPut, "http://share.test/dav/only-alice.txt", "bob"); got.Code != http.StatusCreated {
+		t.Fatalf("bob same-path PUT = %d %q", got.Code, got.Body.String())
+	}
+	if got := doBasic("alice", http.MethodGet, "http://share.test/dav/only-alice.txt", ""); got.Code != http.StatusOK || got.Body.String() != "alice" {
+		t.Fatalf("alice file after bob PUT = %d %q", got.Code, got.Body.String())
+	}
+	bearer := httptest.NewRequest(http.MethodGet, "http://share.test/api/download?path=/shared.txt", nil)
+	bearer.Header.Set("Authorization", "Bearer "+testSharePassword)
+	shared := httptest.NewRecorder()
+	controller.ServeHTTP(shared, bearer)
+	if shared.Code != http.StatusOK || shared.Body.String() != "bearer-root" {
+		t.Fatalf("bearer shared root = %d %q", shared.Code, shared.Body.String())
+	}
+	invalid := doBasic("../alice", http.MethodPut, "http://share.test/dav/escape.txt", "escape")
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid username = %d %q", invalid.Code, invalid.Body.String())
+	}
+	if challenges := invalid.Header().Values("WWW-Authenticate"); len(challenges) != 2 {
+		t.Fatalf("invalid username challenges = %q", challenges)
+	}
+	if _, err := os.Stat(filepath.Join(root, "escape.txt")); !os.IsNotExist(err) {
+		t.Fatalf("invalid username changed root: %v", err)
+	}
+}
+
+func TestWebDAVConditionalPut(t *testing.T) {
+	root := t.TempDir()
+	controller, err := webdav.NewController(webdav.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", OwnedRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activateController(t, controller, "conditional-put")
+
+	put := func(name, body string, conditional bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/"+name, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+testSharePassword)
+		if conditional {
+			request.Header.Set("If-None-Match", "*")
+		}
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	if created := put("created.txt", "created-body", true); created.Code != http.StatusCreated {
+		t.Fatalf("conditional create = %d %q", created.Code, created.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "created.txt")); err != nil || string(body) != "created-body" {
+		t.Fatalf("conditional create body = %q err=%v", body, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("original-body"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if rejected := put("existing.txt", "replacement-body", true); rejected.Code != http.StatusPreconditionFailed {
+		t.Fatalf("conditional overwrite = %d %q", rejected.Code, rejected.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "existing.txt")); err != nil || string(body) != "original-body" {
+		t.Fatalf("rejected overwrite body = %q err=%v", body, err)
+	}
+
+	if overwritten := put("existing.txt", "replacement-body", false); overwritten.Code != http.StatusCreated {
+		t.Fatalf("ordinary overwrite = %d %q", overwritten.Code, overwritten.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "existing.txt")); err != nil || string(body) != "replacement-body" {
+		t.Fatalf("ordinary overwrite body = %q err=%v", body, err)
 	}
 }
 

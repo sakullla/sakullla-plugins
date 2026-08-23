@@ -196,7 +196,7 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 		return PluginConfig{}, errors.New("password is required")
 	}
 	password := *document.Password
-	if password == "" || len(password) > MaxPasswordBytes {
+	if !validPassword(password) {
 		return PluginConfig{}, errors.New("password is invalid")
 	}
 	config := PluginConfig{Password: password}
@@ -208,4 +208,8 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 		config.RootPath = rootPath
 	}
 	return config, nil
+}
+
+func validPassword(password string) bool {
+	return password != "" && len(password) <= MaxPasswordBytes
 }

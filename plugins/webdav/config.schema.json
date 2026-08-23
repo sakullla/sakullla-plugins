@@ -9,7 +9,7 @@
       "minLength": 1,
       "maxLength": 256,
       "title": "共享口令",
-      "description": "保护发布入口上的网页与 WebDAV。"
+      "description": "保护发布入口上的网页、文件 API 与 WebDAV；同时用于 Basic 口令和 Bearer credential。"
     },
     "root_path": {
       "type": "string",

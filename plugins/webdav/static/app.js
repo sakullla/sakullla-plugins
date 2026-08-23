@@ -108,7 +108,17 @@ const renderListing = (entries) => {
     const actionCell = document.createElement("td");
     actionCell.className = "row-actions";
     typeCell.textContent = entry.dir ? "目录" : "文件";
-    sizeCell.textContent = entry.dir ? "—" : String(entry.size || 0);
+    if (entry.dir) {
+      sizeCell.textContent = "—";
+    } else {
+      const sizeText = typeof entry.size_text === "string" && entry.size_text ? entry.size_text : "—";
+      const sizeExact = typeof entry.size_exact === "string" ? entry.size_exact : "";
+      sizeCell.textContent = sizeText;
+      if (sizeExact) {
+        sizeCell.title = sizeExact + " bytes";
+        sizeCell.setAttribute("aria-label", sizeText + "，精确大小 " + sizeExact + " 字节");
+      }
+    }
     if (entry.dir) {
       const open = document.createElement("button");
       open.type = "button";

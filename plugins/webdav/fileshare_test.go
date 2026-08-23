@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -113,6 +114,139 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	}
 }
 
+func TestFormatIECSize(t *testing.T) {
+	tests := []struct {
+		name string
+		size int64
+		want string
+	}{
+		{name: "zero bytes", size: 0, want: "0 B"},
+		{name: "largest byte value", size: 1023, want: "1023 B"},
+		{name: "one kibibyte", size: 1 << 10, want: "1 KiB"},
+		{name: "fractional kibibytes", size: 1536, want: "1.5 KiB"},
+		{name: "trailing zero removed", size: 10 << 10, want: "10 KiB"},
+		{name: "below mebibyte threshold", size: 1<<20 - 1, want: "1024 KiB"},
+		{name: "one mebibyte", size: 1 << 20, want: "1 MiB"},
+		{name: "fractional mebibytes", size: 3 << 19, want: "1.5 MiB"},
+		{name: "below gibibyte threshold", size: 1<<30 - 1, want: "1024 MiB"},
+		{name: "one gibibyte", size: 1 << 30, want: "1 GiB"},
+		{name: "below tebibyte threshold", size: 1<<40 - 1, want: "1024 GiB"},
+		{name: "one tebibyte", size: 1 << 40, want: "1 TiB"},
+		{name: "below pebibyte threshold", size: 1<<50 - 1, want: "1024 TiB"},
+		{name: "one pebibyte", size: 1 << 50, want: "1 PiB"},
+		{name: "below exbibyte threshold", size: 1<<60 - 1, want: "1024 PiB"},
+		{name: "one exbibyte", size: 1 << 60, want: "1 EiB"},
+		{name: "largest int64", size: 1<<63 - 1, want: "8 EiB"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatIECSize(test.size); got != test.want {
+				t.Fatalf("formatIECSize(%d) = %q, want %q", test.size, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPageUsesReadableExactSizes(t *testing.T) {
+	controller, owned := startShare(t, "")
+	if err := os.WriteFile(filepath.Join(owned, "sized.bin"), bytes.Repeat([]byte{'x'}, 1536), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, "empty.bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(owned, "folder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	response := doShareRequest(t, controller, http.MethodGet, "http://share.test/api/list?path=/", testSharePassword, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%q", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Entries []map[string]json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	entries := make(map[string]map[string]json.RawMessage, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		var name string
+		if err := json.Unmarshal(entry["name"], &name); err != nil {
+			t.Fatalf("decode entry name: %v", err)
+		}
+		entries[name] = entry
+	}
+	assertFileEntry := func(name string, wantSize int64, wantText, wantExact string) {
+		t.Helper()
+		fileEntry, ok := entries[name]
+		if !ok {
+			t.Fatalf("list response missing %s: %s", name, response.Body.String())
+		}
+		var size int64
+		if err := json.Unmarshal(fileEntry["size"], &size); err != nil || size != wantSize {
+			t.Fatalf("%s size = %d err=%v, want %d", name, size, err, wantSize)
+		}
+		var sizeText, sizeExact string
+		if err := json.Unmarshal(fileEntry["size_text"], &sizeText); err != nil || sizeText != wantText {
+			t.Fatalf("%s size_text = %q err=%v, want %q", name, sizeText, err, wantText)
+		}
+		if err := json.Unmarshal(fileEntry["size_exact"], &sizeExact); err != nil || sizeExact != wantExact {
+			t.Fatalf("%s size_exact = %q err=%v, want %q", name, sizeExact, err, wantExact)
+		}
+	}
+	assertFileEntry("sized.bin", 1536, "1.5 KiB", "1536")
+	assertFileEntry("empty.bin", 0, "0 B", "0")
+	dirEntry, ok := entries["folder"]
+	if !ok {
+		t.Fatalf("list response missing folder: %s", response.Body.String())
+	}
+	for _, field := range []string{"size", "size_text", "size_exact"} {
+		if _, exists := dirEntry[field]; exists {
+			t.Fatalf("directory unexpectedly includes %s: %s", field, response.Body.String())
+		}
+	}
+
+	scriptResponse := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", testSharePassword, nil)
+	if scriptResponse.Code != http.StatusOK {
+		t.Fatalf("script status = %d body=%q", scriptResponse.Code, scriptResponse.Body.String())
+	}
+	script := scriptResponse.Body.String()
+	lineContains := func(fragments ...string) bool {
+		for _, line := range strings.Split(script, "\n") {
+			matched := true
+			for _, fragment := range fragments {
+				if !strings.Contains(line, fragment) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	}
+	if !lineContains("const sizeText", "entry.size_text") || !lineContains("sizeCell.textContent", "sizeText") {
+		t.Fatal("page does not render the API size_text for files")
+	}
+	if !lineContains("sizeCell.textContent", "—") {
+		t.Fatal("page does not retain the directory dash")
+	}
+	if !lineContains("const sizeExact", "entry.size_exact") {
+		t.Fatal("page does not consume the API size_exact field")
+	}
+	if !lineContains("sizeCell.title", "sizeExact", "bytes") {
+		t.Fatal("page does not expose exact bytes in the size cell title")
+	}
+	if !lineContains("aria-label", "sizeExact", "字节") {
+		t.Fatal("page does not expose exact bytes in a Chinese aria-label")
+	}
+	if strings.Contains(script, "String(entry.size || 0)") {
+		t.Fatal("page still renders the legacy raw numeric size")
+	}
+}
+
 func TestWebpageAPIsBrowseDownloadUploadMkdirRenameDelete(t *testing.T) {
 	controller, owned := startShare(t, "")
 	listed := doShareRequest(t, controller, http.MethodGet, "http://share.test/api/list?path=/", testSharePassword, nil)
@@ -166,7 +300,7 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 		t.Fatalf("web list missing dav file: %d %q", listed.Code, listed.Body.String())
 	}
 	move := httptest.NewRequest("MOVE", "http://share.test/dav/folder/from-dav.txt", nil)
-	move.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(move, testSharePassword)
 	move.Header.Set("Destination", "http://share.test/dav/folder/moved.txt")
 	move.Header.Set("Overwrite", "T")
 	moved := httptest.NewRecorder()
@@ -175,7 +309,7 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 		t.Fatalf("move status = %d body=%q", moved.Code, moved.Body.String())
 	}
 	propfind := httptest.NewRequest("PROPFIND", "http://share.test/dav/folder", http.NoBody)
-	propfind.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(propfind, testSharePassword)
 	propfind.Header.Set("Depth", "1")
 	found := httptest.NewRecorder()
 	controller.ServeHTTP(found, propfind)
@@ -189,6 +323,177 @@ func TestWebDAVMethodsShareTheSameRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(owned, "folder", "moved.txt")); !os.IsNotExist(err) {
 		t.Fatalf("dav delete left file: %v", err)
 	}
+}
+
+func TestWebDAVConditionalPut(t *testing.T) {
+	conditionalPut := func(t *testing.T, handler http.Handler, target, contents string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, target, strings.NewReader(contents))
+		request.Header.Set("If-None-Match", " * ")
+		setBearerAuth(request, testSharePassword)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	t.Run("creates a missing resource", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		response := conditionalPut(t, controller, "http://share.test/dav/new.txt", "complete-body")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("conditional put status = %d, want 201 body=%q", response.Code, response.Body.String())
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "new.txt"))
+		if err != nil || string(body) != "complete-body" {
+			t.Fatalf("created file = %q err=%v", body, err)
+		}
+	})
+
+	t.Run("rejects an existing file without changing it", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "existing.txt")
+		if err := os.WriteFile(target, []byte("original-body"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := conditionalPut(t, controller, "http://share.test/dav/existing.txt", "replacement-body")
+		if response.Code != http.StatusPreconditionFailed {
+			t.Fatalf("conditional put status = %d, want 412 body=%q", response.Code, response.Body.String())
+		}
+		body, err := os.ReadFile(target)
+		if err != nil || string(body) != "original-body" {
+			t.Fatalf("existing file = %q err=%v", body, err)
+		}
+		after, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Mode() != before.Mode() {
+			t.Fatalf("existing file mode = %v, want %v", after.Mode(), before.Mode())
+		}
+	})
+
+	t.Run("rejects an existing directory", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "existing-dir")
+		if err := os.Mkdir(target, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		response := conditionalPut(t, controller, "http://share.test/dav/existing-dir", "replacement-body")
+		if response.Code != http.StatusPreconditionFailed {
+			t.Fatalf("conditional put status = %d, want 412 body=%q", response.Code, response.Body.String())
+		}
+		info, err := os.Stat(target)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("existing directory changed: info=%v err=%v", info, err)
+		}
+	})
+
+	t.Run("other conditions retain ordinary overwrite behavior", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			values []string
+		}{
+			{name: "missing header"},
+			{name: "other etag", values: []string{`"other-etag"`}},
+			{name: "combined value", values: []string{`*, "other-etag"`}},
+			{name: "repeated wildcard", values: []string{"*", "*"}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				controller, owned := startShare(t, "")
+				target := filepath.Join(owned, "ordinary.txt")
+				if err := os.WriteFile(target, []byte("old-body"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/ordinary.txt", strings.NewReader("new-body"))
+				for _, value := range test.values {
+					request.Header.Add("If-None-Match", value)
+				}
+				setBearerAuth(request, testSharePassword)
+				response := httptest.NewRecorder()
+				controller.ServeHTTP(response, request)
+				if response.Code != http.StatusCreated {
+					t.Fatalf("put with If-None-Match %q status = %d, want 201 body=%q", test.values, response.Code, response.Body.String())
+				}
+				body, err := os.ReadFile(target)
+				if err != nil || string(body) != "new-body" {
+					t.Fatalf("overwritten file = %q err=%v", body, err)
+				}
+			})
+		}
+	})
+
+	t.Run("missing parent remains a filesystem conflict", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		response := conditionalPut(t, controller, "http://share.test/dav/missing/child.txt", "body")
+		if response.Code == http.StatusPreconditionFailed {
+			t.Fatalf("missing parent was reported as 412 body=%q", response.Body.String())
+		}
+		if response.Code != http.StatusConflict {
+			t.Fatalf("conditional put status = %d, want 409 body=%q", response.Code, response.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(owned, "missing", "child.txt")); !os.IsNotExist(err) {
+			t.Fatalf("missing-parent put created a file: %v", err)
+		}
+	})
+
+	t.Run("competing creates have one winner", func(t *testing.T) {
+		owned := t.TempDir()
+		handlers := make([]http.Handler, 2)
+		for index := range handlers {
+			handler, err := NewHandler(owned, testSharePassword)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handlers[index] = handler
+		}
+		contents := []string{"first-body", "second-body"}
+		responses := make([]*httptest.ResponseRecorder, len(handlers))
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for index := range handlers {
+			wait.Add(1)
+			go func(index int) {
+				defer wait.Done()
+				<-start
+				request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/race.txt", strings.NewReader(contents[index]))
+				request.Header.Set("If-None-Match", "*")
+				setBearerAuth(request, testSharePassword)
+				response := httptest.NewRecorder()
+				handlers[index].ServeHTTP(response, request)
+				responses[index] = response
+			}(index)
+		}
+		close(start)
+		wait.Wait()
+
+		winner := -1
+		for index, response := range responses {
+			switch response.Code {
+			case http.StatusCreated:
+				if winner != -1 {
+					t.Fatalf("multiple conditional creates succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+				}
+				winner = index
+			case http.StatusPreconditionFailed:
+			default:
+				t.Fatalf("conditional create %d status = %d body=%q", index, response.Code, response.Body.String())
+			}
+		}
+		if winner == -1 {
+			t.Fatalf("no conditional create succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "race.txt"))
+		if err != nil || string(body) != contents[winner] {
+			t.Fatalf("winning file = %q, want %q err=%v", body, contents[winner], err)
+		}
+	})
 }
 
 func TestRootPathSwitchAndCloseKeepExternalFiles(t *testing.T) {
@@ -344,7 +649,7 @@ func doShareRequest(t *testing.T, handler http.Handler, method, target, password
 	t.Helper()
 	request := httptest.NewRequest(method, target, body)
 	if password != "" {
-		request.SetBasicAuth(DavMountUsername, password)
+		setBearerAuth(request, password)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -370,10 +675,14 @@ func uploadShareFile(t *testing.T, handler http.Handler, dir, name, contents str
 	}
 	request := httptest.NewRequest(http.MethodPost, "http://share.test/api/upload", &buffer)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.SetBasicAuth(DavMountUsername, testSharePassword)
+	setBearerAuth(request, testSharePassword)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func setBearerAuth(request *http.Request, token string) {
+	request.Header.Set("Authorization", "Bearer "+token)
 }
 
 func jsonString(value string) string {
