@@ -7,8 +7,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 )
+
+var secretAssignmentPattern = regexp.MustCompile(`(?i)((?:password|secret|token|key|credential|authorization)[=:\s]+)[^\s,;]+`)
+
+func sanitizePublicText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if containsLocalDockerMarker(strings.ToLower(text)) {
+		return ""
+	}
+	text = secretAssignmentPattern.ReplaceAllString(text, "${1}***")
+	if strings.Contains(text, "\n") {
+		text = strings.SplitN(text, "\n", 2)[0]
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 240 {
+		text = strings.TrimSpace(text[:240])
+	}
+	return text
+}
 
 var (
 	ErrAuditRequired    = errors.New("trusted auditor is required")
@@ -33,7 +56,29 @@ func safeFailure(class error, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &SafeError{Class: class, Message: class.Error()}
+	message := class.Error()
+	if cause := publicCause(err); cause != "" && cause != class.Error() && cause != ErrOperationFailed.Error() && cause != ErrTypedHandlesUnavailable.Error() {
+		message = class.Error() + ": " + cause
+	}
+	return &SafeError{Class: class, Message: message}
+}
+
+func publicCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if safe, ok := err.(*SafeError); ok {
+		text = strings.TrimSpace(strings.TrimPrefix(safe.Message, safe.Class.Error()+": "))
+		if text == "" || text == safe.Class.Error() {
+			return ""
+		}
+	}
+	text = sanitizePublicText(text)
+	if !strings.HasPrefix(text, "compose ") {
+		return ""
+	}
+	return text
 }
 
 // TransientCredential is a parsed secret from compose or docker run.

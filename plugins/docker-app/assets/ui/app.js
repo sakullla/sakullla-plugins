@@ -235,6 +235,14 @@ const renderApp = (app) => {
   chips.append(versionChip);
   if (ports.length) ports.forEach((port) => chips.append(chip(`:${port}`)));
   else chips.append(chip("无发布端口"));
+  const rules = Array.isArray(app.rules) ? app.rules : [];
+  rules.forEach((rule) => {
+    const domain = String(rule.domain || "").trim();
+    if (!domain) return;
+    const ruleChip = chip(rule.enabled === false ? `${domain}（已停用）` : domain);
+    ruleChip.className = "chip app-http-rule";
+    chips.append(ruleChip);
+  });
   identity.append(title, chips);
 
   const actions = document.createElement("div");
@@ -413,6 +421,19 @@ const renderApp = (app) => {
     hint.textContent = "没有可挂的端口";
     card.append(hint);
   }
+  if (rules.length) {
+    const ruleList = document.createElement("ul");
+    ruleList.className = "http-rules";
+    rules.forEach((rule) => {
+      const item = document.createElement("li");
+      const domain = String(rule.domain || "").trim();
+      const port = rule.port ? `:${rule.port}` : "";
+      const enabled = rule.enabled === false ? "（已停用）" : "";
+      item.textContent = `${domain}${port}${enabled}`;
+      ruleList.append(item);
+    });
+    card.append(ruleList);
+  }
   return card;
 };
 
@@ -490,6 +511,7 @@ const renderWorkspace = async () => {
   deployToggle.hidden = createPanel.hidden === false ? true : false;
   const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
   renderApps(payload.apps);
+  if (payload.error) showStatus(payload.error, true);
 };
 
 const loadAgents = async () => {

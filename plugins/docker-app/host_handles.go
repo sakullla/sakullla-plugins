@@ -10,12 +10,15 @@ import (
 )
 
 const (
-	pluginCallEngineName  = "engine.report"
-	pluginCallComposeName = "compose"
-	pluginCallImageName   = "image"
-	hostHTTPRuleOperation = pluginsdk.HostRuntimeHTTPRule
-	pluginAppsStateKey    = "apps"
-	pluginRuntimeStateKey = "app-runtime"
+	pluginCallEngineName          = "engine.report"
+	pluginCallComposeName         = "compose"
+	pluginCallImageName           = "image"
+	hostHTTPRuleOperation         = pluginsdk.HostRuntimeHTTPRule
+	hostHTTPBackendOfferOperation = "http.backend-offer"
+	hostHTTPRuleActionCreate      = pluginsdk.HTTPRuleActionCreate
+	hostHTTPRuleActionList        = "list"
+	pluginAppsStateKey            = "apps"
+	pluginRuntimeStateKey         = "app-runtime"
 )
 
 type hostRuntimeCaller interface {
@@ -201,14 +204,103 @@ func (runtime *hostCapabilityRuntime) Create(ctx context.Context, spec HTTPRuleS
 	if !validAgentID(spec.AgentID) {
 		return HostHTTPRule{}, ErrAgentOffline
 	}
-	var created HostHTTPRule
+	var created hostHTTPRuleWire
 	if err := callHostWithOperation(ctx, runtime.client, hostHTTPRuleOperation, hostOperationKeyFromContext(ctx), map[string]any{
-		"action": "create", "app_id": spec.AppID, "agent_id": spec.AgentID,
-		"domain": spec.Domain, "port": spec.Port,
+		"action": hostHTTPRuleActionCreate, "agent_id": spec.AgentID,
+		"domain": spec.Domain, "port": int(spec.Port),
 	}, &created); err != nil {
 		return HostHTTPRule{}, err
 	}
-	return created, nil
+	return created.asHostHTTPRule(spec.AgentID), nil
+}
+
+func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) ([]HostHTTPRule, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(agentID) {
+		return nil, ErrAgentOffline
+	}
+	var response struct {
+		Rules []hostHTTPRuleWire `json:"rules"`
+	}
+	if err := callHost(ctx, runtime.client, hostHTTPRuleOperation, map[string]any{
+		"action": hostHTTPRuleActionList, "agent_id": agentID,
+	}, &response); err != nil {
+		return nil, err
+	}
+	rules := make([]HostHTTPRule, 0, len(response.Rules))
+	for _, item := range response.Rules {
+		rules = append(rules, item.asHostHTTPRule(agentID))
+	}
+	return rules, nil
+}
+
+func (runtime *hostCapabilityRuntime) ReplaceHTTPBackendOffers(ctx context.Context, offers []HTTPBackendCatalogOffer) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	if offers == nil {
+		offers = []HTTPBackendCatalogOffer{}
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, hostHTTPBackendOfferOperation, map[string]any{"offers": offers}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+type hostHTTPRuleWire struct {
+	RuleRef     string `json:"rule_ref,omitempty"`
+	Ref         string `json:"ref,omitempty"`
+	FrontendURL string `json:"frontend_url,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	Backend     string `json:"backend,omitempty"`
+	BackendURL  string `json:"backend_url,omitempty"`
+	AppID       string `json:"app_id,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	Enabled     *bool  `json:"enabled,omitempty"`
+}
+
+func (wire hostHTTPRuleWire) asHostHTTPRule(agentID string) HostHTTPRule {
+	ref := strings.TrimSpace(wire.RuleRef)
+	if ref == "" {
+		ref = strings.TrimSpace(wire.Ref)
+	}
+	domain := strings.TrimSpace(wire.FrontendURL)
+	if domain == "" {
+		domain = strings.TrimSpace(wire.Domain)
+	}
+	backend := strings.TrimSpace(wire.Backend)
+	if backend == "" {
+		backend = strings.TrimSpace(wire.BackendURL)
+	}
+	rule := HostHTTPRule{
+		Ref:     ref,
+		Domain:  domain,
+		Backend: backend,
+		AppID:   strings.TrimSpace(wire.AppID),
+		AgentID: strings.TrimSpace(wire.AgentID),
+		Enabled: true,
+	}
+	if rule.AgentID == "" {
+		rule.AgentID = agentID
+	}
+	if wire.Enabled != nil {
+		rule.Enabled = *wire.Enabled
+	}
+	if wire.Port > 0 && wire.Port <= 65535 {
+		rule.Port = uint16(wire.Port)
+	} else if port, ok := parseBackendPort(backend); ok {
+		rule.Port = port
+	}
+	return rule
 }
 
 func (runtime *hostCapabilityRuntime) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
@@ -369,6 +461,8 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UILogs = runtime
 	config.UIRemove = runtime
 	config.UIHTTPRule = runtime
+	config.UIHTTPRuleList = runtime
+	config.UIHTTPBackendOffer = runtime
 	config.UIImageObserver = runtime
 	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
 	return config
@@ -388,7 +482,7 @@ func callHostWithOperation(ctx context.Context, client hostRuntimeCaller, operat
 	}
 	var raw json.RawMessage
 	if err := client.Call(ctx, pluginsdk.HostRuntimeCall{Operation: operation, OperationID: strings.TrimSpace(operationID), Payload: encoded}, &raw); err != nil {
-		return ErrTypedHandlesUnavailable
+		return safeFailure(ErrTypedHandlesUnavailable, err)
 	}
 	if localDockerEngineTarget(raw) {
 		return ErrTypedHandlesUnavailable

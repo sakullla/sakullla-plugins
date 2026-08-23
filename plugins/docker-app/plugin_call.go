@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -136,8 +137,8 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 				return nil, err
 			}
 		}
-		if _, err := controller.runCommand(ctx, workspace.Dir, "docker", "compose", "up", "-d"); err != nil {
-			return nil, err
+		if output, err := controller.runCommand(ctx, workspace.Dir, "docker", "compose", "up", "-d"); err != nil {
+			return nil, composeCallFailure("apply", output, err)
 		}
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
 	case "start", "stop", "restart", "remove", "pull", "ready", "drain", "remove-instance":
@@ -149,8 +150,8 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
-		if _, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
-			return nil, err
+		if output, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
+			return nil, composeCallFailure(action, output, err)
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
@@ -164,7 +165,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		output, err := controller.runCommand(ctx, dir, "docker", args...)
 		if err != nil {
-			return nil, err
+			return nil, composeCallFailure("logs", output, err)
 		}
 		return json.Marshal(map[string]any{"logs": string(output)})
 	case "start-instance":
@@ -172,8 +173,8 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
-		if _, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
-			return nil, err
+		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
+			return nil, composeCallFailure("start-instance", output, err)
 		}
 		instanceID := strings.TrimSpace(request.InstanceID)
 		if instanceID == "" {
@@ -185,8 +186,8 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
-		if _, err := controller.runCommand(ctx, dir, "docker", "compose", "ps"); err != nil {
-			return nil, err
+		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "ps"); err != nil {
+			return nil, composeCallFailure("inspect", output, err)
 		}
 		instanceID := strings.TrimSpace(request.InstanceID)
 		if instanceID == "" {
@@ -330,10 +331,37 @@ func (controller *Controller) executionWorkDirRoot() string {
 	if controller != nil && strings.TrimSpace(controller.uiWorkDirRoot) != "" {
 		return controller.uiWorkDirRoot
 	}
+	return defaultExecutionWorkDirRoot()
+}
+
+func defaultExecutionWorkDirRoot() string {
 	if env := strings.TrimSpace(os.Getenv("NRE_DOCKER_APP_WORKDIR")); env != "" {
 		return env
 	}
-	return filepath.Join(os.TempDir(), "nre-docker-app")
+	if home, err := os.UserHomeDir(); err == nil {
+		if home = strings.TrimSpace(home); home != "" {
+			return filepath.Join(home, ".nre", "docker-app")
+		}
+	}
+	if runtime.GOOS == "windows" {
+		base := strings.TrimSpace(os.Getenv("ProgramData"))
+		if base == "" {
+			base = `C:\ProgramData`
+		}
+		return filepath.Join(base, "nre-docker-app")
+	}
+	return "/var/lib/nre-docker-app"
+}
+
+func composeCallFailure(action string, output []byte, err error) error {
+	cause := sanitizePublicText(string(output))
+	if cause == "" {
+		cause = publicCause(err)
+	}
+	if cause == "" {
+		return fmt.Errorf("compose %s failed", action)
+	}
+	return fmt.Errorf("compose %s failed: %s", action, cause)
 }
 
 func writeAppEnvironment(dir, value string) error {

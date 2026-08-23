@@ -43,6 +43,7 @@ var (
 	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
 	ErrNoPublishedPort         = errors.New("app has no published port")
 	ErrMissingComposeVariable  = errors.New("compose environment variable is missing")
+	ErrHTTPRuleListFailed      = errors.New("http rule list failed")
 )
 
 type App struct {

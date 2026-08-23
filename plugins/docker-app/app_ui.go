@@ -24,16 +24,25 @@ const (
 )
 
 type appView struct {
-	ID       string      `json:"id"`
-	AgentID  string      `json:"agent_id,omitempty"`
-	Name     string      `json:"name"`
-	Status   string      `json:"status"`
-	Notice   string      `json:"notice,omitempty"`
-	Version  string      `json:"version"`
-	Compose  string      `json:"compose,omitempty"`
-	Ports    []uint16    `json:"ports,omitempty"`
-	Services []string    `json:"services,omitempty"`
-	Actions  []OpsAction `json:"actions,omitempty"`
+	ID       string            `json:"id"`
+	AgentID  string            `json:"agent_id,omitempty"`
+	Name     string            `json:"name"`
+	Status   string            `json:"status"`
+	Notice   string            `json:"notice,omitempty"`
+	Version  string            `json:"version"`
+	Compose  string            `json:"compose,omitempty"`
+	Ports    []uint16          `json:"ports,omitempty"`
+	Services []string          `json:"services,omitempty"`
+	Actions  []OpsAction       `json:"actions,omitempty"`
+	Rules    []appHTTPRuleView `json:"rules,omitempty"`
+}
+
+type appHTTPRuleView struct {
+	Ref     string `json:"ref,omitempty"`
+	Domain  string `json:"domain,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Port    uint16 `json:"port,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 type appWriteRequest struct {
@@ -150,10 +159,16 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			return
 		}
 		agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), agentID), Access: struct {
+		controller.publishHTTPBackendOffers(request.Context())
+		views, listErr := controller.projectAppViews(request.Context(), agentID)
+		response := appAPIResponse{Apps: views, Access: struct {
 			CanRead  bool `json:"can_read"`
 			CanWrite bool `json:"can_write"`
-		}{CanRead: true, CanWrite: true}})
+		}{CanRead: true, CanWrite: true}}
+		if listErr != nil {
+			response.Error = publicAppActionError(listErr, "http-rule-list")
+		}
+		writeAppJSON(writer, http.StatusOK, response)
 	case http.MethodPost:
 		if _, err := controller.uiIdentity(request); err != nil {
 			writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
@@ -203,7 +218,8 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), agentID)})
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), agentID))
 	default:
 		writer.Header().Set("Allow", "GET, HEAD, POST")
 		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
@@ -238,7 +254,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
 			return
 		}
-		view := controller.appViewFor(request.Context(), app)
+		listed, _ := controller.listHostHTTPRules(request.Context(), app.AgentID)
+		view := controller.appViewFor(request.Context(), app, listed)
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
@@ -255,7 +272,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "start":
 		if err := StartManaged(request.Context(), app, controller.uiStart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "start")})
@@ -265,7 +283,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "stop":
 		if err := StopManaged(request.Context(), app, controller.uiStop, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "stop")})
@@ -275,7 +294,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "restart":
 		if err := RestartManaged(request.Context(), app, controller.uiRestart, controller.uiAuditor); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "restart")})
@@ -285,28 +305,32 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "update":
 		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return
 		}
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "http-rule":
 		body, err := decodeAppWrite(request)
 		if err != nil {
 			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrEmptyIngressDomain.Error()})
 			return
 		}
-		existing := controller.HostHTTPRules()
 		operationCtx := withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader))
-		rules, err := CreateHTTPRuleFromPublishedPort(operationCtx, controller.uiHTTPRule, existing, app, nil, body.Domain, body.Port, controller.uiAuditor)
+		rules, err := CreateHTTPRuleFromPublishedPort(operationCtx, controller.uiHTTPRule, controller.uiHTTPRuleList, app, nil, body.Domain, body.Port, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "http-rule"), Rules: existing, Apps: controller.projectAppViews(request.Context(), app.AgentID)})
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "http-rule")
+			writeAppJSON(writer, appStatus(err), response)
 			return
 		}
-		controller.replaceHostHTTPRules(rules)
-		writeAppJSON(writer, http.StatusOK, appAPIResponse{Apps: controller.projectAppViews(request.Context(), app.AgentID), Rules: rules})
+		controller.publishHTTPBackendOffers(request.Context())
+		response := controller.appCollectionResponse(request.Context(), app.AgentID)
+		response.Rules = rules
+		writeAppJSON(writer, http.StatusOK, response)
 	case "logs":
 		body, _ := decodeAppWrite(request)
 		service := body.Service
@@ -426,19 +450,68 @@ func (controller *Controller) appByID(appID string) (App, bool) {
 	return App{}, false
 }
 
-func (controller *Controller) projectAppViews(ctx context.Context, agentID string) []appView {
+func (controller *Controller) appCollectionResponse(ctx context.Context, agentID string) appAPIResponse {
+	views, listErr := controller.projectAppViews(ctx, agentID)
+	response := appAPIResponse{Apps: views}
+	if listErr != nil {
+		response.Error = publicAppActionError(listErr, "http-rule-list")
+	}
+	return response
+}
+
+func (controller *Controller) projectAppViews(ctx context.Context, agentID string) ([]appView, error) {
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
+	rulesByAgent := map[string][]HostHTTPRule{}
+	var listErr error
 	for _, app := range apps {
 		if agentID != "" && app.AgentID != agentID {
 			continue
 		}
-		views = append(views, controller.appViewFor(ctx, app))
+		listed := []HostHTTPRule(nil)
+		if app.AgentID != "" {
+			cached, ok := rulesByAgent[app.AgentID]
+			if !ok {
+				var err error
+				cached, err = controller.listHostHTTPRules(ctx, app.AgentID)
+				rulesByAgent[app.AgentID] = cached
+				if err != nil && listErr == nil {
+					listErr = err
+				}
+			}
+			listed = cached
+		}
+		views = append(views, controller.appViewFor(ctx, app, listed))
 	}
-	return views
+	return views, listErr
 }
 
-func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
+func (controller *Controller) listHostHTTPRules(ctx context.Context, agentID string) ([]HostHTTPRule, error) {
+	if controller.uiHTTPRuleList == nil || !validAgentID(agentID) {
+		return nil, nil
+	}
+	listed, err := controller.uiHTTPRuleList.List(ctx, agentID)
+	if err != nil {
+		return nil, safeFailure(ErrHTTPRuleListFailed, err)
+	}
+	return listed, nil
+}
+
+func (controller *Controller) publishHTTPBackendOffers(ctx context.Context) {
+	if controller.uiHTTPBackendOffer == nil {
+		return
+	}
+	controller.mu.Lock()
+	running := cloneAppRuntime(controller.appRuntime)
+	controller.mu.Unlock()
+	offers, err := ProjectHTTPBackendCatalog(controller.Apps(), nil, running, true)
+	if err != nil {
+		return
+	}
+	_ = controller.uiHTTPBackendOffer.ReplaceHTTPBackendOffers(ctx, offers)
+}
+
+func (controller *Controller) appViewFor(ctx context.Context, app App, listed []HostHTTPRule) appView {
 	running := controller.appIsRunning(app.ID)
 	latest := controller.cachedLatestDigest(app)
 	controller.scheduleImageObservation(app)
@@ -448,7 +521,30 @@ func (controller *Controller) appViewFor(ctx context.Context, app App) appView {
 			deployment = record.Value
 		}
 	}
-	return projectAppView(app, running, deployment, latest)
+	view := projectAppView(app, running, deployment, latest)
+	ports := view.Ports
+	if len(ports) == 0 {
+		ports, _ = ListPublishedPorts(app, nil)
+	}
+	view.Rules = projectAppHTTPRuleViews(FilterHTTPRulesForApp(listed, app, ports))
+	return view
+}
+
+func projectAppHTTPRuleViews(rules []HostHTTPRule) []appHTTPRuleView {
+	if len(rules) == 0 {
+		return nil
+	}
+	views := make([]appHTTPRuleView, 0, len(rules))
+	for _, rule := range rules {
+		views = append(views, appHTTPRuleView{
+			Ref:     rule.Ref,
+			Domain:  rule.Domain,
+			Backend: rule.Backend,
+			Port:    rule.Port,
+			Enabled: rule.Enabled,
+		})
+	}
+	return views
 }
 
 func (controller *Controller) cachedLatestDigest(app App) string {
@@ -624,6 +720,8 @@ func appStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrEngineNotReady), errors.Is(err, ErrTypedHandlesUnavailable):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, ErrHTTPRuleListFailed):
+		return http.StatusBadGateway
 	default:
 		return http.StatusInternalServerError
 	}
@@ -637,6 +735,8 @@ func publicAppError(err error) string {
 		return ErrDeleteUnconfirmed.Error()
 	case errors.Is(err, ErrEmptyIngressDomain):
 		return ErrEmptyIngressDomain.Error()
+	case errors.Is(err, ErrHTTPRuleListFailed):
+		return appendPublicCause("HTTP 规则列表对账失败，请刷新页面后重试", err)
 	case errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage):
 		return err.Error()
 	case errors.Is(err, ErrMissingComposeVariable):
@@ -661,31 +761,46 @@ func publicAppError(err error) string {
 }
 
 func publicAppActionError(err error, action string) string {
+	if errors.Is(err, ErrHTTPRuleListFailed) {
+		return appendPublicCause("HTTP 规则列表对账失败，请刷新页面后重试", err)
+	}
 	if !errors.Is(err, ErrOperationFailed) && !errors.Is(err, ErrTypedHandlesUnavailable) {
 		return publicAppError(err)
 	}
+	staged := ""
 	switch action {
 	case "engine":
-		return "读取目标 Agent 的 Docker 状态失败，请确认 Agent 在线并重试"
+		staged = "读取目标 Agent 的 Docker 状态失败，请确认 Agent 在线并重试"
 	case "deploy":
-		return "Docker Compose 部署失败，请检查镜像、.env 必填变量和目标 Agent 的 Docker 状态"
+		staged = "Docker Compose 部署失败，请检查镜像、.env 必填变量和目标 Agent 的 Docker 状态"
 	case "persist":
-		return "Docker 操作已完成，但应用状态保存失败，请刷新页面后重试"
+		staged = "Docker 操作已完成，但应用状态保存失败，请刷新页面后重试"
 	case "start":
-		return "启动应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+		staged = "启动应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
 	case "stop":
-		return "停止应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+		staged = "停止应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
 	case "restart":
-		return "重启应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
+		staged = "重启应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
 	case "delete":
-		return "删除应用失败，请检查目标 Agent 的 Docker 状态和 Compose 工作目录"
+		staged = "删除应用失败，请检查目标 Agent 的 Docker 状态和 Compose 工作目录"
 	case "update":
-		return "更新应用失败，请检查镜像拉取结果和目标 Agent 的 Docker 状态"
+		staged = "更新应用失败，请检查镜像拉取结果和目标 Agent 的 Docker 状态"
 	case "http-rule":
-		return "HTTP 规则创建失败，请检查域名冲突、发布端口和目标 Agent 状态"
+		staged = "HTTP 规则创建失败，请检查域名冲突、发布端口和目标 Agent 状态"
+	case "http-rule-list":
+		staged = "HTTP 规则列表对账失败，请刷新页面后重试"
 	case "logs":
-		return "读取 Docker Compose 日志失败，请检查服务名和目标 Agent 状态"
+		staged = "读取 Docker Compose 日志失败，请检查服务名和目标 Agent 状态"
 	default:
 		return ErrOperationFailed.Error()
 	}
+	return appendPublicCause(staged, err)
+}
+
+func appendPublicCause(staged string, err error) string {
+	cause := publicCause(err)
+	if cause == "" || cause == staged || cause == ErrOperationFailed.Error() || cause == ErrTypedHandlesUnavailable.Error() || cause == ErrHTTPRuleListFailed.Error() {
+		return staged
+	}
+	return staged + "：" + cause
 }

@@ -232,7 +232,7 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 	if config.UIApply != nil || config.UIStart != nil || config.UIStop != nil || config.UIRestart != nil || config.UILogs != nil || config.UIRemove != nil {
 		t.Fatal("missing host runtime still bound compose executors")
 	}
-	if config.UIHTTPRule != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil {
+	if config.UIHTTPRule != nil || config.UIHTTPRuleList != nil || config.UIHTTPBackendOffer != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil {
 		t.Fatal("missing host runtime still bound http/image/rollout handles")
 	}
 	if config.Admission == nil {
@@ -286,8 +286,8 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIRemove != runtime {
 		t.Fatal("compose executors were not bound to the generic host handle")
 	}
-	if config.UIHTTPRule != runtime || config.UIImageObserver != runtime {
-		t.Fatal("http.rule and image observer were not bound to the generic host handle")
+	if config.UIHTTPRule != runtime || config.UIHTTPRuleList != runtime || config.UIHTTPBackendOffer != runtime || config.UIImageObserver != runtime {
+		t.Fatal("http.rule, catalog, and image observer were not bound to the generic host handle")
 	}
 	if rollout, ok := config.UIRolloutExecutor.(hostRolloutRuntime); !ok || rollout.runtime != runtime {
 		t.Fatalf("rollout executor = %#v", config.UIRolloutExecutor)
@@ -306,12 +306,23 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 				return err
 			}
 			if payload["action"] == "create" {
+				if _, exists := payload["app_id"]; exists {
+					t.Fatal("http.rule create must not send app_id")
+				}
 				return copyHostResult(map[string]any{
-					"ref": "rule-media-8080", "domain": "app.example.com",
-					"backend": "agent-1:8080", "app_id": "media", "agent_id": "agent-1", "port": 8080,
+					"rule_ref": "rule-media-8080", "frontend_url": "https://app.example.com",
+					"backend": "http://127.0.0.1:8080", "agent_id": "agent-1",
 				}, target)
 			}
+			if payload["action"] == "list" {
+				return copyHostResult(map[string]any{"rules": []map[string]any{{
+					"rule_ref": "rule-media-8080", "frontend_url": "https://app.example.com",
+					"backend": "http://127.0.0.1:8080", "enabled": true,
+				}}}, target)
+			}
 			return copyHostResult(map[string]any{"accepted": true}, target)
+		case hostHTTPBackendOfferOperation:
+			return copyHostResult(map[string]any{"stored": true, "count": 1}, target)
 		case pluginsdk.HostRuntimePluginCall:
 			request := decodePluginCallRequest(t, call)
 			switch request.Name {
@@ -340,10 +351,19 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest"}
 	ruleContext := withHostOperationKey(context.Background(), "operation/ui-test")
 	rule, err := config.UIHTTPRule.Create(ruleContext, HTTPRuleSpec{
-		AppID: "media", AgentID: "agent-1", Domain: "app.example.com", Port: 8080,
+		AppID: "media", AgentID: "agent-1", Domain: "https://app.example.com", Port: 8080,
 	})
-	if err != nil || rule.Backend != "agent-1:8080" || rule.AgentID != "agent-1" {
+	if err != nil || rule.Backend != "http://127.0.0.1:8080" || rule.AgentID != "agent-1" || rule.Domain != "https://app.example.com" || rule.Port != 8080 {
 		t.Fatalf("http rule=%#v err=%v", rule, err)
+	}
+	listed, err := config.UIHTTPRuleList.List(context.Background(), "agent-1")
+	if err != nil || len(listed) != 1 || listed[0].Ref != "rule-media-8080" || listed[0].Port != 8080 || !listed[0].Enabled {
+		t.Fatalf("http list=%#v err=%v", listed, err)
+	}
+	if err := config.UIHTTPBackendOffer.ReplaceHTTPBackendOffers(context.Background(), []HTTPBackendCatalogOffer{{
+		ResourceID: "media", AgentID: "agent-1", Port: 8080, DisplayName: "media", Available: true,
+	}}); err != nil {
+		t.Fatal(err)
 	}
 	observed, err := config.UIImageObserver.ObserveImage(context.Background(), app)
 	if err != nil || observed.CurrentDigest != "sha256:current" || observed.LatestDigest != "sha256:latest" {
@@ -369,18 +389,24 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(calls) != 8 {
+	if len(calls) != 10 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
 	assertNoNamedAgentHostOps(t, calls)
 	if calls[0].Operation != hostHTTPRuleOperation || calls[0].OperationID != "operation/ui-test" || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
 		t.Fatalf("http.rule call = %#v", calls[0])
 	}
-	image := decodePluginCallRequest(t, calls[1])
-	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || image.Name != pluginCallImageName || image.AgentID != "agent-1" {
-		t.Fatalf("image plugin.call = %#v", calls[1])
+	if calls[1].Operation != hostHTTPRuleOperation || !strings.Contains(string(calls[1].Payload), `"action":"list"`) {
+		t.Fatalf("http.rule list call = %#v", calls[1])
 	}
-	for index, call := range calls[2:] {
+	if calls[2].Operation != hostHTTPBackendOfferOperation || !strings.Contains(string(calls[2].Payload), `"resource_id":"media"`) {
+		t.Fatalf("http.backend-offer call = %#v", calls[2])
+	}
+	image := decodePluginCallRequest(t, calls[3])
+	if calls[3].Operation != pluginsdk.HostRuntimePluginCall || image.Name != pluginCallImageName || image.AgentID != "agent-1" {
+		t.Fatalf("image plugin.call = %#v", calls[3])
+	}
+	for index, call := range calls[4:] {
 		request := decodePluginCallRequest(t, call)
 		if request.Name != pluginCallComposeName {
 			t.Fatalf("rollout compose call %d = %#v", index, call)
@@ -456,7 +482,7 @@ func assertNoNamedAgentHostOps(t *testing.T, calls []pluginsdk.HostRuntimeCall) 
 		switch call.Operation {
 		case "agent.engine.report", "agent.compose", "agent.image":
 			t.Fatalf("production still emits %q: %#v", call.Operation, call)
-		case pluginsdk.HostRuntimePluginCall, pluginsdk.HostRuntimeHTTPRule:
+		case pluginsdk.HostRuntimePluginCall, pluginsdk.HostRuntimeHTTPRule, hostHTTPBackendOfferOperation:
 		default:
 			t.Fatalf("unexpected host operation %q", call.Operation)
 		}

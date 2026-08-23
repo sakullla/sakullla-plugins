@@ -3,16 +3,29 @@ package dockerapp
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// HTTPOffer is a managed app that may appear in the host HTTP rule
-// backend-provider catalog. ProviderID is the app id.
+const HTTPBackendOfferMaxEntries = 256
+
+// HTTPOffer is a managed app that may appear in the host HTTP published-port
+// catalog. ProviderID is the app id.
 type HTTPOffer struct {
-	AppID, ProviderID, RuleRef string
-	Ports                      []uint16
+	AppID, ProviderID, RuleRef, AgentID, DisplayName string
+	Ports                                            []uint16
+	Available                                        bool
+}
+
+// HTTPBackendCatalogOffer is one http.backend-offer replace entry.
+type HTTPBackendCatalogOffer struct {
+	ResourceID  string `json:"resource_id"`
+	AgentID     string `json:"agent_id"`
+	Port        int    `json:"port"`
+	DisplayName string `json:"display_name"`
+	Available   bool   `json:"available"`
 }
 
 // HTTPRuleHandle switches a rule target. Host http.rule implements this.
@@ -36,7 +49,7 @@ type HTTPRuleSpec struct {
 	Port    uint16
 }
 
-// HostHTTPRule is one entry in the host HTTP rule list after a create request.
+// HostHTTPRule is one host-owned HTTP rule after list or create.
 type HostHTTPRule struct {
 	Ref     string `json:"ref,omitempty"`
 	Domain  string `json:"domain,omitempty"`
@@ -44,6 +57,7 @@ type HostHTTPRule struct {
 	AppID   string `json:"app_id,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
 	Port    uint16 `json:"port,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 // AppHTTPIngress is the application-page projection of published host ports.
@@ -63,6 +77,30 @@ type HTTPRuleCreateHandleFunc func(context.Context, HTTPRuleSpec) (HostHTTPRule,
 
 func (function HTTPRuleCreateHandleFunc) Create(ctx context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
 	return function(ctx, spec)
+}
+
+// HTTPRuleListHandle lists host HTTP rules for one Agent. Host http.rule list
+// implements this. Application-page success uses this list, not process memory.
+type HTTPRuleListHandle interface {
+	List(context.Context, string) ([]HostHTTPRule, error)
+}
+
+type HTTPRuleListHandleFunc func(context.Context, string) ([]HostHTTPRule, error)
+
+func (function HTTPRuleListHandleFunc) List(ctx context.Context, agentID string) ([]HostHTTPRule, error) {
+	return function(ctx, agentID)
+}
+
+// HTTPBackendOfferReplaceHandle replaces this plugin instance's published-port
+// catalog. Host http.backend-offer implements this.
+type HTTPBackendOfferReplaceHandle interface {
+	ReplaceHTTPBackendOffers(context.Context, []HTTPBackendCatalogOffer) error
+}
+
+type HTTPBackendOfferReplaceHandleFunc func(context.Context, []HTTPBackendCatalogOffer) error
+
+func (function HTTPBackendOfferReplaceHandleFunc) ReplaceHTTPBackendOffers(ctx context.Context, offers []HTTPBackendCatalogOffer) error {
+	return function(ctx, offers)
 }
 
 // OffersHTTP reports whether a managed app should be listed as a backend
@@ -94,19 +132,74 @@ func ProjectHTTPOffers(apps []App, observations []ContainerObservation, granted 
 	}
 	offers := make([]HTTPOffer, 0, len(apps))
 	for _, app := range apps {
-		ports := portsByApp[app.ID]
+		ports := mergePorts(composePublishedPorts(app.Compose), portsByApp[app.ID])
 		if !OffersHTTP(app, ports) {
 			continue
 		}
 		offers = append(offers, HTTPOffer{
-			AppID:      app.ID,
-			ProviderID: app.ID,
-			RuleRef:    app.RuleRef,
-			Ports:      append([]uint16(nil), ports...),
+			AppID:       app.ID,
+			ProviderID:  app.ID,
+			RuleRef:     app.RuleRef,
+			AgentID:     app.AgentID,
+			DisplayName: app.ID,
+			Ports:       append([]uint16(nil), ports...),
+			Available:   true,
 		})
 	}
 	sort.Slice(offers, func(i, j int) bool { return offers[i].AppID < offers[j].AppID })
 	return offers, nil
+}
+
+// ProjectHTTPBackendCatalog expands ProjectHTTPOffers into the public
+// http.backend-offer replace payload. Stopped apps stay listed with
+// available=false; apps without a port or agent are omitted.
+func ProjectHTTPBackendCatalog(apps []App, observations []ContainerObservation, running map[string]bool, granted bool) ([]HTTPBackendCatalogOffer, error) {
+	offers, err := ProjectHTTPOffers(apps, observations, granted)
+	if err != nil {
+		return nil, err
+	}
+	catalog := make([]HTTPBackendCatalogOffer, 0, len(offers))
+	for _, offer := range offers {
+		if !validID(offer.AppID) || !validAgentID(offer.AgentID) {
+			continue
+		}
+		name := strings.TrimSpace(offer.DisplayName)
+		if name == "" {
+			name = offer.AppID
+		}
+		available := offer.Available
+		if running != nil {
+			available = running[offer.AppID]
+		}
+		for _, port := range offer.Ports {
+			if port == 0 {
+				continue
+			}
+			catalog = append(catalog, HTTPBackendCatalogOffer{
+				ResourceID:  offer.AppID,
+				AgentID:     offer.AgentID,
+				Port:        int(port),
+				DisplayName: name,
+				Available:   available,
+			})
+			if len(catalog) >= HTTPBackendOfferMaxEntries {
+				break
+			}
+		}
+		if len(catalog) >= HTTPBackendOfferMaxEntries {
+			break
+		}
+	}
+	sort.Slice(catalog, func(i, j int) bool {
+		if catalog[i].AgentID != catalog[j].AgentID {
+			return catalog[i].AgentID < catalog[j].AgentID
+		}
+		if catalog[i].ResourceID != catalog[j].ResourceID {
+			return catalog[i].ResourceID < catalog[j].ResourceID
+		}
+		return catalog[i].Port < catalog[j].Port
+	})
+	return catalog, nil
 }
 
 // ListHTTPBackendProviders is the backend-provider catalog projection.
@@ -144,39 +237,80 @@ func ProjectAppHTTPIngress(app App, observations []ContainerObservation) (AppHTT
 }
 
 // CreateHTTPRuleFromPublishedPort asks the host to create an HTTP rule for a
-// selected published port and ingress domain. Empty domain or missing ports
-// leave the existing host rule list unchanged.
-func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateHandle, existing []HostHTTPRule, app App, observations []ContainerObservation, domain string, port uint16, auditor Auditor) ([]HostHTTPRule, error) {
-	preserved := cloneHTTPRules(existing)
+// selected published port and ingress domain. Success is the host list
+// filtered by this app's Agent and published ports. Host rejection does not
+// record a local success.
+func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateHandle, lister HTTPRuleListHandle, app App, observations []ContainerObservation, domain string, port uint16, auditor Auditor) ([]HostHTTPRule, error) {
 	if auditor == nil {
-		return preserved, ErrAuditRequired
+		return nil, ErrAuditRequired
 	}
 	normalized, ok := normalizeIngressDomain(domain)
 	if !ok {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "denied", Detail: ErrEmptyIngressDomain.Error()})
-		return preserved, ErrEmptyIngressDomain
+		return nil, ErrEmptyIngressDomain
 	}
 	ports, err := ListPublishedPorts(app, observations)
 	if err != nil {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-		return preserved, safeFailure(ErrOperationFailed, err)
+		return nil, safeFailure(ErrOperationFailed, err)
 	}
 	if len(ports) == 0 || !containsPort(ports, port) {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "denied", Detail: ErrNoPublishedPort.Error()})
-		return preserved, ErrNoPublishedPort
+		return nil, ErrNoPublishedPort
 	}
 	if handle == nil {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
-		return preserved, ErrTypedHandlesUnavailable
+		return nil, ErrTypedHandlesUnavailable
 	}
-	created, err := handle.Create(ctx, HTTPRuleSpec{AppID: app.ID, AgentID: app.AgentID, Domain: normalized, Port: port})
-	if err != nil {
+	if _, err := handle.Create(ctx, HTTPRuleSpec{AppID: app.ID, AgentID: app.AgentID, Domain: normalized, Port: port}); err != nil {
 		audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "failed", Detail: ErrOperationFailed.Error()})
-		return preserved, safeFailure(ErrOperationFailed, err)
+		return nil, safeFailure(ErrOperationFailed, err)
 	}
-	created = normalizeCreatedHTTPRule(created, app, normalized, port)
+	if lister == nil {
+		audit(auditor, AuditRecord{Action: "http.rule.list", Outcome: "unavailable", Detail: ErrHTTPRuleListFailed.Error()})
+		return nil, ErrHTTPRuleListFailed
+	}
+	listed, err := lister.List(ctx, app.AgentID)
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.list", Outcome: "failed", Detail: ErrHTTPRuleListFailed.Error()})
+		return nil, safeFailure(ErrHTTPRuleListFailed, err)
+	}
 	audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "succeeded", Detail: app.ID})
-	return append(preserved, created), nil
+	return FilterHTTPRulesForApp(listed, app, ports), nil
+}
+
+// FilterHTTPRulesForApp keeps host list entries that target this app's Agent
+// and published ports.
+func FilterHTTPRulesForApp(rules []HostHTTPRule, app App, ports []uint16) []HostHTTPRule {
+	filtered := make([]HostHTTPRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.AgentID != "" && app.AgentID != "" && rule.AgentID != app.AgentID {
+			continue
+		}
+		port := rule.Port
+		if port == 0 {
+			parsed, ok := parseBackendPort(rule.Backend)
+			if !ok {
+				continue
+			}
+			port = parsed
+			rule.Port = port
+		}
+		if !containsPort(ports, port) {
+			continue
+		}
+		if rule.AppID == "" {
+			rule.AppID = app.ID
+		}
+		if rule.AgentID == "" {
+			rule.AgentID = app.AgentID
+		}
+		if rule.Domain == "" && rule.Backend != "" {
+			rule.Domain = rule.Backend
+		}
+		filtered = append(filtered, rule)
+	}
+	return filtered
 }
 
 func normalizeCreatedHTTPRule(rule HostHTTPRule, app App, domain string, port uint16) HostHTTPRule {
@@ -203,31 +337,72 @@ func publishedPortBackend(agentID string, port uint16) string {
 }
 
 func normalizeIngressDomain(value string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	frontend, err := normalizeHTTPRuleFrontend(value)
+	if err != nil {
 		return "", false
 	}
-	lower := strings.ToLower(value)
-	scheme := ""
+	return frontend, true
+}
+
+// normalizeHTTPRuleFrontend matches the host NormalizeHTTPRuleFrontend wire
+// contract: hostname or http(s) URL, path stripped, https:// kept.
+func normalizeHTTPRuleFrontend(domain string) (string, error) {
+	if domain == "" || domain != strings.TrimSpace(domain) || strings.ContainsAny(domain, "\r\n\x00") {
+		return "", ErrEmptyIngressDomain
+	}
+	scheme := "http"
+	host := domain
+	lower := strings.ToLower(domain)
 	switch {
 	case strings.HasPrefix(lower, "https://"):
-		scheme = "https://"
-		value = value[len("https://"):]
+		scheme = "https"
+		host = domain[len("https://"):]
 	case strings.HasPrefix(lower, "http://"):
-		scheme = "http://"
-		value = value[len("http://"):]
+		scheme = "http"
+		host = domain[len("http://"):]
+	case strings.Contains(domain, "://"):
+		return "", ErrEmptyIngressDomain
 	}
-	if cut := strings.IndexAny(value, "/?#"); cut >= 0 {
+	if cut := strings.IndexAny(host, "/?#"); cut >= 0 {
 		if cut == 0 {
-			return "", false
+			return "", ErrEmptyIngressDomain
 		}
-		value = value[:cut]
+		host = host[:cut]
 	}
-	value = strings.TrimSpace(value)
-	if !boundedText(value, 253) {
-		return "", false
+	host = strings.TrimSpace(host)
+	if host == "" || len(host) > 253 || strings.ContainsAny(host, " \r\n\x00/") {
+		return "", ErrEmptyIngressDomain
 	}
-	return scheme + value, true
+	frontend := scheme + "://" + host
+	parsed, err := url.Parse(frontend)
+	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil {
+		return "", ErrEmptyIngressDomain
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return "", ErrEmptyIngressDomain
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + parsed.Host, nil
+}
+
+func parseBackendPort(backend string) (uint16, bool) {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return 0, false
+	}
+	if parsed, err := url.Parse(backend); err == nil && parsed != nil && parsed.Host != "" {
+		if portText := parsed.Port(); portText != "" {
+			return parsePortNumber(portText)
+		}
+		if parsed.Scheme == "" {
+			if _, portText, ok := strings.Cut(parsed.Host, ":"); ok {
+				return parsePortNumber(portText)
+			}
+		}
+	}
+	if index := strings.LastIndexByte(backend, ':'); index >= 0 {
+		return parsePortNumber(backend[index+1:])
+	}
+	return 0, false
 }
 
 func containsPort(ports []uint16, want uint16) bool {

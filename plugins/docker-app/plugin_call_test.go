@@ -11,6 +11,44 @@ import (
 	"testing"
 )
 
+func TestDefaultExecutionWorkDirRootIsDurableOutsideTempDir(t *testing.T) {
+	t.Setenv("NRE_DOCKER_APP_WORKDIR", "")
+	root := defaultExecutionWorkDirRoot()
+	if root == "" {
+		t.Fatal("durable workdir root is empty")
+	}
+	temp := filepath.Clean(os.TempDir())
+	cleaned := filepath.Clean(root)
+	if cleaned == filepath.Join(temp, "nre-docker-app") || strings.HasPrefix(cleaned, temp+string(os.PathSeparator)) {
+		t.Fatalf("workdir %q still uses TempDir %q", root, temp)
+	}
+}
+
+func TestControllerCallComposeApplySanitizesDockerError(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		return []byte("failed to pull: password=fixture-value\nunix:///var/run/docker.sock"), errors.New("exit status 1")
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "apply", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload)
+	if err == nil {
+		t.Fatal("expected compose apply failure")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "compose apply failed") {
+		t.Fatalf("missing compose stage: %q", message)
+	}
+	if strings.Contains(message, "fixture-value") || strings.Contains(message, "docker.sock") {
+		t.Fatalf("compose failure leaked secret or socket: %q", message)
+	}
+}
+
 func TestControllerCallComposeApplyWritesWorkspace(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -366,8 +404,8 @@ func TestControllerCallComposeInspectReportsLiveInstance(t *testing.T) {
 		if err == nil {
 			t.Fatal("inspect succeeded when compose ps failed")
 		}
-		if !errors.Is(err, composeErr) {
-			t.Fatalf("inspect err=%v want %v", err, composeErr)
+		if !strings.Contains(err.Error(), "compose inspect failed") || !strings.Contains(err.Error(), composeErr.Error()) {
+			t.Fatalf("inspect err=%v want staged compose inspect failure", err)
 		}
 		if len(raw) == 0 {
 			return

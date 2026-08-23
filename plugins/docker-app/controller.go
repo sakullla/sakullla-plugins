@@ -74,6 +74,8 @@ type ControllerConfig struct {
 	UILogs                                                     ServiceLogReader
 	UIRemove                                                   AppRemoveExecutor
 	UIHTTPRule                                                 HTTPRuleCreateHandle
+	UIHTTPRuleList                                             HTTPRuleListHandle
+	UIHTTPBackendOffer                                         HTTPBackendOfferReplaceHandle
 	UIAuditor                                                  Auditor
 	UIWorkDirRoot                                              string
 	UIRolloutExecutor                                          RolloutExecutor
@@ -85,34 +87,35 @@ type ControllerConfig struct {
 
 type Controller struct {
 	*rpcplugin.Adapter
-	mu               sync.Mutex
-	apps             []App
-	registryMirror   string
-	resourceGroupRef string
-	admission        TypedHandleAdmission
-	prepareGate      func(context.Context) error
-	commit           *rpcplugin.Handle[*commitEpoch]
-	epoch            *commitEpoch
-	uiEngineSource   AgentEngineSource
-	uiApply          AppApplyExecutor
-	uiStart          StartExecutor
-	uiStop           StopExecutor
-	uiRestart        RestartExecutor
-	uiLogs           ServiceLogReader
-	uiRemove         AppRemoveExecutor
-	uiHTTPRule       HTTPRuleCreateHandle
-	uiAuditor        Auditor
-	uiWorkDirRoot    string
-	uiRollout        Rollout
-	uiImageObserver  ImageUpdateObserver
-	commandRunner    CommandRunner
-	callImages       ImageUpdateObserver
-	uiAppState       AppStateStore
-	appRuntime       map[string]bool
-	hostRules        []HostHTTPRule
-	imageCache       map[string]cachedImageObservation
-	imageRefresh     map[string]bool
-	imageSlots       chan struct{}
+	mu                 sync.Mutex
+	apps               []App
+	registryMirror     string
+	resourceGroupRef   string
+	admission          TypedHandleAdmission
+	prepareGate        func(context.Context) error
+	commit             *rpcplugin.Handle[*commitEpoch]
+	epoch              *commitEpoch
+	uiEngineSource     AgentEngineSource
+	uiApply            AppApplyExecutor
+	uiStart            StartExecutor
+	uiStop             StopExecutor
+	uiRestart          RestartExecutor
+	uiLogs             ServiceLogReader
+	uiRemove           AppRemoveExecutor
+	uiHTTPRule         HTTPRuleCreateHandle
+	uiHTTPRuleList     HTTPRuleListHandle
+	uiHTTPBackendOffer HTTPBackendOfferReplaceHandle
+	uiAuditor          Auditor
+	uiWorkDirRoot      string
+	uiRollout          Rollout
+	uiImageObserver    ImageUpdateObserver
+	commandRunner      CommandRunner
+	callImages         ImageUpdateObserver
+	uiAppState         AppStateStore
+	appRuntime         map[string]bool
+	imageCache         map[string]cachedImageObservation
+	imageRefresh       map[string]bool
+	imageSlots         chan struct{}
 }
 
 type cachedImageObservation struct {
@@ -139,6 +142,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		admission: config.Admission, prepareGate: config.PrepareGate,
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
 		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
+		uiHTTPRuleList: config.UIHTTPRuleList, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
 		appRuntime: map[string]bool{},
@@ -162,18 +166,6 @@ func (controller *Controller) Apps() []App {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	return cloneApps(controller.apps)
-}
-
-func (controller *Controller) HostHTTPRules() []HostHTTPRule {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	return cloneHTTPRules(controller.hostRules)
-}
-
-func (controller *Controller) replaceHostHTTPRules(rules []HostHTTPRule) {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	controller.hostRules = cloneHTTPRules(rules)
 }
 
 func (controller *Controller) RegistryMirror() string {
@@ -255,7 +247,6 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			controller.resourceGroupRef = ""
 			controller.commit = nil
 			controller.epoch = nil
-			controller.hostRules = nil
 		}
 		controller.mu.Unlock()
 	})
@@ -320,7 +311,6 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.resourceGroupRef = ""
 	controller.commit = nil
 	controller.epoch = nil
-	controller.hostRules = nil
 	controller.mu.Unlock()
 	return nil
 }
