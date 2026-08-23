@@ -211,31 +211,5 @@ func loadConfig(wire []byte) (PluginConfig, error) {
 }
 
 func validPassword(password string) bool {
-	if password == "" || len(password) > MaxPasswordBytes {
-		return false
-	}
-	padding := false
-	token := false
-	for index := 0; index < len(password); index++ {
-		character := password[index]
-		if character == '=' {
-			if !token {
-				return false
-			}
-			padding = true
-			continue
-		}
-		if padding || !isBearerToken68Character(character) {
-			return false
-		}
-		token = true
-	}
-	return token
-}
-
-func isBearerToken68Character(character byte) bool {
-	return character >= 'a' && character <= 'z' ||
-		character >= 'A' && character <= 'Z' ||
-		character >= '0' && character <= '9' ||
-		strings.ContainsRune("-._~+/", rune(character))
+	return password != "" && len(password) <= MaxPasswordBytes
 }

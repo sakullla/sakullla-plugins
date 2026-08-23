@@ -3,6 +3,7 @@ package webdav
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,8 +32,8 @@ func TestConfigSchemaDeclaresClosedLoadableObject(t *testing.T) {
 		t.Fatalf("webdav config schema must only declare password and root_path: %#v", properties)
 	}
 	password, _ := properties["password"].(map[string]any)
-	if password["pattern"] != "^[A-Za-z0-9._~+/-]+=*$" {
-		t.Fatalf("webdav password schema must require Bearer token68 syntax: %#v", password)
+	if password["pattern"] != nil || password["minLength"] != float64(1) || password["maxLength"] != float64(MaxPasswordBytes) {
+		t.Fatalf("webdav password schema must preserve the shared password domain: %#v", password)
 	}
 	required, _ := schema["required"].([]any)
 	if len(required) != 1 || required[0] != "password" {
@@ -152,8 +153,8 @@ func TestLoadConfigRequiresPasswordAndRejectsUnknownFields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadConfig(wire); err == nil {
-			t.Fatalf("non-token68 password %q was accepted", password)
+		if config, err := loadConfig(wire); err != nil || config.Password != password {
+			t.Fatalf("existing password %q was rejected: config=%+v err=%v", password, config, err)
 		}
 	}
 	for _, password := range []string{"share-pass", "abc.DEF_123~+/", "token=="} {
@@ -229,6 +230,29 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 	malloryComponent, _ := basicNamespaceComponent("mallory")
 	if _, err := os.Stat(filepath.Join(root, malloryComponent)); !os.IsNotExist(err) {
 		t.Fatalf("wrong Basic password created a namespace: %v", err)
+	}
+
+	for index, password := range []string{"share pass", "share:pass"} {
+		t.Run("existing password "+password, func(t *testing.T) {
+			controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", OwnedRoot: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			activateControllerWithConfig(t, controller, fmt.Sprintf("existing-password-%d", index), testShareConfig(password, ""))
+			for _, scheme := range []string{"basic", "bearer"} {
+				request := httptest.NewRequest(http.MethodGet, "http://share.test/", nil)
+				if scheme == "basic" {
+					request.SetBasicAuth("alice", password)
+				} else {
+					request.Header.Set("Authorization", "Bearer "+password)
+				}
+				recorder := httptest.NewRecorder()
+				controller.ServeHTTP(recorder, request)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("%s password %q status=%d body=%q", scheme, password, recorder.Code, recorder.Body.String())
+				}
+			}
+		})
 	}
 }
 
