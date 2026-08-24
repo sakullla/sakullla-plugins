@@ -19,8 +19,9 @@ import (
 var appUIAssets embed.FS
 
 const (
-	appActorHeader     = pluginsdk.HeaderPluginActor
-	appOperationHeader = pluginsdk.HeaderPluginOperationKey
+	appActorHeader        = pluginsdk.HeaderPluginActor
+	appOperationHeader    = pluginsdk.HeaderPluginOperationKey
+	appUnavailableMessage = "暂时无法管理 Docker 应用。"
 )
 
 type appView struct {
@@ -91,7 +92,7 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	path := request.URL.Path
 	if !controller.uiReady() {
-		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: ErrTypedHandlesUnavailable.Error()})
+		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: appUnavailableMessage})
 		return
 	}
 	if path == "/api/engine" {
@@ -133,11 +134,19 @@ func (controller *Controller) serveEngine(writer http.ResponseWriter, request *h
 	}
 	report, err := controller.observeAgent(request.Context(), agentID)
 	if err != nil {
-		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppError(err)})
+		controller.writeEngineView(writer, engineAPIView{AgentID: agentID})
 		return
 	}
 	status := ProjectEngine(ObservationFromReport(report))
-	view := engineAPIView{AgentID: agentID, Online: report.Online, Ready: report.Online && status.Ready, Version: status.Version}
+	controller.writeEngineView(writer, engineAPIView{
+		AgentID: agentID,
+		Online:  report.Online,
+		Ready:   report.Online && status.Ready,
+		Version: status.Version,
+	})
+}
+
+func (controller *Controller) writeEngineView(writer http.ResponseWriter, view engineAPIView) {
 	if !view.Ready {
 		command, commandErr := InstallCommand(controller.RegistryMirror())
 		if commandErr != nil {
@@ -817,7 +826,7 @@ func publicAppError(err error) string {
 	case errors.Is(err, ErrAppAgentConflict):
 		return ErrAppAgentConflict.Error()
 	case errors.Is(err, ErrTypedHandlesUnavailable):
-		return ErrTypedHandlesUnavailable.Error()
+		return "读取目标 Agent 的 Docker 状态失败，请确认 Agent 在线并重试"
 	default:
 		return ErrOperationFailed.Error()
 	}

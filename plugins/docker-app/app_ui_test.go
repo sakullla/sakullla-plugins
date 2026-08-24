@@ -648,6 +648,79 @@ func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
 	}
 }
 
+func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T) {
+	t.Parallel()
+	sdkText := ErrTypedHandlesUnavailable.Error()
+	cases := []struct {
+		name   string
+		source AgentEngineSource
+	}{
+		{
+			name: "typed-handles-unavailable",
+			source: AgentEngineSourceFunc(func(context.Context, string) (AgentEngineReport, error) {
+				return AgentEngineReport{}, ErrTypedHandlesUnavailable
+			}),
+		},
+		{
+			name: "generic-probe-error",
+			source: AgentEngineSourceFunc(func(context.Context, string) (AgentEngineReport, error) {
+				return AgentEngineReport{}, errors.New("engine probe failed")
+			}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			controller := newUIControllerWithSource(t, tc.source, `{"apps":[]}`)
+			engine := httptest.NewRecorder()
+			controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+			body := engine.Body.String()
+			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, OfficialInstallScript) {
+				t.Fatalf("probe failure engine status=%d body=%s", engine.Code, body)
+			}
+			if strings.Contains(body, `"ready":true`) || strings.Contains(body, sdkText) {
+				t.Fatalf("probe failure leaked readiness or SDK text: %s", body)
+			}
+
+			denied := httptest.NewRecorder()
+			controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+			if denied.Code == http.StatusOK || strings.Contains(denied.Body.String(), sdkText) {
+				t.Fatalf("probe failure deploy status=%d body=%s", denied.Code, denied.Body.String())
+			}
+			if len(controller.Apps()) != 0 {
+				t.Fatalf("probe failure deploy mutated apps: %#v", controller.Apps())
+			}
+		})
+	}
+}
+
+func TestAppUIUnavailableDoesNotLeakSDKTextOrInstallCommand(t *testing.T) {
+	t.Parallel()
+	controller, err := NewController(ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		UIEngineSource: AgentEngineSourceFunc(func(context.Context, string) (AgentEngineReport, error) {
+			return AgentEngineReport{}, ErrTypedHandlesUnavailable
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := httptest.NewRecorder()
+	controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+	body := engine.Body.String()
+	if engine.Code != http.StatusServiceUnavailable || !strings.Contains(body, appUnavailableMessage) {
+		t.Fatalf("uiReady engine status=%d body=%s", engine.Code, body)
+	}
+	if strings.Contains(body, ErrTypedHandlesUnavailable.Error()) || strings.Contains(body, OfficialInstallScript) {
+		t.Fatalf("uiReady engine leaked SDK text or install command: %s", body)
+	}
+	apps := httptest.NewRecorder()
+	controller.ServeHTTP(apps, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if apps.Code != http.StatusServiceUnavailable || strings.Contains(apps.Body.String(), ErrTypedHandlesUnavailable.Error()) {
+		t.Fatalf("uiReady apps status=%d body=%s", apps.Code, apps.Body.String())
+	}
+}
+
 func TestAppUIRejectsSameAppIDOnAnotherAgent(t *testing.T) {
 	t.Parallel()
 	catalog := NewReportedEngineCatalog()
@@ -1270,9 +1343,81 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
 	}
-	if strings.Contains(stylesheet, "min(52rem") {
-		t.Fatal("stylesheet still caps main at 52rem")
+	if strings.Contains(stylesheet, "min(52rem") || strings.Contains(stylesheet, "min(64rem") || strings.Contains(stylesheet, "min(880px") {
+		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
 	}
+	workspaceHead := cssRule(stylesheet, ".workspace-head")
+	if strings.Contains(workspaceHead, "space-between") {
+		t.Fatal(".workspace-head still uses space-between to fill main")
+	}
+	if !strings.Contains(workspaceHead, "justify-content: flex-start") || !strings.Contains(workspaceHead, "max-width: min(46rem, 100%)") {
+		t.Fatal(".workspace-head is not a capped operation group")
+	}
+	createForm := cssRule(stylesheet, "#create-form")
+	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
+		t.Fatal("#create-form still fills main without a capped operation group")
+	}
+	for _, want := range []string{
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"repeat(2, minmax(0, 1fr))",
+		"repeat(2, minmax(18rem, 1fr))",
+		"repeat(3, minmax(18rem, 1fr))",
+	} {
+		if !strings.Contains(stylesheet, want) {
+			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
+		}
+	}
+	sdkText := ErrTypedHandlesUnavailable.Error()
+	if strings.Contains(page, sdkText) || strings.Contains(js, sdkText) || strings.Contains(stylesheet, sdkText) {
+		t.Fatal("management page still exposes the typed-handles SDK sentence")
+	}
+	renderStart := strings.Index(js, "const renderWorkspace = async () => {")
+	loadEngineCall := strings.Index(js, "engine = await loadEngine();")
+	if renderStart < 0 || loadEngineCall < 0 || loadEngineCall < renderStart {
+		t.Fatal("renderWorkspace no longer loads the engine")
+	}
+	beforeLoad := js[renderStart:loadEngineCall]
+	for _, want := range []string{
+		"workspaceNode.hidden = true",
+		"renderApps([])",
+		"closeCreate()",
+		`showStatus("", false)`,
+	} {
+		if !strings.Contains(beforeLoad, want) {
+			t.Fatalf("app.js does not clear workspace before loadEngine: missing %q", want)
+		}
+	}
+	catchStart := strings.Index(js[loadEngineCall:], "catch (error)")
+	if catchStart < 0 {
+		t.Fatal("loadEngine failure is not handled inside renderWorkspace")
+	}
+	loadCatch := js[loadEngineCall:]
+	endCatch := strings.Index(loadCatch, "engineReady = engine?.ready === true;")
+	if endCatch < 0 {
+		t.Fatal("renderWorkspace lost the ready projection after loadEngine")
+	}
+	if strings.Contains(loadCatch[:endCatch], "showStatus(error.message") {
+		t.Fatal("loadEngine failure still writes the error payload into #app-status")
+	}
+	if !strings.Contains(loadCatch[:endCatch], `showContext("unready")`) {
+		t.Fatal("loadEngine failure does not fall through to the install guide")
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {

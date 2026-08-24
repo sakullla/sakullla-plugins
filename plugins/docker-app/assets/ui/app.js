@@ -924,37 +924,38 @@ const renderWorkspace = async () => {
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
+  workspaceNode.hidden = true;
+  emptyNode.hidden = true;
+  closeCreate();
+  showStatus("", false);
+  renderApps([]);
   if (!selectedAgentID) {
     renderEngineBadge(null);
     showContext("empty");
-    workspaceNode.hidden = true;
-    emptyNode.hidden = true;
-    closeCreate();
-    deployToggle.hidden = true;
-    renderApps([]);
     return;
   }
   if (!agentOnline) {
     renderEngineBadge(null);
     showContext("offline");
-    workspaceNode.hidden = true;
-    closeCreate();
-    deployToggle.hidden = true;
-    emptyNode.hidden = true;
-    renderApps([]);
     return;
   }
-  const engine = await loadEngine();
+  showContext("");
+  let engine = null;
+  try {
+    engine = await loadEngine();
+  } catch (error) {
+    if (error && error.denied) throw error;
+    if (error && error.message === "暂时无法管理 Docker 应用。") throw error;
+    renderGuide(null);
+    renderEngineBadge(null);
+    showContext("unready");
+    return;
+  }
   engineReady = engine?.ready === true;
   renderEngineBadge(engine);
   if (!engineReady) {
     renderGuide(engine);
     showContext("unready");
-    workspaceNode.hidden = true;
-    closeCreate();
-    deployToggle.hidden = true;
-    emptyNode.hidden = true;
-    renderApps([]);
     return;
   }
   showContext("");
