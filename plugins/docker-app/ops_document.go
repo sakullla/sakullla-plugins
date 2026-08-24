@@ -130,20 +130,22 @@ func ProjectOpsDocumentFromRuntime(app App, running, unhealthy bool, deployment 
 
 func opsActions(status AppStatus) []OpsAction {
 	configure := OpsAction{ID: OpsActionConfigure, Label: OpsConfigEntry}
+	var actions []OpsAction
 	switch ProjectPopularStatus(status) {
 	case OpsStatusRunning:
-		return []OpsAction{{ID: OpsActionStop, Label: "停止"}, {ID: OpsActionRestart, Label: "重启"}, configure}
+		actions = []OpsAction{{ID: OpsActionStop, Label: "停止"}, {ID: OpsActionRestart, Label: "重启"}, configure}
 	case OpsStatusStopped:
-		return []OpsAction{{ID: OpsActionStart, Label: "启动"}, {ID: OpsActionDelete, Label: "删除"}, configure}
+		actions = []OpsAction{{ID: OpsActionStart, Label: "启动"}, configure}
 	case OpsStatusUpdateAvailable:
-		return []OpsAction{{ID: OpsActionUpdate, Label: "更新"}, {ID: OpsActionStop, Label: "停止"}, configure}
+		actions = []OpsAction{{ID: OpsActionUpdate, Label: "更新"}, {ID: OpsActionStop, Label: "停止"}, configure}
 	case OpsStatusPublishing:
 		return []OpsAction{configure}
 	case OpsStatusUnhealthy:
-		return []OpsAction{{ID: OpsActionUpdate, Label: "恢复"}, {ID: OpsActionStop, Label: "停止"}, configure}
+		actions = []OpsAction{{ID: OpsActionUpdate, Label: "恢复"}, {ID: OpsActionStop, Label: "停止"}, configure}
 	default:
 		return []OpsAction{configure}
 	}
+	return appendDeleteAction(actions)
 }
 
 func canRollback(deployment Deployment) bool {

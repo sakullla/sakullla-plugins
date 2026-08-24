@@ -10,35 +10,42 @@
   <div class="wash" aria-hidden="true"></div>
   <main>
     <header class="page-head">
-      <p class="kicker">Docker 应用</p>
-      <h1>组内 compose 应用</h1>
-      <p class="lede">先选一台在线节点。引擎状态与应用镜像版本分开显示。引擎未就绪时给出本机安装命令；就绪后可部署 compose，启停、看日志、确认删除。有发布端口后可在组内挂入口域名。有新版本时需手动更新。</p>
-      </header>
-      <section class="face-summary" aria-label="插件运行面">
-        <div class="face-summary-item">
-          <strong>本地管理面</strong>
-          <span>当前页面管理配置与操作，不在控制面运行 Docker。</span>
-        </div>
-        <div class="face-summary-item">
-          <strong>Agent 执行面</strong>
-          <span>compose、镜像与引擎操作始终发送到所选 Agent。</span>
-        </div>
-      </section>
-      <p id="app-loading" role="status">正在加载应用…</p>
-    <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
-    <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
-    <div id="app-workspace" hidden>
-      <div class="toolbar-bar">
+      <div class="page-head-copy">
+        <p class="kicker">Docker 应用</p>
+        <h1>组内 compose 应用</h1>
+        <p class="lede">页头选择一台在线节点。引擎状态与应用镜像版本分开显示。引擎未就绪时给出本机安装命令；就绪后可部署 compose，启停、看日志、确认删除（运行中也可删）。有发布端口时直接管理入口域名。有新版本时需手动更新。</p>
+      </div>
+      <div class="page-head-agent">
         <label class="agent-field">节点
           <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
           <div class="agent-search-select" data-agent-picker="workspace"></div>
         </label>
         <p id="engine-status" class="engine-status" hidden></p>
-        <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
       </div>
-      <p id="app-node-hint" class="hint" hidden></p>
-      <p id="app-offline" class="hint" hidden>该节点离线，不能部署或改动 compose 应用。</p>
-      <section class="panel" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
+    </header>
+    <section class="face-summary" aria-label="插件运行面">
+      <div class="face-summary-item">
+        <strong>本地管理面</strong>
+        <span>当前页面管理配置与操作，不在控制面运行 Docker。</span>
+      </div>
+      <div class="face-summary-item">
+        <strong>Agent 执行面</strong>
+        <span>compose、镜像与引擎操作始终发送到所选 Agent。</span>
+      </div>
+    </section>
+    <p id="app-loading" role="status">正在加载应用…</p>
+    <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
+    <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
+    <section id="app-context" class="context-region" hidden>
+      <section class="state-panel" id="app-node-empty" hidden>
+        <h2>未选择节点</h2>
+        <p>请先选择一台在线节点，再查看引擎状态和管理 compose 应用。</p>
+      </section>
+      <section class="state-panel" id="app-offline" hidden>
+        <h2>节点离线</h2>
+        <p>该节点离线，不能部署或改动 compose 应用。</p>
+      </section>
+      <section class="state-panel" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
         <div class="section-head">
           <h2 id="engine-guide-title">安装 Docker 引擎</h2>
         </div>
@@ -46,15 +53,21 @@
         <pre id="engine-install-script"></pre>
         <button id="copy-install-script" class="btn-primary" type="button">复制命令</button>
         <div id="engine-daemon-json-wrap" hidden>
-          <p class="hint">已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
+          <p>已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
           <pre id="engine-daemon-json"></pre>
           <button id="copy-daemon-json" class="btn-primary" type="button">复制 daemon.json</button>
         </div>
       </section>
+    </section>
+    <section id="app-workspace" class="workspace-region" hidden>
+      <div class="workspace-head">
+        <h2>工作区</h2>
+        <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
+      </div>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
           <h2 id="app-create-title">部署应用</h2>
-          <button id="create-cancel" class="btn-link" type="button">取消</button>
+          <button id="create-cancel" class="btn-secondary" type="button">取消</button>
         </div>
         <form id="create-form" method="post">
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
@@ -76,8 +89,8 @@
         <div id="app-list" class="app-list"></div>
         <p id="app-empty" hidden>还没有应用。引擎就绪后点右上角部署。</p>
       </section>
-      <p id="app-status" role="status" hidden></p>
-    </div>
+    </section>
+    <p id="app-status" role="status" hidden></p>
   </main>
   <script src="app.js" defer></script>
 </body>

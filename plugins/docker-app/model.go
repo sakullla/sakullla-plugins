@@ -41,6 +41,8 @@ var (
 	ErrAppAgentConflict        = errors.New("app is already bound to another Agent")
 	ErrUnknownService          = errors.New("compose service is unknown")
 	ErrEmptyIngressDomain      = errors.New("ingress domain is empty")
+	ErrEmptyHTTPRuleRef        = errors.New("http rule ref is empty")
+	ErrUnknownHTTPRule         = errors.New("http rule is unknown")
 	ErrNoPublishedPort         = errors.New("app has no published port")
 	ErrMissingComposeVariable  = errors.New("compose environment variable is missing")
 	ErrHTTPRuleListFailed      = errors.New("http rule list failed")

@@ -54,6 +54,7 @@ type appWriteRequest struct {
 	Confirm    string `json:"confirm"`
 	Domain     string `json:"domain"`
 	Port       uint16 `json:"port"`
+	RuleRef    string `json:"rule_ref"`
 	Service    string `json:"service"`
 }
 
@@ -241,7 +242,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		writeAppJSON(writer, http.StatusNotFound, appAPIResponse{Error: "app is unknown"})
 		return
 	}
-	if action != "get" && action != "http-rule" {
+	if action != "get" && action != "http-rule" && action != "http-rule-delete" {
 		if err := controller.requireMutableAgent(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, action)})
 			return
@@ -259,9 +260,21 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
-		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, body.Confirm == appID, controller.uiRemove, controller.uiAuditor)
+		if body.Confirm != appID {
+			writeAppJSON(writer, appStatus(ErrDeleteUnconfirmed), appAPIResponse{Error: publicAppActionError(ErrDeleteUnconfirmed, "delete")})
+			return
+		}
+		if err := controller.deleteListedAppHTTPRules(request.Context(), app); err != nil {
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "http-rule-delete")
+			writeAppJSON(writer, appStatus(err), response)
+			return
+		}
+		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, true, controller.uiRemove, controller.uiAuditor)
 		if err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "delete")})
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "delete-after-rules")
+			writeAppJSON(writer, appStatus(err), response)
 			return
 		}
 		if err := controller.replaceApps(request.Context(), next); err != nil {
@@ -324,6 +337,24 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		if err != nil {
 			response := controller.appCollectionResponse(request.Context(), app.AgentID)
 			response.Error = publicAppActionError(err, "http-rule")
+			writeAppJSON(writer, appStatus(err), response)
+			return
+		}
+		controller.publishHTTPBackendOffers(request.Context())
+		response := controller.appCollectionResponse(request.Context(), app.AgentID)
+		response.Rules = rules
+		writeAppJSON(writer, http.StatusOK, response)
+	case "http-rule-delete":
+		body, err := decodeAppWrite(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrEmptyHTTPRuleRef.Error()})
+			return
+		}
+		operationCtx := withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader))
+		rules, err := DeleteHTTPRule(operationCtx, controller.uiHTTPRuleDelete, controller.uiHTTPRuleList, app, nil, body.RuleRef, controller.uiAuditor)
+		if err != nil {
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "http-rule-delete")
 			writeAppJSON(writer, appStatus(err), response)
 			return
 		}
@@ -652,7 +683,7 @@ func appViewActions(status, notice string) []OpsAction {
 	case OpsStatusRunning:
 		actions = []OpsAction{{ID: OpsActionStop, Label: "停止"}, {ID: OpsActionRestart, Label: "重启"}, configure}
 	case OpsStatusStopped:
-		actions = []OpsAction{{ID: OpsActionStart, Label: "启动"}, {ID: OpsActionDelete, Label: "删除"}, configure}
+		actions = []OpsAction{{ID: OpsActionStart, Label: "启动"}, configure}
 	case OpsStatusPublishing:
 		actions = []OpsAction{configure}
 	case OpsStatusUnhealthy:
@@ -662,6 +693,9 @@ func appViewActions(status, notice string) []OpsAction {
 	}
 	if notice == OpsStatusUpdateAvailable && !hasOpsAction(actions, OpsActionUpdate) {
 		actions = append([]OpsAction{{ID: OpsActionUpdate, Label: "更新"}}, actions...)
+	}
+	if status != OpsStatusPublishing {
+		actions = appendDeleteAction(actions)
 	}
 	return actions
 }
@@ -673,6 +707,31 @@ func hasOpsAction(actions []OpsAction, id string) bool {
 		}
 	}
 	return false
+}
+
+func appendDeleteAction(actions []OpsAction) []OpsAction {
+	if hasOpsAction(actions, OpsActionDelete) {
+		return actions
+	}
+	return append(actions, OpsAction{ID: OpsActionDelete, Label: "删除"})
+}
+
+func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app App) error {
+	listed, err := controller.listHostHTTPRules(ctx, app.AgentID)
+	if err != nil {
+		return err
+	}
+	view := controller.appViewFor(ctx, app, listed)
+	refs := make([]string, 0, len(view.Rules))
+	for _, rule := range view.Rules {
+		if strings.TrimSpace(rule.Ref) != "" {
+			refs = append(refs, rule.Ref)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return DeleteListedHTTPRules(ctx, controller.uiHTTPRuleDelete, controller.uiHTTPRuleList, app, nil, refs, controller.uiAuditor)
 }
 
 func parseAppAPIPath(path string) (appID, action string, ok bool) {
@@ -689,7 +748,7 @@ func parseAppAPIPath(path string) (appID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "delete", "start", "stop", "restart", "update", "http-rule", "logs":
+	case "delete", "start", "stop", "restart", "update", "http-rule", "http-rule-delete", "logs":
 		return decoded, action, true
 	default:
 		return "", "", false
@@ -714,7 +773,7 @@ func appStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusForbidden
-	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
+	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrEmptyHTTPRuleRef), errors.Is(err, ErrUnknownHTTPRule), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
 		return http.StatusConflict
@@ -735,6 +794,10 @@ func publicAppError(err error) string {
 		return ErrDeleteUnconfirmed.Error()
 	case errors.Is(err, ErrEmptyIngressDomain):
 		return ErrEmptyIngressDomain.Error()
+	case errors.Is(err, ErrEmptyHTTPRuleRef):
+		return ErrEmptyHTTPRuleRef.Error()
+	case errors.Is(err, ErrUnknownHTTPRule):
+		return ErrUnknownHTTPRule.Error()
 	case errors.Is(err, ErrHTTPRuleListFailed):
 		return appendPublicCause("HTTP 规则列表对账失败，请刷新页面后重试", err)
 	case errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage):
@@ -783,10 +846,14 @@ func publicAppActionError(err error, action string) string {
 		staged = "重启应用失败，请检查目标 Agent 的 Docker 状态和 Compose 服务"
 	case "delete":
 		staged = "删除应用失败，请检查目标 Agent 的 Docker 状态和 Compose 工作目录"
+	case "delete-after-rules":
+		staged = "入口规则已按宿主结果删除，但应用仍在。请刷新后重试删除应用"
 	case "update":
 		staged = "更新应用失败，请检查镜像拉取结果和目标 Agent 的 Docker 状态"
 	case "http-rule":
 		staged = "HTTP 规则创建失败，请检查域名冲突、发布端口和目标 Agent 状态"
+	case "http-rule-delete":
+		staged = "HTTP 规则删除失败，请检查规则是否仍存在和目标 Agent 状态"
 	case "http-rule-list":
 		staged = "HTTP 规则列表对账失败，请刷新页面后重试"
 	case "logs":

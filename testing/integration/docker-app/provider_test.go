@@ -169,6 +169,43 @@ func TestHTTPRuleCreatedFromPublishedPortAndDomain(t *testing.T) {
 	}
 }
 
+func TestHTTPRuleDeletedFromPublishedPortAndDomain(t *testing.T) {
+	app := dockerapp.App{
+		ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n",
+	}
+	observations := []dockerapp.ContainerObservation{
+		{ID: "ctr-media", Labels: map[string]string{dockerapp.AppLabel: app.ID}, ExposedPorts: []uint16{8080}},
+	}
+	store := &recordingHostHTTPRules{}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	rules, err := dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), store, store, app, observations, "https://app.example.com", 8080, auditor)
+	if err != nil || len(rules) != 1 || rules[0].Ref == "" {
+		t.Fatalf("create rules=%#v err=%v", rules, err)
+	}
+	ref := rules[0].Ref
+
+	deleted, err := dockerapp.DeleteHTTPRule(context.Background(), store, store, app, observations, ref, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.deletes) != 1 || store.deletes[0] != ref {
+		t.Fatalf("host deletes=%#v", store.deletes)
+	}
+	if len(deleted) != 0 || len(store.rules) != 0 {
+		t.Fatalf("host list still has rule deleted=%#v store=%#v", deleted, store.rules)
+	}
+
+	snapshot := append([]dockerapp.HostHTTPRule(nil), store.rules...)
+	again, err := dockerapp.DeleteHTTPRule(context.Background(), store, store, app, observations, ref, auditor)
+	if !errors.Is(err, dockerapp.ErrUnknownHTTPRule) || len(store.deletes) != 1 || len(again) != 0 {
+		t.Fatalf("second delete err=%v deletes=%#v rules=%#v", err, store.deletes, again)
+	}
+	if len(store.rules) != len(snapshot) {
+		t.Fatalf("unknown delete mutated rules: %#v", store.rules)
+	}
+}
+
 func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 	httpApp := dockerapp.App{
 		ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
@@ -287,6 +324,77 @@ func TestHTTPRuleNotCreatedWithoutPublishedPortOrDomain(t *testing.T) {
 	})
 }
 
+func TestHTTPRuleNotDeletedWithoutRefOrOnFailure(t *testing.T) {
+	httpApp := dockerapp.App{
+		ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Generation: "generation-1",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n",
+	}
+	httpObservations := []dockerapp.ContainerObservation{
+		{ID: "ctr-media", Labels: map[string]string{dockerapp.AppLabel: httpApp.ID}, ExposedPorts: []uint16{8080}},
+	}
+	store := &recordingHostHTTPRules{}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	created, err := dockerapp.CreateHTTPRuleFromPublishedPort(context.Background(), store, store, httpApp, httpObservations, "https://app.example.com", 8080, auditor)
+	if err != nil || len(created) != 1 {
+		t.Fatalf("seed create rules=%#v err=%v", created, err)
+	}
+	ref := created[0].Ref
+
+	for _, test := range []struct {
+		name       string
+		ref        string
+		want       error
+		nilHandle  bool
+		nilAuditor bool
+	}{
+		{name: "empty-ref", ref: "", want: dockerapp.ErrEmptyHTTPRuleRef},
+		{name: "whitespace-ref", ref: "   ", want: dockerapp.ErrEmptyHTTPRuleRef},
+		{name: "unknown-ref", ref: "rule-other", want: dockerapp.ErrUnknownHTTPRule},
+		{name: "missing-handle", ref: ref, want: dockerapp.ErrTypedHandlesUnavailable, nilHandle: true},
+		{name: "missing-auditor", ref: ref, want: dockerapp.ErrAuditRequired, nilAuditor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := len(store.deletes)
+			snapshot := append([]dockerapp.HostHTTPRule(nil), store.rules...)
+			var handle dockerapp.HTTPRuleDeleteHandle
+			if !test.nilHandle {
+				handle = store
+			}
+			var audit dockerapp.Auditor
+			if !test.nilAuditor {
+				audit = auditor
+			}
+			rules, err := dockerapp.DeleteHTTPRule(context.Background(), handle, store, httpApp, httpObservations, test.ref, audit)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want %v", err, test.want)
+			}
+			if len(store.deletes) != before {
+				t.Fatal("host delete was invoked")
+			}
+			if len(rules) != 0 {
+				t.Fatalf("denied delete returned local rules: %#v", rules)
+			}
+			if len(store.rules) != len(snapshot) || store.rules[0] != snapshot[0] {
+				t.Fatalf("existing rules changed: %#v", store.rules)
+			}
+		})
+	}
+
+	t.Run("delete-failure", func(t *testing.T) {
+		failing := &recordingHostHTTPRules{rules: append([]dockerapp.HostHTTPRule(nil), store.rules...), deleteErr: errors.New("host rejected fixture-value")}
+		rules, err := dockerapp.DeleteHTTPRule(context.Background(), failing, failing, httpApp, httpObservations, ref, auditor)
+		if !errors.Is(err, dockerapp.ErrOperationFailed) {
+			t.Fatalf("delete failure err=%v", err)
+		}
+		if len(rules) != 0 || len(failing.rules) != 1 {
+			t.Fatalf("failed delete recorded local success: rules=%#v store=%#v", rules, failing.rules)
+		}
+		if strings.Contains(err.Error(), "fixture-value") {
+			t.Fatalf("delete failure leaked cause: %v", err)
+		}
+	})
+}
+
 func TestProjectHTTPBackendCatalogUsesComposePortsAndAvailability(t *testing.T) {
 	hub := dockerapp.App{
 		ID: "hubproxy", AgentID: "edge-a", Image: "hubproxy:latest", Generation: "generation-1",
@@ -325,8 +433,10 @@ func TestProjectHTTPBackendCatalogUsesComposePortsAndAvailability(t *testing.T) 
 type recordingHostHTTPRules struct {
 	specs     []dockerapp.HTTPRuleSpec
 	rules     []dockerapp.HostHTTPRule
+	deletes   []string
 	createErr error
 	listErr   error
+	deleteErr error
 }
 
 func (store *recordingHostHTTPRules) Create(_ context.Context, spec dockerapp.HTTPRuleSpec) (dockerapp.HostHTTPRule, error) {
@@ -358,6 +468,21 @@ func (store *recordingHostHTTPRules) List(_ context.Context, agentID string) ([]
 		}
 	}
 	return listed, nil
+}
+
+func (store *recordingHostHTTPRules) Delete(_ context.Context, ruleRef string) error {
+	store.deletes = append(store.deletes, ruleRef)
+	if store.deleteErr != nil {
+		return store.deleteErr
+	}
+	kept := make([]dockerapp.HostHTTPRule, 0, len(store.rules))
+	for _, rule := range store.rules {
+		if rule.Ref != ruleRef {
+			kept = append(kept, rule)
+		}
+	}
+	store.rules = kept
+	return nil
 }
 
 func portsEqual(got, want []uint16) bool {

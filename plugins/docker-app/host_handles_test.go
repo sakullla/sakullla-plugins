@@ -286,7 +286,7 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIRemove != runtime {
 		t.Fatal("compose executors were not bound to the generic host handle")
 	}
-	if config.UIHTTPRule != runtime || config.UIHTTPRuleList != runtime || config.UIHTTPBackendOffer != runtime || config.UIImageObserver != runtime {
+	if config.UIHTTPRule != runtime || config.UIHTTPRuleList != runtime || config.UIHTTPRuleDelete != runtime || config.UIHTTPBackendOffer != runtime || config.UIImageObserver != runtime {
 		t.Fatal("http.rule, catalog, and image observer were not bound to the generic host handle")
 	}
 	if rollout, ok := config.UIRolloutExecutor.(hostRolloutRuntime); !ok || rollout.runtime != runtime {
@@ -418,6 +418,46 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	}
 	if err := config.UIRolloutExecutor.Ready(context.Background(), 1, App{ID: "media"}, "new"); !errors.Is(err, ErrAgentOffline) {
 		t.Fatalf("ready without agent_id err=%v", err)
+	}
+}
+
+func TestHostCapabilityRuntimeDeletesHTTPRuleByRef(t *testing.T) {
+	t.Parallel()
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		calls = append(calls, call)
+		if call.Operation != hostHTTPRuleOperation {
+			t.Fatalf("unexpected host operation %q", call.Operation)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			return err
+		}
+		if payload["action"] != "delete" {
+			t.Fatalf("payload=%#v", payload)
+		}
+		if _, exists := payload["domain"]; exists {
+			t.Fatal("http.rule delete must not send domain")
+		}
+		if _, exists := payload["port"]; exists {
+			t.Fatal("http.rule delete must not send port")
+		}
+		if payload["rule_ref"] != "rule-media-8080" {
+			t.Fatalf("payload=%#v", payload)
+		}
+		return copyHostResult(map[string]any{"accepted": true}, target)
+	})
+	config := bindHostCapabilityClient(ControllerConfig{}, func() (hostRuntimeCaller, error) {
+		return client, nil
+	})
+	if err := config.UIHTTPRuleDelete.Delete(withHostOperationKey(context.Background(), "operation/ui-test"), "rule-media-8080"); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].Operation != hostHTTPRuleOperation || calls[0].OperationID != "operation/ui-test" {
+		t.Fatalf("http.rule delete call = %#v", calls)
+	}
+	if !strings.Contains(string(calls[0].Payload), `"action":"delete"`) || !strings.Contains(string(calls[0].Payload), `"rule_ref":"rule-media-8080"`) {
+		t.Fatalf("http.rule delete payload = %s", calls[0].Payload)
 	}
 }
 

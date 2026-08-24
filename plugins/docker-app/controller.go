@@ -75,6 +75,7 @@ type ControllerConfig struct {
 	UIRemove                                                   AppRemoveExecutor
 	UIHTTPRule                                                 HTTPRuleCreateHandle
 	UIHTTPRuleList                                             HTTPRuleListHandle
+	UIHTTPRuleDelete                                           HTTPRuleDeleteHandle
 	UIHTTPBackendOffer                                         HTTPBackendOfferReplaceHandle
 	UIAuditor                                                  Auditor
 	UIWorkDirRoot                                              string
@@ -104,6 +105,7 @@ type Controller struct {
 	uiRemove           AppRemoveExecutor
 	uiHTTPRule         HTTPRuleCreateHandle
 	uiHTTPRuleList     HTTPRuleListHandle
+	uiHTTPRuleDelete   HTTPRuleDeleteHandle
 	uiHTTPBackendOffer HTTPBackendOfferReplaceHandle
 	uiAuditor          Auditor
 	uiWorkDirRoot      string
@@ -138,11 +140,23 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if auditor == nil {
 		auditor = AuditorFunc(func(AuditRecord) {})
 	}
+	httpRuleList := config.UIHTTPRuleList
+	if httpRuleList == nil {
+		if lister, ok := config.UIHTTPRule.(HTTPRuleListHandle); ok {
+			httpRuleList = lister
+		}
+	}
+	httpRuleDelete := config.UIHTTPRuleDelete
+	if httpRuleDelete == nil {
+		if deleter, ok := config.UIHTTPRule.(HTTPRuleDeleteHandle); ok {
+			httpRuleDelete = deleter
+		}
+	}
 	controller := &Controller{
 		admission: config.Admission, prepareGate: config.PrepareGate,
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
 		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
-		uiHTTPRuleList: config.UIHTTPRuleList, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
+		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
 		appRuntime: map[string]bool{},

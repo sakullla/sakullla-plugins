@@ -20,6 +20,7 @@ const statusNode = document.querySelector("#app-status");
 const loadingNode = document.querySelector("#app-loading");
 const unavailableNode = document.querySelector("#app-unavailable");
 const deniedNode = document.querySelector("#app-denied");
+const contextNode = document.querySelector("#app-context");
 const workspaceNode = document.querySelector("#app-workspace");
 const listNode = document.querySelector("#app-list");
 const emptyNode = document.querySelector("#app-empty");
@@ -32,7 +33,7 @@ const createCancel = document.querySelector("#create-cancel");
 const deployToggle = document.querySelector("#deploy-toggle");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
-const nodeHint = document.querySelector("#app-node-hint");
+const nodeEmpty = document.querySelector("#app-node-empty");
 const offlineNode = document.querySelector("#app-offline");
 const engineGuide = document.querySelector("#engine-guide");
 const engineStatus = document.querySelector("#engine-status");
@@ -52,6 +53,9 @@ let editingID = "";
 let agentsCache = [];
 let engineReady = false;
 let agentOnline = false;
+const engineCache = new Map();
+const ENGINE_CACHE_MS = 15000;
+const ENGINE_PROBE_CONCURRENCY = 3;
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -114,10 +118,13 @@ const sendPluginJSON = async (path, body) => {
 
 const setBusy = (next) => {
   busy = next;
-  workspaceNode.querySelectorAll("button, input, textarea, select").forEach((node) => {
-    if (node === agentSelect || node === copyScript || node === copyDaemon) return;
-    if (agentPickerRoot && agentPickerRoot.contains(node)) return;
-    node.disabled = next;
+  const roots = [workspaceNode, contextNode].filter(Boolean);
+  roots.forEach((root) => {
+    root.querySelectorAll("button, input, textarea, select").forEach((node) => {
+      if (node === agentSelect || node === copyScript || node === copyDaemon) return;
+      if (agentPickerRoot && agentPickerRoot.contains(node)) return;
+      node.disabled = next;
+    });
   });
 };
 
@@ -167,6 +174,64 @@ const agentLabel = (agent) => {
   return isAgentOnline(agent) ? label : `${label}（离线）`;
 };
 
+const cachedEngine = (agentID) => {
+  const cached = engineCache.get(agentID);
+  if (!cached) return null;
+  if (Date.now() - cached.at > ENGINE_CACHE_MS) return cached;
+  return cached;
+};
+
+const rememberEngine = (agentID, engine) => {
+  if (!agentID) return null;
+  const entry = {
+    ready: engine?.ready === true,
+    online: engine?.online === true,
+    version: engine?.version || "",
+    at: Date.now(),
+  };
+  engineCache.set(agentID, entry);
+  return entry;
+};
+
+const probeEngine = async (agentID) => {
+  if (!agentID) return null;
+  const cached = engineCache.get(agentID);
+  if (cached && Date.now() - cached.at < ENGINE_CACHE_MS) return cached;
+  try {
+    const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(agentID)}`);
+    return rememberEngine(agentID, payload.engine || null);
+  } catch (_error) {
+    return cached || null;
+  }
+};
+
+const probeEngines = async (agentIDs, onDone) => {
+  const pending = agentIDs.filter((id) => {
+    if (!id) return false;
+    const cached = engineCache.get(id);
+    return !cached || Date.now() - cached.at >= ENGINE_CACHE_MS;
+  });
+  if (!pending.length) return;
+  let index = 0;
+  const workers = Array.from({ length: Math.min(ENGINE_PROBE_CONCURRENCY, pending.length) }, async () => {
+    while (index < pending.length) {
+      const id = pending[index];
+      index += 1;
+      await probeEngine(id);
+    }
+  });
+  await Promise.all(workers);
+  if (typeof onDone === "function") onDone();
+};
+
+const engineMark = (state) => {
+  const node = document.createElement("span");
+  node.className = "agent-search-select__engine";
+  node.dataset.ready = state.ready ? "true" : "false";
+  node.textContent = state.ready ? "引擎就绪" : "引擎未就绪";
+  return node;
+};
+
 const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const picker = {
     root,
@@ -196,10 +261,13 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   statusDot.hidden = true;
   const label = document.createElement("span");
   label.className = "agent-search-select__label";
+  const triggerEngine = document.createElement("span");
+  triggerEngine.className = "agent-search-select__engine";
+  triggerEngine.hidden = true;
   const chevron = document.createElement("span");
   chevron.className = "agent-search-select__chevron";
   chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-  trigger.append(statusDot, label, chevron);
+  trigger.append(statusDot, label, triggerEngine, chevron);
 
   const dropdown = document.createElement("div");
   dropdown.className = "agent-search-select__dropdown";
@@ -270,6 +338,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const syncTrigger = () => {
     hiddenInput.value = picker.selected;
     const agent = currentAgent();
+    const engine = picker.selected ? cachedEngine(picker.selected) : null;
     if (agent) {
       label.textContent = agentDisplayName(agent);
       label.dataset.empty = "false";
@@ -286,6 +355,13 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       label.dataset.empty = "true";
       statusDot.hidden = true;
       trigger.title = placeholder;
+    }
+    if (engine) {
+      triggerEngine.hidden = false;
+      triggerEngine.dataset.ready = engine.ready ? "true" : "false";
+      triggerEngine.textContent = engine.ready ? "引擎就绪" : "引擎未就绪";
+    } else {
+      triggerEngine.hidden = true;
     }
   };
 
@@ -358,6 +434,8 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       meta.className = "agent-search-select__option-meta";
       meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
       option.append(dot, name, meta);
+      const engine = cachedEngine(agent.id);
+      if (engine) option.append(engineMark(engine));
       option.addEventListener("click", () => emitChange(agent.id));
       list.append(option);
     });
@@ -401,6 +479,10 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     trigger.setAttribute("aria-expanded", "true");
     renderList();
     searchInput.focus();
+    probeEngines(filteredAgents().slice(0, 12).map((agent) => agent.id), () => {
+      if (picker.open) renderList();
+      syncTrigger();
+    });
   });
 
   searchInput.addEventListener("input", () => {
@@ -512,6 +594,15 @@ const postAppAction = async (app, action, body = {}) => {
   await renderWorkspace();
 };
 
+const actionButton = (action, className, label) => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.dataset.action = action.id;
+  button.textContent = label;
+  return button;
+};
+
 const renderApp = (app) => {
   const card = document.createElement("article");
   card.className = "app-card";
@@ -519,6 +610,7 @@ const renderApp = (app) => {
   const ports = Array.isArray(app.ports) && app.ports.length ? app.ports : parsePublishedPorts(app.compose);
   const version = app.version || parseImage(app.compose);
   const services = Array.isArray(app.services) && app.services.length ? app.services : [];
+  const rules = Array.isArray(app.rules) ? app.rules : [];
 
   const head = document.createElement("div");
   head.className = "app-card-head";
@@ -542,87 +634,82 @@ const renderApp = (app) => {
   chips.append(versionChip);
   if (ports.length) ports.forEach((port) => chips.append(chip(`:${port}`)));
   else chips.append(chip("无发布端口"));
-  const rules = Array.isArray(app.rules) ? app.rules : [];
-  rules.forEach((rule) => {
-    const domain = String(rule.domain || "").trim();
-    if (!domain) return;
-    const ruleChip = chip(rule.enabled === false ? `${domain}（已停用）` : domain);
-    ruleChip.className = "chip app-http-rule";
-    chips.append(ruleChip);
-  });
   identity.append(title, chips);
+  head.append(identity);
+  card.append(head);
 
-  const actions = document.createElement("div");
-  actions.className = "app-actions";
   const apiActions = Array.isArray(app.actions) && app.actions.length
     ? app.actions
     : [{ id: "configure", label: "编辑" }, { id: "delete", label: "删除" }];
-  apiActions.forEach((action) => {
-    if (action.id === "rollback") return;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = action.id === "delete" ? "btn-link danger" : "btn-link";
-    button.dataset.action = action.id;
-    button.textContent = action.id === "configure" ? "编辑" : (action.label || action.id);
-    button.addEventListener("click", async () => {
-      if (busy) return;
-      if (action.id === "configure") {
-        openCreate(app);
-        return;
-      }
-      if (action.id === "delete") {
-        if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
-          showStatus("已取消，应用未更改。", false);
-          return;
-        }
-        setBusy(true);
-        try {
-          await postAppAction(app, "delete", { confirm: app.id });
-          showStatus("已删除应用。", false);
-        } catch (error) {
-          showStatus(error.message, true);
-        } finally {
-          setBusy(false);
-        }
+  const primary = document.createElement("div");
+  primary.className = "app-actions app-actions-primary";
+  const secondary = document.createElement("div");
+  secondary.className = "app-actions app-actions-secondary";
+  const danger = document.createElement("div");
+  danger.className = "app-actions app-actions-danger";
+
+  const runAction = async (action) => {
+    if (busy) return;
+    if (action.id === "configure") {
+      openCreate(app);
+      return;
+    }
+    if (action.id === "delete") {
+      if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
+        showStatus("已取消，应用未更改。", false);
         return;
       }
       setBusy(true);
       try {
-        await postAppAction(app, action.id);
-        showStatus(action.id === "update" ? "已更新应用镜像。" : "已执行操作。", false);
+        await postAppAction(app, "delete", { confirm: app.id });
+        showStatus("已删除应用。", false);
       } catch (error) {
         showStatus(error.message, true);
       } finally {
         setBusy(false);
       }
-    });
-    actions.append(button);
+      return;
+    }
+    setBusy(true);
+    try {
+      await postAppAction(app, action.id);
+      showStatus(action.id === "update" ? "已更新应用镜像。" : "已执行操作。", false);
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  apiActions.forEach((action) => {
+    if (action.id === "rollback") return;
+    const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart";
+    const isDelete = action.id === "delete";
+    const button = actionButton(
+      action,
+      isDelete ? "btn-link danger" : (isPrimary ? "btn-primary" : "btn-secondary"),
+      action.id === "configure" ? "编辑" : (action.label || action.id),
+    );
+    button.addEventListener("click", () => runAction(action));
+    if (isDelete) danger.append(button);
+    else if (isPrimary) primary.append(button);
+    else secondary.append(button);
   });
   if (services.length) {
     const logsToggle = document.createElement("button");
     logsToggle.type = "button";
-    logsToggle.className = "btn-link";
+    logsToggle.className = "btn-secondary";
     logsToggle.dataset.action = "logs";
     logsToggle.textContent = "日志";
     logsToggle.addEventListener("click", () => {
       const panel = card.querySelector(".app-logs");
       if (panel) panel.hidden = !panel.hidden;
     });
-    actions.append(logsToggle);
+    secondary.append(logsToggle);
   }
-  if (ports.length) {
-    const httpToggle = document.createElement("button");
-    httpToggle.type = "button";
-    httpToggle.className = "btn-link";
-    httpToggle.textContent = "挂 HTTP";
-    httpToggle.addEventListener("click", () => {
-      const form = card.querySelector(".http-form");
-      if (form) form.hidden = !form.hidden;
-    });
-    actions.append(httpToggle);
-  }
-  head.append(identity, actions);
-  card.append(head);
+  if (primary.childNodes.length) card.append(primary);
+  if (secondary.childNodes.length) card.append(secondary);
+  if (danger.childNodes.length) card.append(danger);
 
   if (app.compose) {
     const details = document.createElement("details");
@@ -673,10 +760,56 @@ const renderApp = (app) => {
     card.append(logsPanel);
   }
 
+  const httpSection = document.createElement("section");
+  httpSection.className = "app-section http-ingress";
+  const httpTitle = document.createElement("h4");
+  httpTitle.textContent = "HTTP 入口";
+  httpSection.append(httpTitle);
+  if (rules.length) {
+    const ruleList = document.createElement("ul");
+    ruleList.className = "http-rules";
+    rules.forEach((rule) => {
+      const item = document.createElement("li");
+      const domain = String(rule.domain || "").trim();
+      const port = rule.port ? `:${rule.port}` : "";
+      const enabled = rule.enabled === false;
+      const label = document.createElement("span");
+      label.textContent = `${domain}${port}${enabled ? "（已停用）" : ""}`;
+      if (enabled) label.className = "http-rule-disabled";
+      item.append(label);
+      if (rule.ref) {
+        const deleteRule = document.createElement("button");
+        deleteRule.type = "button";
+        deleteRule.className = "btn-link danger";
+        deleteRule.textContent = "删除";
+        deleteRule.addEventListener("click", async () => {
+          if (busy) return;
+          if (!window.confirm(`确认删除入口 ${domain || rule.ref}？取消不会更改规则。`)) {
+            showStatus("已取消，规则未更改。", false);
+            return;
+          }
+          setBusy(true);
+          try {
+            await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/http-rule-delete`, {
+              rule_ref: rule.ref,
+            });
+            showStatus("已删除 HTTP 规则。", false);
+            await renderWorkspace();
+          } catch (error) {
+            showStatus(error.message, true);
+          } finally {
+            setBusy(false);
+          }
+        });
+        item.append(deleteRule);
+      }
+      ruleList.append(item);
+    });
+    httpSection.append(ruleList);
+  }
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
-    form.hidden = true;
     const portLabel = document.createElement("label");
     portLabel.append("端口");
     const portSelect = document.createElement("select");
@@ -712,7 +845,6 @@ const renderApp = (app) => {
           port: Number(portSelect.value),
         });
         showStatus("已创建 HTTP 规则。", false);
-        form.hidden = true;
         form.reset();
         await renderWorkspace();
       } catch (error) {
@@ -721,33 +853,24 @@ const renderApp = (app) => {
         setBusy(false);
       }
     });
-    card.append(form);
+    httpSection.append(form);
   } else {
     const hint = document.createElement("p");
     hint.className = "hint";
     hint.textContent = "没有可挂的端口";
-    card.append(hint);
+    httpSection.append(hint);
   }
-  if (rules.length) {
-    const ruleList = document.createElement("ul");
-    ruleList.className = "http-rules";
-    rules.forEach((rule) => {
-      const item = document.createElement("li");
-      const domain = String(rule.domain || "").trim();
-      const port = rule.port ? `:${rule.port}` : "";
-      const enabled = rule.enabled === false ? "（已停用）" : "";
-      item.textContent = `${domain}${port}${enabled}`;
-      ruleList.append(item);
-    });
-    card.append(ruleList);
-  }
+  card.append(httpSection);
   return card;
 };
 
 const loadEngine = async () => {
   if (!selectedAgentID) return null;
   const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(selectedAgentID)}`);
-  return payload.engine || null;
+  const engine = payload.engine || null;
+  rememberEngine(selectedAgentID, engine);
+  agentPicker.refresh();
+  return engine;
 };
 
 const renderGuide = (engine) => {
@@ -758,6 +881,13 @@ const renderGuide = (engine) => {
   if (daemonWrap) daemonWrap.hidden = !daemonJSON;
 };
 
+const showContext = (which) => {
+  if (contextNode) contextNode.hidden = !which;
+  if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
+  if (offlineNode) offlineNode.hidden = which !== "offline";
+  if (engineGuide) engineGuide.hidden = which !== "unready";
+};
+
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
   listNode.replaceChildren(...list.map(renderApp));
@@ -766,55 +896,69 @@ const renderApps = (apps) => {
   countNode.textContent = `${list.length} 个`;
 };
 
+const renderEngineBadge = (engine) => {
+  if (!engineStatus) return;
+  if (!selectedAgentID) {
+    engineStatus.hidden = true;
+    return;
+  }
+  engineStatus.hidden = false;
+  if (!agentOnline) {
+    engineStatus.dataset.ready = "false";
+    engineStatus.textContent = "Agent 执行面 · 节点离线";
+    return;
+  }
+  if (!engine) {
+    engineStatus.dataset.ready = "false";
+    engineStatus.textContent = "Agent 执行面 · 引擎未就绪";
+    return;
+  }
+  engineReady = engine.ready === true;
+  engineStatus.dataset.ready = engineReady ? "true" : "false";
+  engineStatus.textContent = engineReady
+    ? (engine.version ? `Agent 执行面 · 引擎 ${engine.version} 已就绪` : "Agent 执行面 · 引擎已就绪")
+    : "Agent 执行面 · 引擎未就绪";
+};
+
 const renderWorkspace = async () => {
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
   if (!selectedAgentID) {
-    if (engineGuide) engineGuide.hidden = true;
-    if (offlineNode) offlineNode.hidden = true;
-    if (engineStatus) engineStatus.hidden = true;
-    nodeHint.hidden = false;
-    nodeHint.textContent = "请选择一台在线节点后再管理应用。";
+    renderEngineBadge(null);
+    showContext("empty");
+    workspaceNode.hidden = true;
     emptyNode.hidden = true;
     closeCreate();
     deployToggle.hidden = true;
     renderApps([]);
     return;
   }
-  nodeHint.hidden = true;
   if (!agentOnline) {
-    if (engineGuide) engineGuide.hidden = true;
-    if (offlineNode) offlineNode.hidden = false;
-    if (engineStatus) {
-      engineStatus.hidden = false;
-      engineStatus.textContent = "Agent 执行面 · 节点离线";
-    }
+    renderEngineBadge(null);
+    showContext("offline");
+    workspaceNode.hidden = true;
     closeCreate();
     deployToggle.hidden = true;
     emptyNode.hidden = true;
     renderApps([]);
     return;
   }
-  if (offlineNode) offlineNode.hidden = true;
   const engine = await loadEngine();
   engineReady = engine?.ready === true;
-  if (engineStatus) {
-    engineStatus.hidden = false;
-    engineStatus.textContent = engineReady
-      ? (engine.version ? `Agent 执行面 · 引擎 ${engine.version} 已就绪` : "Agent 执行面 · 引擎已就绪")
-      : "Agent 执行面 · 引擎未就绪";
-  }
+  renderEngineBadge(engine);
   if (!engineReady) {
     renderGuide(engine);
-    if (engineGuide) engineGuide.hidden = false;
+    showContext("unready");
+    workspaceNode.hidden = true;
     closeCreate();
     deployToggle.hidden = true;
     emptyNode.hidden = true;
     renderApps([]);
     return;
   }
-  if (engineGuide) engineGuide.hidden = true;
+  showContext("");
+  workspaceNode.hidden = false;
   deployToggle.hidden = createPanel.hidden === false ? true : false;
   const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
   renderApps(payload.apps);
@@ -936,7 +1080,7 @@ if (createForm) {
     await loadAgents();
     await renderWorkspace();
     loadingNode.hidden = true;
-    workspaceNode.hidden = false;
+    if (contextNode && !workspaceNode.hidden) contextNode.hidden = true;
   } catch (error) {
     loadingNode.hidden = true;
     if (error.denied) deniedNode.hidden = false;

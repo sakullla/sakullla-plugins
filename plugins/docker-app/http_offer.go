@@ -2,6 +2,7 @@ package dockerapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -89,6 +90,18 @@ type HTTPRuleListHandleFunc func(context.Context, string) ([]HostHTTPRule, error
 
 func (function HTTPRuleListHandleFunc) List(ctx context.Context, agentID string) ([]HostHTTPRule, error) {
 	return function(ctx, agentID)
+}
+
+// HTTPRuleDeleteHandle deletes a host HTTP rule by rule_ref. Host http.rule
+// delete implements this. Application-page success uses the subsequent list.
+type HTTPRuleDeleteHandle interface {
+	Delete(context.Context, string) error
+}
+
+type HTTPRuleDeleteHandleFunc func(context.Context, string) error
+
+func (function HTTPRuleDeleteHandleFunc) Delete(ctx context.Context, ruleRef string) error {
+	return function(ctx, ruleRef)
 }
 
 // HTTPBackendOfferReplaceHandle replaces this plugin instance's published-port
@@ -285,6 +298,86 @@ func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateH
 	}
 	audit(auditor, AuditRecord{Action: "http.rule.create", Outcome: "succeeded", Detail: app.ID})
 	return FilterHTTPRulesForApp(listed, app, ports), nil
+}
+
+// DeleteHTTPRule asks the host to delete one listed HTTP rule. Success is the
+// host list filtered by this app's Agent and published ports. Host rejection
+// does not record a local success. Missing rule_ref or a ref not listed for
+// this app is denied without a host call.
+func DeleteHTTPRule(ctx context.Context, handle HTTPRuleDeleteHandle, lister HTTPRuleListHandle, app App, observations []ContainerObservation, ruleRef string, auditor Auditor) ([]HostHTTPRule, error) {
+	if auditor == nil {
+		return nil, ErrAuditRequired
+	}
+	ruleRef = strings.TrimSpace(ruleRef)
+	if ruleRef == "" {
+		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "denied", Detail: ErrEmptyHTTPRuleRef.Error()})
+		return nil, ErrEmptyHTTPRuleRef
+	}
+	ports, err := ListPublishedPorts(app, observations)
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+		return nil, safeFailure(ErrOperationFailed, err)
+	}
+	if lister == nil {
+		audit(auditor, AuditRecord{Action: "http.rule.list", Outcome: "unavailable", Detail: ErrHTTPRuleListFailed.Error()})
+		return nil, ErrHTTPRuleListFailed
+	}
+	listed, err := lister.List(ctx, app.AgentID)
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.list", Outcome: "failed", Detail: ErrHTTPRuleListFailed.Error()})
+		return nil, safeFailure(ErrHTTPRuleListFailed, err)
+	}
+	filtered := FilterHTTPRulesForApp(listed, app, ports)
+	if !containsHTTPRuleRef(filtered, ruleRef) {
+		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "denied", Detail: ErrUnknownHTTPRule.Error()})
+		return nil, ErrUnknownHTTPRule
+	}
+	if handle == nil {
+		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
+		return nil, ErrTypedHandlesUnavailable
+	}
+	if err := handle.Delete(ctx, ruleRef); err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
+		return nil, safeFailure(ErrOperationFailed, err)
+	}
+	listed, err = lister.List(ctx, app.AgentID)
+	if err != nil {
+		audit(auditor, AuditRecord{Action: "http.rule.list", Outcome: "failed", Detail: ErrHTTPRuleListFailed.Error()})
+		return nil, safeFailure(ErrHTTPRuleListFailed, err)
+	}
+	audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "succeeded", Detail: ruleRef})
+	return FilterHTTPRulesForApp(listed, app, ports), nil
+}
+
+// DeleteListedHTTPRules deletes each listed rule_ref in order. An empty ref is
+// skipped. Unknown refs are treated as already gone. The first host failure
+// stops the rest; already deleted rules are not rolled back.
+func DeleteListedHTTPRules(ctx context.Context, handle HTTPRuleDeleteHandle, lister HTTPRuleListHandle, app App, observations []ContainerObservation, ruleRefs []string, auditor Auditor) error {
+	for _, ruleRef := range ruleRefs {
+		if strings.TrimSpace(ruleRef) == "" {
+			continue
+		}
+		if _, err := DeleteHTTPRule(ctx, handle, lister, app, observations, ruleRef, auditor); err != nil {
+			if errors.Is(err, ErrUnknownHTTPRule) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func containsHTTPRuleRef(rules []HostHTTPRule, ruleRef string) bool {
+	ruleRef = strings.TrimSpace(ruleRef)
+	if ruleRef == "" {
+		return false
+	}
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Ref) == ruleRef {
+			return true
+		}
+	}
+	return false
 }
 
 // FilterHTTPRulesForApp keeps host list entries that target this app's Agent

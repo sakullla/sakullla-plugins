@@ -252,6 +252,145 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	}
 }
 
+func TestAppUIDeletesHTTPRuleFromHostList(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+		t.Fatalf("http-rule status=%d rules=%#v body=%s", rule.Code, handle.rules, rule.Body.String())
+	}
+	ref := handle.rules[0].Ref
+
+	emptyRef := httptest.NewRecorder()
+	controller.ServeHTTP(emptyRef, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule-delete", `{"rule_ref":""}`))
+	if emptyRef.Code != http.StatusBadRequest || !strings.Contains(emptyRef.Body.String(), ErrEmptyHTTPRuleRef.Error()) {
+		t.Fatalf("empty ref status=%d body=%s", emptyRef.Code, emptyRef.Body.String())
+	}
+	if len(handle.deletes) != 0 || len(handle.rules) != 1 {
+		t.Fatalf("empty ref mutated host rules: deletes=%#v rules=%#v", handle.deletes, handle.rules)
+	}
+
+	unknown := httptest.NewRecorder()
+	controller.ServeHTTP(unknown, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule-delete", `{"rule_ref":"rule-other"}`))
+	if unknown.Code != http.StatusBadRequest || !strings.Contains(unknown.Body.String(), ErrUnknownHTTPRule.Error()) {
+		t.Fatalf("unknown ref status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	if len(handle.deletes) != 0 || len(handle.rules) != 1 {
+		t.Fatalf("unknown ref mutated host rules: deletes=%#v rules=%#v", handle.deletes, handle.rules)
+	}
+
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule-delete", `{"rule_ref":`+jsonString(ref)+`}`))
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if len(handle.deletes) != 1 || handle.deletes[0] != ref || len(handle.rules) != 0 {
+		t.Fatalf("host delete deletes=%#v rules=%#v", handle.deletes, handle.rules)
+	}
+	if strings.Contains(deleted.Body.String(), "https://app.example.com") {
+		t.Fatalf("delete still projected host rule: %s", deleted.Body.String())
+	}
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), "https://app.example.com") {
+		t.Fatalf("list kept deleted host rule: %s", listed.Body.String())
+	}
+	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" {
+		t.Fatalf("http-rule-delete mutated apps=%#v", controller.Apps())
+	}
+}
+
+func TestAppUIHTTPRuleDeleteFailureKeepsHostRule(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{deleteErr: errors.New("upstream rejected fixture-value")}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+		t.Fatalf("seed rule status=%d rules=%#v body=%s", rule.Code, handle.rules, rule.Body.String())
+	}
+	ref := handle.rules[0].Ref
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule-delete", `{"rule_ref":`+jsonString(ref)+`}`))
+	if deleted.Code != http.StatusInternalServerError {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if !strings.Contains(deleted.Body.String(), "HTTP 规则删除失败") || strings.Contains(deleted.Body.String(), "fixture-value") {
+		t.Fatalf("delete failure is not actionable and safe: %s", deleted.Body.String())
+	}
+	if len(handle.rules) != 1 || handle.rules[0].Ref != ref {
+		t.Fatalf("failed delete removed host rule: %#v", handle.rules)
+	}
+}
+
+func TestAppUIConfirmedDeleteRemovesListedHTTPRules(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK || !hasAppAction(decodeAppList(t, created.Body.Bytes())[0], OpsActionDelete) {
+		t.Fatalf("running create omitted delete: status=%d body=%s", created.Code, created.Body.String())
+	}
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+		t.Fatalf("http-rule status=%d rules=%#v body=%s", rule.Code, handle.rules, rule.Body.String())
+	}
+	ref := handle.rules[0].Ref
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":""}`))
+	if denied.Code != http.StatusBadRequest || len(controller.Apps()) != 1 || len(handle.rules) != 1 || len(handle.deletes) != 0 {
+		t.Fatalf("unconfirmed delete mutated state apps=%#v rules=%#v deletes=%#v body=%s", controller.Apps(), handle.rules, handle.deletes, denied.Body.String())
+	}
+
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+	if len(handle.deletes) != 1 || handle.deletes[0] != ref || len(handle.rules) != 0 {
+		t.Fatalf("confirmed delete left host rules deletes=%#v rules=%#v", handle.deletes, handle.rules)
+	}
+	if strings.Contains(deleted.Body.String(), `"id":"media"`) || strings.Contains(deleted.Body.String(), "https://app.example.com") {
+		t.Fatalf("confirmed delete still listed app or rule: %s", deleted.Body.String())
+	}
+}
+
+func TestAppUICascadeHTTPRuleDeleteFailureKeepsApp(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{deleteErr: errors.New("upstream rejected fixture-value")}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+		t.Fatalf("seed rule status=%d rules=%#v", rule.Code, handle.rules)
+	}
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusInternalServerError || len(controller.Apps()) != 1 {
+		t.Fatalf("cascade failure status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+	if !strings.Contains(deleted.Body.String(), "HTTP 规则删除失败") || strings.Contains(deleted.Body.String(), "fixture-value") {
+		t.Fatalf("cascade failure is not actionable and safe: %s", deleted.Body.String())
+	}
+	if len(handle.rules) != 1 {
+		t.Fatalf("cascade failure removed host rule: %#v", handle.rules)
+	}
+}
+
 func TestNormalizeHTTPRuleFrontendPreservesHTTPSAndRejectsInvalid(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -425,19 +564,27 @@ func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
 		t.Fatal("create form still requires an ingress domain")
 	}
 	for _, token := range []string{
-		"挂 HTTP",
 		"入口域名",
 		"无发布端口",
 		"没有可挂的端口",
 		"/http-rule",
+		"/http-rule-delete",
 		`name = "domain"`,
 		`name = "port"`,
 		"app.rules",
 		"http-rules",
+		"已取消，规则未更改",
+		"app-actions-primary",
+		"app-actions-secondary",
+		"app-actions-danger",
+		`isPrimary ? "btn-primary" : "btn-secondary"`,
 	} {
 		if !strings.Contains(script, token) {
 			t.Fatalf("app.js missing %q", token)
 		}
+	}
+	if strings.Contains(script, "挂 HTTP") {
+		t.Fatal("HTTP create is still hidden behind a 挂 HTTP toggle")
 	}
 }
 
@@ -683,7 +830,7 @@ func TestAppUIStartStopRestartLogsAndConfirmedDelete(t *testing.T) {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
 	listed := decodeAppList(t, created.Body.Bytes())
-	if len(listed) != 1 || listed[0].Status != OpsStatusRunning || !hasAppAction(listed[0], OpsActionStop) || !hasAppAction(listed[0], OpsActionRestart) {
+	if len(listed) != 1 || listed[0].Status != OpsStatusRunning || !hasAppAction(listed[0], OpsActionStop) || !hasAppAction(listed[0], OpsActionRestart) || !hasAppAction(listed[0], OpsActionDelete) {
 		t.Fatalf("deployed view=%#v", listed)
 	}
 
@@ -964,11 +1111,11 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	if running.Status != OpsStatusRunning || running.Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("running update view=%#v", running)
 	}
-	if !hasOpsAction(running.Actions, OpsActionUpdate) || !hasOpsAction(running.Actions, OpsActionStop) || !hasOpsAction(running.Actions, OpsActionRestart) {
+	if !hasOpsAction(running.Actions, OpsActionUpdate) || !hasOpsAction(running.Actions, OpsActionStop) || !hasOpsAction(running.Actions, OpsActionRestart) || !hasOpsAction(running.Actions, OpsActionDelete) {
 		t.Fatalf("running update dropped ops: %#v", running.Actions)
 	}
-	if hasOpsAction(running.Actions, OpsActionRollback) || hasOpsAction(running.Actions, OpsActionDelete) {
-		t.Fatalf("running update offered rollback or delete: %#v", running.Actions)
+	if hasOpsAction(running.Actions, OpsActionRollback) {
+		t.Fatalf("running update offered rollback: %#v", running.Actions)
 	}
 
 	stopped := projectAppView(app, false, deployment, "sha256:latest")
@@ -1064,13 +1211,38 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(page, `<select id="agent-select"`) {
 		t.Fatal("management page still uses a native agent <select>")
 	}
+	if strings.Contains(page, `class="toolbar-bar"`) || strings.Contains(stylesheet, ".toolbar-bar") {
+		t.Fatal("node picker is still in a toolbar-bar")
+	}
+	headStart := strings.Index(page, `class="page-head"`)
+	headEnd := strings.Index(page, `class="face-summary"`)
+	if headStart < 0 || headEnd < 0 || headEnd < headStart {
+		t.Fatal("page is missing page-head / face-summary regions")
+	}
+	head := page[headStart:headEnd]
 	for _, want := range []string{
 		`id="agent-select"`,
 		`data-agent-picker="workspace"`,
 		`class="agent-search-select"`,
+		`class="page-head-agent"`,
+		`id="engine-status"`,
+	} {
+		if !strings.Contains(head, want) {
+			t.Fatalf("page-head missing agent picker markup %q", want)
+		}
+	}
+	for _, want := range []string{
+		`id="app-context"`,
+		`class="context-region"`,
+		`class="state-panel"`,
+		`id="app-node-empty"`,
+		`id="app-offline"`,
+		`id="engine-guide"`,
+		`id="app-workspace"`,
+		`class="workspace-region"`,
 	} {
 		if !strings.Contains(page, want) {
-			t.Fatalf("page missing agent picker markup %q", want)
+			t.Fatalf("page missing layout region %q", want)
 		}
 	}
 	for _, want := range []string{
@@ -1079,6 +1251,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		"最近活跃",
 		"/panel-api/agents",
 		"agentPicker.onChange",
+		"引擎就绪",
+		"引擎未就绪",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing agent picker behavior %q", want)
@@ -1090,11 +1264,14 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
-		"min(52rem",
+		"width: calc(100% - 2.5rem)",
 	} {
 		if !strings.Contains(stylesheet, want) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
+	}
+	if strings.Contains(stylesheet, "min(52rem") {
+		t.Fatal("stylesheet still caps main at 52rem")
 	}
 }
 
@@ -1281,10 +1458,12 @@ func stringPtr(value string) *string {
 }
 
 type recordingHTTPRuleCreate struct {
-	specs   []HTTPRuleSpec
-	rules   []HostHTTPRule
-	err     error
-	listErr error
+	specs     []HTTPRuleSpec
+	rules     []HostHTTPRule
+	deletes   []string
+	err       error
+	listErr   error
+	deleteErr error
 }
 
 func (handle *recordingHTTPRuleCreate) Create(_ context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
@@ -1316,6 +1495,21 @@ func (handle *recordingHTTPRuleCreate) List(_ context.Context, agentID string) (
 		}
 	}
 	return listed, nil
+}
+
+func (handle *recordingHTTPRuleCreate) Delete(_ context.Context, ruleRef string) error {
+	handle.deletes = append(handle.deletes, ruleRef)
+	if handle.deleteErr != nil {
+		return handle.deleteErr
+	}
+	kept := make([]HostHTTPRule, 0, len(handle.rules))
+	for _, rule := range handle.rules {
+		if rule.Ref != ruleRef {
+			kept = append(kept, rule)
+		}
+	}
+	handle.rules = kept
+	return nil
 }
 
 type recordingHTTPBackendOffers struct {

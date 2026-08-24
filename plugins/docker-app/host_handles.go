@@ -17,6 +17,7 @@ const (
 	hostHTTPBackendOfferOperation = "http.backend-offer"
 	hostHTTPRuleActionCreate      = pluginsdk.HTTPRuleActionCreate
 	hostHTTPRuleActionList        = "list"
+	hostHTTPRuleActionDelete      = "delete"
 	pluginAppsStateKey            = "apps"
 	pluginRuntimeStateKey         = "app-runtime"
 )
@@ -234,6 +235,19 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 		rules = append(rules, item.asHostHTTPRule(agentID))
 	}
 	return rules, nil
+}
+
+func (runtime *hostCapabilityRuntime) Delete(ctx context.Context, ruleRef string) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	ruleRef = strings.TrimSpace(ruleRef)
+	if ruleRef == "" {
+		return ErrEmptyHTTPRuleRef
+	}
+	return callHostWithOperation(ctx, runtime.client, hostHTTPRuleOperation, hostOperationKeyFromContext(ctx), map[string]any{
+		"action": hostHTTPRuleActionDelete, "rule_ref": ruleRef,
+	}, nil)
 }
 
 func (runtime *hostCapabilityRuntime) ReplaceHTTPBackendOffers(ctx context.Context, offers []HTTPBackendCatalogOffer) error {
@@ -462,6 +476,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIRemove = runtime
 	config.UIHTTPRule = runtime
 	config.UIHTTPRuleList = runtime
+	config.UIHTTPRuleDelete = runtime
 	config.UIHTTPBackendOffer = runtime
 	config.UIImageObserver = runtime
 	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
