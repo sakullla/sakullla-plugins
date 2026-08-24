@@ -396,12 +396,38 @@ func TestMappingUIViewportLayout(t *testing.T) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
 	}
-	if strings.Contains(text, "min(52rem") {
-		t.Fatal("stylesheet still caps main at 52rem")
+	if strings.Contains(text, "min(52rem") || strings.Contains(text, "min(64rem") || strings.Contains(text, "min(880px") {
+		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
 	}
 	if strings.Contains(text, "flex-wrap: nowrap") || strings.Contains(text, "white-space: nowrap") {
 		t.Fatal("action bar still forces nowrap overflow")
 	}
+	createForm := cssRule(text, "#create-form")
+	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
+		t.Fatal("#create-form is not a capped operation group")
+	}
+	if strings.Contains(createForm, "1fr") {
+		t.Fatal("#create-form still uses uncapped 1fr tracks")
+	}
+	for _, want := range []string{"html { font-size: 17px; }", "html { font-size: 18px; }", "html { font-size: 20px; }"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stylesheet missing type scale %q", want)
+		}
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func TestPluginYAMLDeclaresUIRouteNotPanelPage(t *testing.T) {

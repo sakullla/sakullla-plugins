@@ -63,6 +63,45 @@ func TestEmbeddedPageAndAssets(t *testing.T) {
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), serviceNotReady) {
 		t.Fatalf("inactive panel=%d %s", inactive.Code, inactive.Body.String())
 	}
+	style := bodies["/style.css"]
+	for _, fragment := range []string{
+		"width: calc(100% - 32px)",
+		"max-width: min(46rem, 100%)",
+		"@media (max-width: 720px)",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"repeat(2, minmax(0, 1fr))",
+		"repeat(2, minmax(18rem, 1fr))",
+		"repeat(3, minmax(18rem, 1fr))",
+	} {
+		if !strings.Contains(style, fragment) {
+			t.Fatalf("panel stylesheet missing %q", fragment)
+		}
+	}
+	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
+		t.Fatal("panel stylesheet still caps main at 52rem, 64rem, or 880px")
+	}
+	if !strings.Contains(cssRule(style, ".card"), "max-width: min(46rem, 100%)") {
+		t.Fatal(".card still fills main without a capped operation group")
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func TestUITreeMatchesEmbeddedAssets(t *testing.T) {

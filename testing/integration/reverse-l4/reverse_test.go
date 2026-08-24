@@ -300,11 +300,36 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
+		"width: calc(100% - 2.5rem)",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("management stylesheet missing viewport rule %q", want)
 		}
 	}
+	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
+		t.Fatal("management stylesheet still caps main at 52rem, 64rem, or 880px")
+	}
+	toolbar := cssRule(css, ".toolbar-bar")
+	if strings.Contains(toolbar, "space-between") {
+		t.Fatal(".toolbar-bar still uses space-between to fill main")
+	}
+	if !strings.Contains(toolbar, "justify-content: flex-start") || !strings.Contains(toolbar, "max-width: min(46rem, 100%)") {
+		t.Fatal(".toolbar-bar is not a capped operation group")
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {

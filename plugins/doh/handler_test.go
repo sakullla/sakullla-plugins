@@ -97,8 +97,24 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
 	}
-	if strings.Contains(css, "min(52rem") {
-		t.Fatal("stylesheet still caps main at 52rem")
+	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
+		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	}
+	endpoint := cssRule(css, ".endpoint")
+	if !strings.Contains(endpoint, "max-width: min(46rem, 100%)") {
+		t.Fatal(".endpoint still fills main without a capped operation group")
+	}
+	for _, want := range []string{
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"repeat(3, minmax(0, 1fr))",
+		"repeat(3, minmax(14rem, 1fr))",
+		"repeat(3, minmax(16rem, 1fr))",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
+		}
 	}
 
 	index := httptest.NewRecorder()
@@ -261,4 +277,18 @@ func homepagePositiveResponse(query []byte) []byte {
 	binary.BigEndian.PutUint16(response[2:4], 0x8180)
 	binary.BigEndian.PutUint16(response[6:8], 1)
 	return append(response, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 1)
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

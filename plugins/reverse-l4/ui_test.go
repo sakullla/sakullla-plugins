@@ -153,8 +153,31 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
 	}
-	if strings.Contains(css, "min(52rem") {
-		t.Fatal("stylesheet still caps main at 52rem")
+	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
+		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	}
+	toolbar := cssRule(css, ".toolbar-bar")
+	if strings.Contains(toolbar, "space-between") {
+		t.Fatal(".toolbar-bar still uses space-between to fill main")
+	}
+	if !strings.Contains(toolbar, "justify-content: flex-start") || !strings.Contains(toolbar, "max-width: min(46rem, 100%)") {
+		t.Fatal(".toolbar-bar is not a capped operation group")
+	}
+	mappingForm := cssRule(css, "#mapping-form")
+	if !strings.Contains(mappingForm, "max-width: min(46rem, 100%)") {
+		t.Fatal("#mapping-form still fills main without a capped operation group")
+	}
+	for _, want := range []string{
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"repeat(2, minmax(0, 1fr))",
+		"repeat(2, minmax(18rem, 1fr))",
+		"repeat(3, minmax(18rem, 1fr))",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
+		}
 	}
 
 	anonymous := serveManagement(controller, httptest.NewRequest(http.MethodGet, "/api/mappings", nil))
@@ -406,4 +429,18 @@ func TestStatusesDegradesPollFailureToUnknown(t *testing.T) {
 	if _, err := service.Status(t.Context(), "tcp-map"); !errors.Is(err, ErrHostRuntimeUnavailable) {
 		t.Fatalf("single status poll failure error = %v", err)
 	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

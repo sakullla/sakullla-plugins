@@ -114,6 +114,57 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	}
 }
 
+func TestManagerViewportLayout(t *testing.T) {
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	for _, want := range []string{
+		"width: calc(100% - 2.5rem)",
+		"@media (max-width: 720px)",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"max-width: min(46rem, 100%)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stylesheet missing viewport rule %q", want)
+		}
+	}
+	if strings.Contains(text, "min(52rem") || strings.Contains(text, "min(64rem") || strings.Contains(text, "min(880px") {
+		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	}
+	filesHead := cssRule(text, ".files-head")
+	if strings.Contains(filesHead, "space-between") {
+		t.Fatal(".files-head still uses space-between to stretch the action cluster")
+	}
+	if !strings.Contains(filesHead, "justify-content: flex-start") {
+		t.Fatal(".files-head is not grouped at flex-start")
+	}
+	actions := cssRule(text, ".actions")
+	if !strings.Contains(actions, "max-width: min(46rem, 100%)") {
+		t.Fatal(".actions still fills main without a capped operation group")
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 func TestFormatIECSize(t *testing.T) {
 	tests := []struct {
 		name string

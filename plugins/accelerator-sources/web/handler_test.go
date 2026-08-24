@@ -77,12 +77,45 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 			t.Fatalf("visitor stylesheet missing viewport rule %q", fragment)
 		}
 	}
-	if strings.Contains(style, "min(64rem") {
-		t.Fatal("visitor stylesheet still caps main at 64rem")
+	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
+		t.Fatal("visitor stylesheet still caps main at 52rem, 64rem, or 880px")
 	}
 	if strings.Contains(style, "overflow: auto") {
 		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")
 	}
+	searchRow := cssRule(style, ".search-row")
+	converter := cssRule(style, ".converter-card")
+	if !strings.Contains(searchRow, "max-width: min(46rem, 100%)") {
+		t.Fatal(".search-row still fills main without a capped operation group")
+	}
+	if !strings.Contains(converter, "max-width: min(46rem, 100%)") {
+		t.Fatal(".converter-card still fills main without a capped operation group")
+	}
+	for _, want := range []string{
+		"html { font-size: 17px; }",
+		"html { font-size: 18px; }",
+		"html { font-size: 20px; }",
+		"repeat(2, minmax(18rem, 1fr))",
+		"repeat(2, minmax(22rem, 1fr))",
+	} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("visitor stylesheet missing wide-viewport rule %q", want)
+		}
+	}
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }
 
 func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {

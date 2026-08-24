@@ -30,6 +30,10 @@
 
 * { box-sizing: border-box; }
 
+html {
+  font-size: 16px;
+}
+
 html, body {
   margin: 0;
   min-height: 100%;
@@ -109,6 +113,11 @@ main {
   box-shadow: var(--shadow-xs);
 }
 
+.mount-card {
+  width: min(46rem, 100%);
+  max-width: min(46rem, 100%);
+}
+
 .host-line {
   display: inline-flex;
   align-items: center;
@@ -142,7 +151,12 @@ code, #dav-url {
   align-items: center;
 }
 
-.files-head { justify-content: space-between; }
+.files-head { justify-content: flex-start; }
+
+.actions {
+  width: fit-content;
+  max-width: min(46rem, 100%);
+}
 
 button, .upload {
   min-height: 2.25rem;
@@ -195,3 +209,29 @@ th { color: var(--color-text-secondary); font-weight: 650; }
 
 #status[data-error="true"] { color: var(--color-danger); }
 #status { margin: 0.75rem 0 0; }
+
+@media (max-width: 720px) {
+  main { width: calc(100% - 1.5rem); padding-top: 1.5rem; }
+  .masthead-inner { width: calc(100% - 1.5rem); }
+  .hero { text-align: left; }
+  .files-head { flex-direction: column; align-items: stretch; }
+  .actions { width: 100%; }
+  .actions button, .upload { width: 100%; }
+}
+
+@media (min-width: 1920px) {
+  html { font-size: 17px; }
+}
+
+@media (min-width: 2560px) {
+  html { font-size: 18px; }
+}
+
+@media (min-width: 3840px) {
+  html { font-size: 20px; }
+  :root {
+    --space-4: 1.25rem;
+    --space-5: 1.5rem;
+  }
+  main { width: calc(100% - 4rem); padding: 3rem 0 7rem; }
+}

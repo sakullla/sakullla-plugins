@@ -16,6 +16,8 @@
 
 html, body { margin: 0; min-height: 100%; }
 
+html { font-size: 16px; }
+
 body {
   color: var(--ink);
   background: var(--page);
@@ -45,12 +47,16 @@ main {
   line-height: 1.6;
 }
 
+.lede { max-width: min(46rem, 100%); }
+
 .card {
   margin-top: 24px;
   padding: 20px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--card);
+  width: min(46rem, 100%);
+  max-width: min(46rem, 100%);
 }
 
 .actions, .hostport-row, .share-row {
@@ -58,6 +64,8 @@ main {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  width: fit-content;
+  max-width: min(46rem, 100%);
 }
 
 form { margin: 0; }
@@ -112,3 +120,44 @@ code, .uri {
 #panel-status { margin-top: 16px; }
 
 #panel-status[data-error="true"] { color: var(--danger); }
+
+@media (max-width: 720px) {
+  main { width: calc(100% - 16px); padding-top: 24px; }
+  .actions, .hostport-row, .share-row {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .actions form,
+  .actions button,
+  .hostport-row button,
+  .share-row button { width: 100%; }
+}
+
+@media (min-width: 1920px) {
+  html { font-size: 17px; }
+  main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 24px;
+    align-items: start;
+  }
+  .lede,
+  #account-card,
+  #panel-status { grid-column: 1 / -1; }
+}
+
+@media (min-width: 2560px) {
+  html { font-size: 18px; }
+  main { grid-template-columns: repeat(2, minmax(18rem, 1fr)); }
+}
+
+@media (min-width: 3840px) {
+  html { font-size: 20px; }
+  main {
+    width: calc(100% - 64px);
+    grid-template-columns: repeat(3, minmax(18rem, 1fr));
+    padding: 48px 0 112px;
+  }
+  #account-card { grid-column: auto; }
+}
