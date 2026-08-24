@@ -1,6 +1,7 @@
 package reversel4
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -169,15 +170,29 @@ func TestRejectNonEmptyConfigEnforcesZeroConfig(t *testing.T) {
 
 func TestStableOperationKeysAreDeterministicAndRevisionDistinct(t *testing.T) {
 	t.Parallel()
-	first := mutationOperationKey("channel.ensure", "tcp-map", 3)
-	if first != mutationOperationKey("channel.ensure", "tcp-map", 3) {
+	mapping := Mapping{
+		ID: "tcp-map", EntryAgentID: "entry-agent", ExitAgentID: "exit-agent",
+		Protocol: ProtocolTCP, ListenPort: 8443, BackendHost: "127.0.0.1", BackendPort: 9443,
+	}
+	ctx := withMutationOperationKey(context.Background(), "operation/ui/first")
+	first := mutationOperationKey(ctx, "channel.ensure", mapping, 3)
+	if first != mutationOperationKey(ctx, "channel.ensure", mapping, 3) {
 		t.Fatal("operation key is not deterministic")
 	}
-	if first == mutationOperationKey("channel.ensure", "tcp-map", 4) {
+	if first == mutationOperationKey(ctx, "channel.ensure", mapping, 4) {
 		t.Fatal("operation key ignores the mapping revision")
 	}
-	if first == mutationOperationKey("rule.create", "tcp-map", 3) {
+	if first == mutationOperationKey(ctx, "rule.create", mapping, 3) {
 		t.Fatal("operation key ignores the action")
+	}
+	changed := mapping
+	changed.ListenPort++
+	if first == mutationOperationKey(ctx, "channel.ensure", changed, 3) {
+		t.Fatal("operation key ignores a changed update intent")
+	}
+	secondCtx := withMutationOperationKey(context.Background(), "operation/ui/second")
+	if first == mutationOperationKey(secondCtx, "channel.ensure", mapping, 3) {
+		t.Fatal("operation key ignores a new request identity")
 	}
 	if len(first) > 512 {
 		t.Fatalf("operation key exceeds the policy identity bound: %d", len(first))
@@ -199,7 +214,11 @@ func TestRecoveryOperationKeysAreAttemptScoped(t *testing.T) {
 	if first == recoveryOperationKey("rule.update", "tcp-map", 3, 1) {
 		t.Fatal("recovery operation key ignores the action")
 	}
-	if first == mutationOperationKey("channel.ensure", "tcp-map", 3) {
+	mutationMapping := Mapping{
+		ID: "tcp-map", EntryAgentID: "entry-agent", ExitAgentID: "exit-agent",
+		Protocol: ProtocolTCP, ListenPort: 8443, BackendHost: "127.0.0.1", BackendPort: 9443,
+	}
+	if first == mutationOperationKey(context.Background(), "channel.ensure", mutationMapping, 3) {
 		t.Fatal("recovery operation key collides with an admin mutation key")
 	}
 	if len(first) > 512 {

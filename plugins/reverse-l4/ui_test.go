@@ -238,6 +238,27 @@ func TestManagementPageCRUDWithChannelStateProjection(t *testing.T) {
 	}
 }
 
+func TestManagementMutationPropagatesRequestOperationKey(t *testing.T) {
+	t.Parallel()
+	controller, host := newManagementController(t)
+	request := managementJSONRequest(http.MethodPost, "/api/mappings", `{"id":"tcp-map","entry_agent_id":"entry-agent","exit_agent_id":"exit-agent","protocol":"tcp","listen_port":8443,"backend_host":"127.0.0.1","backend_port":9443}`)
+	request.Header.Set(mappingOperationHeader, "operation/ui/propagated")
+	response := serveManagement(controller, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	call := host.onlyCall(t, pluginsdk.HostRuntimeChannelReverse, pluginsdk.ChannelReverseActionEnsure)
+	mapping := Mapping{
+		ID: "tcp-map", EntryAgentID: "entry-agent", ExitAgentID: "exit-agent",
+		Protocol: ProtocolTCP, ListenPort: 8443, BackendHost: "127.0.0.1", BackendPort: 9443, Enabled: true,
+	}
+	expected := mutationOperationKey(withMutationOperationKey(t.Context(), "operation/ui/propagated"), "channel.ensure", mapping, 1)
+	if call.OperationID != expected {
+		t.Fatalf("create operation id = %q, want request-scoped %q", call.OperationID, expected)
+	}
+}
+
 func TestManagementPageCreatesWithoutIDAndRejectsSameAgents(t *testing.T) {
 	t.Parallel()
 	controller, _ := newManagementController(t)

@@ -8,6 +8,7 @@ package reversel4
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,7 +17,7 @@ import (
 
 const (
 	PluginID                 = "reverse-l4"
-	PluginVersion            = "0.3.2"
+	PluginVersion            = "0.3.3"
 	DeclaredResourceGroupRef = "resource-group/reverse-l4"
 
 	// MaxMappings bounds the durable mapping catalog.
@@ -143,6 +144,20 @@ func (mapping Mapping) Validate() error {
 func (mapping Mapping) Clone() Mapping {
 	mapping.RelayChain = append([]int(nil), mapping.RelayChain...)
 	return mapping
+}
+
+// sameUserSpec reports whether an update changes any user-owned mapping
+// field. Nil and empty relay chains are equivalent on the management API.
+func (mapping Mapping) sameUserSpec(other Mapping) bool {
+	return mapping.ID == other.ID &&
+		mapping.Name == other.Name &&
+		mapping.EntryAgentID == other.EntryAgentID &&
+		mapping.ExitAgentID == other.ExitAgentID &&
+		mapping.Protocol == other.Protocol &&
+		mapping.ListenPort == other.ListenPort &&
+		mapping.BackendHost == other.BackendHost &&
+		mapping.BackendPort == other.BackendPort &&
+		slices.Equal(mapping.RelayChain, other.RelayChain)
 }
 
 func validMappingID(value string) bool {

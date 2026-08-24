@@ -761,6 +761,88 @@ func TestUpdateRepointsRuleAndMovesEntryAgent(t *testing.T) {
 	}
 }
 
+func TestUpdateWithSameUserSpecIsNoOp(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), orchestrationMapping("tcp-map", ProtocolTCP))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeChannel := host.callCount(pluginsdk.HostRuntimeChannelReverse)
+	beforeRules := host.callCount(pluginsdk.HostRuntimeL4Rule)
+	beforeStateWrites := host.callCount("state.put")
+	same := orchestrationMapping("tcp-map", ProtocolTCP)
+	same.RelayChain = []int{}
+	updated, err := service.Update(t.Context(), same)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if updated.Revision != created.Revision || updated.RuleRef != created.RuleRef || updated.SessionRef != created.SessionRef {
+		t.Fatalf("no-op update changed ownership state: created=%#v updated=%#v", created, updated)
+	}
+	if got := host.callCount(pluginsdk.HostRuntimeChannelReverse); got != beforeChannel {
+		t.Fatalf("no-op update channel calls = %d, want %d", got, beforeChannel)
+	}
+	if got := host.callCount(pluginsdk.HostRuntimeL4Rule); got != beforeRules {
+		t.Fatalf("no-op update rule calls = %d, want %d", got, beforeRules)
+	}
+	if got := host.callCount("state.put"); got != beforeStateWrites {
+		t.Fatalf("no-op update state writes = %d, want %d", got, beforeStateWrites)
+	}
+}
+
+func TestFailedUpdatesCanReturnToEarlierIntentWithNewRequestKey(t *testing.T) {
+	host := newFakeHostRuntime(t)
+	service := newOrchestrationService(t, host)
+	created, err := service.Create(t.Context(), orchestrationMapping("tcp-map", ProtocolTCP))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host.failChannelEnsureAttempts = 2
+	first := orchestrationMapping("tcp-map", ProtocolTCP)
+	first.ListenPort = 9443
+	firstCtx := withMutationOperationKey(t.Context(), "operation/ui/first")
+	if _, err := service.Update(firstCtx, first); !errors.Is(err, ErrHostRuntimeUnavailable) {
+		t.Fatalf("first update error = %v", err)
+	}
+	second := first
+	second.ListenPort = 9543
+	secondCtx := withMutationOperationKey(t.Context(), "operation/ui/second")
+	if _, err := service.Update(secondCtx, second); !errors.Is(err, ErrHostRuntimeUnavailable) {
+		t.Fatalf("second update error = %v", err)
+	}
+	thirdCtx := withMutationOperationKey(t.Context(), "operation/ui/third")
+	updated, err := service.Update(thirdCtx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ListenPort != first.ListenPort || updated.Revision != created.Revision+1 {
+		t.Fatalf("updated mapping = %#v", updated)
+	}
+
+	host.mu.Lock()
+	var ensures []fakeHostCall
+	for _, call := range host.calls {
+		if call.Operation == pluginsdk.HostRuntimeChannelReverse && strings.Contains(call.Payload, `"action":"ensure"`) {
+			ensures = append(ensures, call)
+		}
+	}
+	host.mu.Unlock()
+	if len(ensures) < 4 {
+		t.Fatalf("channel ensure calls = %d, want create and three updates", len(ensures))
+	}
+	firstFailed, secondFailed, returned := ensures[len(ensures)-3], ensures[len(ensures)-2], ensures[len(ensures)-1]
+	if firstFailed.Payload != secondFailed.Payload || firstFailed.Payload != returned.Payload {
+		t.Fatalf("test requires identical channel payloads: first=%s second=%s returned=%s", firstFailed.Payload, secondFailed.Payload, returned.Payload)
+	}
+	if firstFailed.OperationID == secondFailed.OperationID || firstFailed.OperationID == returned.OperationID || secondFailed.OperationID == returned.OperationID {
+		t.Fatalf("three update requests reused operation ids: %q %q %q", firstFailed.OperationID, secondFailed.OperationID, returned.OperationID)
+	}
+}
+
 func TestCreateRetryReplaysDurableChannelOutcome(t *testing.T) {
 	host := newFakeHostRuntime(t)
 	host.failRuleCreateAttempts = 1

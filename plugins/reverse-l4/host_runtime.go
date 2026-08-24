@@ -27,6 +27,24 @@ type hostRuntime struct {
 	client hostRuntimeCaller
 }
 
+type mutationOperationContextKey struct{}
+
+func withMutationOperationKey(ctx context.Context, operationKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, mutationOperationContextKey{}, strings.TrimSpace(operationKey))
+}
+
+func mutationRequestOperationKey(ctx context.Context) string {
+	if ctx != nil {
+		if key, ok := ctx.Value(mutationOperationContextKey{}).(string); ok && key != "" {
+			return key
+		}
+	}
+	return "internal"
+}
+
 // newProductionHostRuntime binds the canonical host runtime client from the
 // plugin process environment. A missing endpoint means the host did not
 // provision the runtime surface; orchestration then reports the explicit
@@ -226,10 +244,25 @@ func (runtime *hostRuntime) call(ctx context.Context, operationID, operation str
 }
 
 // mutationOperationKey derives the stable host operation id for one logical
-// mapping mutation. Retrying the same mutation reuses the id and payload, so
-// the host replays the durable outcome; a new revision mints a new id.
-func mutationOperationKey(action, mappingID string, revision uint64) string {
-	return stableOperationKey("reverse-l4", action, mappingID, revisionString(revision))
+// mapping mutation. Retrying the same intent reuses the id and payload, while
+// a changed intent at the same uncommitted revision mints a new id instead of
+// attaching to a stale pending or unknown host outcome.
+func mutationOperationKey(ctx context.Context, action string, mapping Mapping, revision uint64) string {
+	fields := []string{
+		"reverse-l4", "mutation", mutationRequestOperationKey(ctx), action, mapping.ID, revisionString(revision),
+		mapping.Name, mapping.EntryAgentID, mapping.ExitAgentID, mapping.Protocol,
+		fmt.Sprintf("listen-%d", mapping.ListenPort), mapping.BackendHost,
+		fmt.Sprintf("backend-%d", mapping.BackendPort),
+	}
+	for _, hop := range mapping.RelayChain {
+		fields = append(fields, fmt.Sprintf("relay-%d", hop))
+	}
+	fields = append(fields,
+		fmt.Sprintf("enabled-%t", mapping.Enabled), mapping.RuleRef, mapping.SessionRef,
+		mapping.BridgeHost, fmt.Sprintf("bridge-%d", mapping.BridgePort),
+		generationString(mapping.RecoveryGeneration),
+	)
+	return stableOperationKey(fields...)
 }
 
 func stableOperationKey(fields ...string) string {

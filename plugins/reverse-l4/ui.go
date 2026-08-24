@@ -115,7 +115,8 @@ func (controller *Controller) serveMappingCollection(writer http.ResponseWriter,
 		}
 		writeMappingJSON(writer, http.StatusOK, mappingAPIResponse{Mappings: mappingViews(statuses), Access: mappingPageAccess{CanRead: true, CanWrite: true}})
 	case http.MethodPost:
-		if _, err := controller.uiIdentity(request, "mapping-create"); err != nil {
+		identity, err := controller.uiIdentity(request, "mapping-create")
+		if err != nil {
 			writeMappingJSON(writer, http.StatusForbidden, mappingAPIResponse{Error: ErrUnauthorized.Error()})
 			return
 		}
@@ -124,7 +125,7 @@ func (controller *Controller) serveMappingCollection(writer http.ResponseWriter,
 			writeMappingJSON(writer, http.StatusBadRequest, mappingAPIResponse{Error: ErrInvalidMapping.Error()})
 			return
 		}
-		if _, err := service.Create(request.Context(), body.mapping()); err != nil {
+		if _, err := service.Create(withMutationOperationKey(request.Context(), identity.OperationKey), body.mapping()); err != nil {
 			writeMappingJSON(writer, mappingHTTPStatus(err), mappingAPIResponse{Error: publicMappingError(err)})
 			return
 		}
@@ -161,7 +162,8 @@ func (controller *Controller) serveMappingItem(writer http.ResponseWriter, reque
 		return
 	}
 	operation := "mapping-" + action
-	if _, err := controller.uiIdentity(request, operation); err != nil {
+	identity, err := controller.uiIdentity(request, operation)
+	if err != nil {
 		writeMappingJSON(writer, http.StatusForbidden, mappingAPIResponse{Error: ErrUnauthorized.Error()})
 		return
 	}
@@ -174,17 +176,17 @@ func (controller *Controller) serveMappingItem(writer http.ResponseWriter, reque
 	case "update":
 		spec := body.mapping()
 		spec.ID = id
-		_, err = service.Update(request.Context(), spec)
+		_, err = service.Update(withMutationOperationKey(request.Context(), identity.OperationKey), spec)
 	case "enable":
-		_, err = service.SetEnabled(request.Context(), id, true)
+		_, err = service.SetEnabled(withMutationOperationKey(request.Context(), identity.OperationKey), id, true)
 	case "disable":
-		_, err = service.SetEnabled(request.Context(), id, false)
+		_, err = service.SetEnabled(withMutationOperationKey(request.Context(), identity.OperationKey), id, false)
 	case "delete":
 		if body.Confirm != id {
 			writeMappingJSON(writer, http.StatusBadRequest, mappingAPIResponse{Error: ErrDeleteUnconfirmed.Error()})
 			return
 		}
-		err = service.Delete(request.Context(), id)
+		err = service.Delete(withMutationOperationKey(request.Context(), identity.OperationKey), id)
 	default:
 		http.Error(writer, "四层反向穿透管理页未找到", http.StatusNotFound)
 		return

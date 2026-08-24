@@ -276,7 +276,7 @@ func (service *Service) Create(ctx context.Context, mapping Mapping) (Mapping, e
 	if err != nil {
 		return Mapping{}, err
 	}
-	rule, err := service.runtime.createRule(ctx, mutationOperationKey("rule.create", mapping.ID, revision), ruleRequest(mapping, session))
+	rule, err := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", mapping, revision), ruleRequest(mapping, session))
 	if err != nil {
 		// No compensating teardown: the durable ensure outcome is keyed to
 		// this revision, so a retry re-attaches the same host session and
@@ -319,6 +319,9 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 	if err := updated.Validate(); err != nil {
 		return Mapping{}, err
 	}
+	if updated.sameUserSpec(existing) {
+		return existing.Clone(), nil
+	}
 	revision := existing.Revision + 1
 	updated.Revision = revision
 
@@ -329,7 +332,7 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 		// The channel is torn down and the rule disabled; the new spec is
 		// applied by the next enable, which re-ensures and re-points the rule.
 		if entryMoved && existing.RuleRef != "" {
-			if err := service.runtime.deleteRule(ctx, mutationOperationKey("rule.delete", updated.ID, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+			if err := service.runtime.deleteRule(ctx, mutationOperationKey(ctx, "rule.delete", updated, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 				return Mapping{}, err
 			}
 		}
@@ -343,7 +346,7 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 	if !ownersMoved {
 		reattach = existing.SessionRef
 	} else if existing.SessionRef != "" {
-		if err := service.runtime.teardownChannel(ctx, mutationOperationKey("channel.teardown", updated.ID, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+		if err := service.runtime.teardownChannel(ctx, mutationOperationKey(ctx, "channel.teardown", updated, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 			return Mapping{}, err
 		}
 	}
@@ -357,17 +360,17 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 	switch {
 	case entryMoved:
 		if existing.RuleRef != "" {
-			if err := service.runtime.deleteRule(ctx, mutationOperationKey("rule.delete", updated.ID, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+			if err := service.runtime.deleteRule(ctx, mutationOperationKey(ctx, "rule.delete", updated, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 				return Mapping{}, err
 			}
 		}
-		rule, err := service.runtime.createRule(ctx, mutationOperationKey("rule.create", updated.ID, revision), ruleRequest(updated, session))
+		rule, err := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", updated, revision), ruleRequest(updated, session))
 		if err != nil {
 			return Mapping{}, err
 		}
 		updated.RuleRef = rule.RuleRef
 	case existing.RuleRef == "":
-		rule, err := service.runtime.createRule(ctx, mutationOperationKey("rule.create", updated.ID, revision), ruleRequest(updated, session))
+		rule, err := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", updated, revision), ruleRequest(updated, session))
 		if err != nil {
 			return Mapping{}, err
 		}
@@ -377,9 +380,9 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 		request.RuleRef = existing.RuleRef
 		enabled := true
 		request.Enabled = &enabled
-		if _, err := service.runtime.updateRule(ctx, mutationOperationKey("rule.update", updated.ID, revision), request); err != nil {
+		if _, err := service.runtime.updateRule(ctx, mutationOperationKey(ctx, "rule.update", updated, revision), request); err != nil {
 			if errors.Is(err, ErrHostRejectedRequest) {
-				rule, createErr := service.runtime.createRule(ctx, mutationOperationKey("rule.create", updated.ID, revision), ruleRequest(updated, session))
+				rule, createErr := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", updated, revision), ruleRequest(updated, session))
 				if createErr != nil {
 					return Mapping{}, createErr
 				}
@@ -418,12 +421,12 @@ func (service *Service) SetEnabled(ctx context.Context, id string, enabled bool)
 
 	if !enabled {
 		if existing.SessionRef != "" {
-			if err := service.runtime.teardownChannel(ctx, mutationOperationKey("channel.teardown", id, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+			if err := service.runtime.teardownChannel(ctx, mutationOperationKey(ctx, "channel.teardown", updated, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 				return Mapping{}, err
 			}
 		}
 		if existing.RuleRef != "" {
-			if _, err := service.runtime.setRuleEnabled(ctx, mutationOperationKey("rule.disable", id, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID), false); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+			if _, err := service.runtime.setRuleEnabled(ctx, mutationOperationKey(ctx, "rule.disable", updated, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID), false); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 				return Mapping{}, err
 			}
 		}
@@ -439,7 +442,7 @@ func (service *Service) SetEnabled(ctx context.Context, id string, enabled bool)
 	updated.SessionRef = session.SessionRef
 	updated.BridgeHost, updated.BridgePort = session.BridgeHost, session.BridgePort
 	if existing.RuleRef == "" {
-		rule, err := service.runtime.createRule(ctx, mutationOperationKey("rule.create", id, revision), ruleRequest(updated, session))
+		rule, err := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", updated, revision), ruleRequest(updated, session))
 		if err != nil {
 			return Mapping{}, err
 		}
@@ -449,11 +452,11 @@ func (service *Service) SetEnabled(ctx context.Context, id string, enabled bool)
 		request.RuleRef = existing.RuleRef
 		enabled := true
 		request.Enabled = &enabled
-		if _, err := service.runtime.updateRule(ctx, mutationOperationKey("rule.update", id, revision), request); err != nil {
+		if _, err := service.runtime.updateRule(ctx, mutationOperationKey(ctx, "rule.update", updated, revision), request); err != nil {
 			if !errors.Is(err, ErrHostRejectedRequest) {
 				return Mapping{}, err
 			}
-			rule, createErr := service.runtime.createRule(ctx, mutationOperationKey("rule.create", id, revision), ruleRequest(updated, session))
+			rule, createErr := service.runtime.createRule(ctx, mutationOperationKey(ctx, "rule.create", updated, revision), ruleRequest(updated, session))
 			if createErr != nil {
 				return Mapping{}, createErr
 			}
@@ -484,12 +487,12 @@ func (service *Service) Delete(ctx context.Context, id string) error {
 	}
 	revision := existing.Revision + 1
 	if existing.SessionRef != "" {
-		if err := service.runtime.teardownChannel(ctx, mutationOperationKey("channel.teardown", id, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+		if err := service.runtime.teardownChannel(ctx, mutationOperationKey(ctx, "channel.teardown", existing, revision), existing.SessionRef); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 			return err
 		}
 	}
 	if existing.RuleRef != "" {
-		if err := service.runtime.deleteRule(ctx, mutationOperationKey("rule.delete", id, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
+		if err := service.runtime.deleteRule(ctx, mutationOperationKey(ctx, "rule.delete", existing, revision), ruleRefRequest(existing.RuleRef, existing.EntryAgentID)); err != nil && !errors.Is(err, ErrHostRejectedRequest) {
 			return err
 		}
 	}
@@ -896,7 +899,7 @@ func (service *Service) ensureChannelFor(ctx context.Context, mapping Mapping, s
 	if err := request.Validate(); err != nil {
 		return channelSession{}, fmt.Errorf("%w: %v", ErrInvalidMapping, err)
 	}
-	operation := mutationOperationKey("channel.ensure", mapping.ID, revision)
+	operation := mutationOperationKey(ctx, "channel.ensure", mapping, revision)
 	return service.runtime.ensureChannel(ctx, operation, request)
 }
 
