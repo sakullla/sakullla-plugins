@@ -442,7 +442,7 @@ func TestHostCapabilityRuntimeDeletesHTTPRuleByRef(t *testing.T) {
 		if _, exists := payload["port"]; exists {
 			t.Fatal("http.rule delete must not send port")
 		}
-		if payload["rule_ref"] != "rule-media-8080" {
+		if payload["rule_ref"] != "rule-media-8080" || payload["agent_id"] != "agent-1" {
 			t.Fatalf("payload=%#v", payload)
 		}
 		return copyHostResult(map[string]any{"accepted": true}, target)
@@ -450,14 +450,20 @@ func TestHostCapabilityRuntimeDeletesHTTPRuleByRef(t *testing.T) {
 	config := bindHostCapabilityClient(ControllerConfig{}, func() (hostRuntimeCaller, error) {
 		return client, nil
 	})
-	if err := config.UIHTTPRuleDelete.Delete(withHostOperationKey(context.Background(), "operation/ui-test"), "rule-media-8080"); err != nil {
+	if err := config.UIHTTPRuleDelete.Delete(withHostOperationKey(context.Background(), "operation/ui-test"), "agent-1", "rule-media-8080"); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 1 || calls[0].Operation != hostHTTPRuleOperation || calls[0].OperationID != "operation/ui-test" {
 		t.Fatalf("http.rule delete call = %#v", calls)
 	}
-	if !strings.Contains(string(calls[0].Payload), `"action":"delete"`) || !strings.Contains(string(calls[0].Payload), `"rule_ref":"rule-media-8080"`) {
+	if !strings.Contains(string(calls[0].Payload), `"action":"delete"`) || !strings.Contains(string(calls[0].Payload), `"rule_ref":"rule-media-8080"`) || !strings.Contains(string(calls[0].Payload), `"agent_id":"agent-1"`) {
 		t.Fatalf("http.rule delete payload = %s", calls[0].Payload)
+	}
+	if err := config.UIHTTPRuleDelete.Delete(context.Background(), "", "rule-media-8080"); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("delete without agent_id err=%v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("empty agent_id dispatched http.rule: %#v", calls)
 	}
 }
 

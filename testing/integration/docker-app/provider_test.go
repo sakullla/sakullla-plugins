@@ -189,7 +189,7 @@ func TestHTTPRuleDeletedFromPublishedPortAndDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(store.deletes) != 1 || store.deletes[0] != ref {
+	if len(store.deletes) != 1 || store.deletes[0] != (recordedHTTPRuleDelete{AgentID: app.AgentID, RuleRef: ref}) {
 		t.Fatalf("host deletes=%#v", store.deletes)
 	}
 	if len(deleted) != 0 || len(store.rules) != 0 {
@@ -430,10 +430,15 @@ func TestProjectHTTPBackendCatalogUsesComposePortsAndAvailability(t *testing.T) 
 	}
 }
 
+type recordedHTTPRuleDelete struct {
+	AgentID string
+	RuleRef string
+}
+
 type recordingHostHTTPRules struct {
 	specs     []dockerapp.HTTPRuleSpec
 	rules     []dockerapp.HostHTTPRule
-	deletes   []string
+	deletes   []recordedHTTPRuleDelete
 	createErr error
 	listErr   error
 	deleteErr error
@@ -470,8 +475,8 @@ func (store *recordingHostHTTPRules) List(_ context.Context, agentID string) ([]
 	return listed, nil
 }
 
-func (store *recordingHostHTTPRules) Delete(_ context.Context, ruleRef string) error {
-	store.deletes = append(store.deletes, ruleRef)
+func (store *recordingHostHTTPRules) Delete(_ context.Context, agentID, ruleRef string) error {
+	store.deletes = append(store.deletes, recordedHTTPRuleDelete{AgentID: agentID, RuleRef: ruleRef})
 	if store.deleteErr != nil {
 		return store.deleteErr
 	}

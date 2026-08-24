@@ -291,7 +291,7 @@ func TestAppUIDeletesHTTPRuleFromHostList(t *testing.T) {
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
-	if len(handle.deletes) != 1 || handle.deletes[0] != ref || len(handle.rules) != 0 {
+	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref}) || len(handle.rules) != 0 {
 		t.Fatalf("host delete deletes=%#v rules=%#v", handle.deletes, handle.rules)
 	}
 	if strings.Contains(deleted.Body.String(), "https://app.example.com") {
@@ -359,7 +359,7 @@ func TestAppUIConfirmedDeleteRemovesListedHTTPRules(t *testing.T) {
 	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
 		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
-	if len(handle.deletes) != 1 || handle.deletes[0] != ref || len(handle.rules) != 0 {
+	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref}) || len(handle.rules) != 0 {
 		t.Fatalf("confirmed delete left host rules deletes=%#v rules=%#v", handle.deletes, handle.rules)
 	}
 	if strings.Contains(deleted.Body.String(), `"id":"media"`) || strings.Contains(deleted.Body.String(), "https://app.example.com") {
@@ -1457,10 +1457,15 @@ func stringPtr(value string) *string {
 	return &value
 }
 
+type recordedHTTPRuleDelete struct {
+	AgentID string
+	RuleRef string
+}
+
 type recordingHTTPRuleCreate struct {
 	specs     []HTTPRuleSpec
 	rules     []HostHTTPRule
-	deletes   []string
+	deletes   []recordedHTTPRuleDelete
 	err       error
 	listErr   error
 	deleteErr error
@@ -1497,8 +1502,8 @@ func (handle *recordingHTTPRuleCreate) List(_ context.Context, agentID string) (
 	return listed, nil
 }
 
-func (handle *recordingHTTPRuleCreate) Delete(_ context.Context, ruleRef string) error {
-	handle.deletes = append(handle.deletes, ruleRef)
+func (handle *recordingHTTPRuleCreate) Delete(_ context.Context, agentID, ruleRef string) error {
+	handle.deletes = append(handle.deletes, recordedHTTPRuleDelete{AgentID: agentID, RuleRef: ruleRef})
 	if handle.deleteErr != nil {
 		return handle.deleteErr
 	}

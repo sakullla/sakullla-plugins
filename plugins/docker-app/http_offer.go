@@ -92,16 +92,17 @@ func (function HTTPRuleListHandleFunc) List(ctx context.Context, agentID string)
 	return function(ctx, agentID)
 }
 
-// HTTPRuleDeleteHandle deletes a host HTTP rule by rule_ref. Host http.rule
-// delete implements this. Application-page success uses the subsequent list.
+// HTTPRuleDeleteHandle deletes a host HTTP rule by agent_id and rule_ref.
+// Host http.rule delete implements this. Application-page success uses the
+// subsequent list. The host resolver rejects delete without agent_id.
 type HTTPRuleDeleteHandle interface {
-	Delete(context.Context, string) error
+	Delete(context.Context, string, string) error
 }
 
-type HTTPRuleDeleteHandleFunc func(context.Context, string) error
+type HTTPRuleDeleteHandleFunc func(context.Context, string, string) error
 
-func (function HTTPRuleDeleteHandleFunc) Delete(ctx context.Context, ruleRef string) error {
-	return function(ctx, ruleRef)
+func (function HTTPRuleDeleteHandleFunc) Delete(ctx context.Context, agentID, ruleRef string) error {
+	return function(ctx, agentID, ruleRef)
 }
 
 // HTTPBackendOfferReplaceHandle replaces this plugin instance's published-port
@@ -336,7 +337,7 @@ func DeleteHTTPRule(ctx context.Context, handle HTTPRuleDeleteHandle, lister HTT
 		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return nil, ErrTypedHandlesUnavailable
 	}
-	if err := handle.Delete(ctx, ruleRef); err != nil {
+	if err := handle.Delete(ctx, app.AgentID, ruleRef); err != nil {
 		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return nil, safeFailure(ErrOperationFailed, err)
 	}

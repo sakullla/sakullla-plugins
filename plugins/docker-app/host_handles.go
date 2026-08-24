@@ -237,16 +237,19 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 	return rules, nil
 }
 
-func (runtime *hostCapabilityRuntime) Delete(ctx context.Context, ruleRef string) error {
+func (runtime *hostCapabilityRuntime) Delete(ctx context.Context, agentID, ruleRef string) error {
 	if runtime == nil || runtime.client == nil {
 		return ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(agentID) {
+		return ErrAgentOffline
 	}
 	ruleRef = strings.TrimSpace(ruleRef)
 	if ruleRef == "" {
 		return ErrEmptyHTTPRuleRef
 	}
 	return callHostWithOperation(ctx, runtime.client, hostHTTPRuleOperation, hostOperationKeyFromContext(ctx), map[string]any{
-		"action": hostHTTPRuleActionDelete, "rule_ref": ruleRef,
+		"action": hostHTTPRuleActionDelete, "agent_id": agentID, "rule_ref": ruleRef,
 	}, nil)
 }
 
