@@ -90,12 +90,15 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
-		"min(52rem",
+		"width: calc(100% - 2.5rem)",
 		"overflow-wrap: anywhere",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
+	}
+	if strings.Contains(css, "min(52rem") {
+		t.Fatal("stylesheet still caps main at 52rem")
 	}
 
 	index := httptest.NewRecorder()

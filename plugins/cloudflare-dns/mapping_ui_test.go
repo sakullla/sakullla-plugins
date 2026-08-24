@@ -388,13 +388,16 @@ func TestMappingUIViewportLayout(t *testing.T) {
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
-		"min(52rem",
+		"width: calc(100% - 2.5rem)",
 		"flex-wrap: wrap",
 		"overflow-wrap: anywhere",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
+	}
+	if strings.Contains(text, "min(52rem") {
+		t.Fatal("stylesheet still caps main at 52rem")
 	}
 	if strings.Contains(text, "flex-wrap: nowrap") || strings.Contains(text, "white-space: nowrap") {
 		t.Fatal("action bar still forces nowrap overflow")

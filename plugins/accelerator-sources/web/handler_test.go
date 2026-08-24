@@ -70,12 +70,15 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
 		"@media (min-width: 3840px)",
-		"min(64rem",
+		"width: calc(100% - 2.5rem)",
 		"overflow-wrap: anywhere",
 	} {
 		if !strings.Contains(style, fragment) {
 			t.Fatalf("visitor stylesheet missing viewport rule %q", fragment)
 		}
+	}
+	if strings.Contains(style, "min(64rem") {
+		t.Fatal("visitor stylesheet still caps main at 64rem")
 	}
 	if strings.Contains(style, "overflow: auto") {
 		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")

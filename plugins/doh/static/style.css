@@ -62,7 +62,8 @@ html, body {
 }
 
 .masthead-inner, main {
-  width: min(52rem, calc(100% - 2.5rem));
+  width: calc(100% - 2.5rem);
+  max-width: none;
   margin: 0 auto;
 }
 
@@ -224,5 +225,5 @@ button {
     --space-4: 1.25rem;
     --space-5: 1.5rem;
   }
-  main { width: min(52rem, calc(100% - 4rem)); padding: 3rem 0 7rem; }
+  main { width: calc(100% - 4rem); padding: 3rem 0 7rem; }
 }
