@@ -1,6 +1,6 @@
 schema_version: 1
 id: cloudflare-dns
-version: 0.1.14
+version: 0.1.15
 name: Cloudflare DNS
 description: 按域名后缀解析 Cloudflare DNS Token，并提供专门映射管理页
 compatibility:
