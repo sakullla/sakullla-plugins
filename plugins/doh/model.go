@@ -11,7 +11,7 @@ import (
 
 const (
 	PluginID                 = "doh"
-	PluginVersion            = "0.2.0"
+	PluginVersion            = "0.2.1"
 	ProviderID               = "default"
 	DNSQueryPath             = "/dns-query"
 	DefaultUpstreamID        = "default"

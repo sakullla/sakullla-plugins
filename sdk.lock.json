@@ -2,14 +2,14 @@
   "schema_version": 1,
   "repository": {
     "url": "https://github.com/sakullla/nginx-reverse-emby.git",
-    "commit": "fd46625386b46f5e3704ddb17265378235c6109c",
-    "tag": "plugin-sdk/v0.7.14"
+    "commit": "5f3f09f1021d1cab3865cda1f422f63af83a5a1e",
+    "tag": "plugin-sdk/v0.7.15"
   },
   "sdk": {
     "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
     "module_directory": "plugin-sdk",
     "package_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-    "contract_tree_oid": "bc0440ba0ccb8007bc49393103cfe443a8ec53c4"
+    "contract_tree_oid": "2835088f39096302b5eff13d262205ff576198f0"
   },
   "artifacts": {
     "descriptor_set_sha256": "47c0dc758ccc30fb596dfe078419aeb1effe8b266ed28d729c64334a09881628",
