@@ -340,6 +340,13 @@ func defaultExecutionWorkDirRoot() string {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if home = strings.TrimSpace(home); home != "" {
+			// Linux RPC plugin sandboxes deliberately use /nonexistent as HOME.
+			// Compose files are only staging input there: the Agent's Docker
+			// proxy persists them below its managed workspace root. Keep the
+			// staging copy in the sandbox's writable temporary directory.
+			if root, ok := sandboxExecutionWorkDirRoot(runtime.GOOS, home, os.TempDir()); ok {
+				return root
+			}
 			return filepath.Join(home, ".nre", "docker-app")
 		}
 	}
@@ -351,6 +358,17 @@ func defaultExecutionWorkDirRoot() string {
 		return filepath.Join(base, "nre-docker-app")
 	}
 	return "/var/lib/nre-docker-app"
+}
+
+func sandboxExecutionWorkDirRoot(goos, home, temporary string) (string, bool) {
+	if goos == "windows" || strings.TrimSpace(home) != "/nonexistent" {
+		return "", false
+	}
+	temporary = strings.TrimSpace(temporary)
+	if temporary == "" {
+		return "", false
+	}
+	return filepath.Join(temporary, "nre-docker-app"), true
 }
 
 func composeCallFailure(action string, output []byte, err error) error {

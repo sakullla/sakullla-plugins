@@ -24,6 +24,18 @@ func TestDefaultExecutionWorkDirRootIsDurableOutsideTempDir(t *testing.T) {
 	}
 }
 
+func TestDefaultExecutionWorkDirRootUsesTempForSandboxHome(t *testing.T) {
+	temporary := t.TempDir()
+	want := filepath.Join(temporary, "nre-docker-app")
+	got, ok := sandboxExecutionWorkDirRoot("linux", "/nonexistent", temporary)
+	if !ok || got != want {
+		t.Fatalf("sandbox workdir root = %q, want writable temp staging root %q", got, want)
+	}
+	if _, ok := sandboxExecutionWorkDirRoot("windows", "/nonexistent", temporary); ok {
+		t.Fatal("Windows unexpectedly treated the Linux sandbox HOME sentinel as active")
+	}
+}
+
 func TestControllerCallComposeApplySanitizesDockerError(t *testing.T) {
 	t.Parallel()
 	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
