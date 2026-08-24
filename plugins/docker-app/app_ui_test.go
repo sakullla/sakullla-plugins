@@ -1044,6 +1044,60 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	}
 }
 
+func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) {
+	t.Parallel()
+	html, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := appUIAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(html)
+	js := string(script)
+	stylesheet := string(css)
+	if strings.Contains(page, `<select id="agent-select"`) {
+		t.Fatal("management page still uses a native agent <select>")
+	}
+	for _, want := range []string{
+		`id="agent-select"`,
+		`data-agent-picker="workspace"`,
+		`class="agent-search-select"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing agent picker markup %q", want)
+		}
+	}
+	for _, want := range []string{
+		"mountAgentSearchSelect",
+		"搜索节点",
+		"最近活跃",
+		"/panel-api/agents",
+		"agentPicker.onChange",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("script missing agent picker behavior %q", want)
+		}
+	}
+	for _, want := range []string{
+		".agent-search-select",
+		"@media (max-width: 720px)",
+		"@media (min-width: 1920px)",
+		"@media (min-width: 2560px)",
+		"@media (min-width: 3840px)",
+		"min(52rem",
+	} {
+		if !strings.Contains(stylesheet, want) {
+			t.Fatalf("stylesheet missing viewport rule %q", want)
+		}
+	}
+}
+
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")

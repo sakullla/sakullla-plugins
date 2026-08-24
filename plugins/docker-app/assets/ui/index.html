@@ -30,7 +30,8 @@
     <div id="app-workspace" hidden>
       <div class="toolbar-bar">
         <label class="agent-field">节点
-          <select id="agent-select" required></select>
+          <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
+          <div class="agent-search-select" data-agent-picker="workspace"></div>
         </label>
         <p id="engine-status" class="engine-status" hidden></p>
         <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
