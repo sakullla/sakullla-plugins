@@ -173,11 +173,15 @@ const agentLabel = (agent) => {
   return isAgentOnline(agent) ? label : `${label}（离线）`;
 };
 
-const closeAllAgentPickers = (except) => {
-  agentPickers.forEach((picker) => {
-    if (picker !== except) picker.close();
+const listenerPickers = [];
+
+const closeAllPickers = (except) => {
+  [...agentPickers, ...listenerPickers].forEach((picker) => {
+    if (picker !== except && picker.close) picker.close();
   });
 };
+
+const closeAllAgentPickers = (except) => closeAllPickers(except);
 
 const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const picker = {
@@ -390,7 +394,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       picker.close();
       return;
     }
-    closeAllAgentPickers(picker);
+    closeAllPickers(picker);
     picker.open = true;
     dropdown.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
@@ -455,36 +459,301 @@ const fillAgentPickers = (entryID, exitID) => {
   exitPicker.refresh(exitID || "");
 };
 
-const fillListenerSelect = (select, selected) => {
-  if (!select) return;
-  const selectedID = Number(selected);
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = listenersCache.length ? "选择中继监听器" : "暂无中继监听器";
-  select.replaceChildren(placeholder);
+const isListenerEnabled = (listener) => !listener || listener.enabled !== false;
+
+const listenerSearchText = (listener) => [
+  listener && listener.name,
+  listener && listener.agent_name,
+  listener && listener.agent_id,
+  listener && listener.agent,
+  listenerID(listener),
+  listener && listener.public_addr,
+  listener && listener.listen_port,
+].filter(Boolean).join(" ").toLowerCase();
+
+const uniqueListeners = () => {
   const seen = new Set();
+  const result = [];
   listenersCache.forEach((listener) => {
     const id = listenerID(listener);
     if (!id || seen.has(id)) return;
     seen.add(id);
-    const option = document.createElement("option");
-    option.value = String(id);
-    option.textContent = listenerLabel(listener, id);
-    select.append(option);
+    result.push(listener);
   });
-  if (selectedID > 0 && !seen.has(selectedID)) {
-    const option = document.createElement("option");
-    option.value = String(selectedID);
-    option.textContent = `监听器 ${selectedID}`;
-    select.append(option);
-  }
-  select.value = selectedID > 0 ? String(selectedID) : "";
+  return result;
+};
+
+const mountListenerSearchSelect = (root, hiddenInput, placeholder) => {
+  const picker = {
+    root,
+    hiddenInput,
+    placeholder,
+    open: false,
+    disabled: false,
+    enabledFilter: "",
+    sortBy: "name",
+    search: "",
+    selected: 0,
+    close() {},
+    setValue() {},
+    setDisabled() {},
+    refresh() {},
+  };
+  if (!root || !hiddenInput) return picker;
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "agent-search-select__trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const statusDot = document.createElement("span");
+  statusDot.className = "agent-search-select__status";
+  statusDot.hidden = true;
+  const label = document.createElement("span");
+  label.className = "agent-search-select__label";
+  const chevron = document.createElement("span");
+  chevron.className = "agent-search-select__chevron";
+  chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+  trigger.append(statusDot, label, chevron);
+
+  const dropdown = document.createElement("div");
+  dropdown.className = "agent-search-select__dropdown";
+  dropdown.hidden = true;
+  dropdown.setAttribute("role", "listbox");
+
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "agent-search-select__search";
+  const searchShell = document.createElement("div");
+  searchShell.className = "agent-search-select__search-shell";
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.className = "agent-search-select__search-input";
+  searchInput.placeholder = "搜索中继...";
+  searchInput.setAttribute("aria-label", "搜索中继");
+  searchInput.autocomplete = "off";
+  searchShell.append(searchInput);
+  searchWrap.append(searchShell);
+
+  const filters = document.createElement("div");
+  filters.className = "agent-search-select__filters";
+  const filterButtons = [
+    { value: "", text: "全部" },
+    { value: "enabled", text: "启用" },
+    { value: "disabled", text: "停用" },
+  ].map((opt) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-search-select__chip";
+    button.textContent = opt.text;
+    button.dataset.enabled = opt.value;
+    button.addEventListener("click", () => {
+      picker.enabledFilter = opt.value;
+      renderList();
+    });
+    filters.append(button);
+    return button;
+  });
+
+  const list = document.createElement("div");
+  list.className = "agent-search-select__list";
+
+  const sortBar = document.createElement("div");
+  sortBar.className = "agent-search-select__sort";
+  sortBar.append(document.createTextNode("排序:"));
+  const sortButtons = [
+    { value: "name", text: "名称" },
+    { value: "agent", text: "节点" },
+  ].map((opt) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-search-select__chip";
+    button.textContent = opt.text;
+    button.dataset.sort = opt.value;
+    button.addEventListener("click", () => {
+      picker.sortBy = opt.value;
+      renderList();
+    });
+    sortBar.append(button);
+    return button;
+  });
+
+  dropdown.append(searchWrap, filters, list, sortBar);
+  root.replaceChildren(trigger, dropdown);
+
+  const selectedListener = () => uniqueListeners().find((listener) => listenerID(listener) === picker.selected) || null;
+
+  const syncTrigger = () => {
+    hiddenInput.value = picker.selected > 0 ? String(picker.selected) : "";
+    const listener = selectedListener();
+    if (listener) {
+      const id = listenerID(listener);
+      label.textContent = listenerLabel(listener, id);
+      label.dataset.empty = "false";
+      statusDot.hidden = false;
+      statusDot.className = `agent-search-select__status agent-search-select__status--${isListenerEnabled(listener) ? "online" : "offline"}`;
+      trigger.title = listenerLabel(listener, id);
+    } else if (picker.selected > 0) {
+      label.textContent = `监听器 ${picker.selected}`;
+      label.dataset.empty = "false";
+      statusDot.hidden = true;
+      trigger.title = `监听器 ${picker.selected}`;
+    } else {
+      label.textContent = uniqueListeners().length ? placeholder : "暂无中继监听器";
+      label.dataset.empty = "true";
+      statusDot.hidden = true;
+      trigger.title = label.textContent;
+    }
+  };
+
+  const filteredListeners = () => {
+    const query = picker.search.trim().toLowerCase();
+    let result = uniqueListeners();
+    if (picker.enabledFilter === "enabled") result = result.filter((listener) => isListenerEnabled(listener));
+    if (picker.enabledFilter === "disabled") result = result.filter((listener) => !isListenerEnabled(listener));
+    if (query) result = result.filter((listener) => listenerSearchText(listener).includes(query));
+    result.sort((left, right) => {
+      if (picker.sortBy === "agent") {
+        const leftAgent = String(left.agent_name || left.agent_id || left.agent || "");
+        const rightAgent = String(right.agent_name || right.agent_id || right.agent || "");
+        return leftAgent.localeCompare(rightAgent, "zh") || listenerID(left) - listenerID(right);
+      }
+      return listenerLabel(left, listenerID(left)).localeCompare(listenerLabel(right, listenerID(right)), "zh");
+    });
+    return result;
+  };
+
+  const renderList = () => {
+    filterButtons.forEach((button) => {
+      button.setAttribute("aria-pressed", button.dataset.enabled === picker.enabledFilter ? "true" : "false");
+    });
+    sortButtons.forEach((button) => {
+      button.setAttribute("aria-pressed", button.dataset.sort === picker.sortBy ? "true" : "false");
+    });
+    const items = filteredListeners();
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "agent-search-select__empty";
+      empty.textContent = uniqueListeners().length ? "没有匹配的中继" : "暂无中继监听器";
+      list.append(empty);
+      return;
+    }
+    items.forEach((listener) => {
+      const id = listenerID(listener);
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "agent-search-select__option";
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", id === picker.selected ? "true" : "false");
+      const dot = document.createElement("span");
+      dot.className = `agent-search-select__status agent-search-select__status--${isListenerEnabled(listener) ? "online" : "offline"}`;
+      const copy = document.createElement("span");
+      copy.className = "agent-search-select__option-copy";
+      const name = document.createElement("span");
+      name.className = "agent-search-select__option-name";
+      name.textContent = String(listener.name || "").trim() && String(listener.name) !== String(id)
+        ? listener.name
+        : `监听器 ${id}`;
+      const meta = document.createElement("span");
+      meta.className = "agent-search-select__option-meta";
+      const agent = String(listener.agent_name || listener.agent_id || listener.agent || "").trim();
+      meta.textContent = [agent ? `节点 ${agent}` : "", `监听器 ID ${id}`, isListenerEnabled(listener) ? "启用" : "停用"].filter(Boolean).join(" · ");
+      copy.append(name, meta);
+      option.append(dot, copy);
+      option.addEventListener("click", () => {
+        picker.setValue(id);
+        picker.close();
+      });
+      list.append(option);
+    });
+  };
+
+  picker.close = () => {
+    picker.open = false;
+    picker.search = "";
+    picker.enabledFilter = "";
+    picker.sortBy = "name";
+    searchInput.value = "";
+    dropdown.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+  };
+
+  picker.setValue = (value) => {
+    const id = Number(value);
+    picker.selected = Number.isInteger(id) && id > 0 ? id : 0;
+    syncTrigger();
+  };
+
+  picker.setDisabled = (next) => {
+    picker.disabled = Boolean(next);
+    trigger.disabled = picker.disabled;
+    searchInput.disabled = picker.disabled;
+  };
+
+  picker.refresh = (selected) => {
+    if (selected !== undefined) picker.setValue(selected);
+    else syncTrigger();
+    if (picker.open) renderList();
+  };
+
+  trigger.addEventListener("click", () => {
+    if (picker.disabled) return;
+    if (picker.open) {
+      picker.close();
+      return;
+    }
+    closeAllPickers(picker);
+    picker.open = true;
+    dropdown.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    renderList();
+    searchInput.focus();
+  });
+
+  searchInput.addEventListener("input", () => {
+    picker.search = searchInput.value;
+    renderList();
+  });
+
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      picker.close();
+      trigger.focus();
+    }
+  });
+
+  document.addEventListener("mousedown", (event) => {
+    if (!picker.open) return;
+    if (root.contains(event.target)) return;
+    picker.close();
+  });
+
+  syncTrigger();
+  return picker;
+};
+
+const hopSideHint = (index, total) => {
+  if (total === 1) return "（入口之后、出口之前）";
+  if (index === 0) return "（入口之后）";
+  if (index === total - 1) return "（出口之前）";
+  return "";
 };
 
 const relabelRelayHops = () => {
   if (!relayHops) return;
-  Array.from(relayHops.querySelectorAll("select")).forEach((select, index) => {
-    select.setAttribute("aria-label", `中继跳 ${index + 1}`);
+  const rows = Array.from(relayHops.querySelectorAll(".relay-hop"));
+  rows.forEach((row, index) => {
+    let badge = row.querySelector(".relay-hop-index");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "relay-hop-index";
+      row.insertBefore(badge, row.firstChild);
+    }
+    const n = index + 1;
+    badge.textContent = `第 ${n} 跳${hopSideHint(index, rows.length)}`;
+    const trigger = row.querySelector(".agent-search-select__trigger");
+    if (trigger) trigger.setAttribute("aria-label", `中继第 ${n} 跳`);
   });
 };
 
@@ -498,12 +767,13 @@ const syncFormControls = () => {
 
 const setBusy = (next) => {
   busy = next;
-  if (next) closeAllAgentPickers();
+  if (next) closeAllPickers();
   workspaceNode.querySelectorAll("button, input, select").forEach((node) => {
     node.disabled = next;
   });
   entryPicker.setDisabled(next);
   exitPicker.setDisabled(next);
+  listenerPickers.forEach((picker) => picker.setDisabled(next));
   if (!next) syncFormControls();
 };
 
@@ -511,26 +781,40 @@ const addRelayHop = (selected) => {
   if (!relayHops || relayHops.children.length >= maxRelayHops) return;
   const row = document.createElement("div");
   row.className = "relay-hop";
-  const select = document.createElement("select");
-  fillListenerSelect(select, selected);
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.dataset.relayHop = "true";
+  hidden.value = "";
+  const pickerRoot = document.createElement("div");
+  pickerRoot.className = "agent-search-select";
+  pickerRoot.dataset.listenerPicker = "true";
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "btn-link danger";
   remove.textContent = "移除";
+  row.append(hidden, pickerRoot, remove);
+  relayHops.append(row);
+  const picker = mountListenerSearchSelect(pickerRoot, hidden, "选择中继监听器");
+  listenerPickers.push(picker);
+  picker.refresh(selected || "");
+  picker.setDisabled(busy || !catalogReady);
   remove.addEventListener("click", () => {
     if (busy) return;
+    const index = listenerPickers.indexOf(picker);
+    if (index >= 0) listenerPickers.splice(index, 1);
+    picker.close();
     row.remove();
     relabelRelayHops();
     syncFormControls();
   });
-  row.append(select, remove);
-  relayHops.append(row);
   relabelRelayHops();
   syncFormControls();
 };
 
 const renderRelayHops = (hops) => {
   if (!relayHops) return;
+  listenerPickers.slice().forEach((picker) => picker.close());
+  listenerPickers.splice(0, listenerPickers.length);
   const values = Array.isArray(hops)
     ? hops.filter((hop) => Number.isInteger(hop) && hop > 0)
     : [];
@@ -543,8 +827,8 @@ const renderRelayHops = (hops) => {
 const collectRelayHops = () => {
   if (!relayHops) return { hops: [], error: "" };
   const hops = [];
-  for (const select of relayHops.querySelectorAll("select")) {
-    const hop = Number(select.value);
+  for (const input of relayHops.querySelectorAll("input[data-relay-hop]")) {
+    const hop = Number(input.value);
     if (!Number.isInteger(hop) || hop <= 0) {
       return { hops: [], error: "请为每一跳选择中继监听器，或移除空跳。" };
     }
@@ -570,6 +854,7 @@ const loadCatalogs = async () => {
   agentsCache = nextAgents;
   listenersCache = nextListeners;
   catalogReady = true;
+  listenerPickers.forEach((picker) => picker.refresh());
 };
 
 const formMapping = () => {
@@ -711,21 +996,24 @@ const relayRoute = (relayChain) => {
   const hops = Array.isArray(relayChain) ? relayChain : [];
   title.textContent = hops.length ? `经 ${hops.length} 个中继` : "出口直连入口";
   const meta = document.createElement("small");
-  meta.textContent = "由出口节点主动建立";
+  meta.textContent = hops.length
+    ? "转发：入口 → 下列各跳 → 出口；出口主动建链"
+    : "出口主动连入口，中间不经中继";
   stage.append(label, title, meta);
   if (hops.length) {
     const list = document.createElement("ol");
     list.className = "map-route-relays";
-    list.setAttribute("aria-label", "中继配置顺序");
-    hops.forEach((hop) => {
+    list.setAttribute("aria-label", "中继转发顺序，入口之后到出口之前");
+    hops.forEach((hop, index) => {
       const identity = listenerIdentity(hop);
       const item = document.createElement("li");
       const name = document.createElement("span");
-      name.textContent = identity.displayName;
+      name.textContent = `第 ${index + 1} 跳 · ${identity.displayName}`;
       const detail = document.createElement("small");
+      const side = hopSideHint(index, hops.length);
       detail.textContent = identity.owner
-        ? `${identity.owner} · 监听器 ID ${identity.id}`
-        : `监听器 ID ${identity.id}`;
+        ? `${identity.owner} · 监听器 ID ${identity.id}${side}`
+        : `监听器 ID ${identity.id}${side}`;
       item.append(name, detail);
       list.append(item);
     });

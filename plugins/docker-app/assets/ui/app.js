@@ -26,6 +26,7 @@ const listNode = document.querySelector("#app-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#app-count");
 const createPanel = document.querySelector("#app-create");
+const listPanel = document.querySelector("#app-list-panel");
 const createForm = document.querySelector("#create-form");
 const createTitle = document.querySelector("#app-create-title");
 const createSubmit = document.querySelector("#create-submit");
@@ -53,9 +54,12 @@ let editingID = "";
 let agentsCache = [];
 let engineReady = false;
 let agentOnline = false;
+let lastEngine = null;
+let workspaceSeq = 0;
 const engineCache = new Map();
 const ENGINE_CACHE_MS = 15000;
 const ENGINE_PROBE_CONCURRENCY = 3;
+const OFFICIAL_INSTALL_SCRIPT = "curl -fsSL https://get.docker.com | sh";
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -177,7 +181,7 @@ const agentLabel = (agent) => {
 const cachedEngine = (agentID) => {
   const cached = engineCache.get(agentID);
   if (!cached) return null;
-  if (Date.now() - cached.at > ENGINE_CACHE_MS) return cached;
+  if (Date.now() - cached.at > ENGINE_CACHE_MS) return null;
   return cached;
 };
 
@@ -521,11 +525,18 @@ const openCreate = (app) => {
     idInput.value = editingID;
     idInput.readOnly = Boolean(editingID);
   }
-  if (composeInput) composeInput.value = app?.compose || "";
-  if (envInput) envInput.value = "";
+  if (composeInput) {
+    composeInput.value = app?.compose || "";
+    paintCodeEditor(composeInput);
+  }
+  if (envInput) {
+    envInput.value = "";
+    paintCodeEditor(envInput);
+  }
   if (autoUpdateInput) autoUpdateInput.checked = app?.auto_update === true;
   createPanel.hidden = false;
   deployToggle.hidden = true;
+  syncListPanel();
   if (composeInput) composeInput.focus();
 };
 
@@ -537,6 +548,14 @@ const closeCreate = () => {
   createSubmit.textContent = "部署";
   createPanel.hidden = true;
   deployToggle.hidden = !(selectedAgentID && engineReady && agentOnline);
+  syncListPanel();
+};
+
+const syncListPanel = () => {
+  const hasApps = listNode && listNode.children.length > 0;
+  const creating = createPanel && createPanel.hidden === false;
+  if (emptyNode) emptyNode.hidden = !selectedAgentID || !engineReady || hasApps || creating;
+  if (listPanel) listPanel.hidden = Boolean(creating && !hasApps);
 };
 
 const parsePublishedPorts = (compose) => {
@@ -576,6 +595,143 @@ const chip = (text) => {
   node.textContent = text;
   return node;
 };
+
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+
+const tok = (name, text) => `<span class="tok-${name}">${escapeHtml(text)}</span>`;
+
+const splitInlineComment = (text) => {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble && (i === 0 || /\s/.test(text[i - 1]))) {
+      return [text.slice(0, i), text.slice(i)];
+    }
+  }
+  return [text, ""];
+};
+
+const highlightInterp = (text) => {
+  const parts = String(text).split(/(\$\{[^}]*\})/g);
+  if (parts.length === 1) return escapeHtml(text);
+  return parts.map((part, index) => (index % 2 ? tok("interp", part) : escapeHtml(part))).join("");
+};
+
+const highlightScalar = (value) => {
+  const trimmed = value.trimStart();
+  const lead = value.slice(0, value.length - trimmed.length);
+  if (!trimmed) return escapeHtml(value);
+  const prefix = escapeHtml(lead);
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+    const quote = trimmed[0];
+    let end = 1;
+    while (end < trimmed.length) {
+      if (quote === '"' && trimmed[end] === "\\") {
+        end += 2;
+        continue;
+      }
+      if (trimmed[end] === quote) {
+        end += 1;
+        break;
+      }
+      end += 1;
+    }
+    return prefix + tok("string", trimmed.slice(0, end)) + highlightInterp(trimmed.slice(end));
+  }
+  const keyword = trimmed.match(/^(true|false|null|yes|no|True|False|Null|YES|NO)\b/);
+  if (keyword) return prefix + tok("keyword", keyword[0]) + highlightInterp(trimmed.slice(keyword[0].length));
+  const number = trimmed.match(/^-?\d+(?:\.\d+)?\b/);
+  if (number) return prefix + tok("number", number[0]) + highlightInterp(trimmed.slice(number[0].length));
+  return prefix + highlightInterp(trimmed);
+};
+
+const highlightYamlLine = (line) => {
+  if (!line) return "";
+  const commentLine = line.match(/^(\s*)(#.*)$/);
+  if (commentLine) return escapeHtml(commentLine[1]) + tok("comment", commentLine[2]);
+  if (/^\s*(---|\.\.\.)\s*$/.test(line)) return tok("punct", line);
+  const indent = line.match(/^\s*/)[0];
+  let rest = line.slice(indent.length);
+  let html = escapeHtml(indent);
+  if (rest.startsWith("- ")) {
+    html += tok("punct", "- ");
+    rest = rest.slice(2);
+  } else if (rest === "-") {
+    return html + tok("punct", "-");
+  }
+  const keyed = rest.match(/^((?:"[^"]*"|'[^']*'|[A-Za-z0-9_./-]+))(:)(\s*)(.*)$/);
+  if (keyed) {
+    html += tok("key", keyed[1]) + tok("punct", keyed[2]) + escapeHtml(keyed[3]);
+    const [value, comment] = splitInlineComment(keyed[4]);
+    html += highlightScalar(value);
+    if (comment) html += tok("comment", comment);
+    return html;
+  }
+  const [value, comment] = splitInlineComment(rest);
+  html += highlightScalar(value);
+  if (comment) html += tok("comment", comment);
+  return html;
+};
+
+const highlightYaml = (source) => String(source || "").split("\n").map(highlightYamlLine).join("\n");
+
+const highlightEnvLine = (line) => {
+  if (!line) return "";
+  const commentLine = line.match(/^(\s*)(#.*)$/);
+  if (commentLine) return escapeHtml(commentLine[1]) + tok("comment", commentLine[2]);
+  const matched = line.match(/^(\s*)((?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+  if (!matched) return escapeHtml(line);
+  const [, indent, exported, key, assign, raw] = matched;
+  const [value, comment] = splitInlineComment(raw);
+  return escapeHtml(indent)
+    + (exported ? tok("keyword", exported) : "")
+    + tok("key", key)
+    + tok("punct", assign)
+    + highlightScalar(value)
+    + (comment ? tok("comment", comment) : "");
+};
+
+const highlightEnv = (source) => String(source || "").split("\n").map(highlightEnvLine).join("\n");
+
+const paintCodeEditor = (textarea) => {
+  const wrap = textarea && textarea.closest(".code-editor");
+  const layer = wrap ? wrap.querySelector(".code-editor__highlight") : null;
+  if (!textarea || !layer) return;
+  const lang = wrap.dataset.lang === "env" ? highlightEnv : highlightYaml;
+  layer.innerHTML = `${lang(textarea.value)}\n`;
+  layer.scrollTop = textarea.scrollTop;
+  layer.scrollLeft = textarea.scrollLeft;
+};
+
+const mountCodeEditor = (textarea) => {
+  if (!textarea) return;
+  const wrap = textarea.closest(".code-editor");
+  if (!wrap) return;
+  textarea.addEventListener("input", () => paintCodeEditor(textarea));
+  textarea.addEventListener("scroll", () => paintCodeEditor(textarea));
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => paintCodeEditor(textarea)).observe(textarea);
+  }
+  paintCodeEditor(textarea);
+};
+
+mountCodeEditor(composeInput);
+mountCodeEditor(envInput);
+if (createForm) {
+  createForm.addEventListener("reset", () => {
+    requestAnimationFrame(() => {
+      paintCodeEditor(composeInput);
+      paintCodeEditor(envInput);
+    });
+  });
+}
 
 const copyText = async (text) => {
   const value = String(text || "");
@@ -716,7 +872,8 @@ const renderApp = (app) => {
     const summary = document.createElement("summary");
     summary.textContent = "Compose YAML";
     const pre = document.createElement("pre");
-    pre.textContent = app.compose;
+    pre.className = "code-block";
+    pre.innerHTML = highlightYaml(app.compose);
     details.append(summary, pre);
     card.append(details);
   }
@@ -875,25 +1032,38 @@ const loadEngine = async () => {
 
 const renderGuide = (engine) => {
   const command = engine?.command || {};
-  if (engineScript) engineScript.textContent = command.script || "";
+  if (engineScript) engineScript.textContent = command.script || OFFICIAL_INSTALL_SCRIPT;
   const daemonJSON = command.daemon_json || "";
   if (daemonNode) daemonNode.textContent = daemonJSON;
   if (daemonWrap) daemonWrap.hidden = !daemonJSON;
 };
 
+const showUnreadyGuide = (engine) => {
+  const view = engine && engine.ready !== true
+    ? engine
+    : { ready: false, command: engine?.command || { script: OFFICIAL_INSTALL_SCRIPT } };
+  lastEngine = view;
+  engineReady = false;
+  if (deployToggle) deployToggle.hidden = true;
+  if (workspaceNode) workspaceNode.hidden = true;
+  renderGuide(view);
+  renderEngineBadge(view);
+  showContext("unready");
+};
+
 const showContext = (which) => {
-  if (contextNode) contextNode.hidden = !which;
   if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
   if (offlineNode) offlineNode.hidden = which !== "offline";
   if (engineGuide) engineGuide.hidden = which !== "unready";
+  if (contextNode) contextNode.hidden = which !== "empty" && which !== "offline";
 };
 
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
   listNode.replaceChildren(...list.map(renderApp));
-  emptyNode.hidden = !selectedAgentID || !engineReady || list.length > 0;
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
+  syncListPanel();
 };
 
 const renderEngineBadge = (engine) => {
@@ -904,11 +1074,13 @@ const renderEngineBadge = (engine) => {
   }
   engineStatus.hidden = false;
   if (!agentOnline) {
+    engineReady = false;
     engineStatus.dataset.ready = "false";
     engineStatus.textContent = "Agent 执行面 · 节点离线";
     return;
   }
   if (!engine) {
+    engineReady = false;
     engineStatus.dataset.ready = "false";
     engineStatus.textContent = "Agent 执行面 · 引擎未就绪";
     return;
@@ -921,9 +1093,11 @@ const renderEngineBadge = (engine) => {
 };
 
 const renderWorkspace = async () => {
+  const seq = ++workspaceSeq;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
+  lastEngine = null;
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
   closeCreate();
@@ -944,6 +1118,7 @@ const renderWorkspace = async () => {
   try {
     engine = await loadEngine();
   } catch (error) {
+    if (seq !== workspaceSeq) return;
     if (error && error.denied) throw error;
     if (error && error.message === "暂时无法管理 Docker 应用。") throw error;
     renderGuide(null);
@@ -951,6 +1126,8 @@ const renderWorkspace = async () => {
     showContext("unready");
     return;
   }
+  if (seq !== workspaceSeq) return;
+  lastEngine = engine;
   engineReady = engine?.ready === true;
   renderEngineBadge(engine);
   if (!engineReady) {
@@ -962,6 +1139,7 @@ const renderWorkspace = async () => {
   workspaceNode.hidden = false;
   deployToggle.hidden = createPanel.hidden === false ? true : false;
   const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  if (seq !== workspaceSeq) return;
   renderApps(payload.apps);
   if (payload.error) showStatus(payload.error, true);
 };
@@ -1003,6 +1181,7 @@ if (deployToggle) {
       return;
     }
     if (!engineReady) {
+      showUnreadyGuide(lastEngine);
       showStatus("引擎未就绪，请先在该节点本机安装 Docker。", true);
       return;
     }
@@ -1081,7 +1260,6 @@ if (createForm) {
     await loadAgents();
     await renderWorkspace();
     loadingNode.hidden = true;
-    if (contextNode && !workspaceNode.hidden) contextNode.hidden = true;
   } catch (error) {
     loadingNode.hidden = true;
     if (error.denied) deniedNode.hidden = false;

@@ -12,24 +12,25 @@
     <header class="page-head">
       <p class="kicker">四层反向穿透</p>
       <h1>反向穿透映射</h1>
-      <p class="lede">在入口节点公开一个 TCP/UDP 端口，由出口节点主动建立反向通道，并把收到的流量送到出口节点能够访问的内网服务。</p>
+      <p class="lede">公网客户端连接入口节点上的端口。出口节点主动建立反向通道（可选中继），再访问它能到达的内网服务。回程沿同一条链路返回。</p>
       <section class="route-guide" aria-labelledby="route-guide-title">
         <h2 id="route-guide-title" class="sr-only">流量关系说明</h2>
         <div class="route-guide-step">
           <span class="route-guide-index">1</span>
-          <span><strong>公网客户端连接入口</strong><small>入口节点 : 监听端口</small></span>
+          <span><strong>公网客户端连接入口</strong><small>连的是入口节点上的监听端口，不是出口，也不是面板</small></span>
         </div>
         <span class="route-guide-arrow" aria-hidden="true">→</span>
         <div class="route-guide-step">
           <span class="route-guide-index">2</span>
-          <span><strong>流量进入反向通道</strong><small>出口主动建链；可按顺序经过中继</small></span>
+          <span><strong>反向通道送到出口</strong><small>出口主动建链。无中继则直连入口；有中继则按添加顺序从入口走到出口</small></span>
         </div>
         <span class="route-guide-arrow" aria-hidden="true">→</span>
         <div class="route-guide-step">
           <span class="route-guide-index">3</span>
-          <span><strong>出口连接内网服务</strong><small>内网地址 : 服务端口</small></span>
+          <span><strong>出口连接内网服务</strong><small>由出口节点访问这个地址；不是入口去连</small></span>
         </div>
       </section>
+      <p class="route-guide-flow"><strong>转发顺序：</strong>客户端 → 入口 → 第 1 跳中继 → 第 2 跳中继 → … → 出口 → 内网服务。不添加中继时，入口与出口直连。</p>
       <p class="route-guide-note"><strong>地址归属：</strong><code>127.0.0.1</code> 表示出口节点自身，不是入口节点，也不是管理面板所在机器。</p>
     </header>
     <p id="map-loading" role="status">正在加载映射…</p>
@@ -70,7 +71,7 @@
           <section class="form-stage" aria-labelledby="channel-stage-title">
             <div class="form-stage-head">
               <span class="form-stage-index">2</span>
-              <span><strong id="channel-stage-title">反向通道</strong><small>出口节点主动连接入口；不配置中继时两端直连</small></span>
+              <span><strong id="channel-stage-title">反向通道</strong><small>出口节点主动建链。无中继时直连入口；有中继时按下方列表从入口侧依次走到出口侧</small></span>
             </div>
             <div class="form-stage-fields form-stage-fields--single">
               <label>出口节点
@@ -80,11 +81,11 @@
             </div>
             <div class="relay-field">
               <div class="relay-head">
-                <span>经过的中继（可选，按顺序）</span>
+                <span>中继链路（可选）</span>
                 <button id="relay-add" class="btn-link" type="button">添加一跳</button>
               </div>
               <div id="relay-hops" class="relay-hops"></div>
-              <p class="hint">链路按列表从上到下的顺序提交给宿主。列表末尾的数字是监听器 ID，不是跳数。</p>
+              <p class="hint">从上到下就是实际转发顺序：入口 → 第 1 跳 → 第 2 跳 → … → 出口。不添加则出口直连入口。选项末尾的数字是监听器 ID，不是跳号。</p>
             </div>
           </section>
           <section class="form-stage" aria-labelledby="backend-stage-title">
@@ -99,7 +100,7 @@
           </section>
           <p id="catalog-error" class="map-error" role="alert" hidden></p>
           <div class="form-footer">
-            <p class="hint">入口与出口节点不能相同。响应流量沿同一通道原路返回；映射 ID 由系统创建且不可更改。</p>
+            <p class="hint">入口与出口节点不能相同。回程沿同一条链路原路返回。映射 ID 由系统创建且不可更改。</p>
             <button type="submit" class="btn-primary" id="form-submit">创建</button>
           </div>
         </form>

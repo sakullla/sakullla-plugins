@@ -356,6 +356,9 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	if err != nil || !bytes.Contains(page, []byte(`id="create-form" method="post"`)) || bytes.Contains(page, []byte("{{")) || !bytes.Contains(page, []byte(`method="post"`)) {
 		t.Fatalf("token forms missing post method: %s", page)
 	}
+	if !bytes.Contains(page, []byte("Zone → DNS → Edit")) || !bytes.Contains(page, []byte("guides/certificates")) || !bytes.Contains(page, []byte("最长匹配")) {
+		t.Fatal("page missing Cloudflare token setup guide")
+	}
 	if !bytes.Contains(script, []byte(`actionForm("rotate"`)) || !bytes.Contains(script, []byte(`actionForm("delete"`)) {
 		t.Fatalf("native UI script is missing dynamic actions: %s", script)
 	}

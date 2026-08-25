@@ -8,42 +8,46 @@
 </head>
 <body>
   <div class="wash" aria-hidden="true"></div>
-  <header class="masthead">
-    <div class="masthead-inner">
-      <span class="wordmark">HTTPS 域名解析</span>
-    </div>
-  </header>
   <main>
-    <section class="hero">
-      <p class="eyebrow">DNS over HTTPS</p>
-      <h1>把当前入口配进浏览器或系统</h1>
-      <p class="lede">这是 DNS over HTTPS（DoH），不是 DNS over TLS。把下面由当前页面地址生成的解析入口填进支持安全 DNS 或加密 DNS 的设置即可。入口带路径时，解析地址会跟当前路径走，不必猜测插件内部地址。</p>
-    </section>
-    <section class="card endpoint-card">
-      <p class="kicker">解析地址</p>
-      <h2>当前入口的 RFC 8484 端点</h2>
-      <p>地址等于当前页面所在路径加上 <code>/dns-query</code>。入口在子路径时会带上该路径。复制后可直接粘贴到下方步骤里的自定义提供商。</p>
-      <div class="endpoint">
-        <p class="host-line"><span class="host-dot" aria-hidden="true"></span><code id="doh-url">/dns-query</code></p>
-        <button type="button" id="copy-doh-url">复制地址</button>
+    <header class="page-head">
+      <div class="page-head-copy">
+        <p class="kicker">DNS over HTTPS</p>
+        <h1>把当前入口配进浏览器或系统</h1>
+        <p class="lede">这是 DNS over HTTPS（DoH），不是 DNS over TLS。把下面由当前页面地址生成的解析入口填进支持安全 DNS 或加密 DNS 的设置即可。入口带路径时，解析地址会跟当前路径走，不必猜测插件内部地址。</p>
       </div>
-      <p id="copy-status" role="status" hidden></p>
-    </section>
+      <section class="card endpoint-card">
+        <p class="kicker">解析地址</p>
+        <h2>当前入口的 RFC 8484 端点</h2>
+        <p>地址等于当前页面所在路径加上 <code>/dns-query</code>。入口在子路径时会带上该路径。复制后可直接粘贴到下方步骤里的自定义提供商。</p>
+        <div class="endpoint">
+          <p class="host-line"><span class="host-dot" aria-hidden="true"></span><code id="doh-url">/dns-query</code></p>
+          <button type="button" id="copy-doh-url">复制地址</button>
+        </div>
+        <p id="copy-status" role="status" hidden></p>
+      </section>
+    </header>
     <section class="card steps-card">
-      <p class="kicker">配置步骤</p>
-      <h2>Chrome / Edge、Firefox 与 Windows 11</h2>
+      <div class="steps-head">
+        <div>
+          <p class="kicker">配置步骤</p>
+          <h2>能粘贴这串地址的地方</h2>
+        </div>
+        <p class="hint">上方是完整 DoH URL（含 <code>https://</code> 和 <code>/dns-query</code>），不要只填主机名。Chrome / Edge 只改浏览器自己的查询；Windows 11 覆盖本机大部分应用。系统开了加密 DNS 后，不必再在浏览器里配一遍。Firefox 占用低，本页不写。</p>
+      </div>
       <ol class="steps">
         <li>
-          <h3>Chrome / Edge</h3>
-          <p>打开设置 → 隐私和安全（Edge 为「隐私、搜索和服务」）→ 安全 → 使用安全 DNS。选择自定义提供商，粘贴上方地址。</p>
+          <span class="step-index">1</span>
+          <div>
+            <h3>Chrome / Edge</h3>
+            <p>Chrome：右上角 ⋮ → 设置 → 隐私和安全 → 安全 → 打开「使用安全 DNS」→ 自定义提供商，粘贴上方整段地址。Edge 在「隐私、搜索和服务」里滚到「安全」，其余相同。只保护这个浏览器，不管系统或其他 App。</p>
+          </div>
         </li>
         <li>
-          <h3>Firefox</h3>
-          <p>打开设置 → 隐私与安全 → DNS over HTTPS。启用后选择自定义提供商，填入上方地址。</p>
-        </li>
-        <li>
-          <h3>Windows 11</h3>
-          <p>打开设置 → 网络和 Internet → 以太网或 WLAN → DNS 服务器分配 → 编辑。打开加密 DNS / DNS over HTTPS（手动模板），把上方地址填进模板。</p>
+          <span class="step-index">2</span>
+          <div>
+            <h3>Windows 11</h3>
+            <p>设置 → 网络和 Internet → 以太网或 WLAN → 点当前网络。DNS 服务器分配 → 编辑 → IPv4 选手动。打开加密 DNS / DNS over HTTPS，模板选手动，把上方整段 URL 填进模板后保存。</p>
+          </div>
         </li>
       </ol>
     </section>

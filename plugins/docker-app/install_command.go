@@ -57,6 +57,15 @@ func ProjectEngineReady(observation EngineObservation, document []byte, installe
 	return EngineReadyView{Status: status, Command: command}, nil
 }
 
+// UnreadyInstallCommand returns the copy-only official command shown when the
+// engine is not ready. Ready engines yield a zero suggestion.
+func UnreadyInstallCommand(ready bool, registryMirror string) (InstallSuggestion, error) {
+	if ready {
+		return InstallSuggestion{}, nil
+	}
+	return InstallCommand(registryMirror)
+}
+
 // InstallCommandForDocument builds the official get.docker.com command from
 // this agent's overlay. An empty registry_mirror omits registry-mirrors. A
 // valid https URL attaches a daemon.json suggestion. Illegal overlays are

@@ -1287,6 +1287,35 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(page, `class="toolbar-bar"`) || strings.Contains(stylesheet, ".toolbar-bar") {
 		t.Fatal("node picker is still in a toolbar-bar")
 	}
+	contextStart := strings.Index(page, `id="app-context"`)
+	guideStart := strings.Index(page, `id="engine-guide"`)
+	workspaceStart := strings.Index(page, `id="app-workspace"`)
+	if contextStart < 0 || guideStart < 0 || workspaceStart < 0 || !(contextStart < guideStart && guideStart < workspaceStart) {
+		t.Fatal("engine-guide is not a sibling between context and workspace")
+	}
+	if !strings.Contains(page, OfficialInstallScript) {
+		t.Fatal("engine-guide markup is missing the official install command")
+	}
+	if !strings.Contains(js, OfficialInstallScript) || !strings.Contains(js, "command.script || OFFICIAL_INSTALL_SCRIPT") {
+		t.Fatal("script does not fall back to the official install command")
+	}
+	if !strings.Contains(js, "showUnreadyGuide") {
+		t.Fatal("deploy no longer reveals the install guide when the engine is unready")
+	}
+	if !strings.Contains(page, `data-lang="yaml"`) || !strings.Contains(page, `data-lang="env"`) {
+		t.Fatal("compose YAML/.env editors are missing highlighter shells")
+	}
+	for _, want := range []string{"highlightYaml", "highlightEnv", "mountCodeEditor"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("script missing syntax highlighter %q", want)
+		}
+	}
+	if !strings.Contains(stylesheet, "tok-key") || !strings.Contains(stylesheet, ".code-editor") {
+		t.Fatal("stylesheet missing syntax highlighter colors")
+	}
+	if !strings.Contains(stylesheet, "max-height: 22rem") || !strings.Contains(stylesheet, "max-height: 14rem") || !strings.Contains(stylesheet, "field-sizing: fixed") {
+		t.Fatal("YAML/.env editors can still grow with content instead of scrolling")
+	}
 	headStart := strings.Index(page, `class="page-head"`)
 	headEnd := strings.Index(page, `class="face-summary"`)
 	if headStart < 0 || headEnd < 0 || headEnd < headStart {

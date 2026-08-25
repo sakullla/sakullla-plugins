@@ -282,7 +282,7 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 		t.Fatal(err)
 	}
 	js := string(jsBytes)
-	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners", "搜索节点", "最近活跃", "mountAgentSearchSelect", "agentIdentity", "listenerIdentity", "流量路径", "技术标识"} {
+	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners", "搜索节点", "最近活跃", "mountAgentSearchSelect", "mountListenerSearchSelect", "搜索中继", "agentIdentity", "listenerIdentity", "流量路径", "技术标识"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("management script missing catalog %q", want)
 		}

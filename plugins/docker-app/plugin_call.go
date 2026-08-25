@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -95,10 +96,10 @@ func (controller *Controller) callEngineReport(ctx context.Context, payload []by
 		return nil, err
 	}
 	report := AgentEngineReport{AgentID: agentID, Online: true}
-	version, err := controller.dockerServerVersion(ctx)
-	if err == nil && strings.TrimSpace(version) != "" {
+	version, err := controller.probeDockerEngine(ctx)
+	if err == nil {
 		report.Installed = true
-		report.Version = strings.TrimSpace(version)
+		report.Version = version
 	}
 	return json.Marshal(map[string]any{
 		"agent_id": report.AgentID,
@@ -283,12 +284,40 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 	})
 }
 
+var dockerServerVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$`)
+
+func (controller *Controller) probeDockerEngine(ctx context.Context) (string, error) {
+	version, err := controller.dockerServerVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, err := controller.runCommand(ctx, "", "docker", "compose", "version", "--short"); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
 func (controller *Controller) dockerServerVersion(ctx context.Context) (string, error) {
 	output, err := controller.runCommand(ctx, "", "docker", "version", "--format", "{{.Server.Version}}")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(bytes.TrimSpace(output))), nil
+	return parseDockerServerVersion(output)
+}
+
+func parseDockerServerVersion(output []byte) (string, error) {
+	text := normalizeCommandOutput(output)
+	if text == "" {
+		return "", errors.New("docker server version is missing")
+	}
+	line := text
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		line = strings.TrimSpace(text[:i])
+	}
+	if !dockerServerVersionPattern.MatchString(line) {
+		return "", errors.New("docker server version is missing")
+	}
+	return line, nil
 }
 
 func (controller *Controller) dockerImageDigest(ctx context.Context, image string) (string, error) {

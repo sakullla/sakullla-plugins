@@ -1,3 +1,23 @@
+const applyHostTheme = () => {
+  const allowed = { "sakura-day": true, "sakura-night": true };
+  const aliases = { sakura: "sakura-day", midnight: "sakura-night", "neko-dark": "sakura-night", cyberpunk: "sakura-day" };
+  let theme = "sakura-day";
+  try {
+    const raw = window.parent && window.parent !== window
+      ? window.parent.document.documentElement.getAttribute("data-theme")
+      : document.documentElement.getAttribute("data-theme");
+    const mapped = aliases[raw] || raw;
+    if (allowed[mapped]) {
+      theme = mapped;
+    }
+  } catch (_error) {
+    theme = "sakura-day";
+  }
+  document.documentElement.setAttribute("data-theme", theme);
+};
+
+applyHostTheme();
+
 const origin = window.location.origin.replace(/\/$/, "");
 const davUrl = origin + "/dav/";
 const davNode = document.querySelector("#dav-url");

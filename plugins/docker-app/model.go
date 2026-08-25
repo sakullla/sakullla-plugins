@@ -19,7 +19,7 @@ import (
 
 const (
 	PluginID                 = "docker-app"
-	PluginVersion            = "0.1.12"
+	PluginVersion            = "0.1.13"
 	DeclaredResourceGroupRef = "resource-group/docker-app"
 	MaxApps                  = 128
 	MaxDiscoveries           = 512

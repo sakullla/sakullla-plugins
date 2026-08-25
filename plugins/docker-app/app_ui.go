@@ -147,12 +147,12 @@ func (controller *Controller) serveEngine(writer http.ResponseWriter, request *h
 }
 
 func (controller *Controller) writeEngineView(writer http.ResponseWriter, view engineAPIView) {
+	command, commandErr := UnreadyInstallCommand(view.Ready, controller.RegistryMirror())
+	if commandErr != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: commandErr.Error()})
+		return
+	}
 	if !view.Ready {
-		command, commandErr := InstallCommand(controller.RegistryMirror())
-		if commandErr != nil {
-			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: commandErr.Error()})
-			return
-		}
 		view.Command = &installCommandView{Script: command.Script, DaemonJSON: command.DaemonJSON}
 	}
 	writeAppJSON(writer, http.StatusOK, appAPIResponse{Engine: &view, Access: struct {

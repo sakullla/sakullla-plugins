@@ -239,6 +239,17 @@ func TestDockerRegistryMirrorPrepareAcceptsHTTPSOverlay(t *testing.T) {
 	if got.Script != dockerapp.OfficialInstallScript || !strings.Contains(got.DaemonJSON, mirror) {
 		t.Fatalf("accepted overlay did not yield agent-effective install command: %#v", got)
 	}
+	unready, err := dockerapp.UnreadyInstallCommand(false, controller.RegistryMirror())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unready.Script != dockerapp.OfficialInstallScript || !strings.Contains(unready.DaemonJSON, mirror) {
+		t.Fatalf("unready projection omitted install command: %#v", unready)
+	}
+	ready, err := dockerapp.UnreadyInstallCommand(true, controller.RegistryMirror())
+	if err != nil || ready.Script != "" || ready.DaemonJSON != "" {
+		t.Fatalf("ready projection still attached install command: %#v err=%v", ready, err)
+	}
 }
 
 func TestDockerRegistryMirrorPrepareRejectsInvalidOverlay(t *testing.T) {

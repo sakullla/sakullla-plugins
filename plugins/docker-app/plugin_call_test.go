@@ -182,6 +182,109 @@ func TestControllerCallEngineReportMissingDocker(t *testing.T) {
 	}
 }
 
+func TestControllerCallEngineReportRejectsDaemonErrorText(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := DecodeAgentEngineReport(raw)
+	if err != nil || report.Installed || report.Version != "" {
+		t.Fatalf("daemon error text still marked installed: %#v err=%v", report, err)
+	}
+}
+
+func TestControllerCallEngineReportRequiresCompose(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(append([]string{name}, args...), " ")
+		if strings.Contains(joined, "compose version") {
+			return nil, errors.New("unknown command")
+		}
+		return []byte("29.7.2\n"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := DecodeAgentEngineReport(raw)
+	if err != nil || report.Installed || report.Version != "" {
+		t.Fatalf("client-only docker still marked installed: %#v err=%v", report, err)
+	}
+}
+
+func TestControllerCallEngineReportInstalledWhenComposeWorks(t *testing.T) {
+	t.Parallel()
+	var argv [][]string
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		argv = append(argv, append([]string{name}, args...))
+		joined := strings.Join(append([]string{name}, args...), " ")
+		if strings.Contains(joined, "compose version") {
+			return []byte("v2.29.7\n"), nil
+		}
+		return []byte("29.7.2\n"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := DecodeAgentEngineReport(raw)
+	if err != nil || !report.Online || !report.Installed || report.Version != "29.7.2" {
+		t.Fatalf("ready engine report=%#v err=%v", report, err)
+	}
+	if len(argv) != 2 || strings.Join(argv[0], " ") != "docker version --format {{.Server.Version}}" || strings.Join(argv[1], " ") != "docker compose version --short" {
+		t.Fatalf("engine probe argv=%#v", argv)
+	}
+}
+
+func TestParseDockerServerVersion(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		output  string
+		want    string
+		wantErr bool
+	}{
+		{name: "clean", output: "29.7.2\n", want: "29.7.2"},
+		{name: "with-warning", output: "27.1.1\nWARNING: daemon is deprecated\n", want: "27.1.1"},
+		{name: "daemon-error", output: "Cannot connect to the Docker daemon", wantErr: true},
+		{name: "no-value", output: "<no value>", wantErr: true},
+		{name: "empty", output: "  \n", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDockerServerVersion([]byte(tc.output))
+			if tc.wantErr {
+				if err == nil || got != "" {
+					t.Fatalf("got=%q err=%v", got, err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got=%q err=%v want=%q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestControllerCallImageUsesInjectedObserver(t *testing.T) {
 	t.Parallel()
 	observer := ImageUpdateObserverFunc(func(_ context.Context, app App) (UpdateObservation, error) {

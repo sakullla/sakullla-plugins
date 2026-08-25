@@ -12,20 +12,41 @@
     <header class="page-head">
       <p class="kicker">Cloudflare DNS</p>
       <h1>域名 Token 映射</h1>
-      <p class="lede">按域名后缀绑定 Cloudflare DNS Token。列表、详情和编辑框都不会回显 Token。本页不配置区域 Token，也不管理 DNS 记录。</p>
+      <p class="lede">按域名后缀绑定 Cloudflare DNS Token。查询时取最长匹配的后缀。列表、详情和编辑框都不会回显 Token。本页不配置区域 Token，也不管理 DNS 记录。</p>
+      <section class="token-guide" aria-labelledby="token-guide-title">
+        <h2 id="token-guide-title" class="sr-only">如何配置 Cloudflare API Token</h2>
+        <div class="token-guide-step">
+          <span class="token-guide-index">1</span>
+          <span><strong>打开 API Tokens</strong><small>Cloudflare 控制台 → 右上角头像 → My Profile → API Tokens → Create Token</small></span>
+        </div>
+        <div class="token-guide-step">
+          <span class="token-guide-index">2</span>
+          <span><strong>用自定义 Token</strong><small>选 Custom token。权限至少 Zone → DNS → Edit；建议再加 Zone → Zone → Read。区域资源选 Include → Specific zone，只包含本映射要用的域名</small></span>
+        </div>
+        <div class="token-guide-step">
+          <span class="token-guide-index">3</span>
+          <span><strong>创建后立刻复制</strong><small>Continue to summary → Create Token。密钥只显示一次，粘贴到下方后本页不会再回显</small></span>
+        </div>
+      </section>
+      <p class="token-guide-note"><strong>最长匹配：</strong>同时有 <code>example.com</code> 和 <code>shop.example.com</code> 时，<code>www.shop.example.com</code> 用更长的 <code>shop.example.com</code>。<a class="token-guide-link" href="https://sakullla.github.io/nginx-reverse-emby/guides/certificates#%E8%8E%B7%E5%8F%96-cloudflare-api-token" target="_blank" rel="noopener noreferrer">官方步骤与截图</a></p>
     </header>
     <p id="mapping-loading" role="status">正在加载映射...</p>
     <p id="mapping-unavailable" role="status" hidden>插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
     <p id="mapping-denied" role="alert" hidden>无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
     <div id="mapping-workspace" hidden>
       <section class="panel" id="mapping-create" aria-labelledby="mapping-create-title" hidden>
-        <h2 id="mapping-create-title">新增映射</h2>
+        <div class="setup-hero">
+          <span class="setup-mark" aria-hidden="true"></span>
+          <div>
+            <h2 id="mapping-create-title">新增映射</h2>
+            <p class="hint">后缀按最长匹配生效。Token 只在提交时发送，保存后不会回显。</p>
+          </div>
+        </div>
         <form id="create-form" method="post" data-action="create">
           <label>域名后缀 <input name="suffix" required autocomplete="off" placeholder="example.com" spellcheck="false"></label>
           <label>Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
           <button type="submit" class="btn-primary">添加映射</button>
         </form>
-        <p class="hint">后缀按最长匹配生效。Token 只在提交时发送。</p>
       </section>
       <section class="panel" aria-labelledby="mapping-list-title">
         <div class="section-head">

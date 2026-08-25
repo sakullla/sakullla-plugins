@@ -13,29 +13,32 @@
       <div class="page-head-copy">
         <p class="kicker">Docker 应用</p>
         <h1>组内 compose 应用</h1>
-        <p class="lede">页头选择一台在线节点。引擎状态与应用镜像版本分开显示。引擎未就绪时给出本机安装命令；就绪后可部署 compose，启停、看日志、确认删除（运行中也可删）。有发布端口时直接管理入口域名。有新版本时需手动更新。</p>
+        <p class="lede">选一台在线节点，把 compose 部署到该 Agent。引擎状态与应用镜像版本分开显示。有发布端口时可管理入口域名。</p>
       </div>
       <div class="page-head-agent">
-        <label class="agent-field">节点
-          <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
-          <div class="agent-search-select" data-agent-picker="workspace"></div>
-        </label>
-        <p id="engine-status" class="engine-status" hidden></p>
+        <div class="node-card">
+          <label class="agent-field">节点
+            <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
+            <div class="agent-search-select" data-agent-picker="workspace"></div>
+          </label>
+          <p id="engine-status" class="engine-status" hidden></p>
+        </div>
       </div>
     </header>
     <section class="face-summary" aria-label="插件运行面">
       <div class="face-summary-item">
         <strong>本地管理面</strong>
-        <span>当前页面管理配置与操作，不在控制面运行 Docker。</span>
+        <span>当前页只下发配置与操作，不在控制面运行 Docker。</span>
       </div>
       <div class="face-summary-item">
         <strong>Agent 执行面</strong>
-        <span>compose、镜像与引擎操作始终发送到所选 Agent。</span>
+        <span>compose、镜像与引擎始终在所选节点本机执行。</span>
       </div>
     </section>
     <p id="app-loading" role="status">正在加载应用…</p>
     <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
     <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
+    <p id="app-status" role="status" hidden></p>
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel" id="app-node-empty" hidden>
         <h2>未选择节点</h2>
@@ -45,19 +48,38 @@
         <h2>节点离线</h2>
         <p>该节点离线，不能部署或改动 compose 应用。</p>
       </section>
-      <section class="state-panel" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
-        <div class="section-head">
-          <h2 id="engine-guide-title">安装 Docker 引擎</h2>
+    </section>
+    <section class="state-panel engine-guide" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
+      <div class="setup-hero">
+        <span class="setup-mark" aria-hidden="true"></span>
+        <div>
+          <h2 id="engine-guide-title">该节点还没有 Docker</h2>
+          <p>在节点本机执行官方安装命令。面板不会代为安装。装好后刷新本页再部署。</p>
         </div>
-        <p class="lede">在该节点本机执行下面的官方安装命令。面板不会代为安装 Docker。</p>
-        <pre id="engine-install-script"></pre>
-        <button id="copy-install-script" class="btn-primary" type="button">复制命令</button>
-        <div id="engine-daemon-json-wrap" hidden>
-          <p>已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
-          <pre id="engine-daemon-json"></pre>
-          <button id="copy-daemon-json" class="btn-primary" type="button">复制 daemon.json</button>
-        </div>
-      </section>
+      </div>
+      <ol class="setup-steps">
+        <li>
+          <span class="setup-step-index">1</span>
+          <div>
+            <strong>复制命令，在节点 SSH 里执行</strong>
+            <div class="engine-command">
+              <pre id="engine-install-script">curl -fsSL https://get.docker.com | sh</pre>
+              <button id="copy-install-script" class="btn-primary" type="button">复制命令</button>
+            </div>
+          </div>
+        </li>
+        <li id="engine-daemon-json-wrap" hidden>
+          <span class="setup-step-index">2</span>
+          <div>
+            <strong>写入镜像加速</strong>
+            <p>已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
+            <div class="engine-command">
+              <pre id="engine-daemon-json"></pre>
+              <button id="copy-daemon-json" class="btn-secondary" type="button">复制 daemon.json</button>
+            </div>
+          </div>
+        </li>
+      </ol>
     </section>
     <section id="app-workspace" class="workspace-region" hidden>
       <div class="workspace-head">
@@ -71,8 +93,18 @@
         </div>
         <form id="create-form" method="post">
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
-          <label>Compose YAML <textarea name="compose" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea></label>
-          <label>Compose .env（可选） <textarea name="env" spellcheck="false" autocomplete="off" placeholder="POSTGRES_PASSWORD=change-me&#10;JWT_SECRET=..."></textarea></label>
+          <label>Compose YAML
+            <span class="code-editor" data-lang="yaml">
+              <pre class="code-editor__highlight" aria-hidden="true"></pre>
+              <textarea name="compose" class="code-editor__input" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea>
+            </span>
+          </label>
+          <label>Compose .env（可选）
+            <span class="code-editor" data-lang="env">
+              <pre class="code-editor__highlight" aria-hidden="true"></pre>
+              <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="POSTGRES_PASSWORD=change-me&#10;JWT_SECRET=..."></textarea>
+            </span>
+          </label>
           <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
           <div class="form-footer">
             <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
@@ -81,16 +113,15 @@
         </form>
         <p class="hint">./ 相对路径会映射到该应用工作目录。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
       </section>
-      <section class="panel" aria-labelledby="app-list-title">
+      <section class="panel" id="app-list-panel" aria-labelledby="app-list-title">
         <div class="section-head">
           <h2 id="app-list-title">应用</h2>
           <p id="app-count" class="count" hidden></p>
         </div>
         <div id="app-list" class="app-list"></div>
-        <p id="app-empty" hidden>还没有应用。引擎就绪后点右上角部署。</p>
+        <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
     </section>
-    <p id="app-status" role="status" hidden></p>
   </main>
   <script src="app.js" defer></script>
 </body>

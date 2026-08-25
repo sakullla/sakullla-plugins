@@ -97,6 +97,8 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"公网入口",
 		"出口侧内网服务",
 		"127.0.0.1</code> 表示出口节点自身",
+		"入口 → 第 1 跳",
+		"从上到下就是实际转发顺序",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("page missing %q: %s", want, html)
@@ -116,6 +118,8 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"搜索节点",
 		"最近活跃",
 		"mountAgentSearchSelect",
+		"mountListenerSearchSelect",
+		"搜索中继",
 		"agentIdentity",
 		"listenerIdentity",
 		"流量路径",
