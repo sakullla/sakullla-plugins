@@ -75,7 +75,7 @@ func publicCause(err error) string {
 		}
 	}
 	text = sanitizePublicText(text)
-	if !strings.HasPrefix(text, "compose ") {
+	if !strings.HasPrefix(text, "compose ") && !strings.HasPrefix(text, "files ") {
 		return ""
 	}
 	return text

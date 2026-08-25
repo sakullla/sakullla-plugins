@@ -497,11 +497,7 @@ func projectAppFilesResponse(result map[string]any) appAPIResponse {
 }
 
 func filesStatus(err error) int {
-	if errors.Is(err, ErrBoundExceeded) || errors.Is(err, errWorkspaceFilePath) {
-		return http.StatusBadRequest
-	}
-	text := err.Error()
-	if strings.Contains(text, "file path is not relative") || strings.Contains(text, "files action") || strings.Contains(text, "file exceeds") || strings.Contains(text, "file content is invalid") {
+	if filesPublicMessage(err) != "" {
 		return http.StatusBadRequest
 	}
 	return appStatus(err)

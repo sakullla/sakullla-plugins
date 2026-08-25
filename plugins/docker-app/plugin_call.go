@@ -310,7 +310,11 @@ func (controller *Controller) callFiles(ctx context.Context, payload []byte) ([]
 	if !validID(request.AppID) {
 		return nil, errors.New("files app id is invalid")
 	}
-	return executeWorkspaceFiles(controller.executionWorkDirRoot(), request)
+	output, err := executeWorkspaceFiles(controller.executionWorkDirRoot(), request)
+	if err != nil {
+		return nil, filesCallFailure(request.Action, err)
+	}
+	return output, nil
 }
 
 func executeWorkspaceFiles(root string, request filesCallRequest) ([]byte, error) {
@@ -631,6 +635,49 @@ func composeCallFailure(action string, output []byte, err error) error {
 		return fmt.Errorf("compose %s failed", action)
 	}
 	return fmt.Errorf("compose %s failed: %s", action, cause)
+}
+
+func filesCallFailure(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	text := sanitizePublicText(err.Error())
+	if strings.HasPrefix(text, "files ") {
+		return err
+	}
+	cause := publicFilesCause(err)
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "call"
+	}
+	if cause == "" {
+		return fmt.Errorf("files %s failed", action)
+	}
+	return fmt.Errorf("files %s failed: %s", action, cause)
+}
+
+func publicFilesCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := sanitizePublicText(err.Error())
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "files ") || filesPublicCauseAllowed(text) {
+		return text
+	}
+	return ""
+}
+
+func filesPublicCauseAllowed(text string) bool {
+	return strings.Contains(text, "file path is not relative") ||
+		strings.Contains(text, "relative bind escapes") ||
+		strings.Contains(text, "file exceeds") ||
+		strings.Contains(text, "file content is invalid") ||
+		strings.Contains(text, "path is not a directory") ||
+		strings.Contains(text, "path is a directory") ||
+		strings.Contains(text, "app workdir cannot be deleted")
 }
 
 func writeAppEnvironment(dir, value string) error {

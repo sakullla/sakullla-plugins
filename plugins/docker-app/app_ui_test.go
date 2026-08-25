@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1576,6 +1577,64 @@ func TestAppUIFilesSurfacesHandleErrorWithoutHostPath(t *testing.T) {
 	}
 	if strings.Contains(denied.Body.String(), "/mnt/") || strings.Contains(denied.Body.String(), "fixture-value") {
 		t.Fatalf("files error leaked a host path: %s", denied.Body.String())
+	}
+}
+
+func TestAppUIFilesProductionHandleMapsOversizeReadToSizeError(t *testing.T) {
+	t.Parallel()
+	agentRoot := t.TempDir()
+	agent := newCallController(t, agentRoot, unusedDockerRunner(t), nil)
+	workdir, err := AppWorkDir(agentRoot, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workdir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "huge.txt"), []byte(strings.Repeat("x", MaxConfigBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := hostCallFunc(func(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		if request.Name != pluginCallFilesName {
+			t.Fatalf("unexpected plugin.call name %q", request.Name)
+		}
+		raw, err := agent.Call(ctx, "generation-1", request.Name, request.Payload)
+		if err != nil {
+			return err
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return err
+		}
+		return copyHostResult(decoded, target)
+	})
+	controller := newUIControllerWithOptions(t, uiControllerOptions{files: newHostCapabilityRuntime(client)})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	oversize := httptest.NewRecorder()
+	controller.ServeHTTP(oversize, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"read","path":"huge.txt"}`))
+	if oversize.Code != http.StatusBadRequest || !strings.Contains(oversize.Body.String(), "文件超过 1MiB 上限") {
+		t.Fatalf("oversize read status=%d body=%s", oversize.Code, oversize.Body.String())
+	}
+	if strings.Contains(oversize.Body.String(), ErrTypedHandlesUnavailable.Error()) {
+		t.Fatalf("oversize read leaked generic handle error: %s", oversize.Body.String())
+	}
+
+	directory := httptest.NewRecorder()
+	controller.ServeHTTP(directory, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"read","path":"data"}`))
+	if directory.Code != http.StatusBadRequest || !strings.Contains(directory.Body.String(), "路径是目录") {
+		t.Fatalf("directory read status=%d body=%s", directory.Code, directory.Body.String())
+	}
+
+	missing := httptest.NewRecorder()
+	controller.ServeHTTP(missing, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"read","path":"missing.txt"}`))
+	if strings.Contains(missing.Body.String(), workdir) || strings.Contains(missing.Body.String(), agentRoot) {
+		t.Fatalf("missing read leaked a host path: %s", missing.Body.String())
 	}
 }
 
