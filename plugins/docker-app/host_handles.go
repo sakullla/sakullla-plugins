@@ -13,6 +13,7 @@ const (
 	pluginCallEngineName          = "engine.report"
 	pluginCallComposeName         = "compose"
 	pluginCallImageName           = "image"
+	pluginCallFilesName           = "files"
 	hostHTTPRuleOperation         = pluginsdk.HostRuntimeHTTPRule
 	hostHTTPBackendOfferOperation = "http.backend-offer"
 	hostHTTPRuleActionCreate      = pluginsdk.HTTPRuleActionCreate
@@ -415,6 +416,26 @@ func (runtime *hostCapabilityRuntime) compose(ctx context.Context, payload map[s
 	return runtime.pluginCall(ctx, agentID, pluginCallComposeName, payload, result)
 }
 
+func (runtime *hostCapabilityRuntime) Files(ctx context.Context, app App, payload map[string]any, result any) error {
+	if !validAgentID(app.AgentID) {
+		return ErrAgentOffline
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["agent_id"] = app.AgentID
+	payload["app_id"] = app.ID
+	return runtime.files(ctx, payload, result)
+}
+
+func (runtime *hostCapabilityRuntime) files(ctx context.Context, payload map[string]any, result any) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	agentID, _ := payload["agent_id"].(string)
+	return runtime.pluginCall(ctx, agentID, pluginCallFilesName, payload, result)
+}
+
 func (runtime *hostCapabilityRuntime) pluginCall(ctx context.Context, agentID, name string, inner any, result any) error {
 	if runtime == nil || runtime.client == nil {
 		return ErrTypedHandlesUnavailable
@@ -529,7 +550,7 @@ func localDockerEngineValue(node any, key string) bool {
 	switch typed := node.(type) {
 	case map[string]any:
 		for childKey, child := range typed {
-			if strings.EqualFold(childKey, "compose") {
+			if strings.EqualFold(childKey, "compose") || strings.EqualFold(childKey, "content") {
 				continue
 			}
 			if strings.EqualFold(childKey, "payload") {

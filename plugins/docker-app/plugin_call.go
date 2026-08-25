@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -61,6 +62,19 @@ type imageCallRequest struct {
 	Image   string `json:"image"`
 }
 
+type filesCallRequest struct {
+	Action  string `json:"action"`
+	AgentID string `json:"agent_id"`
+	AppID   string `json:"app_id"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+type fileListEntry struct {
+	Name string `json:"name"`
+	Dir  bool   `json:"dir"`
+}
+
 const (
 	localImageDigestFormat      = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}"
 	registryImagetoolsFormat    = "{{.Manifest.Digest}}"
@@ -84,6 +98,8 @@ func (controller *Controller) Call(ctx context.Context, generation, name string,
 		return controller.callCompose(ctx, payload)
 	case pluginCallImageName:
 		return controller.callImage(ctx, payload)
+	case pluginCallFilesName:
+		return controller.callFiles(ctx, payload)
 	default:
 		return nil, fmt.Errorf("%w: plugin call name %q is unknown", ErrTypedHandlesUnavailable, name)
 	}
@@ -281,6 +297,211 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 		"current_digest": current,
 		"latest_digest":  latest,
 	})
+}
+
+func (controller *Controller) callFiles(ctx context.Context, payload []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var request filesCallRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return nil, errors.New("files payload is invalid")
+	}
+	if !validID(request.AppID) {
+		return nil, errors.New("files app id is invalid")
+	}
+	action := strings.TrimSpace(request.Action)
+	workdir, resolved, err := resolveWorkspaceFilePath(controller.executionWorkDirRoot(), request.AppID, request.Path)
+	if err != nil {
+		return nil, err
+	}
+	switch action {
+	case "list":
+		return marshalWorkspaceList(workdir, resolved)
+	case "mkdir":
+		return marshalFilesAccepted(mkdirWorkspacePath(resolved))
+	case "read":
+		content, err := readWorkspaceFile(resolved)
+		if err != nil {
+			return nil, err
+		}
+		display, err := workspaceDisplayPath(workdir, resolved)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"path": display, "content": content})
+	case "write":
+		if len(request.Content) > MaxConfigBytes {
+			return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+		}
+		if strings.ContainsRune(request.Content, '\x00') {
+			return nil, errors.New("file content is invalid")
+		}
+		return marshalFilesAccepted(writeWorkspaceFile(workdir, resolved, request.Content))
+	case "delete":
+		return marshalFilesAccepted(deleteWorkspacePath(workdir, resolved))
+	default:
+		return nil, fmt.Errorf("files action %q is unknown", action)
+	}
+}
+
+func marshalFilesAccepted(err error) ([]byte, error) {
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"accepted": true})
+}
+
+func marshalWorkspaceList(workdir, resolved string) ([]byte, error) {
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("file path is not relative to app workdir")
+	}
+	if !info.IsDir() {
+		return nil, errors.New("path is not a directory")
+	}
+	items, err := os.ReadDir(resolved)
+	if err != nil {
+		return nil, err
+	}
+	display, err := workspaceDisplayPath(workdir, resolved)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]workspaceFileEntry, 0, len(items))
+	for _, item := range items {
+		child := filepath.Join(resolved, item.Name())
+		childRel, err := workspaceDisplayPath(workdir, child)
+		if err != nil {
+			return nil, err
+		}
+		entry := workspaceFileEntry{Name: item.Name(), Path: childRel, Dir: item.IsDir()}
+		if !item.IsDir() {
+			if details, err := item.Info(); err == nil {
+				entry.Size = details.Size()
+			}
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return json.Marshal(map[string]any{"path": display, "entries": entries})
+}
+
+func mkdirWorkspacePath(resolved string) error {
+	info, err := os.Lstat(resolved)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("file path is not relative to app workdir")
+		}
+		if info.IsDir() {
+			return nil
+		}
+		return errors.New("path is not a directory")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.MkdirAll(resolved, 0o755)
+}
+
+func readWorkspaceFile(resolved string) (string, error) {
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	if info.IsDir() {
+		return "", errors.New("path is a directory")
+	}
+	if info.Size() > MaxConfigBytes {
+		return "", fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+	}
+	payload, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) > MaxConfigBytes {
+		return "", fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+	}
+	if strings.ContainsRune(string(payload), '\x00') {
+		return "", errors.New("file content is invalid")
+	}
+	return string(payload), nil
+}
+
+func writeWorkspaceFile(workdir, resolved, content string) error {
+	if filepath.Clean(resolved) == filepath.Clean(workdir) {
+		return errors.New("path is a directory")
+	}
+	if info, err := os.Lstat(resolved); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("file path is not relative to app workdir")
+		}
+		if info.IsDir() {
+			return errors.New("path is a directory")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir := filepath.Dir(resolved)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, ".nre-files-*")
+	if err != nil {
+		return err
+	}
+	tmpName := temporary.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.WriteString(content); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, resolved); err != nil {
+		if removeErr := os.Remove(resolved); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Rename(tmpName, resolved); err != nil {
+			return err
+		}
+	}
+	success = true
+	return nil
+}
+
+func deleteWorkspacePath(workdir, resolved string) error {
+	if filepath.Clean(resolved) == filepath.Clean(workdir) {
+		return errors.New("app workdir cannot be deleted")
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("file path is not relative to app workdir")
+	}
+	return os.RemoveAll(resolved)
 }
 
 func (controller *Controller) dockerServerVersion(ctx context.Context) (string, error) {

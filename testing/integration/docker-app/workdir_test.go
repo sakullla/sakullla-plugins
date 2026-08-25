@@ -153,6 +153,116 @@ func TestRelativeBindLongFormIsNotHostMount(t *testing.T) {
 	}
 }
 
+func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "config.yaml")
+	if err := os.WriteFile(outsideFile, []byte("outside-original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	siblingDir := filepath.Join(root, "other")
+	if err := os.MkdirAll(siblingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siblingFile := filepath.Join(siblingDir, "secret.txt")
+	if err := os.WriteFile(siblingFile, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		UIWorkDirRoot: root,
+		CommandRunner: dockerapp.CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := strings.Join([]string{
+		"services:",
+		"  komga:",
+		"    image: gotson/komga:1.0",
+		"    volumes:",
+		"      - /mnt/data/komga:/config",
+		"      - ./config.yaml:/app/config.yaml",
+		"",
+	}, "\n")
+	applyPayload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "komga", "compose": compose})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "compose", applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(root, "komga", dockerapp.ComposeFileName)
+	onDisk, err := os.ReadFile(composePath)
+	if err != nil || string(onDisk) != compose {
+		t.Fatalf("compose YAML rewritten=%q err=%v", onDisk, err)
+	}
+	if !strings.Contains(string(onDisk), "/mnt/data/komga") {
+		t.Fatal("absolute host volume was stripped from compose YAML")
+	}
+
+	writePayload, err := json.Marshal(map[string]any{
+		"action": "write", "app_id": "komga", "path": "config.yaml", "content": "port: 25600\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "files", writePayload); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := os.ReadFile(filepath.Join(root, "komga", "config.yaml"))
+	if err != nil || string(relative) != "port: 25600\n" {
+		t.Fatalf("relative write=%q err=%v", relative, err)
+	}
+
+	absOutside, err := filepath.Abs(outsideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"/mnt/data/komga/config.yaml",
+		absOutside,
+		"..",
+		"../other/secret.txt",
+	} {
+		payload, err := json.Marshal(map[string]any{
+			"action": "write", "app_id": "komga", "path": path, "content": "escaped",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", "files", payload); err == nil {
+			t.Fatalf("files write path %q succeeded", path)
+		}
+		payload, err = json.Marshal(map[string]any{"action": "read", "app_id": "komga", "path": path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", "files", payload); err == nil {
+			t.Fatalf("files read path %q succeeded", path)
+		}
+	}
+
+	outside, err := os.ReadFile(outsideFile)
+	if err != nil || string(outside) != "outside-original" {
+		t.Fatalf("outside file mutated=%q err=%v", outside, err)
+	}
+	sibling, err := os.ReadFile(siblingFile)
+	if err != nil || string(sibling) != "keep" {
+		t.Fatalf("sibling file mutated=%q err=%v", sibling, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "komga", "mnt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("absolute path was materialized inside the app workdir")
+	}
+	unchangedCompose, err := os.ReadFile(composePath)
+	if err != nil || string(unchangedCompose) != compose {
+		t.Fatalf("files rewrote compose YAML=%q err=%v", unchangedCompose, err)
+	}
+}
+
 func TestAbsoluteAndParentBindsRemainHostMounts(t *testing.T) {
 	compose := strings.Join([]string{
 		"services:",

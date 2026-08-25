@@ -146,6 +146,278 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 	}
 }
 
+func TestControllerCallFiles(t *testing.T) {
+	t.Parallel()
+
+	t.Run("list-mkdir-read-write-delete", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, unusedDockerRunner(t), nil)
+		if _, err := callFiles(t, controller, map[string]any{"action": "mkdir", "app_id": "media", "path": "data"}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "data/note.txt", "content": "from-panel",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertAccepted(t, raw)
+		onDisk, err := os.ReadFile(filepath.Join(root, "media", "data", "note.txt"))
+		if err != nil || string(onDisk) != "from-panel" {
+			t.Fatalf("disk=%q err=%v", onDisk, err)
+		}
+		listed, err := callFiles(t, controller, map[string]any{"action": "list", "app_id": "media", "path": "data"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFileEntries(t, listed, []fileListEntry{{Name: "note.txt", Dir: false}})
+		read, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": "./data/note.txt"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFileContent(t, read, "from-panel")
+		raw, err = callFiles(t, controller, map[string]any{"action": "delete", "app_id": "media", "path": "data/note.txt"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertAccepted(t, raw)
+		if _, err := os.Stat(filepath.Join(root, "media", "data", "note.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("deleted file still present: %v", err)
+		}
+		listed, err = callFiles(t, controller, map[string]any{"action": "list", "app_id": "media", "path": "."})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFileEntries(t, listed, []fileListEntry{{Name: "data", Dir: true}})
+	})
+
+	t.Run("rejects-absolute-parent-and-other-app", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, unusedDockerRunner(t), nil)
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "keep.txt", "content": "media",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "other", "path": "secret.txt", "content": "other",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "outside.txt")
+		if err := os.WriteFile(outside, []byte("keep-outside"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		otherSecret := filepath.Join(root, "other", "secret.txt")
+		for _, path := range []string{"/mnt/data/komga", outside, filepath.ToSlash(outside), "..", "../other/secret.txt"} {
+			if _, err := callFiles(t, controller, map[string]any{
+				"action": "write", "app_id": "media", "path": path, "content": "escaped",
+			}); err == nil {
+				t.Fatalf("write path %q succeeded", path)
+			}
+			if _, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": path}); err == nil {
+				t.Fatalf("read path %q succeeded", path)
+			}
+			if _, err := callFiles(t, controller, map[string]any{"action": "delete", "app_id": "media", "path": path}); err == nil {
+				t.Fatalf("delete path %q succeeded", path)
+			}
+			if _, err := callFiles(t, controller, map[string]any{"action": "list", "app_id": "media", "path": path}); err == nil {
+				t.Fatalf("list path %q succeeded", path)
+			}
+			if _, err := callFiles(t, controller, map[string]any{"action": "mkdir", "app_id": "media", "path": path}); err == nil {
+				t.Fatalf("mkdir path %q succeeded", path)
+			}
+		}
+		if _, err := callFiles(t, controller, map[string]any{"action": "write", "app_id": "media", "path": "", "content": "x"}); err == nil {
+			t.Fatal("empty path succeeded")
+		}
+		if got, err := os.ReadFile(outside); err != nil || string(got) != "keep-outside" {
+			t.Fatalf("outside file changed: %q err=%v", got, err)
+		}
+		if got, err := os.ReadFile(otherSecret); err != nil || string(got) != "other" {
+			t.Fatalf("other app file changed: %q err=%v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(root, "media", "keep.txt")); err != nil || string(got) != "media" {
+			t.Fatalf("current app file=%q err=%v", got, err)
+		}
+	})
+
+	t.Run("rejects-oversize-without-truncation", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, unusedDockerRunner(t), nil)
+		huge := strings.Repeat("x", MaxConfigBytes+1)
+		target := filepath.Join(root, "media", "huge.txt")
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": huge,
+		}); err == nil {
+			t.Fatal("oversize write succeeded")
+		}
+		if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("oversize write left a target file: %v", err)
+		}
+		if leftovers := leftoverTempFiles(t, filepath.Join(root, "media")); len(leftovers) != 0 {
+			t.Fatalf("oversize write left temp files: %v", leftovers)
+		}
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": "ok",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": huge,
+		}); err == nil {
+			t.Fatal("oversize replace succeeded")
+		}
+		if got, err := os.ReadFile(target); err != nil || string(got) != "ok" {
+			t.Fatalf("existing file truncated: %q err=%v", got, err)
+		}
+		if err := os.WriteFile(target, []byte(huge), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": "huge.txt"})
+		if err == nil {
+			t.Fatal("oversize read succeeded")
+		}
+		if strings.Contains(string(raw), "xxxxx") {
+			t.Fatalf("oversize read returned truncated content: %q", raw)
+		}
+	})
+
+	t.Run("absolute-volume-compose-apply-unchanged", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		var argv [][]string
+		runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+			if dir != filepath.Join(root, "media") {
+				t.Fatalf("compose dir=%q", dir)
+			}
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("ok"), nil
+		})
+		controller := newCallController(t, root, runner, nil)
+		compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - /mnt/data/komga:/data\n"
+		payload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(argv) != 1 || strings.Join(argv[0], " ") != "docker compose up -d" {
+			t.Fatalf("compose argv=%#v", argv)
+		}
+		onDisk, err := os.ReadFile(filepath.Join(root, "media", ComposeFileName))
+		if err != nil || string(onDisk) != compose {
+			t.Fatalf("compose YAML rewritten: %q err=%v", onDisk, err)
+		}
+		if _, err := callFiles(t, controller, map[string]any{"action": "list", "app_id": "media", "path": "/mnt/data/komga"}); err == nil {
+			t.Fatal("files listed absolute host mount")
+		}
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "/mnt/data/komga/config.yaml", "content": "escaped",
+		}); err == nil {
+			t.Fatal("files wrote absolute host mount")
+		}
+	})
+
+	t.Run("unknown-call-name-fails-closed", func(t *testing.T) {
+		t.Parallel()
+		var called bool
+		controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			called = true
+			return nil, nil
+		}), nil)
+		if _, err := controller.Call(context.Background(), "generation-1", "agent.compose", []byte(`{"action":"apply"}`)); err == nil || !errors.Is(err, ErrTypedHandlesUnavailable) {
+			t.Fatalf("unknown name err=%v", err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", "file", []byte(`{"action":"list","app_id":"media"}`)); err == nil || !errors.Is(err, ErrTypedHandlesUnavailable) {
+			t.Fatalf("unknown files alias err=%v", err)
+		}
+		if called {
+			t.Fatal("unknown name invoked docker CLI")
+		}
+	})
+}
+
+func unusedDockerRunner(t *testing.T) CommandRunner {
+	t.Helper()
+	return CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("files must not invoke docker CLI")
+		return nil, nil
+	})
+}
+
+func callFiles(t *testing.T, controller *Controller, payload map[string]any) ([]byte, error) {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller.Call(context.Background(), "generation-1", pluginCallFilesName, raw)
+}
+
+func assertAccepted(t *testing.T, raw []byte) {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["accepted"] != true {
+		t.Fatalf("result=%#v", decoded)
+	}
+}
+
+func assertFileContent(t *testing.T, raw []byte, want string) {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["content"] != want {
+		t.Fatalf("content=%#v want %q", decoded, want)
+	}
+}
+
+func assertFileEntries(t *testing.T, raw []byte, want []fileListEntry) {
+	t.Helper()
+	var decoded struct {
+		Entries []fileListEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) != len(want) {
+		t.Fatalf("entries=%#v want %#v", decoded.Entries, want)
+	}
+	for i := range want {
+		if decoded.Entries[i] != want[i] {
+			t.Fatalf("entries=%#v want %#v", decoded.Entries, want)
+		}
+	}
+}
+
+func leftoverTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	items, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	var leftovers []string
+	for _, item := range items {
+		name := item.Name()
+		if strings.HasPrefix(name, ".nre-files-") || strings.HasPrefix(name, ".file-") {
+			leftovers = append(leftovers, name)
+		}
+	}
+	return leftovers
+}
+
 func TestControllerCallUnknownNameFailsClosed(t *testing.T) {
 	t.Parallel()
 	var called bool

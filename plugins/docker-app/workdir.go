@@ -296,3 +296,60 @@ func looksLikeFileBind(hostPath, containerPath string) bool {
 	}
 	return false
 }
+
+func resolveWorkspaceFilePath(root, appID, filePath string) (workdir, resolved string, err error) {
+	workdir, err = AppWorkDir(root, appID)
+	if err != nil {
+		return "", "", err
+	}
+	relative, err := normalizeWorkspaceRelativePath(filePath)
+	if err != nil {
+		return "", "", err
+	}
+	resolved, err = resolveRelativePath(workdir, relative)
+	if err != nil {
+		return "", "", errors.New("file path is not relative to app workdir")
+	}
+	return workdir, resolved, nil
+}
+
+func normalizeWorkspaceRelativePath(filePath string) (string, error) {
+	trimmed := strings.TrimSpace(filePath)
+	if trimmed == "" {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	if strings.ContainsRune(trimmed, '\x00') {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	if filepath.IsAbs(trimmed) || path.IsAbs(normalized) {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	if classifyBindSource(trimmed) == bindHost {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", errors.New("file path is not relative to app workdir")
+		}
+	}
+	return trimmed, nil
+}
+
+func workspaceDisplayPath(workdir, resolved string) (string, error) {
+	rel, err := filepath.Rel(workdir, resolved)
+	if err != nil || !relativePathInside(rel) {
+		return "", errors.New("file path is not relative to app workdir")
+	}
+	if rel == "." {
+		return ".", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+type workspaceFileEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Dir  bool   `json:"dir"`
+	Size int64  `json:"size,omitempty"`
+}
