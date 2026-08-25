@@ -17,7 +17,39 @@ func TestParseComposeDocumentAcceptsBoundedLargeEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseComposeDocument() error = %v", err)
 	}
-	if len(app.SecretRefs) != 40 {
-		t.Fatalf("secret refs = %d, want 40", len(app.SecretRefs))
+	if len(app.SecretRefs) != 0 {
+		t.Fatalf("ordinary environment settings produced secret refs: %v", app.SecretRefs)
+	}
+	if strings.Contains(app.Compose, "value-") {
+		t.Fatal("ordinary environment values remained in persisted compose")
+	}
+}
+
+func TestParseComposeDocumentTracksOnlySensitiveEnvironment(t *testing.T) {
+	document := `services:
+  app:
+    image: example/app:latest
+    environment:
+      - DATABASE_PASSWORD=database-material
+      - API_TOKEN=token-material
+      - OAUTH_CLIENT_SECRET=oauth-material
+      - TOTP_ENCRYPTION_KEY=totp-material
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
+      - PUBLIC_KEY=public-material
+      - LOG_LEVEL=info
+`
+
+	_, app, err := ParseComposeDocument(document, "sensitive-env", "generation-1", "")
+	if err != nil {
+		t.Fatalf("ParseComposeDocument() error = %v", err)
+	}
+	want := []string{"API_TOKEN", "DATABASE_PASSWORD", "OAUTH_CLIENT_SECRET", "TOTP_ENCRYPTION_KEY"}
+	if fmt.Sprint(app.SecretRefs) != fmt.Sprint(want) {
+		t.Fatalf("secret refs = %v, want %v", app.SecretRefs, want)
+	}
+	for _, material := range []string{"database-material", "token-material", "oauth-material", "totp-material", "public-material"} {
+		if strings.Contains(app.Compose, material) {
+			t.Fatalf("persisted compose retained environment material %q", material)
+		}
 	}
 }

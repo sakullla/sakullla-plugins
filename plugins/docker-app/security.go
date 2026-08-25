@@ -88,6 +88,42 @@ type TransientCredential struct {
 	Material []byte
 }
 
+// sensitiveEnvironmentName identifies environment keys whose values should be
+// represented by opaque secret_refs. Ordinary runtime settings remain bounded
+// configuration, but do not consume the secret reference budget.
+func sensitiveEnvironmentName(name string) bool {
+	parts := strings.FieldsFunc(strings.ToUpper(strings.TrimSpace(name)), func(value rune) bool {
+		letter := value >= 'A' && value <= 'Z'
+		digit := value >= '0' && value <= '9'
+		return !letter && !digit
+	})
+	for index, part := range parts {
+		switch part {
+		case "PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "CREDENTIALS", "AUTHORIZATION":
+			return true
+		case "TOKEN":
+			if index == len(parts)-1 || index+1 < len(parts) && (parts[index+1] == "VALUE" || parts[index+1] == "SECRET") {
+				return true
+			}
+		case "KEY":
+			if index == len(parts)-1 && (index == 0 || parts[index-1] != "PUBLIC") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sensitiveEnvironmentNames(names []string) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if sensitiveEnvironmentName(name) {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
 // BindSecretRefs converts transient credentials into opaque secret_refs.
 // Material is wiped before return and is never copied into refs or errors.
 func BindSecretRefs(credentials []TransientCredential) ([]string, error) {

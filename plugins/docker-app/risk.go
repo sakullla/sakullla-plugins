@@ -532,7 +532,8 @@ func planFromDockerRun(spec ManageSpec) (ComposePlan, error) {
 		return ComposePlan{}, errors.New("docker run command is invalid")
 	}
 	service.Image = image
-	refs, err := BindSecretRefs(namedCredentials(append(envKeys, envFiles...)))
+	refNames := append(sensitiveEnvironmentNames(envKeys), envFiles...)
+	refs, err := BindSecretRefs(namedCredentials(refNames))
 	if err != nil {
 		return ComposePlan{}, err
 	}
@@ -596,7 +597,9 @@ func planFromComposeYAML(spec ManageSpec) (ComposePlan, error) {
 		if err != nil {
 			return ComposePlan{}, err
 		}
-		refs, err := BindSecretRefs(namedCredentials(append(append(envKeys, files...), secrets...)))
+		refNames := append(sensitiveEnvironmentNames(envKeys), files...)
+		refNames = append(refNames, secrets...)
+		refs, err := BindSecretRefs(namedCredentials(refNames))
 		if err != nil {
 			return ComposePlan{}, err
 		}

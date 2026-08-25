@@ -53,8 +53,8 @@ func (function StopExecutorFunc) Stop(ctx context.Context, app App) error {
 }
 
 // ParseComposeDocument turns pasted compose YAML into a risk plan and app.
-// Environment values become secret_refs via BindSecretRefs and are wiped from
-// the stored compose document.
+// Sensitive environment values become secret_refs via BindSecretRefs. All
+// environment values are wiped from the stored compose document.
 func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposePlan, App, error) {
 	if len(document) > MaxConfigBytes {
 		return ComposePlan{}, App{}, fmt.Errorf("%w: adopt source exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
@@ -377,7 +377,12 @@ func parseDockerRunTokens(tokens []string) (parsedDockerRun, []TransientCredenti
 				parsed.name = value
 			case "-e", "--env":
 				name, material, _ := strings.Cut(value, "=")
-				credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+				if !boundedText(name, 128) {
+					return parsedDockerRun{}, credentials, ErrInvalidAdoptSource
+				}
+				if sensitiveEnvironmentName(name) {
+					credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+				}
 			case "-v", "--volume":
 				host, named, relative := classifyVolume(value)
 				if host != "" {
@@ -525,37 +530,52 @@ func collectNames(value any) ([]string, error) {
 }
 
 func collectEnvironment(value any) ([]TransientCredential, error) {
+	credentials := make([]TransientCredential, 0)
+	appendCredential := func(name string, material []byte) error {
+		name = strings.TrimSpace(name)
+		if !boundedText(name, 128) {
+			return ErrInvalidAdoptSource
+		}
+		if sensitiveEnvironmentName(name) {
+			credentials = append(credentials, TransientCredential{Name: name, Material: material})
+		}
+		return nil
+	}
 	switch typed := value.(type) {
 	case nil:
 		return nil, nil
 	case map[string]any:
-		credentials := make([]TransientCredential, 0, len(typed))
 		for name, raw := range typed {
-			credentials = append(credentials, TransientCredential{Name: name, Material: materialBytes(raw)})
+			if err := appendCredential(name, materialBytes(raw)); err != nil {
+				return credentials, err
+			}
 		}
 		return credentials, nil
 	case map[string]string:
-		credentials := make([]TransientCredential, 0, len(typed))
 		for name, raw := range typed {
-			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(raw)})
+			if err := appendCredential(name, []byte(raw)); err != nil {
+				return credentials, err
+			}
 		}
 		return credentials, nil
 	case []any:
-		credentials := make([]TransientCredential, 0, len(typed))
 		for _, item := range typed {
 			entry, ok := item.(string)
 			if !ok {
 				return credentials, ErrInvalidAdoptSource
 			}
 			name, material, _ := strings.Cut(entry, "=")
-			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+			if err := appendCredential(name, []byte(material)); err != nil {
+				return credentials, err
+			}
 		}
 		return credentials, nil
 	case []string:
-		credentials := make([]TransientCredential, 0, len(typed))
 		for _, entry := range typed {
 			name, material, _ := strings.Cut(entry, "=")
-			credentials = append(credentials, TransientCredential{Name: name, Material: []byte(material)})
+			if err := appendCredential(name, []byte(material)); err != nil {
+				return credentials, err
+			}
 		}
 		return credentials, nil
 	default:
