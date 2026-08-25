@@ -53,6 +53,18 @@
       <p id="empty" class="hint" hidden>这个目录是空的。</p>
     </section>
   </main>
+  <dialog id="mkdir-dialog" aria-labelledby="mkdir-title">
+    <form id="mkdir-form">
+      <h2 id="mkdir-title">新建目录</h2>
+      <label for="mkdir-name">目录名称</label>
+      <input id="mkdir-name" type="text" name="name" autocomplete="off" spellcheck="false">
+      <p id="mkdir-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="submit">确定</button>
+        <button type="button" class="ghost" id="mkdir-cancel">取消</button>
+      </div>
+    </form>
+  </dialog>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

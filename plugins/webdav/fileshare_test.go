@@ -100,7 +100,10 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 		t.Fatalf("page CSP = %q", page.Header().Get("Content-Security-Policy"))
 	}
 	body := page.Body.String()
-	for _, fragment := range []string{"文件共享", "/dav/", "HTTP Basic", `id="dav-url"`, `id="upload-input"`, `id="mkdir-button"`} {
+	for _, fragment := range []string{
+		"文件共享", "/dav/", "HTTP Basic", `id="dav-url"`, `id="upload-input"`, `id="mkdir-button"`,
+		`<dialog id="mkdir-dialog"`, `id="mkdir-form"`, `id="mkdir-name"`, `id="mkdir-cancel"`, "目录名称",
+	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("page missing %q", fragment)
 		}
@@ -148,6 +151,82 @@ func TestManagerViewportLayout(t *testing.T) {
 	actions := cssRule(text, ".actions")
 	if !strings.Contains(actions, "max-width: min(46rem, 100%)") {
 		t.Fatal(".actions still fills main without a capped operation group")
+	}
+}
+
+func TestManagerMkdirUsesInPageDialog(t *testing.T) {
+	controller, _ := startShare(t, "")
+	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", testSharePassword, nil)
+	if page.Code != http.StatusOK {
+		t.Fatalf("page status = %d body=%q", page.Code, page.Body.String())
+	}
+	body := page.Body.String()
+	for _, fragment := range []string{
+		`<dialog id="mkdir-dialog"`,
+		`id="mkdir-title"`,
+		`for="mkdir-name"`,
+		`id="mkdir-error"`,
+		"新建目录",
+		"确定",
+		"取消",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("page missing mkdir dialog fragment %q", fragment)
+		}
+	}
+
+	script := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", testSharePassword, nil)
+	if script.Code != http.StatusOK {
+		t.Fatalf("script status = %d body=%q", script.Code, script.Body.String())
+	}
+	text := script.Body.String()
+	if strings.Contains(text, `window.prompt("目录名称")`) {
+		t.Fatal("mkdir still uses the native prompt")
+	}
+	if !strings.Contains(text, `window.prompt("新名称"`) {
+		t.Fatal("rename no longer uses the native prompt")
+	}
+	if !strings.Contains(text, `window.confirm("删除 "`) {
+		t.Fatal("delete no longer uses the native confirm")
+	}
+	for _, fragment := range []string{
+		"mkdirDialog.showModal()",
+		"mkdirName.focus()",
+		"mkdirName.value.trim()",
+		`sendJSON("/api/mkdir"`,
+		"mkdirDialog.close()",
+		"已新建目录。",
+		"event.preventDefault()",
+		"setMkdirError(error.message)",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("script missing mkdir dialog behavior %q", fragment)
+		}
+	}
+	if !strings.Contains(text, "if (!name)") {
+		t.Fatal("script does not skip empty mkdir names")
+	}
+
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	style := string(css)
+	dialog := cssRule(style, "#mkdir-dialog")
+	for _, want := range []string{"var(--color-bg-surface)", "var(--color-text-primary)", "var(--shadow-md)"} {
+		if !strings.Contains(dialog, want) {
+			t.Fatalf("mkdir dialog missing theme token %q in %q", want, dialog)
+		}
+	}
+	if cssRule(style, "#mkdir-dialog::backdrop") == "" {
+		t.Fatal("mkdir dialog has no backdrop")
+	}
+	nameField := cssRule(style, "#mkdir-name")
+	if !strings.Contains(nameField, "var(--color-bg-sunken)") || !strings.Contains(nameField, "var(--color-text-primary)") {
+		t.Fatalf("mkdir name field does not follow theme tokens: %q", nameField)
+	}
+	if !strings.Contains(style, `[data-theme="sakura-night"] #mkdir-dialog::backdrop`) {
+		t.Fatal("mkdir dialog backdrop does not adapt to sakura-night")
 	}
 }
 

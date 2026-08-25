@@ -31,6 +31,11 @@ const crumbs = document.querySelector("#crumbs");
 const statusNode = document.querySelector("#status");
 const uploadInput = document.querySelector("#upload-input");
 const mkdirButton = document.querySelector("#mkdir-button");
+const mkdirDialog = document.querySelector("#mkdir-dialog");
+const mkdirForm = document.querySelector("#mkdir-form");
+const mkdirName = document.querySelector("#mkdir-name");
+const mkdirCancel = document.querySelector("#mkdir-cancel");
+const mkdirError = document.querySelector("#mkdir-error");
 
 let currentPath = "/";
 
@@ -220,19 +225,43 @@ if (uploadInput) {
   });
 }
 
-if (mkdirButton) {
-  mkdirButton.addEventListener("click", async () => {
-    const name = window.prompt("目录名称");
+const setMkdirError = (message) => {
+  if (!mkdirError) {
+    return;
+  }
+  mkdirError.hidden = !message;
+  mkdirError.textContent = message || "";
+};
+
+if (mkdirButton && mkdirDialog && mkdirForm && mkdirName) {
+  mkdirButton.addEventListener("click", () => {
+    setMkdirError("");
+    mkdirName.value = "";
+    mkdirDialog.showModal();
+    mkdirName.focus();
+  });
+  mkdirForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = mkdirName.value.trim();
     if (!name) {
       return;
     }
     try {
       await sendJSON("/api/mkdir", { path: joinPath(currentPath, name) });
+      mkdirDialog.close();
       await loadList(currentPath);
       showStatus("已新建目录。", false);
     } catch (error) {
+      setMkdirError(error.message);
       showStatus(error.message, true);
     }
+  });
+  if (mkdirCancel) {
+    mkdirCancel.addEventListener("click", () => mkdirDialog.close());
+  }
+  mkdirDialog.addEventListener("close", () => {
+    mkdirName.value = "";
+    setMkdirError("");
   });
 }
 
