@@ -58,7 +58,7 @@ func AppWorkDir(root, appID string) (string, error) {
 }
 
 // PrepareAppWorkspace creates the app workdir, materializes relative bind
-// directories, and writes compose YAML into the directory.
+// directories, and writes compose YAML without rewriting volume sources.
 func PrepareAppWorkspace(root, appID, compose string) (Workspace, error) {
 	dir, err := AppWorkDir(root, appID)
 	if err != nil {
@@ -79,12 +79,8 @@ func PrepareAppWorkspace(root, appID, compose string) (Workspace, error) {
 			return Workspace{}, err
 		}
 	}
-	applyYAML, err := rewriteRelativeBindSources(dir, compose)
-	if err != nil {
-		return Workspace{}, err
-	}
 	composeFile := filepath.Join(dir, ComposeFileName)
-	if err := os.WriteFile(composeFile, []byte(applyYAML), 0o644); err != nil {
+	if err := os.WriteFile(composeFile, []byte(compose), 0o644); err != nil {
 		return Workspace{}, err
 	}
 	return Workspace{Dir: dir, ComposeFile: composeFile, Binds: binds}, nil
@@ -193,143 +189,6 @@ func parseComposeVolumeBinds(document string) ([]VolumeBind, error) {
 		}
 	}
 	return binds, nil
-}
-
-// rewriteRelativeBindSources pins relative volume sources to absolute paths
-// under workdir. Absolute host mounts are left unchanged.
-func rewriteRelativeBindSources(workdir, document string) (string, error) {
-	if strings.TrimSpace(document) == "" {
-		return document, nil
-	}
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(document), &root); err != nil {
-		return "", ErrInvalidCompose
-	}
-	changed, err := rewriteYAMLRelativeBinds(workdir, yamlDocumentBody(&root))
-	if err != nil {
-		return "", err
-	}
-	if !changed {
-		return document, nil
-	}
-	out, err := yaml.Marshal(&root)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-func rewriteYAMLRelativeBinds(workdir string, node *yaml.Node) (bool, error) {
-	services := yamlMapValue(node, "services")
-	if services == nil || services.Kind != yaml.MappingNode {
-		return false, nil
-	}
-	changed := false
-	for i := 0; i+1 < len(services.Content); i += 2 {
-		volumes := yamlMapValue(services.Content[i+1], "volumes")
-		if volumes == nil || volumes.Kind != yaml.SequenceNode {
-			continue
-		}
-		for _, item := range volumes.Content {
-			updated, err := rewriteVolumeBindNode(workdir, item)
-			if err != nil {
-				return false, err
-			}
-			if updated {
-				changed = true
-			}
-		}
-	}
-	return changed, nil
-}
-
-func rewriteVolumeBindNode(workdir string, node *yaml.Node) (bool, error) {
-	if node == nil {
-		return false, nil
-	}
-	switch node.Kind {
-	case yaml.ScalarNode:
-		source := volumeSource(node.Value)
-		hostPath, ok, err := absoluteRelativeBind(workdir, source)
-		if err != nil || !ok {
-			return false, err
-		}
-		setYAMLString(node, hostPath+node.Value[len(source):])
-		return true, nil
-	case yaml.MappingNode:
-		sourceNode := yamlMapValue(node, "source")
-		if sourceNode == nil {
-			sourceNode = yamlMapValue(node, "src")
-		}
-		if sourceNode == nil || sourceNode.Kind != yaml.ScalarNode {
-			return false, nil
-		}
-		hostPath, ok, err := absoluteRelativeBind(workdir, sourceNode.Value)
-		if err != nil || !ok {
-			return false, err
-		}
-		setYAMLString(sourceNode, hostPath)
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func absoluteRelativeBind(workdir, source string) (string, bool, error) {
-	if classifyBindSource(source) != bindRelative {
-		return "", false, nil
-	}
-	hostPath, err := resolveRelativePath(workdir, source)
-	if err != nil {
-		return "", false, err
-	}
-	return hostPath, true, nil
-}
-
-func yamlDocumentBody(node *yaml.Node) *yaml.Node {
-	if node != nil && node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		return node.Content[0]
-	}
-	return node
-}
-
-func yamlMapValue(node *yaml.Node, key string) *yaml.Node {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i] != nil && node.Content[i].Value == key {
-			return node.Content[i+1]
-		}
-	}
-	return nil
-}
-
-func setYAMLString(node *yaml.Node, value string) {
-	if node == nil {
-		return
-	}
-	node.Kind = yaml.ScalarNode
-	node.Tag = "!!str"
-	node.Value = value
-	if yamlScalarNeedsQuotes(value) {
-		node.Style = yaml.DoubleQuotedStyle
-		return
-	}
-	node.Style = 0
-}
-
-func yamlScalarNeedsQuotes(value string) bool {
-	if value == "" || strings.ContainsAny(value, ":#{}[],&*!|>'\"%@`\\ \t") {
-		return true
-	}
-	if strings.Contains(value, "\n") || strings.Contains(value, "\r") {
-		return true
-	}
-	if len(value) >= 2 && value[1] == ':' {
-		return true
-	}
-	return false
 }
 
 func unmarshalComposeDocument(document string, file *composeDocument) error {

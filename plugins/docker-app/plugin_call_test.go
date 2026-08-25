@@ -130,9 +130,12 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 		if err != nil {
 			t.Fatalf("rehydrated compose err=%v", err)
 		}
+		if string(payload) != compose {
+			t.Fatalf("rehydrated compose rewritten relative ./ binds: %s", payload)
+		}
 		dataDir := filepath.Join(root, "media", "data")
-		if !appliedComposePinsBind(t, dir, string(payload), "/data", dataDir) {
-			t.Fatalf("rehydrated compose did not pin ./data to %q: %s", dataDir, payload)
+		if !appliedComposeResolvesBind(t, dir, string(payload), "/data", dataDir) {
+			t.Fatalf("rehydrated compose did not resolve ./data to %q: %s", dataDir, payload)
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".env")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("blank update must not materialize an environment file: %v", err)
@@ -397,14 +400,11 @@ func TestControllerCallFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !appliedComposePinsBind(t, workdir, string(onDisk), "/app/config.yaml", configPath) {
-			t.Fatalf("apply did not pin ./config.yaml to %q: %s", configPath, onDisk)
+		if string(onDisk) != compose {
+			t.Fatalf("apply rewrote compose YAML: %q", onDisk)
 		}
-		if !strings.Contains(string(onDisk), "/mnt/data/komga") {
-			t.Fatalf("absolute host mount rewritten: %s", onDisk)
-		}
-		if strings.Contains(string(onDisk), "./config.yaml") {
-			t.Fatalf("relative bind source left unresolved: %s", onDisk)
+		if !appliedComposeResolvesBind(t, workdir, string(onDisk), "/app/config.yaml", configPath) {
+			t.Fatalf("apply did not resolve ./config.yaml to %q: %s", configPath, onDisk)
 		}
 		got, err := os.ReadFile(configPath)
 		if err != nil || !bytes.Equal(got, want) {
@@ -511,7 +511,7 @@ func assertFileContent(t *testing.T, raw []byte, want string) {
 	}
 }
 
-func appliedComposePinsBind(t *testing.T, workdir, document, containerPath, wantHost string) bool {
+func appliedComposeResolvesBind(t *testing.T, workdir, document, containerPath, wantHost string) bool {
 	t.Helper()
 	binds, err := ResolveComposeBinds(workdir, document)
 	if err != nil {
@@ -522,9 +522,10 @@ func appliedComposePinsBind(t *testing.T, workdir, document, containerPath, want
 		if bind.ContainerPath != containerPath {
 			continue
 		}
-		if filepath.Clean(bind.HostPath) == want || filepath.Clean(bind.Source) == want {
-			return true
+		if !bind.Relative || filepath.Clean(bind.Source) == want {
+			return false
 		}
+		return filepath.Clean(bind.HostPath) == want
 	}
 	return false
 }

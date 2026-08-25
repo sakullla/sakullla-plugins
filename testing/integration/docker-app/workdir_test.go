@@ -138,16 +138,19 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if string(onDisk) != compose {
+		t.Fatalf("applied compose rewrote relative ./ binds: %s", onDisk)
+	}
 	applied, err := dockerapp.ResolveComposeBinds(workdir, string(onDisk))
 	if err != nil {
 		t.Fatal(err)
 	}
 	appliedConfig := findVolumeBind(applied, "/app/config.yml")
-	if filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configHost) && filepath.Clean(appliedConfig.Source) != filepath.Clean(configHost) {
-		t.Fatalf("applied compose did not pin ./config.yml to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
+	if !appliedConfig.Relative || filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configHost) {
+		t.Fatalf("relative ./config.yml did not resolve to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
 	}
-	if strings.Contains(string(onDisk), "./config.yml") {
-		t.Fatalf("relative bind source left unresolved: %s", onDisk)
+	if filepath.Clean(appliedConfig.Source) == filepath.Clean(configHost) {
+		t.Fatalf("applied compose rewrote ./config.yml to sandbox path: %#v yaml=%s", appliedConfig, onDisk)
 	}
 	readPayload, err := json.Marshal(map[string]any{"action": "read", "app_id": "media", "path": "config.yml"})
 	if err != nil {
@@ -239,16 +242,19 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 		t.Fatal("absolute host volume was stripped from compose YAML")
 	}
 	configPath := filepath.Join(root, "komga", "config.yaml")
+	if string(onDisk) != compose {
+		t.Fatalf("applied compose rewrote relative ./ binds: %s", onDisk)
+	}
 	applied, err := dockerapp.ResolveComposeBinds(filepath.Join(root, "komga"), string(onDisk))
 	if err != nil {
 		t.Fatal(err)
 	}
 	appliedConfig := findVolumeBind(applied, "/app/config.yaml")
-	if filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configPath) && filepath.Clean(appliedConfig.Source) != filepath.Clean(configPath) {
-		t.Fatalf("relative ./config.yaml was not pinned to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
+	if !appliedConfig.Relative || filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configPath) {
+		t.Fatalf("relative ./config.yaml did not resolve to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
 	}
-	if strings.Contains(string(onDisk), "./config.yaml") {
-		t.Fatalf("relative bind source left unresolved: %s", onDisk)
+	if filepath.Clean(appliedConfig.Source) == filepath.Clean(configPath) {
+		t.Fatalf("applied compose rewrote ./config.yaml to sandbox path: %#v yaml=%s", appliedConfig, onDisk)
 	}
 
 	writePayload, err := json.Marshal(map[string]any{
