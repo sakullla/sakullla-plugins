@@ -550,7 +550,7 @@ func localDockerEngineValue(node any, key string) bool {
 	switch typed := node.(type) {
 	case map[string]any:
 		for childKey, child := range typed {
-			if strings.EqualFold(childKey, "compose") || strings.EqualFold(childKey, "content") {
+			if skipLocalDockerValueKey(childKey) {
 				continue
 			}
 			if strings.EqualFold(childKey, "payload") {
@@ -597,6 +597,15 @@ func decodePluginCallPayload(node any) any {
 		}
 	}
 	return node
+}
+
+func skipLocalDockerValueKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "compose", "content", "path", "name", "entries":
+		return true
+	default:
+		return false
+	}
 }
 
 func isLocalDockerHandleKey(key string) bool {

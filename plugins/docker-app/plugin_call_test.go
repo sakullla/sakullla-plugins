@@ -244,6 +244,48 @@ func TestControllerCallFiles(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects-symlink-directory-escape", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, unusedDockerRunner(t), nil)
+		workdir := filepath.Join(root, "media")
+		if err := os.MkdirAll(workdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outsideDir := t.TempDir()
+		outsideFile := filepath.Join(outsideDir, "secret.txt")
+		if err := os.WriteFile(outsideFile, []byte("keep-outside"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideDir, filepath.Join(workdir, "link")); err != nil {
+			t.Skipf("symbolic links unavailable: %v", err)
+		}
+		escaped := "link/secret.txt"
+		if _, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": escaped}); err == nil {
+			t.Fatal("read through symlink directory succeeded")
+		}
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": escaped, "content": "escaped",
+		}); err == nil {
+			t.Fatal("write through symlink directory succeeded")
+		}
+		if _, err := callFiles(t, controller, map[string]any{"action": "list", "app_id": "media", "path": "link"}); err == nil {
+			t.Fatal("list through symlink directory succeeded")
+		}
+		if _, err := callFiles(t, controller, map[string]any{"action": "mkdir", "app_id": "media", "path": "link/pwned"}); err == nil {
+			t.Fatal("mkdir through symlink directory succeeded")
+		}
+		if _, err := callFiles(t, controller, map[string]any{"action": "delete", "app_id": "media", "path": escaped}); err == nil {
+			t.Fatal("delete through symlink directory succeeded")
+		}
+		if got, err := os.ReadFile(outsideFile); err != nil || string(got) != "keep-outside" {
+			t.Fatalf("outside file changed: %q err=%v", got, err)
+		}
+		if _, err := os.Stat(filepath.Join(outsideDir, "pwned")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("mkdir through symlink created outside path: %v", err)
+		}
+	})
+
 	t.Run("rejects-oversize-without-truncation", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()

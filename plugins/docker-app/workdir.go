@@ -310,7 +310,35 @@ func resolveWorkspaceFilePath(root, appID, filePath string) (workdir, resolved s
 	if err != nil {
 		return "", "", errors.New("file path is not relative to app workdir")
 	}
+	rel, err := filepath.Rel(workdir, resolved)
+	if err != nil || !relativePathInside(rel) {
+		return "", "", errors.New("file path is not relative to app workdir")
+	}
+	if err := rejectSymlinkTraversal(workdir, rel); err != nil {
+		return "", "", err
+	}
 	return workdir, resolved, nil
+}
+
+func rejectSymlinkTraversal(root, relative string) error {
+	if relative == "." {
+		return nil
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("file path is not relative to app workdir")
+		}
+	}
+	return nil
 }
 
 func normalizeWorkspaceRelativePath(filePath string) (string, error) {

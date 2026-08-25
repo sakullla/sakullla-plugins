@@ -228,6 +228,37 @@ func TestHostCapabilityRuntimeForwardsFilesThroughPluginCall(t *testing.T) {
 	}
 }
 
+func TestHostCapabilityRuntimeAcceptsFilesPathNameAndEntriesWithDockerSock(t *testing.T) {
+	t.Parallel()
+	var request pluginsdk.PluginCallRequest
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request = decodePluginCallRequest(t, call)
+		return copyHostResult(map[string]any{
+			"path": "data",
+			"entries": []map[string]any{
+				{"name": "docker.sock", "path": "data/docker.sock", "dir": false},
+			},
+		}, target)
+	})
+	var result map[string]any
+	if err := newHostCapabilityRuntime(client).Files(context.Background(), App{ID: "media", AgentID: "agent-1"}, map[string]any{
+		"action": "list", "path": "data/docker.sock",
+	}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if request.Name != pluginCallFilesName {
+		t.Fatalf("plugin.call = %#v", request)
+	}
+	payload := decodePluginCallInner(t, request)
+	if payload["path"] != "data/docker.sock" {
+		t.Fatalf("files path was stripped: %#v", payload)
+	}
+	entries, _ := result["entries"].([]any)
+	if result["path"] != "data" || len(entries) != 1 {
+		t.Fatalf("files list result=%#v", result)
+	}
+}
+
 func TestHostCapabilityRuntimeSendsFilesContentWithoutTreatingItAsLocalEngine(t *testing.T) {
 	t.Parallel()
 	var request pluginsdk.PluginCallRequest
