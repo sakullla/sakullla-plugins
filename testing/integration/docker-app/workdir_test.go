@@ -319,6 +319,76 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestRelativeFilesStayInAppWorkDirWhenNREDockerAppWorkdirSet(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("NRE_DOCKER_APP_WORKDIR", root)
+	var composeDir string
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		CommandRunner: dockerapp.CommandRunnerFunc(func(_ context.Context, dir, _ string, _ ...string) ([]byte, error) {
+			composeDir = dir
+			return []byte("ok"), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := strings.Join([]string{
+		"services:",
+		"  web:",
+		"    image: nginx:1.27",
+		"    volumes:",
+		"      - ./config.yml:/app/config.yml",
+		"",
+	}, "\n")
+	applyPayload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "compose", applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	workdir, err := dockerapp.AppWorkDir(root, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(composeDir) != filepath.Clean(workdir) {
+		t.Fatalf("compose project dir = %q want AppWorkDir %q", composeDir, workdir)
+	}
+	writePayload, err := json.Marshal(map[string]any{
+		"action": "write", "app_id": "media", "path": "config.yml", "content": []byte("listen: 80\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "files", writePayload); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(workdir, "config.yml")
+	content, err := os.ReadFile(configPath)
+	if err != nil || string(content) != "listen: 80\n" {
+		t.Fatalf("relative file = %q err=%v", content, err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(workdir, dockerapp.ComposeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(onDisk) != compose {
+		t.Fatalf("applied compose rewrote relative ./ binds: %s", onDisk)
+	}
+	binds, err := dockerapp.ResolveComposeBinds(workdir, string(onDisk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBind := findVolumeBind(binds, "/app/config.yml")
+	if !configBind.Relative || filepath.Clean(configBind.HostPath) != filepath.Clean(configPath) {
+		t.Fatalf("relative ./config.yml did not resolve to AppWorkDir: %#v yaml=%s", configBind, onDisk)
+	}
+	if filepath.Clean(configBind.Source) == filepath.Clean(configPath) {
+		t.Fatalf("applied compose rewrote ./config.yml to sandbox path: %#v yaml=%s", configBind, onDisk)
+	}
+}
+
 func TestAbsoluteAndParentBindsRemainHostMounts(t *testing.T) {
 	compose := strings.Join([]string{
 		"services:",
