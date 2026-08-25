@@ -2,6 +2,7 @@ package dockerapp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -217,7 +218,7 @@ func TestHostCapabilityRuntimeForwardsFilesThroughPluginCall(t *testing.T) {
 		t.Fatalf("plugin.call = %#v", request)
 	}
 	payload := decodePluginCallInner(t, request)
-	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || payload["content"] != "listen: 80\n" {
+	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || filesContentField(t, payload) != "listen: 80\n" {
 		t.Fatalf("files handle payload = %#v", payload)
 	}
 	if result["accepted"] != true {
@@ -276,7 +277,7 @@ func TestHostCapabilityRuntimeSendsFilesContentWithoutTreatingItAsLocalEngine(t 
 		t.Fatalf("plugin.call = %#v", request)
 	}
 	payload := decodePluginCallInner(t, request)
-	if payload["content"] != content {
+	if filesContentField(t, payload) != content {
 		t.Fatalf("files content was stripped: %#v", payload)
 	}
 }
@@ -315,7 +316,7 @@ func TestHostCapabilityRuntimeSendsFilesThroughPluginCall(t *testing.T) {
 		t.Fatalf("files plugin.call = %#v", request)
 	}
 	payload := decodePluginCallInner(t, request)
-	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || payload["content"] != "listen: 80\n" {
+	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || filesContentField(t, payload) != "listen: 80\n" {
 		t.Fatalf("files handle payload = %#v", payload)
 	}
 	if err := runtime.Files(context.Background(), App{ID: "media"}, map[string]any{"action": "list"}, nil); !errors.Is(err, ErrAgentOffline) {
@@ -652,6 +653,19 @@ func decodePluginCallInner(t *testing.T, request pluginsdk.PluginCallRequest) ma
 		t.Fatalf("plugin.call payload: %v", err)
 	}
 	return payload
+}
+
+func filesContentField(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	raw, ok := payload["content"].(string)
+	if !ok {
+		t.Fatalf("content=%#v", payload["content"])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("content base64: %v value=%q", err, raw)
+	}
+	return string(decoded)
 }
 
 func assertNoNamedAgentHostOps(t *testing.T, calls []pluginsdk.HostRuntimeCall) {

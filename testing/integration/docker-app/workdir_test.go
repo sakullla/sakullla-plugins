@@ -117,7 +117,13 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 	}
 
 	configHost := filepath.Join(workdir, "config.yml")
-	if err := os.WriteFile(configHost, []byte("listen: 80\n"), 0o644); err != nil {
+	writePayload, err := json.Marshal(map[string]any{
+		"action": "write", "app_id": "media", "path": "config.yml", "content": []byte("listen: 80\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "files", writePayload); err != nil {
 		t.Fatal(err)
 	}
 	configBind := findVolumeBind(binds, "/app/config.yml")
@@ -127,6 +133,35 @@ func TestRelativeWorkdirBindsDeployWithoutHostMountConfirmation(t *testing.T) {
 	content, err := os.ReadFile(configBind.HostPath)
 	if err != nil || string(content) != "listen: 80\n" {
 		t.Fatalf("container file content = %q err=%v", content, err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(workdir, dockerapp.ComposeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := dockerapp.ResolveComposeBinds(workdir, string(onDisk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedConfig := findVolumeBind(applied, "/app/config.yml")
+	if filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configHost) && filepath.Clean(appliedConfig.Source) != filepath.Clean(configHost) {
+		t.Fatalf("applied compose did not pin ./config.yml to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
+	}
+	if strings.Contains(string(onDisk), "./config.yml") {
+		t.Fatalf("relative bind source left unresolved: %s", onDisk)
+	}
+	readPayload, err := json.Marshal(map[string]any{"action": "read", "app_id": "media", "path": "config.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", "files", readPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Content []byte `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil || string(decoded.Content) != "listen: 80\n" {
+		t.Fatalf("files read=%q err=%v", raw, err)
 	}
 }
 
@@ -197,15 +232,27 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 	}
 	composePath := filepath.Join(root, "komga", dockerapp.ComposeFileName)
 	onDisk, err := os.ReadFile(composePath)
-	if err != nil || string(onDisk) != compose {
-		t.Fatalf("compose YAML rewritten=%q err=%v", onDisk, err)
+	if err != nil {
+		t.Fatalf("compose YAML err=%v", err)
 	}
 	if !strings.Contains(string(onDisk), "/mnt/data/komga") {
 		t.Fatal("absolute host volume was stripped from compose YAML")
 	}
+	configPath := filepath.Join(root, "komga", "config.yaml")
+	applied, err := dockerapp.ResolveComposeBinds(filepath.Join(root, "komga"), string(onDisk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedConfig := findVolumeBind(applied, "/app/config.yaml")
+	if filepath.Clean(appliedConfig.HostPath) != filepath.Clean(configPath) && filepath.Clean(appliedConfig.Source) != filepath.Clean(configPath) {
+		t.Fatalf("relative ./config.yaml was not pinned to AppWorkDir: %#v yaml=%s", appliedConfig, onDisk)
+	}
+	if strings.Contains(string(onDisk), "./config.yaml") {
+		t.Fatalf("relative bind source left unresolved: %s", onDisk)
+	}
 
 	writePayload, err := json.Marshal(map[string]any{
-		"action": "write", "app_id": "komga", "path": "config.yaml", "content": "port: 25600\n",
+		"action": "write", "app_id": "komga", "path": "config.yaml", "content": []byte("port: 25600\n"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +276,7 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 		"../other/secret.txt",
 	} {
 		payload, err := json.Marshal(map[string]any{
-			"action": "write", "app_id": "komga", "path": path, "content": "escaped",
+			"action": "write", "app_id": "komga", "path": path, "content": []byte("escaped"),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -258,8 +305,11 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 		t.Fatal("absolute path was materialized inside the app workdir")
 	}
 	unchangedCompose, err := os.ReadFile(composePath)
-	if err != nil || string(unchangedCompose) != compose {
+	if err != nil || string(unchangedCompose) != string(onDisk) {
 		t.Fatalf("files rewrote compose YAML=%q err=%v", unchangedCompose, err)
+	}
+	if !strings.Contains(string(unchangedCompose), "/mnt/data/komga") {
+		t.Fatal("files stripped the absolute host volume")
 	}
 }
 

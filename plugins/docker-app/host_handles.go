@@ -2,6 +2,7 @@ package dockerapp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -433,7 +434,46 @@ func (runtime *hostCapabilityRuntime) files(ctx context.Context, payload map[str
 		return ErrTypedHandlesUnavailable
 	}
 	agentID, _ := payload["agent_id"].(string)
-	return runtime.pluginCall(ctx, agentID, pluginCallFilesName, payload, result)
+	if err := runtime.pluginCall(ctx, agentID, pluginCallFilesName, filesPluginCallPayload(payload), result); err != nil {
+		return err
+	}
+	decodeFilesCallResult(result)
+	return nil
+}
+
+func filesPluginCallPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		out[key] = value
+	}
+	switch content := out["content"].(type) {
+	case string:
+		out["content"] = []byte(content)
+	case []byte:
+		copied := make([]byte, len(content))
+		copy(copied, content)
+		out["content"] = copied
+	}
+	return out
+}
+
+func decodeFilesCallResult(result any) {
+	target, ok := result.(*map[string]any)
+	if !ok || target == nil || *target == nil {
+		return
+	}
+	raw, ok := (*target)["content"].(string)
+	if !ok {
+		return
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return
+	}
+	(*target)["content"] = string(decoded)
 }
 
 func (runtime *hostCapabilityRuntime) pluginCall(ctx context.Context, agentID, name string, inner any, result any) error {

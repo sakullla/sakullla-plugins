@@ -67,7 +67,7 @@ type filesCallRequest struct {
 	AgentID string `json:"agent_id"`
 	AppID   string `json:"app_id"`
 	Path    string `json:"path"`
-	Content string `json:"content"`
+	Content []byte `json:"content"`
 }
 
 type fileListEntry struct {
@@ -342,9 +342,6 @@ func executeWorkspaceFiles(root string, request filesCallRequest) ([]byte, error
 		if len(request.Content) > MaxConfigBytes {
 			return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
 		}
-		if strings.ContainsRune(request.Content, '\x00') {
-			return nil, errors.New("file content is invalid")
-		}
 		return marshalFilesAccepted(writeWorkspaceFile(workdir, resolved, request.Content))
 	case "delete":
 		return marshalFilesAccepted(deleteWorkspacePath(workdir, resolved))
@@ -415,34 +412,31 @@ func mkdirWorkspacePath(resolved string) error {
 	return os.MkdirAll(resolved, 0o755)
 }
 
-func readWorkspaceFile(resolved string) (string, error) {
+func readWorkspaceFile(resolved string) ([]byte, error) {
 	info, err := os.Lstat(resolved)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("file path is not relative to app workdir")
+		return nil, errors.New("file path is not relative to app workdir")
 	}
 	if info.IsDir() {
-		return "", errors.New("path is a directory")
+		return nil, errors.New("path is a directory")
 	}
 	if info.Size() > MaxConfigBytes {
-		return "", fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
 	}
 	payload, err := os.ReadFile(resolved)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(payload) > MaxConfigBytes {
-		return "", fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
 	}
-	if strings.ContainsRune(string(payload), '\x00') {
-		return "", errors.New("file content is invalid")
-	}
-	return string(payload), nil
+	return payload, nil
 }
 
-func writeWorkspaceFile(workdir, resolved, content string) error {
+func writeWorkspaceFile(workdir, resolved string, content []byte) error {
 	if filepath.Clean(resolved) == filepath.Clean(workdir) {
 		return errors.New("path is a directory")
 	}
@@ -475,7 +469,7 @@ func writeWorkspaceFile(workdir, resolved, content string) error {
 		_ = temporary.Close()
 		return err
 	}
-	if _, err := temporary.WriteString(content); err != nil {
+	if _, err := temporary.Write(content); err != nil {
 		_ = temporary.Close()
 		return err
 	}

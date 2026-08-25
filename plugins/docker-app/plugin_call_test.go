@@ -1,7 +1,9 @@
 package dockerapp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -125,8 +127,12 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 			t.Fatalf("command=%s %q", name, args)
 		}
 		payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName))
-		if err != nil || string(payload) != compose {
-			t.Fatalf("rehydrated compose=%q err=%v", payload, err)
+		if err != nil {
+			t.Fatalf("rehydrated compose err=%v", err)
+		}
+		dataDir := filepath.Join(root, "media", "data")
+		if !appliedComposePinsBind(t, dir, string(payload), "/data", dataDir) {
+			t.Fatalf("rehydrated compose did not pin ./data to %q: %s", dataDir, payload)
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".env")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("blank update must not materialize an environment file: %v", err)
@@ -157,7 +163,7 @@ func TestControllerCallFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "data/note.txt", "content": "from-panel",
+			"action": "write", "app_id": "media", "path": "data/note.txt", "content": []byte("from-panel"),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -197,12 +203,12 @@ func TestControllerCallFiles(t *testing.T) {
 		root := t.TempDir()
 		controller := newCallController(t, root, unusedDockerRunner(t), nil)
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "keep.txt", "content": "media",
+			"action": "write", "app_id": "media", "path": "keep.txt", "content": []byte("media"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "other", "path": "secret.txt", "content": "other",
+			"action": "write", "app_id": "other", "path": "secret.txt", "content": []byte("other"),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -213,7 +219,7 @@ func TestControllerCallFiles(t *testing.T) {
 		otherSecret := filepath.Join(root, "other", "secret.txt")
 		for _, path := range []string{"/mnt/data/komga", outside, filepath.ToSlash(outside), "..", "../other/secret.txt"} {
 			if _, err := callFiles(t, controller, map[string]any{
-				"action": "write", "app_id": "media", "path": path, "content": "escaped",
+				"action": "write", "app_id": "media", "path": path, "content": []byte("escaped"),
 			}); err == nil {
 				t.Fatalf("write path %q succeeded", path)
 			}
@@ -230,7 +236,7 @@ func TestControllerCallFiles(t *testing.T) {
 				t.Fatalf("mkdir path %q succeeded", path)
 			}
 		}
-		if _, err := callFiles(t, controller, map[string]any{"action": "write", "app_id": "media", "path": "", "content": "x"}); err == nil {
+		if _, err := callFiles(t, controller, map[string]any{"action": "write", "app_id": "media", "path": "", "content": []byte("x")}); err == nil {
 			t.Fatal("empty path succeeded")
 		}
 		if got, err := os.ReadFile(outside); err != nil || string(got) != "keep-outside" {
@@ -265,7 +271,7 @@ func TestControllerCallFiles(t *testing.T) {
 			t.Fatal("read through symlink directory succeeded")
 		}
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": escaped, "content": "escaped",
+			"action": "write", "app_id": "media", "path": escaped, "content": []byte("escaped"),
 		}); err == nil {
 			t.Fatal("write through symlink directory succeeded")
 		}
@@ -293,7 +299,7 @@ func TestControllerCallFiles(t *testing.T) {
 		huge := strings.Repeat("x", MaxConfigBytes+1)
 		target := filepath.Join(root, "media", "huge.txt")
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "huge.txt", "content": huge,
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": []byte(huge),
 		}); err == nil {
 			t.Fatal("oversize write succeeded")
 		}
@@ -304,12 +310,12 @@ func TestControllerCallFiles(t *testing.T) {
 			t.Fatalf("oversize write left temp files: %v", leftovers)
 		}
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "huge.txt", "content": "ok",
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": []byte("ok"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "huge.txt", "content": huge,
+			"action": "write", "app_id": "media", "path": "huge.txt", "content": []byte(huge),
 		}); err == nil {
 			t.Fatal("oversize replace succeeded")
 		}
@@ -359,9 +365,89 @@ func TestControllerCallFiles(t *testing.T) {
 			t.Fatal("files listed absolute host mount")
 		}
 		if _, err := callFiles(t, controller, map[string]any{
-			"action": "write", "app_id": "media", "path": "/mnt/data/komga/config.yaml", "content": "escaped",
+			"action": "write", "app_id": "media", "path": "/mnt/data/komga/config.yaml", "content": []byte("escaped"),
 		}); err == nil {
 			t.Fatal("files wrote absolute host mount")
+		}
+	})
+
+	t.Run("relative-bind-apply-uses-files-workdir", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}), nil)
+		want := []byte("listen: 80\n")
+		if _, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "config.yaml", "content": want,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/app/config.yaml\n      - /mnt/data/komga:/data\n"
+		payload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+			t.Fatal(err)
+		}
+		workdir := filepath.Join(root, "media")
+		configPath := filepath.Join(workdir, "config.yaml")
+		onDisk, err := os.ReadFile(filepath.Join(workdir, ComposeFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !appliedComposePinsBind(t, workdir, string(onDisk), "/app/config.yaml", configPath) {
+			t.Fatalf("apply did not pin ./config.yaml to %q: %s", configPath, onDisk)
+		}
+		if !strings.Contains(string(onDisk), "/mnt/data/komga") {
+			t.Fatalf("absolute host mount rewritten: %s", onDisk)
+		}
+		if strings.Contains(string(onDisk), "./config.yaml") {
+			t.Fatalf("relative bind source left unresolved: %s", onDisk)
+		}
+		got, err := os.ReadFile(configPath)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("AppWorkDir file=%q err=%v", got, err)
+		}
+		read, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": "config.yaml"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFileContent(t, read, string(want))
+	})
+
+	t.Run("write-read-nul-base64", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		controller := newCallController(t, root, unusedDockerRunner(t), nil)
+		want := []byte{'a', 0, 'b', 0xff}
+		raw, err := callFiles(t, controller, map[string]any{
+			"action": "write", "app_id": "media", "path": "blob.bin", "content": want,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertAccepted(t, raw)
+		onDisk, err := os.ReadFile(filepath.Join(root, "media", "blob.bin"))
+		if err != nil || !bytes.Equal(onDisk, want) {
+			t.Fatalf("disk=%q err=%v", onDisk, err)
+		}
+		read, err := callFiles(t, controller, map[string]any{"action": "read", "app_id": "media", "path": "blob.bin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Content []byte `json:"content"`
+		}
+		if err := json.Unmarshal(read, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(decoded.Content, want) {
+			t.Fatalf("content=%q want %q", decoded.Content, want)
+		}
+		if !strings.Contains(string(read), base64.StdEncoding.EncodeToString(want)) {
+			t.Fatalf("read did not use base64 content: %s", read)
 		}
 	})
 
@@ -414,13 +500,33 @@ func assertAccepted(t *testing.T, raw []byte) {
 
 func assertFileContent(t *testing.T, raw []byte, want string) {
 	t.Helper()
-	var decoded map[string]any
+	var decoded struct {
+		Content []byte `json:"content"`
+	}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded["content"] != want {
-		t.Fatalf("content=%#v want %q", decoded, want)
+	if string(decoded.Content) != want {
+		t.Fatalf("content=%q want %q", decoded.Content, want)
 	}
+}
+
+func appliedComposePinsBind(t *testing.T, workdir, document, containerPath, wantHost string) bool {
+	t.Helper()
+	binds, err := ResolveComposeBinds(workdir, document)
+	if err != nil {
+		t.Fatalf("resolve applied compose: %v", err)
+	}
+	want := filepath.Clean(wantHost)
+	for _, bind := range binds {
+		if bind.ContainerPath != containerPath {
+			continue
+		}
+		if filepath.Clean(bind.HostPath) == want || filepath.Clean(bind.Source) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func assertFileEntries(t *testing.T, raw []byte, want []fileListEntry) {
