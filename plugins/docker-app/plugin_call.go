@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
@@ -96,7 +95,7 @@ func (controller *Controller) callEngineReport(ctx context.Context, payload []by
 		return nil, err
 	}
 	report := AgentEngineReport{AgentID: agentID, Online: true}
-	version, err := controller.probeDockerEngine(ctx)
+	version, err := controller.dockerServerVersion(ctx)
 	if err == nil {
 		report.Installed = true
 		report.Version = version
@@ -284,19 +283,6 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 	})
 }
 
-var dockerServerVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$`)
-
-func (controller *Controller) probeDockerEngine(ctx context.Context) (string, error) {
-	version, err := controller.dockerServerVersion(ctx)
-	if err != nil {
-		return "", err
-	}
-	if _, err := controller.runCommand(ctx, "", "docker", "compose", "version", "--short"); err != nil {
-		return "", err
-	}
-	return version, nil
-}
-
 func (controller *Controller) dockerServerVersion(ctx context.Context) (string, error) {
 	output, err := controller.runCommand(ctx, "", "docker", "version", "--format", "{{.Server.Version}}")
 	if err != nil {
@@ -314,10 +300,21 @@ func parseDockerServerVersion(output []byte) (string, error) {
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		line = strings.TrimSpace(text[:i])
 	}
-	if !dockerServerVersionPattern.MatchString(line) {
+	if unusableDockerVersion(line) {
 		return "", errors.New("docker server version is missing")
 	}
-	return line, nil
+	return strings.TrimPrefix(line, "v"), nil
+}
+
+func unusableDockerVersion(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" || lower == "<no value>" {
+		return true
+	}
+	if containsLocalDockerMarker(lower) || strings.Contains(lower, "cannot connect") {
+		return true
+	}
+	return false
 }
 
 func (controller *Controller) dockerImageDigest(ctx context.Context, image string) (string, error) {

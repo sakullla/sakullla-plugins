@@ -202,38 +202,14 @@ func TestControllerCallEngineReportRejectsDaemonErrorText(t *testing.T) {
 	}
 }
 
-func TestControllerCallEngineReportRequiresCompose(t *testing.T) {
-	t.Parallel()
-	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
-		joined := strings.Join(append([]string{name}, args...), " ")
-		if strings.Contains(joined, "compose version") {
-			return nil, errors.New("unknown command")
-		}
-		return []byte("29.7.2\n"), nil
-	})
-	controller := newCallController(t, t.TempDir(), runner, nil)
-	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := DecodeAgentEngineReport(raw)
-	if err != nil || report.Installed || report.Version != "" {
-		t.Fatalf("client-only docker still marked installed: %#v err=%v", report, err)
-	}
-}
-
-func TestControllerCallEngineReportInstalledWhenComposeWorks(t *testing.T) {
+func TestControllerCallEngineReportInstalledWithoutComposePlugin(t *testing.T) {
 	t.Parallel()
 	var argv [][]string
 	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
 		argv = append(argv, append([]string{name}, args...))
 		joined := strings.Join(append([]string{name}, args...), " ")
 		if strings.Contains(joined, "compose version") {
-			return []byte("v2.29.7\n"), nil
+			t.Fatal("engine report must not require docker compose version")
 		}
 		return []byte("29.7.2\n"), nil
 	})
@@ -250,7 +226,7 @@ func TestControllerCallEngineReportInstalledWhenComposeWorks(t *testing.T) {
 	if err != nil || !report.Online || !report.Installed || report.Version != "29.7.2" {
 		t.Fatalf("ready engine report=%#v err=%v", report, err)
 	}
-	if len(argv) != 2 || strings.Join(argv[0], " ") != "docker version --format {{.Server.Version}}" || strings.Join(argv[1], " ") != "docker compose version --short" {
+	if len(argv) != 1 || strings.Join(argv[0], " ") != "docker version --format {{.Server.Version}}" {
 		t.Fatalf("engine probe argv=%#v", argv)
 	}
 }
@@ -265,6 +241,8 @@ func TestParseDockerServerVersion(t *testing.T) {
 	}{
 		{name: "clean", output: "29.7.2\n", want: "29.7.2"},
 		{name: "with-warning", output: "27.1.1\nWARNING: daemon is deprecated\n", want: "27.1.1"},
+		{name: "v-prefix", output: "v27.1.1\n", want: "27.1.1"},
+		{name: "build-meta", output: "20.10.24+azure\n", want: "20.10.24+azure"},
 		{name: "daemon-error", output: "Cannot connect to the Docker daemon", wantErr: true},
 		{name: "no-value", output: "<no value>", wantErr: true},
 		{name: "empty", output: "  \n", wantErr: true},
