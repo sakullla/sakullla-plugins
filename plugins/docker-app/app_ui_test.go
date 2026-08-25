@@ -884,6 +884,11 @@ func TestAppUIRejectsOfflineAgentMutations(t *testing.T) {
 	if logs.Code != http.StatusConflict || !strings.Contains(logs.Body.String(), ErrAgentOffline.Error()) {
 		t.Fatalf("logs status=%d body=%s", logs.Code, logs.Body.String())
 	}
+	files := httptest.NewRecorder()
+	controller.ServeHTTP(files, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"list","path":"."}`))
+	if files.Code != http.StatusConflict || !strings.Contains(files.Body.String(), ErrAgentOffline.Error()) {
+		t.Fatalf("files status=%d body=%s", files.Code, files.Body.String())
+	}
 	deleted := httptest.NewRecorder()
 	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
 	if deleted.Code != http.StatusConflict || !strings.Contains(deleted.Body.String(), ErrAgentOffline.Error()) {
@@ -1449,6 +1454,161 @@ func cssRule(css, selector string) string {
 	return rest[:end]
 }
 
+func TestPageWorkspaceFiles(t *testing.T) {
+	t.Parallel()
+	if appID, action, ok := parseAppAPIPath("/api/apps/media/files"); !ok || appID != "media" || action != "files" {
+		t.Fatalf("parseAppAPIPath files = %q %q %t", appID, action, ok)
+	}
+	page := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
+	html := page.Body.String()
+	scriptRec := httptest.NewRecorder()
+	newUIController(t).ServeHTTP(scriptRec, uiRequest(http.MethodGet, "/app.js", ""))
+	script := scriptRec.Body.String()
+	combined := html + script
+	for _, token := range []string{
+		`id="app-files"`,
+		`id="files-breadcrumb"`,
+		`id="files-list"`,
+		`id="files-mkdir"`,
+		`id="files-upload"`,
+		`id="files-download"`,
+		`id="files-editor"`,
+		`id="files-delete"`,
+		`id="files-save"`,
+		"目录名称",
+		"/files",
+		"postAppFiles",
+		"relativeWorkspacePath",
+	} {
+		if !strings.Contains(combined, token) {
+			t.Fatalf("workspace files UI missing %q", token)
+		}
+	}
+	if !strings.Contains(html, `id="create-form"`) || !strings.Contains(html, `name="compose"`) || !strings.Contains(html, `id="app-files-template"`) {
+		t.Fatal("compose editor was replaced by the workspace files tree")
+	}
+	if strings.Contains(script, "/mnt/data/komga") {
+		t.Fatal("files UI lists an absolute host mount")
+	}
+}
+
+func TestAppUIFilesListsRelativeWorkspaceAndRejectsAbsolutePath(t *testing.T) {
+	t.Parallel()
+	files := &recordingUIFiles{result: map[string]any{
+		"path": ".",
+		"entries": []map[string]any{
+			{"name": "config.yaml", "path": "config.yaml", "dir": false, "size": 12},
+			{"name": "data", "path": "data", "dir": true},
+			{"name": "komga", "path": "/mnt/data/komga", "dir": true},
+		},
+	}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{files: files})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/config.yaml\n      - /mnt/data/komga:/data\n"}`))
+	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
+		t.Fatalf("compose deploy status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"list","path":"."}`))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	body := listed.Body.String()
+	if !strings.Contains(body, `"path":"."`) || !strings.Contains(body, `"name":"config.yaml"`) || !strings.Contains(body, `"path":"data"`) {
+		t.Fatalf("list omitted relative workspace entries: %s", body)
+	}
+	if strings.Contains(body, "/mnt/data/komga") {
+		t.Fatalf("list projected an absolute host mount: %s", body)
+	}
+	if len(files.calls) != 1 || files.calls[0].Payload["action"] != "list" || files.calls[0].Payload["path"] != "." || files.calls[0].App.ID != "media" {
+		t.Fatalf("list files calls=%#v", files.calls)
+	}
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"list","path":"/mnt/data/komga"}`))
+	if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), errWorkspaceFilePath.Error()) {
+		t.Fatalf("absolute list status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	parent := httptest.NewRecorder()
+	controller.ServeHTTP(parent, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"read","path":"../secret"}`))
+	if parent.Code != http.StatusBadRequest || !strings.Contains(parent.Body.String(), errWorkspaceFilePath.Error()) {
+		t.Fatalf("parent read status=%d body=%s", parent.Code, parent.Body.String())
+	}
+	if len(files.calls) != 1 {
+		t.Fatalf("rejected paths still called Files: %#v", files.calls)
+	}
+
+	written := httptest.NewRecorder()
+	files.result = map[string]any{"accepted": true}
+	controller.ServeHTTP(written, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"write","path":"config.yaml","content":"listen: 80\n"}`))
+	if written.Code != http.StatusOK || !strings.Contains(written.Body.String(), `"accepted":true`) {
+		t.Fatalf("write status=%d body=%s", written.Code, written.Body.String())
+	}
+	if len(files.calls) != 2 || files.calls[1].Payload["action"] != "write" || files.calls[1].Payload["path"] != "config.yaml" || files.calls[1].Payload["content"] != "listen: 80\n" {
+		t.Fatalf("write files calls=%#v", files.calls)
+	}
+
+	again := httptest.NewRecorder()
+	controller.ServeHTTP(again, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/config.yaml\n      - /mnt/data/komga:/data\n"}`))
+	if again.Code != http.StatusOK || !strings.Contains(again.Body.String(), `"id":"media"`) {
+		t.Fatalf("compose post after files status=%d body=%s", again.Code, again.Body.String())
+	}
+	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" {
+		t.Fatalf("files mutated apps=%#v", controller.Apps())
+	}
+}
+
+func TestAppUIFilesSurfacesHandleErrorWithoutHostPath(t *testing.T) {
+	t.Parallel()
+	files := &recordingUIFiles{err: errors.New("file path is not relative to app workdir")}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{files: files})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/files", `{"action":"read","path":"config.yaml"}`))
+	if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), errWorkspaceFilePath.Error()) {
+		t.Fatalf("files error status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	if strings.Contains(denied.Body.String(), "/mnt/") || strings.Contains(denied.Body.String(), "fixture-value") {
+		t.Fatalf("files error leaked a host path: %s", denied.Body.String())
+	}
+}
+
+type recordingUIFiles struct {
+	calls  []recordedFilesCall
+	result map[string]any
+	err    error
+}
+
+type recordedFilesCall struct {
+	App     App
+	Payload map[string]any
+}
+
+func (files *recordingUIFiles) Files(_ context.Context, app App, payload map[string]any, result any) error {
+	copied := map[string]any{}
+	for key, value := range payload {
+		copied[key] = value
+	}
+	files.calls = append(files.calls, recordedFilesCall{App: app, Payload: copied})
+	if files.err != nil {
+		return files.err
+	}
+	if result == nil || files.result == nil {
+		return nil
+	}
+	raw, err := json.Marshal(files.result)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, result)
+}
+
 func TestProductionRuntimeWiresReportedEngineSource(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
@@ -1490,6 +1650,7 @@ type uiControllerOptions struct {
 	httpRuleList  HTTPRuleListHandle
 	httpOffers    HTTPBackendOfferReplaceHandle
 	appState      AppStateStore
+	files         AppFilesHandle
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -1513,6 +1674,11 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 	if opts.workDirRoot != nil {
 		workDirRoot = *opts.workDirRoot
 	}
+	runtime.filesRoot = workDirRoot
+	filesHandle := opts.files
+	if filesHandle == nil {
+		filesHandle = runtime
+	}
 	httpRuleList := opts.httpRuleList
 	if httpRuleList == nil {
 		if lister, ok := opts.httpRule.(HTTPRuleListHandle); ok {
@@ -1530,6 +1696,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIStop:             runtime,
 		UIRestart:          runtime,
 		UILogs:             runtime,
+		UIFiles:            filesHandle,
 		UIRemove:           runtime,
 		UIHTTPRule:         opts.httpRule,
 		UIHTTPRuleList:     httpRuleList,
@@ -1703,10 +1870,11 @@ func (handle *recordingHTTPBackendOffers) ReplaceHTTPBackendOffers(_ context.Con
 }
 
 type uiTestRuntime struct {
-	applied  map[string]App
-	running  map[string]bool
-	restarts map[string]int
-	logs     map[string]string
+	applied   map[string]App
+	running   map[string]bool
+	restarts  map[string]int
+	logs      map[string]string
+	filesRoot string
 }
 
 func newUITestRuntime() *uiTestRuntime {
@@ -1722,7 +1890,35 @@ func (runtime *uiTestRuntime) ApplyApp(_ context.Context, app App) error {
 	runtime.applied[app.ID] = app
 	runtime.running[app.ID] = true
 	runtime.logs[app.ID+"/web"] = "listening on :80\n"
+	if runtime.filesRoot != "" {
+		if dir, err := AppWorkDir(runtime.filesRoot, app.ID); err == nil {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+	}
 	return nil
+}
+
+func (runtime *uiTestRuntime) Files(_ context.Context, app App, payload map[string]any, result any) error {
+	if runtime == nil || strings.TrimSpace(runtime.filesRoot) == "" {
+		return ErrTypedHandlesUnavailable
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	var request filesCallRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return errors.New("files payload is invalid")
+	}
+	request.AppID = app.ID
+	encoded, err := executeWorkspaceFiles(runtime.filesRoot, request)
+	if err != nil {
+		return err
+	}
+	if result == nil || len(encoded) == 0 {
+		return nil
+	}
+	return json.Unmarshal(encoded, result)
 }
 
 func (runtime *uiTestRuntime) Start(_ context.Context, app App) error {

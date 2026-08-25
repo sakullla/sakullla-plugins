@@ -1,8 +1,8 @@
 schema_version: 1
 id: docker-app
-version: 0.1.14
+version: 0.1.15
 name: Docker 应用
-description: 通过 compose YAML 管理 Agent 上的应用启停、日志与删除
+description: 通过 compose YAML 管理 Agent 上的应用启停、日志、工作区文件与删除
 compatibility:
   host: "*"
   agent: "*"

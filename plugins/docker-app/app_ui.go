@@ -59,6 +59,14 @@ type appWriteRequest struct {
 	Service    string `json:"service"`
 }
 
+type appFilesRequest struct {
+	Action  string `json:"action"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+var errWorkspaceFilePath = errors.New("只能使用应用工作区内的相对路径")
+
 type installCommandView struct {
 	Script     string `json:"script"`
 	DaemonJSON string `json:"daemon_json,omitempty"`
@@ -73,13 +81,17 @@ type engineAPIView struct {
 }
 
 type appAPIResponse struct {
-	Apps   []appView      `json:"apps,omitempty"`
-	App    *appView       `json:"app,omitempty"`
-	Logs   string         `json:"logs,omitempty"`
-	Error  string         `json:"error,omitempty"`
-	Engine *engineAPIView `json:"engine,omitempty"`
-	Rules  []HostHTTPRule `json:"rules,omitempty"`
-	Access struct {
+	Apps     []appView            `json:"apps,omitempty"`
+	App      *appView             `json:"app,omitempty"`
+	Logs     string               `json:"logs,omitempty"`
+	Error    string               `json:"error,omitempty"`
+	Engine   *engineAPIView       `json:"engine,omitempty"`
+	Rules    []HostHTTPRule       `json:"rules,omitempty"`
+	Path     string               `json:"path,omitempty"`
+	Content  string               `json:"content,omitempty"`
+	Entries  []workspaceFileEntry `json:"entries,omitempty"`
+	Accepted bool                 `json:"accepted,omitempty"`
+	Access   struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -383,9 +395,116 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Logs: text})
+	case "files":
+		controller.serveAppFiles(writer, request, app)
 	default:
 		http.Error(writer, "Docker 应用页未找到", http.StatusNotFound)
 	}
+}
+
+func (controller *Controller) serveAppFiles(writer http.ResponseWriter, request *http.Request, app App) {
+	body, err := decodeAppFiles(request)
+	if err != nil {
+		var maxBytes *http.MaxBytesError
+		if errors.As(err, &maxBytes) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "文件超过 1MiB 上限"})
+			return
+		}
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "files payload is invalid"})
+		return
+	}
+	action := strings.TrimSpace(body.Action)
+	switch action {
+	case "list", "mkdir", "read", "write", "delete":
+	default:
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "未知的文件操作"})
+		return
+	}
+	filePath := strings.TrimSpace(body.Path)
+	if filePath == "" {
+		filePath = "."
+	}
+	if rejectedWorkspaceAPIPath(filePath) {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: errWorkspaceFilePath.Error()})
+		return
+	}
+	if controller.uiFiles == nil {
+		writeAppJSON(writer, appStatus(ErrTypedHandlesUnavailable), appAPIResponse{Error: publicAppActionError(ErrTypedHandlesUnavailable, "files")})
+		return
+	}
+	payload := map[string]any{"action": action, "path": filePath}
+	if action == "write" {
+		if len(body.Content) > MaxConfigBytes {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "文件超过 1MiB 上限"})
+			return
+		}
+		payload["content"] = body.Content
+	}
+	var result map[string]any
+	if err := controller.uiFiles.Files(request.Context(), app, payload, &result); err != nil {
+		writeAppJSON(writer, filesStatus(err), appAPIResponse{Error: publicAppActionError(filesCallError(err), "files")})
+		return
+	}
+	writeAppJSON(writer, http.StatusOK, projectAppFilesResponse(result))
+}
+
+func rejectedWorkspaceAPIPath(filePath string) bool {
+	trimmed := strings.TrimSpace(filePath)
+	if trimmed == "" || strings.Contains(trimmed, "..") {
+		return true
+	}
+	_, err := normalizeWorkspaceRelativePath(trimmed)
+	return err != nil
+}
+
+func projectAppFilesResponse(result map[string]any) appAPIResponse {
+	if len(result) == 0 {
+		return appAPIResponse{}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return appAPIResponse{}
+	}
+	var decoded struct {
+		Path     string               `json:"path"`
+		Content  string               `json:"content"`
+		Entries  []workspaceFileEntry `json:"entries"`
+		Accepted bool                 `json:"accepted"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return appAPIResponse{}
+	}
+	path := strings.TrimSpace(decoded.Path)
+	if path != "" && rejectedWorkspaceAPIPath(path) {
+		path = ""
+	}
+	entries := make([]workspaceFileEntry, 0, len(decoded.Entries))
+	for _, entry := range decoded.Entries {
+		entryPath := strings.TrimSpace(entry.Path)
+		if entryPath == "" {
+			entryPath = strings.TrimSpace(entry.Name)
+		}
+		if rejectedWorkspaceAPIPath(entryPath) || rejectedWorkspaceAPIPath(entry.Name) {
+			continue
+		}
+		entry.Path = entryPath
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		entries = nil
+	}
+	return appAPIResponse{Path: path, Content: decoded.Content, Entries: entries, Accepted: decoded.Accepted}
+}
+
+func filesStatus(err error) int {
+	if errors.Is(err, ErrBoundExceeded) || errors.Is(err, errWorkspaceFilePath) {
+		return http.StatusBadRequest
+	}
+	text := err.Error()
+	if strings.Contains(text, "file path is not relative") || strings.Contains(text, "files action") || strings.Contains(text, "file exceeds") || strings.Contains(text, "file content is invalid") {
+		return http.StatusBadRequest
+	}
+	return appStatus(err)
 }
 
 func (controller *Controller) requireMutableAgent(ctx context.Context, app App) error {
@@ -757,11 +876,21 @@ func parseAppAPIPath(path string) (appID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "delete", "start", "stop", "restart", "update", "http-rule", "http-rule-delete", "logs":
+	case "delete", "start", "stop", "restart", "update", "http-rule", "http-rule-delete", "logs", "files":
 		return decoded, action, true
 	default:
 		return "", "", false
 	}
+}
+
+func decodeAppFiles(request *http.Request) (appFilesRequest, error) {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, request.Body, MaxConfigBytes))
+	decoder.DisallowUnknownFields()
+	var body appFilesRequest
+	if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return appFilesRequest{}, err
+	}
+	return body, nil
 }
 
 func decodeAppWrite(request *http.Request) (appWriteRequest, error) {
@@ -782,7 +911,7 @@ func appStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusForbidden
-	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrEmptyHTTPRuleRef), errors.Is(err, ErrUnknownHTTPRule), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview):
+	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrEmptyHTTPRuleRef), errors.Is(err, ErrUnknownHTTPRule), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview), errors.Is(err, errWorkspaceFilePath):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
 		return http.StatusConflict
@@ -819,6 +948,8 @@ func publicAppError(err error) string {
 		return ErrUnknownService.Error()
 	case errors.Is(err, ErrInvalidPreview):
 		return ErrInvalidPreview.Error()
+	case errors.Is(err, errWorkspaceFilePath):
+		return errWorkspaceFilePath.Error()
 	case errors.Is(err, ErrEngineNotReady):
 		return ErrEngineNotReady.Error()
 	case errors.Is(err, ErrAgentOffline):
@@ -835,6 +966,11 @@ func publicAppError(err error) string {
 func publicAppActionError(err error, action string) string {
 	if errors.Is(err, ErrHTTPRuleListFailed) {
 		return appendPublicCause("HTTP 规则列表对账失败，请刷新页面后重试", err)
+	}
+	if action == "files" {
+		if msg := filesPublicMessage(err); msg != "" {
+			return msg
+		}
 	}
 	if !errors.Is(err, ErrOperationFailed) && !errors.Is(err, ErrTypedHandlesUnavailable) {
 		return publicAppError(err)
@@ -867,10 +1003,53 @@ func publicAppActionError(err error, action string) string {
 		staged = "HTTP 规则列表对账失败，请刷新页面后重试"
 	case "logs":
 		staged = "读取 Docker Compose 日志失败，请检查服务名和目标 Agent 状态"
+	case "files":
+		staged = "工作区文件操作失败，请检查相对路径和目标 Agent 状态"
 	default:
 		return ErrOperationFailed.Error()
 	}
 	return appendPublicCause(staged, err)
+}
+
+func filesCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if filesPublicMessage(err) != "" || errors.Is(err, ErrAgentOffline) || errors.Is(err, ErrTypedHandlesUnavailable) || errors.Is(err, ErrEngineNotReady) || errors.Is(err, errWorkspaceFilePath) || errors.Is(err, ErrBoundExceeded) {
+		return err
+	}
+	return safeFailure(ErrOperationFailed, err)
+}
+
+func filesPublicMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, errWorkspaceFilePath) {
+		return errWorkspaceFilePath.Error()
+	}
+	if errors.Is(err, ErrBoundExceeded) {
+		return "文件超过 1MiB 上限"
+	}
+	text := err.Error()
+	switch {
+	case strings.Contains(text, "file path is not relative"), strings.Contains(text, "relative bind escapes"):
+		return errWorkspaceFilePath.Error()
+	case strings.Contains(text, "file exceeds"):
+		return "文件超过 1MiB 上限"
+	case strings.Contains(text, "file content is invalid"):
+		return "文件内容无效"
+	case strings.Contains(text, "path is not a directory"):
+		return "路径不是目录"
+	case strings.Contains(text, "path is a directory"):
+		return "路径是目录"
+	case strings.Contains(text, "app workdir cannot be deleted"):
+		return "不能删除应用工作区根目录"
+	case strings.Contains(text, "files action"):
+		return "未知的文件操作"
+	default:
+		return ""
+	}
 }
 
 func appendPublicCause(staged string, err error) string {

@@ -55,6 +55,15 @@ func (function AppRemoveExecutorFunc) RemoveApp(ctx context.Context, app App) er
 	return function(ctx, app)
 }
 
+type AppFilesHandle interface {
+	Files(context.Context, App, map[string]any, any) error
+}
+type AppFilesHandleFunc func(context.Context, App, map[string]any, any) error
+
+func (function AppFilesHandleFunc) Files(ctx context.Context, app App, payload map[string]any, result any) error {
+	return function(ctx, app, payload, result)
+}
+
 func AppFromCompose(appID, generation, document string) (App, error) {
 	_, app, err := ParseComposeDocument(document, appID, generation, "")
 	return app, err

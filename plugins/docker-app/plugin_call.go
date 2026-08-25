@@ -310,8 +310,12 @@ func (controller *Controller) callFiles(ctx context.Context, payload []byte) ([]
 	if !validID(request.AppID) {
 		return nil, errors.New("files app id is invalid")
 	}
+	return executeWorkspaceFiles(controller.executionWorkDirRoot(), request)
+}
+
+func executeWorkspaceFiles(root string, request filesCallRequest) ([]byte, error) {
 	action := strings.TrimSpace(request.Action)
-	workdir, resolved, err := resolveWorkspaceFilePath(controller.executionWorkDirRoot(), request.AppID, request.Path)
+	workdir, resolved, err := resolveWorkspaceFilePath(root, request.AppID, request.Path)
 	if err != nil {
 		return nil, err
 	}

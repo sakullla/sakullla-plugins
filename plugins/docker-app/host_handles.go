@@ -497,6 +497,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIStop = runtime
 	config.UIRestart = runtime
 	config.UILogs = runtime
+	config.UIFiles = runtime
 	config.UIRemove = runtime
 	config.UIHTTPRule = runtime
 	config.UIHTTPRuleList = runtime

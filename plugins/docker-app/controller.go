@@ -72,6 +72,7 @@ type ControllerConfig struct {
 	UIStop                                                     StopExecutor
 	UIRestart                                                  RestartExecutor
 	UILogs                                                     ServiceLogReader
+	UIFiles                                                    AppFilesHandle
 	UIRemove                                                   AppRemoveExecutor
 	UIHTTPRule                                                 HTTPRuleCreateHandle
 	UIHTTPRuleList                                             HTTPRuleListHandle
@@ -102,6 +103,7 @@ type Controller struct {
 	uiStop             StopExecutor
 	uiRestart          RestartExecutor
 	uiLogs             ServiceLogReader
+	uiFiles            AppFilesHandle
 	uiRemove           AppRemoveExecutor
 	uiHTTPRule         HTTPRuleCreateHandle
 	uiHTTPRuleList     HTTPRuleListHandle
@@ -155,7 +157,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	controller := &Controller{
 		admission: config.Admission, prepareGate: config.PrepareGate,
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
-		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
+		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiFiles: config.UIFiles, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
 		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,

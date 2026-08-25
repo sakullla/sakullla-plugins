@@ -750,6 +750,340 @@ const postAppAction = async (app, action, body = {}) => {
   await renderWorkspace();
 };
 
+const MAX_WORKSPACE_FILE_BYTES = 1048576;
+const workspacePathError = "只能使用应用工作区内的相对路径";
+
+const relativeWorkspacePath = (value) => {
+  const path = String(value || "").trim().replace(/\\/g, "/");
+  if (!path || path.includes("..")) return "";
+  if (path.startsWith("/") || path.startsWith("~")) return "";
+  if (/^[a-zA-Z]:\//.test(path)) return "";
+  return path;
+};
+
+const joinWorkspacePath = (dir, name) => {
+  const leaf = String(name || "").trim().replace(/\\/g, "/");
+  if (!leaf || leaf.includes("/") || leaf.includes("..") || leaf === "." ) return "";
+  const base = relativeWorkspacePath(dir);
+  if (!base || base === ".") return leaf;
+  return `${base}/${leaf}`;
+};
+
+const looksLikeText = (value) => {
+  if (typeof value !== "string" || value.includes("\u0000")) return false;
+  let bad = 0;
+  const limit = Math.min(value.length, 4096);
+  for (let i = 0; i < limit; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 9 || (code > 13 && code < 32) || code === 127) bad += 1;
+  }
+  return bad < 8;
+};
+
+const downloadTextFile = (filename, content) => {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "file.txt";
+  link.click();
+  URL.revokeObjectURL(url);
+};
+
+const postAppFiles = async (app, body) => {
+  const path = relativeWorkspacePath(body.path);
+  if (!path) throw new Error(workspacePathError);
+  const payload = { action: body.action, path };
+  if (Object.prototype.hasOwnProperty.call(body, "content")) payload.content = body.content;
+  return sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/files`, payload);
+};
+
+const mountAppFiles = (app) => {
+  const template = document.querySelector("#app-files-template");
+  const fallback = document.createElement("section");
+  fallback.className = "app-section app-files";
+  if (!template) return fallback;
+  const fragment = template.content.cloneNode(true);
+  const section = fragment.querySelector("#app-files") || fallback;
+  const breadcrumb = fragment.querySelector("#files-breadcrumb");
+  const listNode = fragment.querySelector("#files-list");
+  const emptyNode = fragment.querySelector(".files-empty");
+  const mkdirBtn = fragment.querySelector("#files-mkdir");
+  const mkdirName = fragment.querySelector("#files-mkdir-name");
+  const uploadBtn = fragment.querySelector("#files-upload");
+  const uploadInput = fragment.querySelector("[data-files-input]");
+  const downloadBtn = fragment.querySelector("#files-download");
+  const deleteBtn = fragment.querySelector("#files-delete");
+  const editor = fragment.querySelector("#files-editor");
+  const editorInput = editor ? editor.querySelector("textarea") : null;
+  const saveBtn = fragment.querySelector("#files-save");
+  const binaryHint = fragment.querySelector("[data-files-binary]");
+  const prefix = `app-files-${app.id}`;
+  section.id = prefix;
+  if (breadcrumb) breadcrumb.id = `${prefix}-breadcrumb`;
+  if (listNode) listNode.id = `${prefix}-list`;
+  if (mkdirBtn) mkdirBtn.id = `${prefix}-mkdir`;
+  if (mkdirName) mkdirName.id = `${prefix}-mkdir-name`;
+  if (uploadBtn) uploadBtn.id = `${prefix}-upload`;
+  if (downloadBtn) downloadBtn.id = `${prefix}-download`;
+  if (deleteBtn) deleteBtn.id = `${prefix}-delete`;
+  if (editor) editor.id = `${prefix}-editor`;
+  if (saveBtn) saveBtn.id = `${prefix}-save`;
+
+  let currentPath = ".";
+  let selectedPath = "";
+  let selectedName = "";
+  let selectedDir = true;
+
+  const hideEditor = () => {
+    if (editor) editor.hidden = true;
+    if (editorInput) editorInput.value = "";
+    if (binaryHint) binaryHint.hidden = true;
+  };
+
+  const renderBreadcrumb = () => {
+    if (!breadcrumb) return;
+    breadcrumb.replaceChildren();
+    const addCrumb = (label, path, current) => {
+      if (current) {
+        const currentNode = document.createElement("span");
+        currentNode.textContent = label;
+        breadcrumb.append(currentNode);
+        return;
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn-link";
+      button.textContent = label;
+      button.addEventListener("click", () => loadList(path));
+      breadcrumb.append(button);
+    };
+    const parts = currentPath === "." ? [] : currentPath.split("/").filter(Boolean);
+    addCrumb("工作区", ".", parts.length === 0);
+    let acc = "";
+    parts.forEach((part, index) => {
+      const sep = document.createElement("span");
+      sep.textContent = "/";
+      breadcrumb.append(sep);
+      acc = acc ? `${acc}/${part}` : part;
+      addCrumb(part, acc, index === parts.length - 1);
+    });
+  };
+
+  const selectEntry = (path, name, isDir) => {
+    selectedPath = path;
+    selectedName = name;
+    selectedDir = isDir;
+  };
+
+  const openFile = async (path, name) => {
+    const relative = relativeWorkspacePath(path);
+    if (!relative) {
+      showStatus(workspacePathError, true);
+      return;
+    }
+    try {
+      const payload = await postAppFiles(app, { action: "read", path: relative });
+      selectEntry(relative, name || relative.split("/").pop(), false);
+      if (!editor) return;
+      editor.hidden = false;
+      const content = typeof payload.content === "string" ? payload.content : "";
+      const text = looksLikeText(content);
+      if (binaryHint) binaryHint.hidden = text;
+      if (editorInput) {
+        editorInput.value = text ? content : "";
+        editorInput.hidden = !text;
+      }
+      if (saveBtn) saveBtn.hidden = !text;
+      showStatus("已打开工作区文件。", false);
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  };
+
+  const loadList = async (path) => {
+    const relative = relativeWorkspacePath(path);
+    if (!relative) {
+      showStatus(workspacePathError, true);
+      return;
+    }
+    hideEditor();
+    try {
+      const payload = await postAppFiles(app, { action: "list", path: relative });
+      currentPath = relativeWorkspacePath(payload.path) || relative;
+      selectEntry(currentPath, currentPath === "." ? "工作区" : currentPath.split("/").pop(), true);
+      renderBreadcrumb();
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      if (listNode) listNode.replaceChildren();
+      entries.forEach((entry) => {
+        const entryPath = relativeWorkspacePath(entry.path || entry.name);
+        if (!entryPath) return;
+        const item = document.createElement("li");
+        const nameWrap = document.createElement("div");
+        nameWrap.className = "files-list-name";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "btn-link";
+        open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
+        open.addEventListener("click", () => {
+          if (entry.dir) loadList(entryPath);
+          else openFile(entryPath, entry.name || entryPath);
+        });
+        nameWrap.append(open);
+        const actions = document.createElement("div");
+        actions.className = "files-toolbar";
+        if (!entry.dir) {
+          const download = document.createElement("button");
+          download.type = "button";
+          download.className = "btn-link";
+          download.textContent = "下载";
+          download.addEventListener("click", async () => {
+            try {
+              const file = await postAppFiles(app, { action: "read", path: entryPath });
+              downloadTextFile(entry.name || entryPath.split("/").pop(), file.content || "");
+              showStatus("已开始下载。", false);
+            } catch (error) {
+              showStatus(error.message, true);
+            }
+          });
+          actions.append(download);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn-link danger";
+        remove.textContent = "删除";
+        remove.addEventListener("click", () => removePath(entryPath, entry.name || entryPath));
+        actions.append(remove);
+        item.append(nameWrap, actions);
+        if (listNode) listNode.append(item);
+      });
+      if (emptyNode) emptyNode.hidden = entries.length !== 0;
+    } catch (error) {
+      if (listNode) listNode.replaceChildren();
+      if (emptyNode) emptyNode.hidden = true;
+      showStatus(error.message, true);
+    }
+  };
+
+  const removePath = async (path, name) => {
+    const relative = relativeWorkspacePath(path);
+    if (!relative || relative === ".") {
+      showStatus(relative === "." ? "不能删除应用工作区根目录" : workspacePathError, true);
+      return;
+    }
+    if (!window.confirm(`确认删除 ${name || relative}？取消不会更改工作区。`)) {
+      showStatus("已取消，工作区未更改。", false);
+      return;
+    }
+    setBusy(true);
+    try {
+      await postAppFiles(app, { action: "delete", path: relative });
+      if (selectedPath === relative) hideEditor();
+      showStatus("已删除工作区文件。", false);
+      await loadList(currentPath);
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (mkdirBtn) {
+    mkdirBtn.addEventListener("click", async () => {
+      if (busy) return;
+      const name = mkdirName ? mkdirName.value.trim() : "";
+      if (!name) return;
+      const next = joinWorkspacePath(currentPath, name);
+      if (!next) {
+        showStatus(workspacePathError, true);
+        return;
+      }
+      setBusy(true);
+      try {
+        await postAppFiles(app, { action: "mkdir", path: next });
+        if (mkdirName) mkdirName.value = "";
+        showStatus("已新建目录。", false);
+        await loadList(currentPath);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+  }
+  if (uploadBtn && uploadInput) {
+    uploadBtn.addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files && uploadInput.files[0];
+      uploadInput.value = "";
+      if (!file) return;
+      const next = joinWorkspacePath(currentPath, file.name);
+      if (!next) {
+        showStatus(workspacePathError, true);
+        return;
+      }
+      if (file.size > MAX_WORKSPACE_FILE_BYTES) {
+        showStatus("文件超过 1MiB 上限", true);
+        return;
+      }
+      const content = await file.text();
+      setBusy(true);
+      try {
+        await postAppFiles(app, { action: "write", path: next, content });
+        showStatus("已上传工作区文件。", false);
+        await loadList(currentPath);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+  }
+  if (downloadBtn) {
+    downloadBtn.addEventListener("click", async () => {
+      if (busy) return;
+      if (!selectedPath || selectedDir) {
+        showStatus("请先打开一个文件再下载。", true);
+        return;
+      }
+      try {
+        const file = await postAppFiles(app, { action: "read", path: selectedPath });
+        downloadTextFile(selectedName || selectedPath.split("/").pop(), file.content || "");
+        showStatus("已开始下载。", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    });
+  }
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", () => {
+      if (busy) return;
+      if (!selectedPath || selectedPath === ".") {
+        showStatus("请先选择要删除的文件或目录。", true);
+        return;
+      }
+      removePath(selectedPath, selectedName);
+    });
+  }
+  if (saveBtn) {
+    saveBtn.addEventListener("click", async () => {
+      if (busy || !selectedPath || selectedDir) return;
+      setBusy(true);
+      try {
+        await postAppFiles(app, { action: "write", path: selectedPath, content: editorInput ? editorInput.value : "" });
+        showStatus("已保存工作区文件。", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+  }
+
+  loadList(".");
+  return section;
+};
+
 const actionButton = (action, className, label) => {
   const button = document.createElement("button");
   button.type = "button";
@@ -877,6 +1211,8 @@ const renderApp = (app) => {
     details.append(summary, pre);
     card.append(details);
   }
+
+  card.append(mountAppFiles(app));
 
   if (services.length) {
     const logsPanel = document.createElement("div");

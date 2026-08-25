@@ -13,7 +13,7 @@
       <div class="page-head-copy">
         <p class="kicker">Docker 应用</p>
         <h1>组内 compose 应用</h1>
-        <p class="lede">选一台在线节点，把 compose 部署到该 Agent。引擎状态与应用镜像版本分开显示。有发布端口时可管理入口域名。</p>
+        <p class="lede">选一台在线节点，把 compose 部署到该 Agent。引擎状态与应用镜像版本分开显示。有发布端口时可管理入口域名。已部署应用可管理其工作区相对文件。</p>
       </div>
       <div class="page-head-agent">
         <div class="node-card">
@@ -111,7 +111,7 @@
             <button type="submit" class="btn-primary" id="create-submit">部署</button>
           </div>
         </form>
-        <p class="hint">./ 相对路径会映射到该应用工作目录。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
+        <p class="hint">./ 相对路径会映射到该应用工作目录，已部署应用可管理这些相对文件。绝对 host 路径不会进入文件列表。Compose YAML 仍用本页编辑框。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
       </section>
       <section class="panel" id="app-list-panel" aria-labelledby="app-list-title">
         <div class="section-head">
@@ -122,6 +122,31 @@
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
     </section>
+    <template id="app-files-template">
+      <section class="app-section app-files" id="app-files">
+        <h4>文件</h4>
+        <nav id="files-breadcrumb" class="files-breadcrumb" aria-label="工作区路径"></nav>
+        <div class="files-toolbar">
+          <label>目录名称 <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false"></label>
+          <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
+          <button id="files-upload" type="button" class="btn-secondary">上传</button>
+          <input data-files-input type="file" hidden>
+          <button id="files-download" type="button" class="btn-secondary">下载</button>
+          <button id="files-delete" type="button" class="btn-link danger">删除</button>
+        </div>
+        <ul id="files-list" class="files-list"></ul>
+        <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>
+        <div id="files-editor" class="files-editor" hidden>
+          <label>文本
+            <textarea spellcheck="false"></textarea>
+          </label>
+          <div class="files-editor-actions">
+            <button id="files-save" type="button" class="btn-primary">保存</button>
+          </div>
+          <p class="hint" data-files-binary hidden>该文件不适合文本编辑，请下载或重新上传。</p>
+        </div>
+      </section>
+    </template>
   </main>
   <script src="app.js" defer></script>
 </body>
