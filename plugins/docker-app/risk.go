@@ -116,7 +116,7 @@ func canonicalComposePlan(plan ComposePlan) (ComposePlan, error) {
 			return ComposePlan{}, errors.New("compose image is invalid")
 		}
 		var err error
-		if service.SecretRefs, err = sortedUnique(service.SecretRefs, 32); err != nil {
+		if service.SecretRefs, err = sortedUnique(service.SecretRefs, MaxSecretRefs); err != nil {
 			return ComposePlan{}, err
 		}
 		if service.HostMounts, err = sortedUnique(service.HostMounts, MaxCollectionItems); err != nil {
@@ -156,7 +156,7 @@ func canonicalComposePlan(plan ComposePlan) (ComposePlan, error) {
 	for _, service := range normalized.Services {
 		refs = append(refs, service.SecretRefs...)
 	}
-	if normalized.SecretRefs, err = sortedUnique(refs, 32); err != nil {
+	if normalized.SecretRefs, err = sortedUnique(refs, MaxSecretRefs); err != nil {
 		return ComposePlan{}, err
 	}
 	if normalized.Image == "" && len(normalized.Services) > 0 {

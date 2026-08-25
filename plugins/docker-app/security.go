@@ -92,7 +92,7 @@ type TransientCredential struct {
 // Material is wiped before return and is never copied into refs or errors.
 func BindSecretRefs(credentials []TransientCredential) ([]string, error) {
 	defer wipeCredentials(credentials)
-	if len(credentials) > 32 {
+	if len(credentials) > MaxSecretRefs {
 		return nil, fmt.Errorf("%w: secret refs", ErrBoundExceeded)
 	}
 	refs := make([]string, 0, len(credentials))
@@ -102,7 +102,7 @@ func BindSecretRefs(credentials []TransientCredential) ([]string, error) {
 		}
 		refs = append(refs, credential.Name)
 	}
-	normalized, err := sortedUnique(refs, 32)
+	normalized, err := sortedUnique(refs, MaxSecretRefs)
 	if err != nil {
 		if errors.Is(err, ErrBoundExceeded) {
 			return nil, err
@@ -120,7 +120,7 @@ func AppWithBoundSecrets(app App, credentials []TransientCredential) (App, error
 		return App{}, err
 	}
 	combined := append(append([]string(nil), app.SecretRefs...), refs...)
-	normalized, err := sortedUnique(combined, 32)
+	normalized, err := sortedUnique(combined, MaxSecretRefs)
 	if err != nil {
 		if errors.Is(err, ErrBoundExceeded) {
 			return App{}, err

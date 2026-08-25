@@ -25,6 +25,7 @@ const (
 	MaxDiscoveries           = 512
 	MaxComposeServices       = 128
 	MaxCollectionItems       = 256
+	MaxSecretRefs            = MaxCollectionItems
 )
 
 var resourceGroupRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
@@ -80,7 +81,7 @@ func (app App) Validate() error {
 	if app.RuleRef != "" && !boundedText(app.RuleRef, 128) {
 		return errors.New("rule_ref is invalid")
 	}
-	if len(app.SecretRefs) > 32 {
+	if len(app.SecretRefs) > MaxSecretRefs {
 		return fmt.Errorf("%w: secret refs", ErrBoundExceeded)
 	}
 	for _, reference := range app.SecretRefs {
@@ -88,7 +89,7 @@ func (app App) Validate() error {
 			return errors.New("secret reference is invalid")
 		}
 	}
-	if _, err := sortedUnique(app.SecretRefs, 32); err != nil {
+	if _, err := sortedUnique(app.SecretRefs, MaxSecretRefs); err != nil {
 		return err
 	}
 	return nil
@@ -181,7 +182,7 @@ func (app *App) bindCompose() error {
 		seen[reference] = struct{}{}
 		combined = append(combined, reference)
 	}
-	normalized, err := sortedUnique(combined, 32)
+	normalized, err := sortedUnique(combined, MaxSecretRefs)
 	if err != nil {
 		return err
 	}
