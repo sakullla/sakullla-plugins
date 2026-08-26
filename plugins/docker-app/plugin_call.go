@@ -594,7 +594,7 @@ func (controller *Controller) executionWorkDirRoot() string {
 }
 
 func defaultExecutionWorkDirRoot() string {
-	if env := strings.TrimSpace(os.Getenv("NRE_DOCKER_APP_WORKDIR")); env != "" {
+	if env := strings.TrimSpace(os.Getenv("NRE_APP_WORKDIR")); env != "" {
 		return env
 	}
 	if home, err := os.UserHomeDir(); err == nil {

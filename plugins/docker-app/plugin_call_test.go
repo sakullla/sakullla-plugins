@@ -14,7 +14,7 @@ import (
 )
 
 func TestDefaultExecutionWorkDirRootIsDurableOutsideTempDir(t *testing.T) {
-	t.Setenv("NRE_DOCKER_APP_WORKDIR", "")
+	t.Setenv("NRE_APP_WORKDIR", "")
 	root := defaultExecutionWorkDirRoot()
 	if root == "" {
 		t.Fatal("durable workdir root is empty")
