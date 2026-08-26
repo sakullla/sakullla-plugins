@@ -37,7 +37,7 @@ func TestAgentExecutionFacePreparesWithoutServingUI(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginUIEndpoint, "unix:"+uiSocket)
 	t.Setenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT", "unix:"+filepath.Join(root, "docker-proxy.sock"))
 	t.Setenv("NRE_PLUGIN_DOCKER_CLI", filepath.Join(root, "docker"))
-	t.Setenv("NRE_APP_WORKDIR", filepath.Join(root, "apps"))
+	t.Setenv("NRE_PLUGIN_APP_WORKDIR", filepath.Join(root, "apps"))
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 
 	ctx, cancel := context.WithCancel(context.Background())

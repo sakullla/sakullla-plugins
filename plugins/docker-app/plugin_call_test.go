@@ -14,7 +14,7 @@ import (
 )
 
 func TestDefaultExecutionWorkDirRootIsDurableOutsideTempDir(t *testing.T) {
-	t.Setenv("NRE_APP_WORKDIR", "")
+	t.Setenv("NRE_PLUGIN_APP_WORKDIR", "")
 	root := defaultExecutionWorkDirRoot()
 	if root == "" {
 		t.Fatal("durable workdir root is empty")
@@ -23,6 +23,15 @@ func TestDefaultExecutionWorkDirRootIsDurableOutsideTempDir(t *testing.T) {
 	cleaned := filepath.Clean(root)
 	if cleaned == filepath.Join(temp, "nre-docker-app") || strings.HasPrefix(cleaned, temp+string(os.PathSeparator)) {
 		t.Fatalf("workdir %q still uses TempDir %q", root, temp)
+	}
+}
+
+func TestDefaultExecutionWorkDirRootUsesPluginAppWorkdir(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "plugin-apps")
+	t.Setenv("NRE_PLUGIN_APP_WORKDIR", want)
+	got := defaultExecutionWorkDirRoot()
+	if got != want {
+		t.Fatalf("workdir root = %q want NRE_PLUGIN_APP_WORKDIR %q", got, want)
 	}
 }
 

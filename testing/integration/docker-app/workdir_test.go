@@ -319,9 +319,9 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
-func TestRelativeFilesStayInAppWorkDirWhenNREAppWorkdirSet(t *testing.T) {
+func TestRelativeFilesStayInAppWorkDirWhenPluginAppWorkdirSet(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("NRE_APP_WORKDIR", root)
+	t.Setenv("NRE_PLUGIN_APP_WORKDIR", root)
 	var composeDir string
 	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
