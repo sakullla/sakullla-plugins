@@ -132,7 +132,7 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 	root := t.TempDir()
 	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n"
 	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
-		if name != "docker" || strings.Join(args, " ") != "compose restart" {
+		if name != "docker" || strings.Join(args, " ") != "compose up -d" {
 			t.Fatalf("command=%s %q", name, args)
 		}
 		payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName))
@@ -152,7 +152,7 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 		return []byte("ok"), nil
 	})
 	controller := newCallController(t, root, runner, nil)
-	payload, err := json.Marshal(map[string]any{"action": "restart", "app_id": "media", "compose": compose})
+	payload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +161,39 @@ func TestControllerCallComposeActionRehydratesGenerationWorkspace(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(root, "media", "data")); err != nil {
 		t.Fatalf("relative data directory was not restored: %v", err)
+	}
+}
+
+func TestControllerCallComposeRestartUsesExistingWorkspace(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workdir := filepath.Join(root, "media")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(workdir, ComposeFileName)
+	if err := os.WriteFile(composePath, []byte("services:\n  web:\n    image: nginx:1.27\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(composePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+		if dir != workdir || name != "docker" || strings.Join(args, " ") != "compose restart" {
+			t.Fatalf("command dir=%q name=%s %q", dir, name, args)
+		}
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "restart", "app_id": "media",
+		"compose": "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
 	}
 }
 

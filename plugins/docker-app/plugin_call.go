@@ -156,7 +156,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
 	case "start", "stop", "restart", "remove", "pull", "ready", "drain", "remove-instance":
-		dir, err := controller.prepareComposeCallWorkspace(root, request)
+		dir, err := controller.composeActionWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +174,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
-		dir, err := controller.prepareComposeCallWorkspace(root, request)
+		dir, err := controller.composeActionWorkspace(root, request)
 		if err != nil {
 			return nil, err
 		}
@@ -218,6 +218,22 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		})
 	default:
 		return nil, fmt.Errorf("compose action %q is unknown", action)
+	}
+}
+
+func (controller *Controller) composeActionWorkspace(root string, request composeCallRequest) (string, error) {
+	if !composeRestageAction(request.Action) {
+		return AppWorkDir(root, request.AppID)
+	}
+	return controller.prepareComposeCallWorkspace(root, request)
+}
+
+func composeRestageAction(action string) bool {
+	switch strings.TrimSpace(action) {
+	case "apply", "start-instance", "inspect", "remove":
+		return true
+	default:
+		return false
 	}
 }
 

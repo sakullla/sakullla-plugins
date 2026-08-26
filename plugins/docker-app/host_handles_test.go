@@ -83,6 +83,16 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" {
 		t.Fatalf("compose apply call = %#v payload=%#v", calls[1], apply)
 	}
+	for _, call := range calls[2:6] {
+		payload := decodePluginCallInner(t, decodePluginCallRequest(t, call))
+		if _, ok := payload["compose"]; ok {
+			t.Fatalf("lifecycle call restaged compose: %#v", payload)
+		}
+	}
+	remove := decodePluginCallInner(t, decodePluginCallRequest(t, calls[6]))
+	if remove["action"] != "remove" || remove["compose"] == nil {
+		t.Fatalf("remove omitted compose restage: %#v", remove)
+	}
 	for index, call := range calls[1:] {
 		request := decodePluginCallRequest(t, call)
 		if request.Name != pluginCallComposeName {

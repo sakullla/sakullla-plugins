@@ -405,7 +405,10 @@ func (runtime *hostCapabilityRuntime) composeApp(ctx context.Context, app App, p
 	}
 	payload["agent_id"] = app.AgentID
 	payload["app_id"] = app.ID
-	payload["compose"] = app.Compose
+	action, _ := payload["action"].(string)
+	if composeRestageAction(action) {
+		payload["compose"] = app.Compose
+	}
 	return runtime.compose(ctx, payload, result)
 }
 
