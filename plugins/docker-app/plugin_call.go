@@ -167,6 +167,11 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if output, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
 			return nil, composeCallFailure(action, output, err)
 		}
+		if action == "remove" {
+			if output, err := controller.runCommand(ctx, dir, "docker", "workspace", "remove"); err != nil {
+				return nil, composeCallFailure("remove-workspace", output, err)
+			}
+		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
 		dir, err := controller.prepareComposeCallWorkspace(root, request)
