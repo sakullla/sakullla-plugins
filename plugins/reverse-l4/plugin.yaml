@@ -1,6 +1,6 @@
 schema_version: 1
 id: reverse-l4
-version: 0.3.6
+version: 0.3.7
 name: 四层反向穿透
 description: 把内网 TCP/UDP 服务经入口 L4 规则与出口反向通道发布到公网入口
 compatibility:
