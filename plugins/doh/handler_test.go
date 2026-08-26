@@ -122,6 +122,7 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), "DNS over HTTPS") {
 		t.Fatalf("index.html status=%d", index.Code)
 	}
+	assertConsoleSkin(t, index.Body.String(), js, css)
 
 	prefixed := httptest.NewRecorder()
 	service.ServeHTTP(prefixed, httptest.NewRequest(http.MethodGet, "/doh/", nil))
@@ -277,6 +278,37 @@ func homepagePositiveResponse(query []byte) []byte {
 	binary.BigEndian.PutUint16(response[2:4], 0x8180)
 	binary.BigEndian.PutUint16(response[6:8], 1)
 	return append(response, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 1)
+}
+
+func assertConsoleSkin(t *testing.T, page, script, style string) {
+	t.Helper()
+	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
+		t.Fatal("stylesheet still contains sakura theme colors")
+	}
+	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
+		t.Fatal("page still uses sakura-day as the rendered theme")
+	}
+	if !strings.Contains(page, `data-theme="light"`) {
+		t.Fatal("page default theme is not light")
+	}
+	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
+		t.Fatal("stylesheet missing light/dark theme selectors")
+	}
+	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
+		t.Fatal("stylesheet missing 晴空 light tokens")
+	}
+	if !strings.Contains(style, "#818cf8") {
+		t.Fatal("stylesheet missing dark indigo accent")
+	}
+	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
+		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	}
+	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
+		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
+	}
+	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
+		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	}
 }
 
 func cssRule(css, selector string) string {
