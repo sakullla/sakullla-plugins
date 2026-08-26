@@ -26,8 +26,8 @@
   --color-primary-200: rgba(79, 70, 229, 0.18);
   --color-border-subtle: rgba(15, 23, 42, 0.06);
   --color-border-default: rgba(15, 23, 42, 0.09);
-  --color-danger: #ef4444;
-  --color-success: #10b981;
+  --color-danger: #b91c1c;
+  --color-success: #047857;
   --shadow-xs: 0 1px 1px rgba(15, 23, 42, 0.04);
   --shadow-focus: 0 0 0 3px var(--color-primary-subtle);
   color-scheme: light;
