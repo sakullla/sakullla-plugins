@@ -470,6 +470,94 @@ func TestControllerCallFiles(t *testing.T) {
 	})
 }
 
+func TestControllerCallFilesHonorsWorkDir(t *testing.T) {
+	t.Parallel()
+	defaultRoot := t.TempDir()
+	overrideRoot := t.TempDir()
+	var composeDir string
+	controller := newCallController(t, defaultRoot, CommandRunnerFunc(func(_ context.Context, dir, _ string, _ ...string) ([]byte, error) {
+		composeDir = dir
+		return []byte("ok"), nil
+	}), nil)
+	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yml:/app/config.yml\n      - /mnt/data/komga:/data\n"
+	applyPayload, err := json.Marshal(map[string]any{
+		"action": "apply", "app_id": "media", "compose": compose, "workdir": overrideRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	workdir, err := AppWorkDir(overrideRoot, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(composeDir) != filepath.Clean(workdir) {
+		t.Fatalf("compose project dir = %q want AppWorkDir %q", composeDir, workdir)
+	}
+	if _, err := os.Stat(filepath.Join(defaultRoot, "media", ComposeFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("compose apply used default workdir root: %v", err)
+	}
+
+	if _, err := callFiles(t, controller, map[string]any{
+		"action": "write", "app_id": "media", "path": "other.txt", "content": []byte("default"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(defaultRoot, "media", "other.txt")); err != nil || string(got) != "default" {
+		t.Fatalf("files without workdir should use execution root: %q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "other.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("files without workdir wrote into payload workdir")
+	}
+
+	want := []byte("listen: 80\n")
+	if _, err := callFiles(t, controller, map[string]any{
+		"action": "write", "app_id": "media", "path": "config.yml", "content": want, "workdir": overrideRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(workdir, "config.yml")
+	got, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("payload workdir file=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(defaultRoot, "media", "config.yml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("files workdir override leaked into default workdir")
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(workdir, ComposeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(onDisk) != compose {
+		t.Fatalf("apply rewrote compose YAML: %q", onDisk)
+	}
+	if !strings.Contains(string(onDisk), "/mnt/data/komga") {
+		t.Fatal("absolute host volume was stripped from compose YAML")
+	}
+	if !appliedComposeResolvesBind(t, workdir, string(onDisk), "/app/config.yml", configPath) {
+		t.Fatalf("apply did not resolve ./config.yml to %q: %s", configPath, onDisk)
+	}
+	if _, err := callFiles(t, controller, map[string]any{
+		"action": "list", "app_id": "media", "path": "/mnt/data/komga", "workdir": overrideRoot,
+	}); err == nil {
+		t.Fatal("files listed absolute host mount")
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "mnt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("absolute host mount was materialized inside the app workdir")
+	}
+
+	read, err := callFiles(t, controller, map[string]any{
+		"action": "read", "app_id": "media", "path": "config.yml", "workdir": overrideRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, read, string(want))
+}
+
 func unusedDockerRunner(t *testing.T) CommandRunner {
 	t.Helper()
 	return CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {

@@ -66,6 +66,7 @@ type filesCallRequest struct {
 	Action  string `json:"action"`
 	AgentID string `json:"agent_id"`
 	AppID   string `json:"app_id"`
+	WorkDir string `json:"workdir"`
 	Path    string `json:"path"`
 	Content []byte `json:"content"`
 }
@@ -135,10 +136,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		return nil, errors.New("compose app id is invalid")
 	}
 	action := strings.TrimSpace(request.Action)
-	root := controller.executionWorkDirRoot()
-	if strings.TrimSpace(request.WorkDir) != "" {
-		root = request.WorkDir
-	}
+	root := controller.callWorkDirRoot(request.WorkDir)
 	switch action {
 	case "apply":
 		if strings.TrimSpace(request.Compose) == "" {
@@ -310,7 +308,7 @@ func (controller *Controller) callFiles(ctx context.Context, payload []byte) ([]
 	if !validID(request.AppID) {
 		return nil, errors.New("files app id is invalid")
 	}
-	output, err := executeWorkspaceFiles(controller.executionWorkDirRoot(), request)
+	output, err := executeWorkspaceFiles(controller.callWorkDirRoot(request.WorkDir), request)
 	if err != nil {
 		return nil, filesCallFailure(request.Action, err)
 	}
@@ -574,6 +572,13 @@ func (controller *Controller) runCommand(ctx context.Context, dir, name string, 
 		runner = execCommandRunner{}
 	}
 	return runner.Run(ctx, dir, name, args...)
+}
+
+func (controller *Controller) callWorkDirRoot(payloadWorkDir string) string {
+	if strings.TrimSpace(payloadWorkDir) != "" {
+		return payloadWorkDir
+	}
+	return controller.executionWorkDirRoot()
 }
 
 func (controller *Controller) executionWorkDirRoot() string {

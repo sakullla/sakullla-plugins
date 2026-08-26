@@ -426,6 +426,7 @@ func (runtime *hostCapabilityRuntime) Files(ctx context.Context, app App, payloa
 	}
 	payload["agent_id"] = app.AgentID
 	payload["app_id"] = app.ID
+	payload["workdir"] = app.WorkDir
 	return runtime.files(ctx, payload, result)
 }
 

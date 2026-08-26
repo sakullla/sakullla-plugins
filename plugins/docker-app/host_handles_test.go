@@ -288,13 +288,24 @@ func TestHostCapabilityRuntimeSendsFilesThroughPluginCall(t *testing.T) {
 	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
 		calls = append(calls, call)
 		request := decodePluginCallRequest(t, call)
-		if request.Name != pluginCallFilesName {
+		switch request.Name {
+		case pluginCallFilesName:
+			return copyHostResult(map[string]any{"accepted": true, "path": "config.yaml"}, target)
+		case pluginCallComposeName:
+			return copyHostResult(map[string]any{"accepted": true}, target)
+		default:
 			t.Fatalf("unexpected plugin.call name %q", request.Name)
+			return nil
 		}
-		return copyHostResult(map[string]any{"accepted": true, "path": "config.yaml"}, target)
 	})
 	runtime := newHostCapabilityRuntime(client)
-	app := App{ID: "media", AgentID: "agent-1"}
+	app := App{
+		ID: "media", AgentID: "agent-1", WorkDir: "/apps",
+		Compose: "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/app/config.yaml\n",
+	}
+	if err := runtime.ApplyApp(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
 	var result map[string]any
 	if err := runtime.Files(context.Background(), app, map[string]any{
 		"action": "write", "path": "config.yaml", "content": "listen: 80\n",
@@ -304,25 +315,33 @@ func TestHostCapabilityRuntimeSendsFilesThroughPluginCall(t *testing.T) {
 	if result["accepted"] != true {
 		t.Fatalf("files result=%#v", result)
 	}
-	if len(calls) != 1 {
+	if len(calls) != 2 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
 	assertNoNamedAgentHostOps(t, calls)
-	if calls[0].Operation != pluginsdk.HostRuntimePluginCall {
-		t.Fatalf("files must use plugin.call envelope: %#v", calls[0])
+	applyRequest := decodePluginCallRequest(t, calls[0])
+	if calls[0].Operation != pluginsdk.HostRuntimePluginCall || applyRequest.Name != pluginCallComposeName || applyRequest.AgentID != "agent-1" {
+		t.Fatalf("compose plugin.call = %#v", calls[0])
 	}
-	request := decodePluginCallRequest(t, calls[0])
+	apply := decodePluginCallInner(t, applyRequest)
+	if apply["action"] != "apply" || apply["workdir"] != app.WorkDir {
+		t.Fatalf("compose apply payload = %#v", apply)
+	}
+	if calls[1].Operation != pluginsdk.HostRuntimePluginCall {
+		t.Fatalf("files must use plugin.call envelope: %#v", calls[1])
+	}
+	request := decodePluginCallRequest(t, calls[1])
 	if request.Name != pluginCallFilesName || request.AgentID != "agent-1" {
 		t.Fatalf("files plugin.call = %#v", request)
 	}
 	payload := decodePluginCallInner(t, request)
-	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || filesContentField(t, payload) != "listen: 80\n" {
-		t.Fatalf("files handle payload = %#v", payload)
+	if payload["action"] != "write" || payload["agent_id"] != "agent-1" || payload["app_id"] != "media" || payload["path"] != "config.yaml" || payload["workdir"] != apply["workdir"] || filesContentField(t, payload) != "listen: 80\n" {
+		t.Fatalf("files handle payload = %#v compose workdir=%#v", payload, apply["workdir"])
 	}
 	if err := runtime.Files(context.Background(), App{ID: "media"}, map[string]any{"action": "list"}, nil); !errors.Is(err, ErrAgentOffline) {
 		t.Fatalf("files without agent_id err=%v", err)
 	}
-	if len(calls) != 1 {
+	if len(calls) != 2 {
 		t.Fatalf("empty agent_id dispatched files: %#v", calls)
 	}
 }
