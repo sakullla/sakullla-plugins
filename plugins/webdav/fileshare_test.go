@@ -225,8 +225,44 @@ func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 	if !strings.Contains(nameField, "var(--color-bg-sunken)") || !strings.Contains(nameField, "var(--color-text-primary)") {
 		t.Fatalf("mkdir name field does not follow theme tokens: %q", nameField)
 	}
-	if !strings.Contains(style, `[data-theme="sakura-night"] #mkdir-dialog::backdrop`) {
-		t.Fatal("mkdir dialog backdrop does not adapt to sakura-night")
+	if !strings.Contains(style, `[data-theme="dark"] #mkdir-dialog::backdrop`) {
+		t.Fatal("mkdir dialog backdrop does not adapt to dark theme")
+	}
+	pageHTML, err := os.ReadFile(filepath.Join("static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConsoleSkin(t, string(pageHTML), text, style)
+}
+
+func assertConsoleSkin(t *testing.T, page, script, style string) {
+	t.Helper()
+	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
+		t.Fatal("stylesheet still contains sakura theme colors")
+	}
+	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
+		t.Fatal("page still uses sakura-day as the rendered theme")
+	}
+	if !strings.Contains(page, `data-theme="light"`) {
+		t.Fatal("page default theme is not light")
+	}
+	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
+		t.Fatal("stylesheet missing light/dark theme selectors")
+	}
+	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
+		t.Fatal("stylesheet missing 晴空 light tokens")
+	}
+	if !strings.Contains(style, "#818cf8") {
+		t.Fatal("stylesheet missing dark indigo accent")
+	}
+	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
+		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	}
+	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
+		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
+	}
+	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
+		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
 	}
 }
 

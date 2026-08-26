@@ -1,56 +1,58 @@
 :root,
-[data-theme="sakura-day"] {
+[data-theme="light"] {
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
   --space-5: 1.25rem;
-  --radius-md: 0.625rem;
-  --radius-lg: 0.875rem;
-  --radius-xl: 1.125rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
   --font-sans: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, "Sarasa Mono SC", ui-monospace, monospace;
-  --accent: #d94880;
-  --accent-deep: #be2f69;
-  --color-text-primary: #1c1917;
-  --color-text-secondary: #57534e;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --accent: var(--color-primary);
+  --accent-deep: var(--color-primary-hover);
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #64748b;
   --color-text-inverse: #ffffff;
-  --color-bg-canvas: #f5f4f2;
-  --color-bg-surface: #fffcfa;
-  --color-bg-sunken: #efeeec;
-  --color-primary-subtle: rgba(217, 72, 128, 0.08);
-  --color-primary-200: rgba(217, 72, 128, 0.16);
-  --color-border-subtle: rgba(28, 25, 23, 0.06);
-  --color-border-default: rgba(28, 25, 23, 0.10);
-  --color-danger: #b42318;
-  --color-success: #3f6f5a;
-  --shadow-xs: 0 1px 1px rgba(28, 25, 23, 0.04);
+  --color-bg-canvas: #f8fafc;
+  --color-bg-surface: #ffffff;
+  --color-bg-sunken: #f1f5f9;
+  --color-primary-subtle: rgba(79, 70, 229, 0.10);
+  --color-primary-200: rgba(79, 70, 229, 0.18);
+  --color-border-subtle: rgba(15, 23, 42, 0.06);
+  --color-border-default: rgba(15, 23, 42, 0.09);
+  --color-danger: #b91c1c;
+  --color-success: #047857;
+  --shadow-xs: 0 1px 1px rgba(15, 23, 42, 0.04);
   --shadow-focus: 0 0 0 3px var(--color-primary-subtle);
-  --wash-a: rgba(217, 72, 128, 0.06);
-  --wash-b: rgba(120, 113, 108, 0.05);
   color-scheme: light;
 }
 
-[data-theme="sakura-night"] {
-  --accent: #f4a0c0;
-  --accent-deep: #f472a8;
-  --color-text-primary: #f5f4f2;
-  --color-text-secondary: #a8a29e;
-  --color-text-inverse: #1c1917;
-  --color-bg-canvas: #121110;
-  --color-bg-surface: #1c1b1a;
-  --color-bg-sunken: #0e0d0c;
-  --color-primary-subtle: rgba(244, 160, 192, 0.12);
-  --color-primary-200: rgba(244, 160, 192, 0.22);
-  --color-border-subtle: rgba(245, 244, 242, 0.06);
-  --color-border-default: rgba(245, 244, 242, 0.10);
-  --color-danger: #f0a8a0;
-  --color-success: #86b89c;
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.28);
+[data-theme="dark"] {
+  --color-primary: #818cf8;
+  --color-primary-hover: #a5b4fc;
+  --accent: var(--color-primary);
+  --accent-deep: var(--color-primary-hover);
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-tertiary: #94a3b8;
+  --color-text-inverse: #0f172a;
+  --color-bg-canvas: #0f172a;
+  --color-bg-surface: #1e293b;
+  --color-bg-sunken: #0b1220;
+  --color-primary-subtle: rgba(129, 140, 248, 0.16);
+  --color-primary-200: rgba(129, 140, 248, 0.28);
+  --color-border-subtle: rgba(248, 250, 252, 0.06);
+  --color-border-default: rgba(248, 250, 252, 0.10);
+  --color-danger: #f87171;
+  --color-success: #34d399;
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.28);
   --shadow-focus: 0 0 0 3px var(--color-primary-subtle);
-  --wash-a: rgba(244, 160, 192, 0.08);
-  --wash-b: rgba(120, 113, 108, 0.06);
   color-scheme: dark;
 }
 
@@ -85,9 +87,7 @@ html, body {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(52rem 22rem at 50% -14rem, var(--wash-a), transparent 72%),
-    radial-gradient(30rem 16rem at 92% 4rem, var(--wash-b), transparent 70%);
+  background: none;
 }
 
 main {
@@ -114,10 +114,9 @@ main {
 
 .kicker {
   margin: 0 0 var(--space-2);
-  color: var(--accent);
+  color: var(--color-text-secondary);
   font-size: var(--text-xs);
   font-weight: 650;
-  letter-spacing: 0.14em;
 }
 
 h1, h2, h3 { margin: 0; font-weight: 650; }

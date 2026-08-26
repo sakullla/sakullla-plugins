@@ -1,7 +1,7 @@
 const applyHostTheme = () => {
-  const allowed = { "sakura-day": true, "sakura-night": true };
-  const aliases = { sakura: "sakura-day", midnight: "sakura-night", "neko-dark": "sakura-night", cyberpunk: "sakura-day" };
-  let theme = "sakura-day";
+  const allowed = { light: true, dark: true };
+  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
+  let theme = "light";
   try {
     const raw = window.parent && window.parent !== window
       ? window.parent.document.documentElement.getAttribute("data-theme")
@@ -11,7 +11,7 @@ const applyHostTheme = () => {
       theme = mapped;
     }
   } catch (_error) {
-    theme = "sakura-day";
+    theme = "light";
   }
   document.documentElement.setAttribute("data-theme", theme);
 };
