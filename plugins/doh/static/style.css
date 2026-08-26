@@ -17,6 +17,7 @@
   --accent-deep: var(--color-primary-hover);
   --color-text-primary: #0f172a;
   --color-text-secondary: #475569;
+  --color-text-tertiary: #64748b;
   --color-text-inverse: #ffffff;
   --color-bg-canvas: #f8fafc;
   --color-bg-surface: #ffffff;
@@ -39,6 +40,7 @@
   --accent-deep: var(--color-primary-hover);
   --color-text-primary: #f8fafc;
   --color-text-secondary: #cbd5e1;
+  --color-text-tertiary: #94a3b8;
   --color-text-inverse: #0f172a;
   --color-bg-canvas: #0f172a;
   --color-bg-surface: #1e293b;

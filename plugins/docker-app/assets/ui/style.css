@@ -23,7 +23,7 @@
   --color-accent: var(--color-primary);
   --color-text-primary: #0f172a;
   --color-text-secondary: #475569;
-  --color-text-tertiary: #94a3b8;
+  --color-text-tertiary: #64748b;
   --color-text-inverse: #ffffff;
   --color-bg-canvas: #f8fafc;
   --color-bg-surface: #ffffff;
@@ -860,6 +860,13 @@ button {
 .btn-link:hover { text-decoration: underline; }
 
 .btn-link.danger { color: var(--color-danger); font-weight: 500; }
+
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.btn-link:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
 
 button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 
