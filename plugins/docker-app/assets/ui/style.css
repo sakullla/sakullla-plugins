@@ -400,6 +400,7 @@ h2 { font-size: var(--text-sm); }
 #engine-daemon-json-wrap { margin-top: 0; }
 
 #app-offline h2 { color: var(--color-warning); }
+#app-execution-unavailable h2 { color: var(--color-warning); }
 
 .agent-field {
   display: grid;

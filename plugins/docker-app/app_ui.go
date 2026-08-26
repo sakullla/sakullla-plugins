@@ -164,7 +164,7 @@ func (controller *Controller) writeEngineView(writer http.ResponseWriter, view e
 		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: commandErr.Error()})
 		return
 	}
-	if !view.Ready {
+	if view.Online && !view.Ready {
 		view.Command = &installCommandView{Script: command.Script, DaemonJSON: command.DaemonJSON}
 	}
 	writeAppJSON(writer, http.StatusOK, appAPIResponse{Engine: &view, Access: struct {

@@ -3,6 +3,8 @@ package dockerapp
 import (
 	"context"
 	"io"
+	"os"
+	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -13,10 +15,21 @@ func productionControllerConfig() ControllerConfig {
 	return bindProductionHostCapabilities(ControllerConfig{})
 }
 
+func runtimeServices() pluginsdk.RPCServiceDeclaration {
+	services := pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true}
+	if strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginHostEndpoint)) == "" {
+		// Agent execution face has no host-runtime endpoint. Serving UI there
+		// races the RPC listener and can exclude the candidate from publication.
+		services.UI = false
+	}
+	return services
+}
+
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	declaration := pluginsdk.RPCPluginDeclaration{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		RequiredCapabilities: requiredGrants(),
+		SupportedFeatures:    []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
 		Declaration: declaration,
@@ -29,6 +42,6 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 			})
 		},
 		NewRuntimeLifecycle: func() (pluginsdk.RPCLifecycle, error) { return NewController(productionControllerConfig()) },
-		Services:            pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true},
+		Services:            runtimeServices(),
 	})
 }

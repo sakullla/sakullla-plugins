@@ -676,11 +676,11 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 			engine := httptest.NewRecorder()
 			controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
 			body := engine.Body.String()
-			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, OfficialInstallScript) {
+			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"online":false`) {
 				t.Fatalf("probe failure engine status=%d body=%s", engine.Code, body)
 			}
-			if strings.Contains(body, `"ready":true`) || strings.Contains(body, sdkText) {
-				t.Fatalf("probe failure leaked readiness or SDK text: %s", body)
+			if strings.Contains(body, `"ready":true`) || strings.Contains(body, sdkText) || strings.Contains(body, OfficialInstallScript) {
+				t.Fatalf("probe failure leaked readiness, SDK text, or install command: %s", body)
 			}
 
 			denied := httptest.NewRecorder()
@@ -1260,7 +1260,10 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if !strings.Contains(string(html), "本地管理面") || !strings.Contains(string(html), "Agent 执行面") {
 		t.Fatalf("dedicated UI omits runtime face labels: %s", html)
 	}
-	for _, marker := range []string{"Agent 执行面 · 节点离线", "Agent 执行面 · 引擎未就绪", "Agent 执行面 · ${app.status}", "Agent 执行面 · 有新版本"} {
+	if !strings.Contains(string(html), `id="app-execution-unavailable"`) || !strings.Contains(string(html), "Agent 执行面未就绪") {
+		t.Fatal("dedicated UI omits execution-face unavailable state")
+	}
+	for _, marker := range []string{"Agent 执行面 · 节点离线", "Agent 执行面 · 引擎未就绪", "Agent 执行面 · 执行面未就绪", "Agent 执行面 · ${app.status}", "Agent 执行面 · 有新版本"} {
 		if !strings.Contains(string(script), marker) {
 			t.Fatalf("dedicated UI script omits face-specific state %q", marker)
 		}
@@ -1345,6 +1348,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		`class="state-panel"`,
 		`id="app-node-empty"`,
 		`id="app-offline"`,
+		`id="app-execution-unavailable"`,
 		`id="engine-guide"`,
 		`id="app-workspace"`,
 		`class="workspace-region"`,
@@ -1436,8 +1440,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(loadCatch[:endCatch], "showStatus(error.message") {
 		t.Fatal("loadEngine failure still writes the error payload into #app-status")
 	}
-	if !strings.Contains(loadCatch[:endCatch], `showContext("unready")`) {
-		t.Fatal("loadEngine failure does not fall through to the install guide")
+	if !strings.Contains(loadCatch[:endCatch], `showContext("execution-unavailable")`) {
+		t.Fatal("loadEngine failure does not surface execution-face unavailability")
 	}
 }
 

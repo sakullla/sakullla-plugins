@@ -48,6 +48,10 @@
         <h2>节点离线</h2>
         <p>该节点离线，不能部署或改动 compose 应用。</p>
       </section>
+      <section class="state-panel" id="app-execution-unavailable" hidden>
+        <h2>Agent 执行面未就绪</h2>
+        <p>该节点在线，但 Docker 应用执行面没有启动。不是本机缺 Docker。刷新本页，或检查该节点上的 docker-app 插件状态。</p>
+      </section>
     </section>
     <section class="state-panel engine-guide" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
       <div class="setup-hero">

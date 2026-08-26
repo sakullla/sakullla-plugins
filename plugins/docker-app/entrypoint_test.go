@@ -60,3 +60,27 @@ func TestRunEntrypointProductionWiresReportedEngineSource(t *testing.T) {
 		t.Fatal("production entrypoint still pins a zero UIEngine as the only observation path")
 	}
 }
+
+func TestRuntimeServicesSkipUIWithoutHostRuntimeEndpoint(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
+	services := runtimeServices()
+	if services.UI || !services.UIOptional {
+		t.Fatalf("agent execution face services = %#v", services)
+	}
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "unix:/run/nre-plugin/host.sock")
+	services = runtimeServices()
+	if !services.UI || !services.UIOptional {
+		t.Fatalf("control-plane services = %#v", services)
+	}
+}
+
+func TestRunEntrypointDeclarationAcknowledgesDurableActions(t *testing.T) {
+	output := &bytes.Buffer{}
+	err := RunEntrypoint(context.Background(), []string{CIHandshakeFlag}, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), pluginsdk.RPCABIV1) {
+		t.Fatalf("handshake probe output = %q", output.String())
+	}
+}

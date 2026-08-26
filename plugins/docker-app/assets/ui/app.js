@@ -36,6 +36,7 @@ const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
 const offlineNode = document.querySelector("#app-offline");
+const executionUnavailableNode = document.querySelector("#app-execution-unavailable");
 const engineGuide = document.querySelector("#engine-guide");
 const engineStatus = document.querySelector("#engine-status");
 const engineScript = document.querySelector("#engine-install-script");
@@ -1384,14 +1385,17 @@ const showUnreadyGuide = (engine) => {
   if (workspaceNode) workspaceNode.hidden = true;
   renderGuide(view);
   renderEngineBadge(view);
-  showContext("unready");
+  showContext(executionFaceUnavailable(view) ? "execution-unavailable" : "unready");
 };
+
+const executionFaceUnavailable = (engine) => agentOnline && engine && engine.online === false && engine.ready !== true;
 
 const showContext = (which) => {
   if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
   if (offlineNode) offlineNode.hidden = which !== "offline";
+  if (executionUnavailableNode) executionUnavailableNode.hidden = which !== "execution-unavailable";
   if (engineGuide) engineGuide.hidden = which !== "unready";
-  if (contextNode) contextNode.hidden = which !== "empty" && which !== "offline";
+  if (contextNode) contextNode.hidden = which !== "empty" && which !== "offline" && which !== "execution-unavailable";
 };
 
 const renderApps = (apps) => {
@@ -1423,6 +1427,10 @@ const renderEngineBadge = (engine) => {
   }
   engineReady = engine.ready === true;
   engineStatus.dataset.ready = engineReady ? "true" : "false";
+  if (executionFaceUnavailable(engine)) {
+    engineStatus.textContent = "Agent 执行面 · 执行面未就绪";
+    return;
+  }
   engineStatus.textContent = engineReady
     ? (engine.version ? `Agent 执行面 · 引擎 ${engine.version} 已就绪` : "Agent 执行面 · 引擎已就绪")
     : "Agent 执行面 · 引擎未就绪";
@@ -1459,7 +1467,7 @@ const renderWorkspace = async () => {
     if (error && error.message === "暂时无法管理 Docker 应用。") throw error;
     renderGuide(null);
     renderEngineBadge(null);
-    showContext("unready");
+    showContext("execution-unavailable");
     return;
   }
   if (seq !== workspaceSeq) return;
@@ -1468,7 +1476,7 @@ const renderWorkspace = async () => {
   renderEngineBadge(engine);
   if (!engineReady) {
     renderGuide(engine);
-    showContext("unready");
+    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : "unready");
     return;
   }
   showContext("");
