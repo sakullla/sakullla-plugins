@@ -352,12 +352,10 @@ h2 { font-size: var(--text-sm); }
 
 .engine-status[data-ready="true"] {
   color: var(--color-success);
-  background: color-mix(in srgb, var(--color-success) 12%, var(--color-bg-subtle));
 }
 
 .engine-status[data-ready="false"] {
   color: var(--color-warning);
-  background: var(--color-warning-subtle);
 }
 
 #engine-guide pre {
@@ -608,12 +606,10 @@ h2 { font-size: var(--text-sm); }
 
 .agent-search-select__engine[data-ready="true"] {
   color: var(--color-success);
-  background: color-mix(in srgb, var(--color-success) 12%, var(--color-bg-sunken));
 }
 
 .agent-search-select__engine[data-ready="false"] {
   color: var(--color-warning);
-  background: var(--color-warning-subtle);
 }
 
 .agent-search-select__empty {
@@ -941,7 +937,6 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 
 .chip.app-status-update {
   color: var(--color-warning);
-  background: var(--color-warning-subtle);
 }
 
 .app-actions {
@@ -1155,12 +1150,12 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 #app-status[data-error="true"] {
   color: var(--color-danger);
   border: 1px solid color-mix(in srgb, var(--color-danger) 28%, var(--color-border-default));
-  background: color-mix(in srgb, var(--color-danger) 8%, var(--color-bg-surface));
+  background: var(--color-bg-sunken);
 }
 #app-status[data-error="false"] {
   color: var(--color-success);
   border: 1px solid color-mix(in srgb, var(--color-success) 28%, var(--color-border-default));
-  background: color-mix(in srgb, var(--color-success) 10%, var(--color-bg-surface));
+  background: var(--color-bg-sunken);
 }
 #app-denied { color: var(--color-danger); font-size: var(--text-base); }
 #app-loading { color: var(--color-text-secondary); }
@@ -1169,7 +1164,7 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   padding: var(--space-3) var(--space-4);
   border: 1px solid color-mix(in srgb, var(--color-warning) 35%, var(--color-border-default));
   border-radius: var(--radius-md);
-  background: var(--color-warning-subtle);
+  background: var(--color-bg-sunken);
   color: var(--color-warning);
 }
 

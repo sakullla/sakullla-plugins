@@ -505,13 +505,13 @@ tr.mapping:hover td:last-child { border-radius: 0 var(--radius-sm) var(--radius-
 #mapping-status[data-error="true"] {
   color: var(--color-danger);
   border: 1px solid color-mix(in srgb, var(--color-danger) 28%, var(--color-border-default));
-  background: color-mix(in srgb, var(--color-danger) 8%, var(--color-bg-surface));
+  background: var(--color-bg-sunken);
 }
 
 #mapping-status[data-error="false"] {
   color: var(--color-success);
   border: 1px solid color-mix(in srgb, var(--color-success) 28%, var(--color-border-default));
-  background: color-mix(in srgb, var(--color-success) 10%, var(--color-bg-surface));
+  background: var(--color-bg-sunken);
 }
 
 #mapping-denied { color: var(--color-danger); font-size: var(--text-base); }
@@ -520,7 +520,7 @@ tr.mapping:hover td:last-child { border-radius: 0 var(--radius-sm) var(--radius-
   padding: var(--space-3) var(--space-4);
   border: 1px solid color-mix(in srgb, var(--color-warning) 35%, var(--color-border-default));
   border-radius: var(--radius-md);
-  background: var(--color-warning-subtle);
+  background: var(--color-bg-sunken);
   color: var(--color-warning);
 }
 
