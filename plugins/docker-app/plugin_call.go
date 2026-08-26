@@ -448,7 +448,9 @@ func writeWorkspaceFile(workdir, resolved string, content []byte) error {
 			return errors.New("file path is not relative to app workdir")
 		}
 		if info.IsDir() {
-			return errors.New("path is a directory")
+			if err := ensureBindFilePath(resolved); err != nil {
+				return errors.New("path is a directory")
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

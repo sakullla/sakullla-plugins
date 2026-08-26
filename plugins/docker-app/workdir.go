@@ -80,10 +80,24 @@ func PrepareAppWorkspace(root, appID, compose string) (Workspace, error) {
 		}
 	}
 	composeFile := filepath.Join(dir, ComposeFileName)
-	if err := os.WriteFile(composeFile, []byte(compose), 0o644); err != nil {
+	if err := writeComposeDocument(composeFile, compose); err != nil {
 		return Workspace{}, err
 	}
 	return Workspace{Dir: dir, ComposeFile: composeFile, Binds: binds}, nil
+}
+
+func writeComposeDocument(path, compose string) error {
+	err := os.WriteFile(path, []byte(compose), 0o644)
+	if err == nil {
+		return nil
+	}
+	info, statErr := os.Lstat(path)
+	if statErr == nil && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 && strings.TrimSpace(compose) != "" {
+		// Host-owned compose.yaml from the Docker proxy is still usable;
+		// the proxy rewrites it on the next allowed command.
+		return nil
+	}
+	return err
 }
 
 // ResolveComposeBinds classifies compose volumes and resolves relative sources
@@ -325,9 +339,46 @@ func relativePathInside(rel string) bool {
 
 func ensureBindHostPath(hostPath, containerPath string) error {
 	if looksLikeFileBind(hostPath, containerPath) {
-		return os.MkdirAll(filepath.Dir(hostPath), 0o755)
+		return ensureBindFilePath(hostPath)
 	}
 	return os.MkdirAll(hostPath, 0o755)
+}
+
+func ensureBindFilePath(hostPath string) error {
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return err
+	}
+	info, err := os.Lstat(hostPath)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := os.OpenFile(hostPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+		if createErr != nil {
+			if errors.Is(createErr, os.ErrExist) {
+				return ensureBindFilePath(hostPath)
+			}
+			return createErr
+		}
+		return file.Close()
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("relative bind path is a symlink")
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	entries, readErr := os.ReadDir(hostPath)
+	if readErr != nil {
+		return readErr
+	}
+	if len(entries) > 0 {
+		return errors.New("relative file bind is a non-empty directory")
+	}
+	if err := os.Remove(hostPath); err != nil {
+		return err
+	}
+	return ensureBindFilePath(hostPath)
 }
 
 func looksLikeFileBind(hostPath, containerPath string) bool {
