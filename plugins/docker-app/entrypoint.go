@@ -17,12 +17,20 @@ func productionControllerConfig() ControllerConfig {
 
 func runtimeServices() pluginsdk.RPCServiceDeclaration {
 	services := pluginsdk.RPCServiceDeclaration{UI: true, UIOptional: true}
-	if strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginHostEndpoint)) == "" {
-		// Agent execution face has no host-runtime endpoint. Serving UI there
-		// races the RPC listener and can exclude the candidate from publication.
+	if agentExecutionFace() {
+		// Agent still receives NRE_PLUGIN_UI_ENDPOINT because ui.route is on the
+		// package. Serving UI there races the RPC listener; the first failed
+		// server cancels its sibling and the host excludes the candidate.
 		services.UI = false
 	}
 	return services
+}
+
+func agentExecutionFace() bool {
+	if strings.TrimSpace(os.Getenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT")) != "" {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginHostEndpoint)) == ""
 }
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {

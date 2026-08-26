@@ -62,6 +62,7 @@ func TestRunEntrypointProductionWiresReportedEngineSource(t *testing.T) {
 }
 
 func TestRuntimeServicesSkipUIWithoutHostRuntimeEndpoint(t *testing.T) {
+	t.Setenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT", "")
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	services := runtimeServices()
 	if services.UI || !services.UIOptional {
@@ -71,6 +72,16 @@ func TestRuntimeServicesSkipUIWithoutHostRuntimeEndpoint(t *testing.T) {
 	services = runtimeServices()
 	if !services.UI || !services.UIOptional {
 		t.Fatalf("control-plane services = %#v", services)
+	}
+}
+
+func TestRuntimeServicesSkipUIWhenDockerProxyIsPresent(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "unix:/run/nre-plugin/host.sock")
+	t.Setenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT", "unix:/run/nre-plugin/docker-proxy.sock")
+	t.Setenv(pluginsdk.EnvPluginUIEndpoint, "unix:/run/nre-plugin/ui.sock")
+	services := runtimeServices()
+	if services.UI || !services.UIOptional {
+		t.Fatalf("agent docker-proxy face still serves UI: %#v", services)
 	}
 }
 
