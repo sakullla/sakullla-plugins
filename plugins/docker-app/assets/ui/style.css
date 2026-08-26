@@ -448,7 +448,7 @@ h2 { font-size: var(--text-sm); }
 }
 
 .agent-search-select__label[data-empty="true"] {
-  color: var(--color-text-tertiary);
+  color: var(--color-text-secondary);
   font-weight: 400;
 }
 

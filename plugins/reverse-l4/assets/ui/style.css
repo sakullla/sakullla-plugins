@@ -424,7 +424,7 @@ select { appearance: none; background-image: none; }
   font-weight: 500;
 }
 
-.agent-search-select__label[data-empty="true"] { color: var(--color-text-tertiary); font-weight: 400; }
+.agent-search-select__label[data-empty="true"] { color: var(--color-text-secondary); font-weight: 400; }
 
 .agent-search-select__chevron { flex-shrink: 0; color: var(--color-text-tertiary); }
 
