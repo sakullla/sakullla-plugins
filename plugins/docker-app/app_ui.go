@@ -25,17 +25,18 @@ const (
 )
 
 type appView struct {
-	ID       string            `json:"id"`
-	AgentID  string            `json:"agent_id,omitempty"`
-	Name     string            `json:"name"`
-	Status   string            `json:"status"`
-	Notice   string            `json:"notice,omitempty"`
-	Version  string            `json:"version"`
-	Compose  string            `json:"compose,omitempty"`
-	Ports    []uint16          `json:"ports,omitempty"`
-	Services []string          `json:"services,omitempty"`
-	Actions  []OpsAction       `json:"actions,omitempty"`
-	Rules    []appHTTPRuleView `json:"rules,omitempty"`
+	ID         string            `json:"id"`
+	AgentID    string            `json:"agent_id,omitempty"`
+	Name       string            `json:"name"`
+	Status     string            `json:"status"`
+	Notice     string            `json:"notice,omitempty"`
+	Version    string            `json:"version"`
+	Compose    string            `json:"compose,omitempty"`
+	AutoUpdate bool              `json:"auto_update,omitempty"`
+	Ports      []uint16          `json:"ports,omitempty"`
+	Services   []string          `json:"services,omitempty"`
+	Actions    []OpsAction       `json:"actions,omitempty"`
+	Rules      []appHTTPRuleView `json:"rules,omitempty"`
 }
 
 type appHTTPRuleView struct {
@@ -774,7 +775,8 @@ func projectAppView(app App, running bool, deployment Deployment, latestDigest s
 	return appView{
 		ID: app.ID, AgentID: app.AgentID, Name: name, Status: status, Notice: notice,
 		Version: displayImageVersion(app.Image, deployment.ImageDigest),
-		Compose: app.Compose, Ports: ports, Services: composeServiceNames(app.Compose),
+		Compose: app.Compose, AutoUpdate: AutoUpdateEnabled(app.AutoUpdate),
+		Ports: ports, Services: composeServiceNames(app.Compose),
 		Actions: appViewActions(status, notice),
 	}
 }

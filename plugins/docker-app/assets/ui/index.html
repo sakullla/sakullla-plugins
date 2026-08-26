@@ -125,25 +125,85 @@
         <div id="app-list" class="app-list"></div>
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
+      <section class="panel" id="app-detail" hidden>
+        <div class="detail-head">
+          <button id="detail-back" class="btn-secondary" type="button">返回列表</button>
+          <div class="detail-head-copy">
+            <h2 id="detail-title">应用详情</h2>
+            <p id="detail-lede" class="hint">同一时间只展示一个分区。</p>
+          </div>
+        </div>
+        <nav id="detail-nav" class="detail-nav" aria-label="应用分区">
+          <button type="button" class="detail-nav-item" data-section="overview">概览</button>
+          <button type="button" class="detail-nav-item" data-section="compose">Compose</button>
+          <button type="button" class="detail-nav-item" data-section="files">文件</button>
+          <button type="button" class="detail-nav-item" data-section="logs">日志</button>
+          <button type="button" class="detail-nav-item" data-section="http">HTTP 入口</button>
+        </nav>
+        <section id="detail-overview" class="detail-section" data-section-panel="overview"></section>
+        <section id="detail-compose" class="detail-section" data-section-panel="compose" hidden>
+          <form id="compose-form" method="post">
+            <label>Compose YAML
+              <span class="code-editor" data-lang="yaml">
+                <pre class="code-editor__highlight" aria-hidden="true"></pre>
+                <textarea name="compose" class="code-editor__input" required spellcheck="false"></textarea>
+              </span>
+            </label>
+            <label>Compose .env（可选）
+              <span class="code-editor" data-lang="env">
+                <pre class="code-editor__highlight" aria-hidden="true"></pre>
+                <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="留空表示复用已有文件"></textarea>
+              </span>
+            </label>
+            <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
+            <div class="form-footer">
+              <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
+              <button type="submit" class="btn-primary" id="compose-submit">保存 Compose</button>
+            </div>
+          </form>
+        </section>
+        <section id="detail-files" class="detail-section" data-section-panel="files" hidden></section>
+        <section id="detail-logs" class="detail-section" data-section-panel="logs" hidden>
+          <div class="logs-toolbar">
+            <label>服务 <select id="logs-service" name="service"></select></label>
+            <button id="logs-refresh" class="btn-secondary" type="button">刷新快照</button>
+            <button id="logs-pause" class="btn-secondary" type="button">暂停</button>
+            <p id="logs-status" class="hint">自动刷新</p>
+          </div>
+          <pre id="logs-view" class="logs-terminal"></pre>
+        </section>
+        <section id="detail-http" class="detail-section" data-section-panel="http" hidden></section>
+      </section>
     </section>
     <template id="app-files-template">
       <section class="app-section app-files" id="app-files">
         <h4>文件</h4>
-        <nav id="files-breadcrumb" class="files-breadcrumb" aria-label="工作区路径"></nav>
-        <div class="files-toolbar">
-          <label>目录名称 <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false"></label>
-          <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
-          <button id="files-upload" type="button" class="btn-secondary">上传</button>
-          <input data-files-input type="file" hidden>
-          <button id="files-download" type="button" class="btn-secondary">下载</button>
-          <button id="files-delete" type="button" class="btn-link danger">删除</button>
+        <div id="files-browser" class="files-browser">
+          <nav id="files-breadcrumb" class="files-breadcrumb" aria-label="工作区路径"></nav>
+          <div class="files-toolbar">
+            <label>目录名称 <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false"></label>
+            <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
+            <label>文本文件名 <input id="files-new-name" name="new-text" autocomplete="off" spellcheck="false" placeholder="config.yml"></label>
+            <button id="files-new-text" type="button" class="btn-secondary">新建文本文件</button>
+            <button id="files-upload" type="button" class="btn-secondary">上传</button>
+            <input data-files-input type="file" hidden>
+            <button id="files-edit" type="button" class="btn-secondary">编辑</button>
+            <button id="files-download" type="button" class="btn-secondary">下载</button>
+            <button id="files-delete" type="button" class="btn-link danger">删除</button>
+          </div>
+          <ul id="files-list" class="files-list"></ul>
+          <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>
         </div>
-        <ul id="files-list" class="files-list"></ul>
-        <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>
         <div id="files-editor" class="files-editor" hidden>
-          <label>文本
-            <textarea spellcheck="false"></textarea>
-          </label>
+          <div class="files-editor-head">
+            <strong id="files-editor-name"></strong>
+            <span id="files-dirty" class="files-dirty" hidden>未保存</span>
+            <button id="files-editor-close" type="button" class="btn-secondary">关闭</button>
+          </div>
+          <span class="code-editor" data-lang="text">
+            <pre class="code-editor__highlight" aria-hidden="true"></pre>
+            <textarea class="code-editor__input" spellcheck="false"></textarea>
+          </span>
           <div class="files-editor-actions">
             <button id="files-save" type="button" class="btn-primary">保存</button>
           </div>

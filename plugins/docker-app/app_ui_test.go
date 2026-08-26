@@ -1513,7 +1513,11 @@ func TestPageWorkspaceFiles(t *testing.T) {
 		`id="files-editor"`,
 		`id="files-delete"`,
 		`id="files-save"`,
+		`id="files-edit"`,
+		`id="files-new-text"`,
 		"目录名称",
+		"新建文本文件",
+		"编辑",
 		"/files",
 		"postAppFiles",
 		"relativeWorkspacePath",
@@ -1527,6 +1531,104 @@ func TestPageWorkspaceFiles(t *testing.T) {
 	}
 	if strings.Contains(script, "/mnt/data/komga") {
 		t.Fatal("files UI lists an absolute host mount")
+	}
+}
+
+func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssBytes, err := appUIAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	js := string(scriptBytes)
+	style := string(cssBytes)
+	for _, want := range []string{
+		`id="app-detail"`,
+		`id="detail-back"`,
+		"返回",
+		`data-section="overview"`,
+		`data-section="compose"`,
+		`data-section="files"`,
+		`data-section="logs"`,
+		`data-section="http"`,
+		"概览",
+		"Compose",
+		"HTTP 入口",
+		"新建文本文件",
+		`id="files-edit"`,
+		"自动刷新",
+		`id="compose-form"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("page missing list/detail markup %q", want)
+		}
+	}
+	renderStart := strings.Index(js, "const renderApp = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	if renderStart < 0 || renderEnd < 0 || renderEnd <= renderStart {
+		t.Fatal("compact list renderer is missing")
+	}
+	listRender := js[renderStart:renderEnd]
+	for _, forbidden := range []string{"mountAppFiles", "http-form", "app-logs", "查看日志", "openCreate("} {
+		if strings.Contains(listRender, forbidden) {
+			t.Fatalf("application list still embeds %q", forbidden)
+		}
+	}
+	if !strings.Contains(listRender, `className = "app-row"`) {
+		t.Fatal("application list is not a compact row")
+	}
+	if !strings.Contains(js, `textContent = "管理"`) || !strings.Contains(js, "无发布端口") {
+		t.Fatal("application list is missing manage entry or published-port copy")
+	}
+	if strings.Contains(js, "openCreate(app)") || strings.Contains(js, `loadLogs.textContent = "查看日志"`) {
+		t.Fatal("list still opens the deploy form for existing apps or gates logs behind 查看日志")
+	}
+	if strings.Contains(js, "else openFile(") {
+		t.Fatal("selecting a file still reads and opens the editor")
+	}
+	if !strings.Contains(js, "openFile(") || !strings.Contains(js, `textContent = "编辑"`) {
+		t.Fatal("workspace files are missing an explicit edit entry")
+	}
+	if !strings.Contains(js, "selectEntry(entryPath") {
+		t.Fatal("clicking a file no longer selects without reading")
+	}
+	if !strings.Contains(js, "文本尚未保存") || !strings.Contains(js, "取消则留在当前编辑") {
+		t.Fatal("unsaved editor leave confirmation is missing")
+	}
+	if !strings.Contains(js, "自动刷新失败，已保留上次快照") {
+		t.Fatal("log refresh failure no longer keeps the previous snapshot copy")
+	}
+	if !strings.Contains(js, "LOG_REFRESH_MS = 4000") || !strings.Contains(js, "setInterval(fetchLogs, LOG_REFRESH_MS)") {
+		t.Fatal("logs do not auto-refresh a snapshot every 4 seconds")
+	}
+	if !strings.Contains(js, `addEventListener("visibilitychange"`) || !strings.Contains(js, "clearInterval(logsTimer)") {
+		t.Fatal("log polling is not stopped on hide or leave")
+	}
+	if !strings.Contains(js, "panelJSON(`api/apps/${encodeURIComponent(appID)}`)") {
+		t.Fatal("detail view does not load GET /api/apps/{id}")
+	}
+	if strings.Contains(js, "实时跟随") || strings.Contains(html, "实时跟随") {
+		t.Fatal("page claims Docker follow")
+	}
+	if strings.Contains(js, "from \"react") || strings.Contains(js, "from 'vue") || strings.Contains(html, "react") && strings.Contains(html, "createRoot") {
+		t.Fatal("management page imported a UI framework")
+	}
+	if !strings.Contains(js, `if (action.id === "rollback") return;`) {
+		t.Fatal("management page no longer skips rollback")
+	}
+	for _, want := range []string{".app-row", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus"} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("stylesheet missing workspace rule %q", want)
+		}
 	}
 }
 
