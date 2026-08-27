@@ -16,7 +16,10 @@ import (
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
-var _ pluginsdk.RPCPluginCaller = (*Controller)(nil)
+var (
+	_                  pluginsdk.RPCPluginCaller = (*Controller)(nil)
+	removeAppWorkspace                           = os.RemoveAll
+)
 
 // CommandRunner executes Agent-local commands for the execution face.
 // Tests inject a fake; production defaults to the process PATH.
@@ -168,9 +171,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			return nil, composeCallFailure(action, output, err)
 		}
 		if action == "remove" {
-			if output, err := controller.runCommand(ctx, dir, "docker", "workspace", "remove"); err != nil {
-				return nil, composeCallFailure("remove-workspace", output, err)
-			}
+			_ = removeAppWorkspace(dir)
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
@@ -243,14 +244,33 @@ func (controller *Controller) prepareComposeCallWorkspace(root string, request c
 	}
 	workspace, err := PrepareAppWorkspace(root, request.AppID, request.Compose)
 	if err != nil {
+		if strings.TrimSpace(request.Action) == "remove" {
+			if dir, dirErr := existingComposeWorkDir(root, request.AppID); dirErr == nil {
+				return dir, nil
+			}
+		}
 		return "", err
 	}
 	if strings.TrimSpace(request.Env) != "" {
 		if err := writeAppEnvironment(workspace.Dir, request.Env); err != nil {
+			if strings.TrimSpace(request.Action) == "remove" {
+				return workspace.Dir, nil
+			}
 			return "", err
 		}
 	}
 	return workspace.Dir, nil
+}
+
+func existingComposeWorkDir(root, appID string) (string, error) {
+	dir, err := AppWorkDir(root, appID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(filepath.Join(dir, ComposeFileName)); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func composeCommandArgs(action string) ([]string, error) {

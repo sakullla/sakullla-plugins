@@ -286,7 +286,9 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(ErrDeleteUnconfirmed), appAPIResponse{Error: publicAppActionError(ErrDeleteUnconfirmed, "delete")})
 			return
 		}
-		if err := controller.deleteListedAppHTTPRules(request.Context(), app); err != nil {
+		operationCtx := withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader))
+		droppedRules, err := controller.deleteListedAppHTTPRules(operationCtx, app)
+		if err != nil {
 			response := controller.appCollectionResponse(request.Context(), app.AgentID)
 			response.Error = publicAppActionError(err, "http-rule-delete")
 			writeAppJSON(writer, appStatus(err), response)
@@ -294,8 +296,12 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		}
 		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, true, controller.uiRemove, controller.uiAuditor)
 		if err != nil {
+			stage := "delete"
+			if droppedRules {
+				stage = "delete-after-rules"
+			}
 			response := controller.appCollectionResponse(request.Context(), app.AgentID)
-			response.Error = publicAppActionError(err, "delete-after-rules")
+			response.Error = publicAppActionError(err, stage)
 			writeAppJSON(writer, appStatus(err), response)
 			return
 		}
@@ -859,10 +865,10 @@ func appendDeleteAction(actions []OpsAction) []OpsAction {
 	return append(actions, OpsAction{ID: OpsActionDelete, Label: "删除"})
 }
 
-func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app App) error {
+func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app App) (bool, error) {
 	listed, err := controller.listHostHTTPRules(ctx, app.AgentID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	view := controller.appViewFor(ctx, app, listed)
 	refs := make([]string, 0, len(view.Rules))
@@ -872,9 +878,12 @@ func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app 
 		}
 	}
 	if len(refs) == 0 {
-		return nil
+		return false, nil
 	}
-	return DeleteListedHTTPRules(ctx, controller.uiHTTPRuleDelete, controller.uiHTTPRuleList, app, nil, refs, controller.uiAuditor)
+	if err := DeleteListedHTTPRules(ctx, controller.uiHTTPRuleDelete, controller.uiHTTPRuleList, app, nil, refs, controller.uiAuditor); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func parseAppAPIPath(path string) (appID, action string, ok bool) {

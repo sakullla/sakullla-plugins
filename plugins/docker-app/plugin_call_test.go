@@ -218,9 +218,11 @@ func TestControllerCallComposeRemoveCleansWorkspaceAfterDown(t *testing.T) {
 	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"compose down", "workspace remove"}
-	if strings.Join(commands, "|") != strings.Join(want, "|") {
-		t.Fatalf("remove commands=%q want=%q", commands, want)
+	if len(commands) != 1 || commands[0] != "compose down" {
+		t.Fatalf("remove commands=%q want [compose down]", commands)
+	}
+	if _, err := os.Stat(filepath.Join(root, "media")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove left workspace: %v", err)
 	}
 }
 
@@ -251,17 +253,18 @@ func TestControllerCallComposeRemoveDoesNotCleanWorkspaceAfterDownFailure(t *tes
 	}
 }
 
-func TestControllerCallComposeRemoveReportsWorkspaceCleanupFailure(t *testing.T) {
-	t.Parallel()
+func TestControllerCallComposeRemoveSucceedsWhenWorkspaceCleanupFails(t *testing.T) {
+	original := removeAppWorkspace
+	removeAppWorkspace = func(string) error {
+		return errors.New("cleanup password=fixture-value")
+	}
+	t.Cleanup(func() { removeAppWorkspace = original })
+
 	root := t.TempDir()
 	var commands []string
 	runner := CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
-		command := strings.Join(args, " ")
-		commands = append(commands, command)
-		if command == "workspace remove" {
-			return []byte("cleanup password=fixture-value"), errors.New("cleanup failed")
-		}
-		return nil, nil
+		commands = append(commands, strings.Join(args, " "))
+		return []byte("ok"), nil
 	})
 	controller := newCallController(t, root, runner, nil)
 	payload, err := json.Marshal(map[string]any{
@@ -270,12 +273,44 @@ func TestControllerCallComposeRemoveReportsWorkspaceCleanupFailure(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload)
-	if err == nil || !strings.Contains(err.Error(), "compose remove-workspace failed") || strings.Contains(err.Error(), "fixture-value") {
-		t.Fatalf("workspace cleanup error=%v", err)
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+		t.Fatalf("remove failed after workspace cleanup error: %v", err)
 	}
-	if len(commands) != 2 || commands[0] != "compose down" || commands[1] != "workspace remove" {
-		t.Fatalf("workspace cleanup commands=%q", commands)
+	if len(commands) != 1 || commands[0] != "compose down" {
+		t.Fatalf("remove commands=%q want [compose down]", commands)
+	}
+}
+
+func TestControllerCallComposeRemoveUsesExistingWorkDirWhenRestageFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workdir := filepath.Join(root, "media")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, ComposeFileName), []byte("services:\n  web:\n    image: nginx:1.27\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+		if name != "docker" || strings.Join(args, " ") != "compose down" {
+			t.Fatalf("command name=%s %q", name, args)
+		}
+		dirs = append(dirs, dir)
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "remove", "app_id": "media", "compose": "services: [",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+		t.Fatalf("remove after restage failure: %v", err)
+	}
+	if len(dirs) != 1 || filepath.Clean(dirs[0]) != filepath.Clean(workdir) {
+		t.Fatalf("compose down dir=%q want %q", dirs, workdir)
 	}
 }
 

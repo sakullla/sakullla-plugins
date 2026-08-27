@@ -11,9 +11,8 @@
   <main>
     <header class="page-head">
       <div class="page-head-copy">
-        <p class="kicker">Docker 应用</p>
-        <h1>组内 compose 应用</h1>
-        <p class="lede">先选一台在线节点，再照看该节点上的应用。卡片显示运行状态，有入口时可打开，也可启停或重启。点卡片或「详情」进入管理。有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
+        <h1>Docker 应用</h1>
+        <p class="lede">卡片上打开或启停，详情里管 Compose、文件、日志和入口。有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="page-head-agent">
         <div class="node-card">
@@ -32,7 +31,7 @@
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel" id="app-node-empty" hidden>
         <h2>未选择节点</h2>
-        <p>请先选择一台在线节点，再查看引擎状态和管理 compose 应用。</p>
+        <p>请先选择一台在线节点，再照看这台上的应用。</p>
       </section>
       <section class="state-panel" id="app-offline" hidden>
         <h2>节点离线</h2>
@@ -77,15 +76,18 @@
     </section>
     <section id="app-workspace" class="workspace-region" hidden>
       <div class="workspace-head">
-        <h2>应用</h2>
+        <div class="workspace-head-copy">
+          <h2 id="app-list-title">应用</h2>
+          <p id="app-count" class="count" hidden></p>
+        </div>
         <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
       </div>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
           <h2 id="app-create-title">部署应用</h2>
           <div class="section-head-actions">
+            <button id="create-back" class="btn-link" type="button">返回</button>
             <button id="create-cancel" class="btn-secondary" type="button">取消</button>
-            <button id="create-back" class="btn-secondary" type="button">返回</button>
           </div>
         </div>
         <form id="create-form" method="post">
@@ -99,13 +101,13 @@
               <button type="button" class="btn-secondary" data-template="blank">空白</button>
             </div>
           </div>
-          <label>Compose YAML
+          <label class="code-field">Compose YAML
             <span class="code-editor" data-lang="yaml">
               <pre class="code-editor__highlight" aria-hidden="true"></pre>
               <textarea name="compose" class="code-editor__input" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea>
             </span>
           </label>
-          <label>Compose .env（可选）
+          <label class="code-field">Compose .env（可选）
             <span class="code-editor" data-lang="env">
               <pre class="code-editor__highlight" aria-hidden="true"></pre>
               <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="POSTGRES_PASSWORD=change-me&#10;JWT_SECRET=..."></textarea>
@@ -120,16 +122,12 @@
         <p class="hint">./ 相对路径会映射到该应用工作目录，已部署应用可管理这些相对文件。绝对 host 路径不会进入文件列表。Compose YAML 仍用本页编辑框。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
       </section>
       <section class="panel" id="app-list-panel" aria-labelledby="app-list-title">
-        <div class="section-head">
-          <h2 id="app-list-title">应用</h2>
-          <p id="app-count" class="count" hidden></p>
-        </div>
         <div id="app-list" class="app-list" data-card-wall="apps"></div>
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
       <section class="panel" id="app-detail" hidden>
         <div class="detail-head">
-          <button id="detail-back" class="btn-secondary" type="button">返回列表</button>
+          <button id="detail-back" class="btn-link" type="button">返回列表</button>
           <div class="detail-head-copy">
             <h2 id="detail-title">应用详情</h2>
             <p id="detail-status" class="app-card-status" data-detail-status></p>
@@ -151,13 +149,13 @@
         <section id="detail-overview" class="detail-section" data-section-panel="overview"></section>
         <section id="detail-compose" class="detail-section" data-section-panel="compose" hidden>
           <form id="compose-form" method="post">
-            <label>Compose YAML
+            <label class="code-field">Compose YAML
               <span class="code-editor" data-lang="yaml">
                 <pre class="code-editor__highlight" aria-hidden="true"></pre>
                 <textarea name="compose" class="code-editor__input" required spellcheck="false"></textarea>
               </span>
             </label>
-            <label>Compose .env（可选）
+            <label class="code-field">Compose .env（可选）
               <span class="code-editor" data-lang="env">
                 <pre class="code-editor__highlight" aria-hidden="true"></pre>
                 <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="留空表示复用已有文件"></textarea>
@@ -172,13 +170,15 @@
         </section>
         <section id="detail-files" class="detail-section" data-section-panel="files" hidden></section>
         <section id="detail-logs" class="detail-section" data-section-panel="logs" hidden>
-          <div class="logs-toolbar">
-            <label>服务 <select id="logs-service" name="service"></select></label>
-            <button id="logs-refresh" class="btn-secondary" type="button">刷新快照</button>
-            <button id="logs-pause" class="btn-secondary" type="button">暂停</button>
-            <p id="logs-status" class="hint">自动刷新</p>
+          <div class="logs-panel">
+            <div class="logs-toolbar">
+              <label>服务 <select id="logs-service" name="service"></select></label>
+              <button id="logs-refresh" class="btn-secondary" type="button">刷新快照</button>
+              <button id="logs-pause" class="btn-secondary" type="button">暂停</button>
+              <p id="logs-status" class="hint">自动刷新</p>
+            </div>
+            <pre id="logs-view" class="logs-terminal"></pre>
           </div>
-          <pre id="logs-view" class="logs-terminal"></pre>
         </section>
         <section id="detail-http" class="detail-section" data-section-panel="http" hidden></section>
       </section>
@@ -186,10 +186,19 @@
     <template id="app-card-template">
       <article class="app-card" tabindex="0">
         <div class="app-card-head">
-          <h3 data-app-name></h3>
-          <p class="app-card-status" data-app-status></p>
+          <span class="app-card-mark" data-app-mark aria-hidden="true"></span>
+          <div class="app-card-identity">
+            <div class="app-card-title-row">
+              <h3 data-app-name></h3>
+              <div class="app-card-badges">
+                <p class="app-card-status" data-app-status></p>
+              </div>
+            </div>
+            <p class="app-card-meta" data-app-image></p>
+            <p class="app-card-ports" data-app-ports></p>
+            <p class="app-card-url" data-app-url hidden></p>
+          </div>
         </div>
-        <div class="app-chips" data-app-ports></div>
         <div class="app-card-actions">
           <button type="button" class="btn-primary" data-action="open" hidden>打开</button>
           <button type="button" class="btn-secondary" data-action="start" hidden>启动</button>
@@ -208,9 +217,7 @@
             <div id="files-breadcrumb" class="files-breadcrumb"></div>
           </nav>
           <div class="files-toolbar">
-            <label>目录名称 <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false"></label>
             <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
-            <label>文本文件名 <input id="files-new-name" name="new-text" autocomplete="off" spellcheck="false" placeholder="config.yml"></label>
             <button id="files-new-text" type="button" class="btn-secondary">新建文本文件</button>
             <button id="files-upload" type="button" class="btn-secondary">上传</button>
             <input data-files-input type="file" hidden>
@@ -224,15 +231,43 @@
           <ul id="files-list" class="files-list"></ul>
           <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>
         </div>
+        <dialog id="files-mkdir-dialog" class="files-dialog" aria-labelledby="files-mkdir-title">
+          <form id="files-mkdir-form" class="files-dialog-form">
+            <h3 id="files-mkdir-title">新建目录</h3>
+            <p class="files-dialog-copy">在当前路径下创建一个目录。</p>
+            <label>目录名称
+              <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false" placeholder="config" required>
+            </label>
+            <div class="dialog-actions">
+              <button type="button" class="btn-secondary" data-dialog-close>取消</button>
+              <button type="submit" class="btn-primary">创建</button>
+            </div>
+          </form>
+        </dialog>
+        <dialog id="files-new-dialog" class="files-dialog" aria-labelledby="files-new-title">
+          <form id="files-new-form" class="files-dialog-form">
+            <h3 id="files-new-title">新建文本文件</h3>
+            <p class="files-dialog-copy">在当前路径新建文本文件，保存后写入工作区。</p>
+            <label>文本文件名
+              <input id="files-new-name" name="new-text" autocomplete="off" spellcheck="false" placeholder="config.yml" required>
+            </label>
+            <div class="dialog-actions">
+              <button type="button" class="btn-secondary" data-dialog-close>取消</button>
+              <button type="submit" class="btn-primary">创建</button>
+            </div>
+          </form>
+        </dialog>
         <div id="files-editor" class="files-editor" hidden>
           <div class="files-editor-head">
             <strong id="files-editor-name"></strong>
             <span id="files-dirty" class="files-dirty" hidden>未保存</span>
             <button id="files-editor-close" type="button" class="btn-secondary">关闭</button>
           </div>
-          <span class="code-editor" data-lang="text">
-            <pre class="code-editor__highlight" aria-hidden="true"></pre>
-            <textarea class="code-editor__input" spellcheck="false"></textarea>
+          <span class="code-field files-editor-field">
+            <span class="code-editor" data-lang="text">
+              <pre class="code-editor__highlight" aria-hidden="true"></pre>
+              <textarea class="code-editor__input" spellcheck="false"></textarea>
+            </span>
           </span>
           <div class="files-editor-actions">
             <button id="files-save" type="button" class="btn-primary">保存</button>
@@ -242,6 +277,16 @@
       </section>
     </template>
   </main>
+  <dialog id="confirm-dialog" class="files-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <form method="dialog" class="files-dialog-form">
+      <h3 id="confirm-title">确认</h3>
+      <p id="confirm-body" class="files-dialog-copy"></p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="btn-secondary" id="confirm-cancel">取消</button>
+        <button type="submit" value="ok" class="btn-primary" id="confirm-ok">确定</button>
+      </div>
+    </form>
+  </dialog>
   <script src="app.js" defer></script>
 </body>
 </html>

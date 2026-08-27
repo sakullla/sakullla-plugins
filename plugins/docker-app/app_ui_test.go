@@ -299,7 +299,7 @@ func TestAppUIDeletesHTTPRuleFromHostList(t *testing.T) {
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
-	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref}) || len(handle.rules) != 0 {
+	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref, OperationID: "operation/ui-test"}) || len(handle.rules) != 0 {
 		t.Fatalf("host delete deletes=%#v rules=%#v", handle.deletes, handle.rules)
 	}
 	if strings.Contains(deleted.Body.String(), "https://app.example.com") {
@@ -340,6 +340,31 @@ func TestAppUIHTTPRuleDeleteFailureKeepsHostRule(t *testing.T) {
 	}
 }
 
+func TestAppUIHTTPRuleDeleteSucceedsWhenHostAlreadyRemovedRule(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{deleteErr: errors.New("upstream rejected fixture-value"), deleteDropsRule: true}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	rule := httptest.NewRecorder()
+	controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+	if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+		t.Fatalf("seed rule status=%d rules=%#v body=%s", rule.Code, handle.rules, rule.Body.String())
+	}
+	ref := handle.rules[0].Ref
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule-delete", `{"rule_ref":`+jsonString(ref)+`}`))
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("idempotent delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if len(handle.deletes) != 1 || handle.deletes[0].OperationID != "operation/ui-test" || len(handle.rules) != 0 {
+		t.Fatalf("idempotent delete deletes=%#v rules=%#v", handle.deletes, handle.rules)
+	}
+	if strings.Contains(deleted.Body.String(), "https://app.example.com") {
+		t.Fatalf("idempotent delete still projected host rule: %s", deleted.Body.String())
+	}
+}
+
 func TestAppUIConfirmedDeleteRemovesListedHTTPRules(t *testing.T) {
 	t.Parallel()
 	handle := &recordingHTTPRuleCreate{}
@@ -367,7 +392,7 @@ func TestAppUIConfirmedDeleteRemovesListedHTTPRules(t *testing.T) {
 	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
 		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
-	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref}) || len(handle.rules) != 0 {
+	if len(handle.deletes) != 1 || handle.deletes[0] != (recordedHTTPRuleDelete{AgentID: "agent-1", RuleRef: ref, OperationID: "operation/ui-test"}) || len(handle.rules) != 0 {
 		t.Fatalf("confirmed delete left host rules deletes=%#v rules=%#v", handle.deletes, handle.rules)
 	}
 	if strings.Contains(deleted.Body.String(), `"id":"media"`) || strings.Contains(deleted.Body.String(), "https://app.example.com") {
@@ -397,6 +422,56 @@ func TestAppUICascadeHTTPRuleDeleteFailureKeepsApp(t *testing.T) {
 	if len(handle.rules) != 1 {
 		t.Fatalf("cascade failure removed host rule: %#v", handle.rules)
 	}
+	if len(handle.deletes) != 1 || handle.deletes[0].OperationID != "operation/ui-test" {
+		t.Fatalf("cascade delete omitted operation key: %#v", handle.deletes)
+	}
+}
+
+func TestAppUIDeleteFailureMessageDependsOnHTTPRuleCleanup(t *testing.T) {
+	t.Parallel()
+	compose := "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"
+
+	t.Run("without-rules", func(t *testing.T) {
+		t.Parallel()
+		controller := newUIControllerWithOptions(t, uiControllerOptions{remove: failingAppRemove{err: errors.New("agent rejected fixture-value")}})
+		created := httptest.NewRecorder()
+		controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+		if created.Code != http.StatusOK {
+			t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+		}
+		deleted := httptest.NewRecorder()
+		controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+		if deleted.Code != http.StatusInternalServerError || len(controller.Apps()) != 1 {
+			t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+		}
+		if !strings.Contains(deleted.Body.String(), "删除应用失败") || strings.Contains(deleted.Body.String(), "入口规则已按宿主结果删除") || strings.Contains(deleted.Body.String(), "fixture-value") {
+			t.Fatalf("generic delete failure is not actionable and safe: %s", deleted.Body.String())
+		}
+	})
+
+	t.Run("after-rules", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingHTTPRuleCreate{}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle, remove: failingAppRemove{err: errors.New("agent rejected fixture-value")}})
+		created := httptest.NewRecorder()
+		controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+		rule := httptest.NewRecorder()
+		controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/apps/media/http-rule", `{"domain":"https://app.example.com","port":8080}`))
+		if rule.Code != http.StatusOK || len(handle.rules) != 1 {
+			t.Fatalf("seed rule status=%d rules=%#v", rule.Code, handle.rules)
+		}
+		deleted := httptest.NewRecorder()
+		controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+		if deleted.Code != http.StatusInternalServerError || len(controller.Apps()) != 1 {
+			t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+		}
+		if !strings.Contains(deleted.Body.String(), "入口规则已按宿主结果删除") || strings.Contains(deleted.Body.String(), "fixture-value") {
+			t.Fatalf("delete-after-rules is not actionable and safe: %s", deleted.Body.String())
+		}
+		if len(handle.rules) != 0 || len(handle.deletes) != 1 || handle.deletes[0].OperationID != "operation/ui-test" {
+			t.Fatalf("rules after failed app delete deletes=%#v rules=%#v", handle.deletes, handle.rules)
+		}
+	})
 }
 
 func TestNormalizeHTTPRuleFrontendPreservesHTTPSAndRejectsInvalid(t *testing.T) {
@@ -1500,8 +1575,11 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form still fills main without a capped operation group")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "repeat(auto-fill, minmax(") {
+	if !strings.Contains(appList, "repeat(auto-fit, minmax(") {
 		t.Fatal(".app-list is not a filling card grid")
+	}
+	if strings.Contains(appList, "auto-fill") {
+		t.Fatal(".app-list still leaves empty auto-fill tracks")
 	}
 	if strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
 		t.Fatal(".app-list is still a single column")
@@ -1510,9 +1588,10 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
-		"repeat(auto-fill, minmax(17.5rem, 1fr))",
-		"repeat(auto-fill, minmax(18rem, 1fr))",
-		"repeat(auto-fill, minmax(20rem, 1fr))",
+		"max-width: 72rem",
+		"repeat(auto-fit, minmax(17.5rem, 22rem))",
+		"repeat(auto-fit, minmax(18rem, 22rem))",
+		"repeat(auto-fit, minmax(20rem, 22rem))",
 	} {
 		if !strings.Contains(stylesheet, want) {
 			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
@@ -1680,7 +1759,7 @@ func assertFilesManagerPage(t *testing.T) {
 	}
 
 	loadStart := strings.Index(js, "const loadList = async (path) => {")
-	loadEnd := strings.Index(js, "const requestList = (path) => {")
+	loadEnd := strings.Index(js, "const requestList = async (path) => {")
 	if loadStart < 0 || loadEnd <= loadStart {
 		t.Fatal("loadList is missing")
 	}
@@ -1803,8 +1882,27 @@ func assertFilesManagerPage(t *testing.T) {
 		t.Fatal("mkdir handler is missing")
 	}
 	mkdirFn := js[mkdirStart:mkdirEnd]
-	if !strings.Contains(mkdirFn, "setBusy(true)") || !strings.Contains(mkdirFn, "setBusy(false)") {
+	if !strings.Contains(mkdirFn, "openNamedDialog") && !strings.Contains(js, "showModal") {
+		t.Fatal("new directory is not opened from a dialog")
+	}
+	mkdirPost := strings.Index(js, `action: "mkdir"`)
+	if mkdirPost < 0 {
+		t.Fatal("mkdir does not write a workspace directory")
+	}
+	start := mkdirPost - 400
+	if start < 0 {
+		start = 0
+	}
+	end := mkdirPost + 400
+	if end > len(js) {
+		end = len(js)
+	}
+	mkdirWindow := js[start:end]
+	if !strings.Contains(mkdirWindow, "setBusy(true)") || !strings.Contains(mkdirWindow, "setBusy(false)") {
 		t.Fatal("mkdir does not go through setBusy")
+	}
+	if !strings.Contains(js, "files-new-dialog") || !strings.Contains(js, "files-mkdir-dialog") {
+		t.Fatal("new file/directory dialogs are missing")
 	}
 
 	uploadStart := strings.Index(js, "if (uploadBtn && uploadInput) {")
@@ -1969,7 +2067,7 @@ func assertDetailWorkspacePage(t *testing.T) {
 	}
 
 	paintStart := strings.Index(js, "const paintDetail = (app) => {")
-	paintEnd := strings.Index(js, "const setDetailSection = (section) => {")
+	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
 	}
@@ -1981,8 +2079,8 @@ func assertDetailWorkspacePage(t *testing.T) {
 		t.Fatal("detail head does not paint status or open")
 	}
 
-	setStart := strings.Index(js, "const setDetailSection = (section) => {")
-	setEnd := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	setStart := strings.Index(js, "const setDetailSection = async (section) => {")
+	setEnd := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
 	if setStart < 0 || setEnd <= setStart {
 		t.Fatal("setDetailSection is missing")
 	}
@@ -2025,6 +2123,12 @@ func assertDetailWorkspacePage(t *testing.T) {
 	httpFn := js[httpStart:httpEnd]
 	if !strings.Contains(httpFn, `createElement("a")`) || !strings.Contains(httpFn, `target = "_blank"`) || !strings.Contains(httpFn, "link.href") {
 		t.Fatal("HTTP entries are not openable links")
+	}
+	if strings.Contains(httpFn, `${domain}${port}`) {
+		t.Fatal("HTTP rule rows still glue the backend published port onto the public URL")
+	}
+	if !strings.Contains(httpFn, "后端 ") || !strings.Contains(js, "publicURLFromRule") {
+		t.Fatal("HTTP rule rows do not keep the public URL separate from the backend published port")
 	}
 	if !strings.Contains(httpFn, "确认删除入口") {
 		t.Fatal("HTTP delete is missing confirmation")
@@ -2204,7 +2308,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if resetStart < 0 || !strings.Contains(js[resetStart:], `logsView.textContent = "";`) {
 		t.Fatal("logs terminal reset does not clear #logs-view")
 	}
-	leaveStart := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	leaveStart := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
 	leaveEnd := strings.Index(js, "const showDetail = async (appID, section) => {")
 	if leaveStart < 0 || leaveEnd <= leaveStart {
 		t.Fatal("leaveDetail is missing")
@@ -2214,7 +2318,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("leaveDetail does not reset the logs terminal")
 	}
 	paintStart := strings.Index(js, "const paintDetail = (app) => {")
-	paintEnd := strings.Index(js, "const setDetailSection = (section) => {")
+	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
 	}
@@ -2288,8 +2392,8 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(style, `#app-workspace:has(#app-create:not([hidden])) #app-list-panel`) {
 		t.Fatal("deploy form can still stack on the card wall")
 	}
-	setStart := strings.Index(js, "const setDetailSection = (section) => {")
-	setEnd := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	setStart := strings.Index(js, "const setDetailSection = async (section) => {")
+	setEnd := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
 	if setStart < 0 || setEnd <= setStart {
 		t.Fatal("setDetailSection is missing")
 	}
@@ -2579,6 +2683,7 @@ type uiControllerOptions struct {
 	httpOffers    HTTPBackendOfferReplaceHandle
 	appState      AppStateStore
 	files         AppFilesHandle
+	remove        AppRemoveExecutor
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -2607,6 +2712,10 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 	if filesHandle == nil {
 		filesHandle = runtime
 	}
+	removeHandle := opts.remove
+	if removeHandle == nil {
+		removeHandle = runtime
+	}
 	httpRuleList := opts.httpRuleList
 	if httpRuleList == nil {
 		if lister, ok := opts.httpRule.(HTTPRuleListHandle); ok {
@@ -2625,7 +2734,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIRestart:          runtime,
 		UILogs:             runtime,
 		UIFiles:            filesHandle,
-		UIRemove:           runtime,
+		UIRemove:           removeHandle,
 		UIHTTPRule:         opts.httpRule,
 		UIHTTPRuleList:     httpRuleList,
 		UIHTTPBackendOffer: opts.httpOffers,
@@ -2727,17 +2836,19 @@ func stringPtr(value string) *string {
 }
 
 type recordedHTTPRuleDelete struct {
-	AgentID string
-	RuleRef string
+	AgentID     string
+	RuleRef     string
+	OperationID string
 }
 
 type recordingHTTPRuleCreate struct {
-	specs     []HTTPRuleSpec
-	rules     []HostHTTPRule
-	deletes   []recordedHTTPRuleDelete
-	err       error
-	listErr   error
-	deleteErr error
+	specs           []HTTPRuleSpec
+	rules           []HostHTTPRule
+	deletes         []recordedHTTPRuleDelete
+	err             error
+	listErr         error
+	deleteErr       error
+	deleteDropsRule bool
 }
 
 func (handle *recordingHTTPRuleCreate) Create(_ context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
@@ -2771,9 +2882,11 @@ func (handle *recordingHTTPRuleCreate) List(_ context.Context, agentID string) (
 	return listed, nil
 }
 
-func (handle *recordingHTTPRuleCreate) Delete(_ context.Context, agentID, ruleRef string) error {
-	handle.deletes = append(handle.deletes, recordedHTTPRuleDelete{AgentID: agentID, RuleRef: ruleRef})
-	if handle.deleteErr != nil {
+func (handle *recordingHTTPRuleCreate) Delete(ctx context.Context, agentID, ruleRef string) error {
+	handle.deletes = append(handle.deletes, recordedHTTPRuleDelete{
+		AgentID: agentID, RuleRef: ruleRef, OperationID: hostOperationKeyFromContext(ctx),
+	})
+	if handle.deleteErr != nil && !handle.deleteDropsRule {
 		return handle.deleteErr
 	}
 	kept := make([]HostHTTPRule, 0, len(handle.rules))
@@ -2783,7 +2896,15 @@ func (handle *recordingHTTPRuleCreate) Delete(_ context.Context, agentID, ruleRe
 		}
 	}
 	handle.rules = kept
-	return nil
+	return handle.deleteErr
+}
+
+type failingAppRemove struct {
+	err error
+}
+
+func (executor failingAppRemove) RemoveApp(context.Context, App) error {
+	return executor.err
 }
 
 type recordingHTTPBackendOffers struct {

@@ -393,6 +393,21 @@ func TestHTTPRuleNotDeletedWithoutRefOrOnFailure(t *testing.T) {
 			t.Fatalf("delete failure leaked cause: %v", err)
 		}
 	})
+
+	t.Run("delete-already-gone", func(t *testing.T) {
+		gone := &recordingHostHTTPRules{
+			rules:           append([]dockerapp.HostHTTPRule(nil), store.rules...),
+			deleteErr:       errors.New("host rejected fixture-value"),
+			deleteDropsRule: true,
+		}
+		rules, err := dockerapp.DeleteHTTPRule(context.Background(), gone, gone, httpApp, httpObservations, ref, auditor)
+		if err != nil {
+			t.Fatalf("already-gone delete err=%v", err)
+		}
+		if len(rules) != 0 || len(gone.rules) != 0 || len(gone.deletes) != 1 {
+			t.Fatalf("already-gone delete rules=%#v store=%#v deletes=%#v", rules, gone.rules, gone.deletes)
+		}
+	})
 }
 
 func TestProjectHTTPBackendCatalogUsesComposePortsAndAvailability(t *testing.T) {
@@ -436,12 +451,13 @@ type recordedHTTPRuleDelete struct {
 }
 
 type recordingHostHTTPRules struct {
-	specs     []dockerapp.HTTPRuleSpec
-	rules     []dockerapp.HostHTTPRule
-	deletes   []recordedHTTPRuleDelete
-	createErr error
-	listErr   error
-	deleteErr error
+	specs           []dockerapp.HTTPRuleSpec
+	rules           []dockerapp.HostHTTPRule
+	deletes         []recordedHTTPRuleDelete
+	createErr       error
+	listErr         error
+	deleteErr       error
+	deleteDropsRule bool
 }
 
 func (store *recordingHostHTTPRules) Create(_ context.Context, spec dockerapp.HTTPRuleSpec) (dockerapp.HostHTTPRule, error) {
@@ -477,7 +493,7 @@ func (store *recordingHostHTTPRules) List(_ context.Context, agentID string) ([]
 
 func (store *recordingHostHTTPRules) Delete(_ context.Context, agentID, ruleRef string) error {
 	store.deletes = append(store.deletes, recordedHTTPRuleDelete{AgentID: agentID, RuleRef: ruleRef})
-	if store.deleteErr != nil {
+	if store.deleteErr != nil && !store.deleteDropsRule {
 		return store.deleteErr
 	}
 	kept := make([]dockerapp.HostHTTPRule, 0, len(store.rules))
@@ -487,7 +503,7 @@ func (store *recordingHostHTTPRules) Delete(_ context.Context, agentID, ruleRef 
 		}
 	}
 	store.rules = kept
-	return nil
+	return store.deleteErr
 }
 
 func portsEqual(got, want []uint16) bool {

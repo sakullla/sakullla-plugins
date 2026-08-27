@@ -303,8 +303,8 @@ func CreateHTTPRuleFromPublishedPort(ctx context.Context, handle HTTPRuleCreateH
 
 // DeleteHTTPRule asks the host to delete one listed HTTP rule. Success is the
 // host list filtered by this app's Agent and published ports. Host rejection
-// does not record a local success. Missing rule_ref or a ref not listed for
-// this app is denied without a host call.
+// is still success when the subsequent list no longer contains the ref.
+// Missing rule_ref or a ref not listed for this app is denied without a host call.
 func DeleteHTTPRule(ctx context.Context, handle HTTPRuleDeleteHandle, lister HTTPRuleListHandle, app App, observations []ContainerObservation, ruleRef string, auditor Auditor) ([]HostHTTPRule, error) {
 	if auditor == nil {
 		return nil, ErrAuditRequired
@@ -338,6 +338,11 @@ func DeleteHTTPRule(ctx context.Context, handle HTTPRuleDeleteHandle, lister HTT
 		return nil, ErrTypedHandlesUnavailable
 	}
 	if err := handle.Delete(ctx, app.AgentID, ruleRef); err != nil {
+		listed, listErr := lister.List(ctx, app.AgentID)
+		if listErr == nil && !containsHTTPRuleRef(FilterHTTPRulesForApp(listed, app, ports), ruleRef) {
+			audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "succeeded", Detail: ruleRef})
+			return FilterHTTPRulesForApp(listed, app, ports), nil
+		}
 		audit(auditor, AuditRecord{Action: "http.rule.delete", Outcome: "failed", Detail: ErrOperationFailed.Error()})
 		return nil, safeFailure(ErrOperationFailed, err)
 	}

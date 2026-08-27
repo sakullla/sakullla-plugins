@@ -74,6 +74,34 @@ const autoUpdateInput = createForm ? createForm.querySelector('input[name="auto_
 const detailComposeInput = composeForm ? composeForm.querySelector('textarea[name="compose"]') : null;
 const detailEnvInput = composeForm ? composeForm.querySelector('textarea[name="env"]') : null;
 const detailAutoUpdateInput = composeForm ? composeForm.querySelector('input[name="auto_update"]') : null;
+const confirmDialog = document.querySelector("#confirm-dialog");
+const confirmTitle = document.querySelector("#confirm-title");
+const confirmBody = document.querySelector("#confirm-body");
+const confirmOk = document.querySelector("#confirm-ok");
+const confirmCancel = document.querySelector("#confirm-cancel");
+
+const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false } = {}) => {
+  if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
+    return Promise.resolve(window.confirm([title, body].filter(Boolean).join("\n")));
+  }
+  if (confirmDialog.open) confirmDialog.close("cancel");
+  if (confirmTitle) confirmTitle.textContent = title || "确认";
+  if (confirmBody) {
+    confirmBody.textContent = body || "";
+    confirmBody.hidden = !body;
+  }
+  if (confirmOk) {
+    confirmOk.textContent = confirm;
+    confirmOk.dataset.danger = danger ? "true" : "false";
+  }
+  if (confirmCancel) confirmCancel.textContent = cancel;
+  return new Promise((resolve) => {
+    const onClose = () => resolve(confirmDialog.returnValue === "ok");
+    confirmDialog.addEventListener("close", onClose, { once: true });
+    confirmDialog.showModal();
+    if (confirmCancel) confirmCancel.focus();
+  });
+};
 
 let busy = false;
 let selectedAgentID = "";
@@ -133,11 +161,27 @@ const panelAuthHeaders = () => {
   return headers;
 };
 
+let statusTimer = null;
+const STATUS_CLEAR_MS = 4000;
+
 const showStatus = (message, isError) => {
   if (!statusNode) return;
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+    statusTimer = null;
+  }
   statusNode.hidden = !message;
-  statusNode.textContent = message;
+  statusNode.textContent = message || "";
+  if (!message) {
+    delete statusNode.dataset.error;
+    return;
+  }
   statusNode.dataset.error = isError ? "true" : "false";
+  if (!isError) {
+    statusTimer = setTimeout(() => {
+      if (statusNode.textContent === message) showStatus("", false);
+    }, STATUS_CLEAR_MS);
+  }
 };
 
 const newOperationKey = () => {
@@ -584,6 +628,7 @@ const escapeHtml = (value) => String(value)
   .replace(/"/g, "&quot;");
 
 const tok = (name, text) => `<span class="tok-${name}">${escapeHtml(text)}</span>`;
+const tokHtml = (name, html) => `<span class="tok-${name}">${html}</span>`;
 
 const splitInlineComment = (text) => {
   let inSingle = false;
@@ -630,7 +675,7 @@ const highlightScalar = (value) => {
   if (keyword) return prefix + tok("keyword", keyword[0]) + highlightInterp(trimmed.slice(keyword[0].length));
   const number = trimmed.match(/^-?\d+(?:\.\d+)?\b/);
   if (number) return prefix + tok("number", number[0]) + highlightInterp(trimmed.slice(number[0].length));
-  return prefix + highlightInterp(trimmed);
+  return prefix + tokHtml("string", highlightInterp(trimmed));
 };
 
 const highlightYamlLine = (line) => {
@@ -722,9 +767,16 @@ if (createForm) {
   });
 }
 
-const confirmLeaveEditor = () => {
+const confirmLeaveEditor = async () => {
   if (!filesEditorOpen || !filesDirty) return true;
-  if (!window.confirm("文本尚未保存。离开将丢弃改动，取消则留在当前编辑。")) return false;
+  const ok = await askConfirm({
+    title: "文本尚未保存",
+    body: "离开将丢弃改动，取消则留在当前编辑。",
+    confirm: "丢弃",
+    cancel: "取消",
+    danger: true,
+  });
+  if (!ok) return false;
   discardFileEditor();
   return true;
 };
@@ -737,9 +789,9 @@ const applyCreateTemplate = (name) => {
   composeInput.focus();
 };
 
-const openCreate = () => {
+const openCreate = async () => {
   if (!engineReady || !agentOnline) return;
-  if (view === "detail" && !leaveDetail()) return;
+  if (view === "detail" && !(await leaveDetail())) return;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
   if (idInput) {
@@ -815,6 +867,28 @@ const parseImage = (compose) => {
   return match ? match[1] : "";
 };
 
+const parseComposeScalar = (compose, key) => {
+  const match = String(compose || "").match(new RegExp(`^\\s*${key}:\\s*['"]?([^\\s'"]+)['"]?\\s*$`, "m"));
+  return match ? match[1] : "";
+};
+
+const parseComposeVolumes = (compose) => {
+  const volumes = [];
+  const seen = new Set();
+  String(compose || "").split(/\r?\n/).forEach((line) => {
+    const match = line.match(/^\s*-\s*['"]?([^:'"\s]+):([^:'"\s]+)(?::[^'"]+)?['"]?\s*$/);
+    if (!match) return;
+    const source = match[1];
+    const target = match[2];
+    if (/^\d+$/.test(source) && /^\d+$/.test(target)) return;
+    const key = `${source}:${target}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    volumes.push({ source, target });
+  });
+  return volumes;
+};
+
 const chip = (text) => {
   const node = document.createElement("span");
   node.className = "chip";
@@ -825,8 +899,32 @@ const chip = (text) => {
 const appPorts = (app) => (Array.isArray(app.ports) && app.ports.length ? app.ports : parsePublishedPorts(app.compose));
 const appVersion = (app) => app.version || parseImage(app.compose) || "未解析镜像";
 
-const appendAppChips = (chips, app) => {
-  if (app.status && app.status !== "有新版本") {
+const splitImage = (value) => {
+  const text = String(value || "");
+  const at = text.indexOf("@sha256:");
+  if (at > 0) return { name: text.slice(0, at), digest: text.slice(at + 8) };
+  return { name: text, digest: "" };
+};
+
+const shortVersion = (value) => {
+  const parts = splitImage(value);
+  if (parts.digest) {
+    const short = parts.digest.slice(0, 12);
+    return `${parts.name}@${short}${parts.digest.length > 12 ? "…" : ""}`;
+  }
+  if (parts.name.length > 36) return `${parts.name.slice(0, 34)}…`;
+  return parts.name;
+};
+
+const cardImage = (value) => {
+  const name = splitImage(value).name;
+  if (!name || name === "未解析镜像") return "";
+  if (name.length > 42) return `${name.slice(0, 40)}…`;
+  return name;
+};
+
+const appendAppChips = (chips, app, options = {}) => {
+  if (!options.omitStatus && app.status && app.status !== "有新版本") {
     const statusChip = chip(app.status);
     statusChip.className = "chip app-status";
     statusChip.dataset.status = app.status;
@@ -837,8 +935,10 @@ const appendAppChips = (chips, app) => {
     noticeChip.className = "chip app-status-update";
     chips.append(noticeChip);
   }
-  const versionChip = chip(appVersion(app));
+  const version = appVersion(app);
+  const versionChip = chip(shortVersion(version));
   versionChip.className = "chip app-version";
+  versionChip.title = version;
   chips.append(versionChip);
   const ports = appPorts(app);
   if (ports.length) ports.forEach((port) => chips.append(chip(`:${port}`)));
@@ -952,9 +1052,13 @@ const mountAppFiles = () => {
   const listEl = section.querySelector("#files-list") || section.querySelector(".files-list");
   const emptyEl = section.querySelector(".files-empty");
   const mkdirBtn = section.querySelector("#files-mkdir");
+  const mkdirDialog = section.querySelector("#files-mkdir-dialog");
+  const mkdirForm = section.querySelector("#files-mkdir-form");
   const mkdirName = section.querySelector("#files-mkdir-name");
   const newName = section.querySelector("#files-new-name");
   const newTextBtn = section.querySelector("#files-new-text");
+  const newDialog = section.querySelector("#files-new-dialog");
+  const newForm = section.querySelector("#files-new-form");
   const selectedLabel = section.querySelector("#files-selected");
   const editBtn = section.querySelector("#files-edit");
   const uploadBtn = section.querySelector("#files-upload");
@@ -1016,12 +1120,19 @@ const mountAppFiles = () => {
 
   discardFileEditor = hideEditor;
 
-  const confirmLeave = () => {
+  const confirmLeave = async () => {
     if (!filesEditorOpen || !filesDirty) {
       if (filesEditorOpen && !filesDirty) hideEditor();
       return true;
     }
-    if (!window.confirm("文本尚未保存。离开将丢弃改动，取消则留在当前编辑。")) return false;
+    const ok = await askConfirm({
+      title: "文本尚未保存",
+      body: "离开将丢弃改动，取消则留在当前编辑。",
+      confirm: "丢弃",
+      cancel: "取消",
+      danger: true,
+    });
+    if (!ok) return false;
     hideEditor();
     return true;
   };
@@ -1095,7 +1206,7 @@ const mountAppFiles = () => {
   const openFile = async (path, name) => {
     if (!app) return;
     if (filesEditorOpen && filesDirty && selectedPath === path) return;
-    if (!confirmLeave()) return;
+    if (!(await confirmLeave())) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
       showStatus(workspacePathError, true);
@@ -1114,16 +1225,14 @@ const mountAppFiles = () => {
         return;
       }
       showEditor(relative, name || relative.split("/").pop(), content);
-      showStatus("已打开工作区文件。", false);
     } catch (error) {
       showStatus(error.message, true);
     }
   };
 
-  const openNewFile = (path, name) => {
-    if (!confirmLeave()) return;
+  const openNewFile = async (path, name) => {
+    if (!(await confirmLeave())) return;
     showEditor(path, name, "");
-    showStatus("已打开新建文本文件，保存后写入工作区。", false);
   };
 
   const loadList = async (path) => {
@@ -1151,12 +1260,13 @@ const mountAppFiles = () => {
         listed += 1;
         const item = document.createElement("li");
         item.dataset.path = entryPath;
+        item.dataset.kind = entry.dir ? "dir" : "file";
         item.setAttribute("aria-selected", selectedPath === entryPath ? "true" : "false");
         const nameWrap = document.createElement("div");
         nameWrap.className = "files-list-name";
         const open = document.createElement("button");
         open.type = "button";
-        open.className = "btn-link";
+        open.className = "files-name";
         open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
         open.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1164,13 +1274,13 @@ const mountAppFiles = () => {
           else selectEntry(entryPath, entry.name || entryPath, false);
         });
         nameWrap.append(open);
+        item.append(nameWrap);
         if (!entry.dir && entry.size != null) {
           const size = document.createElement("span");
           size.className = "files-size";
           size.textContent = formatFileSize(entry.size);
-          nameWrap.append(size);
+          item.append(size);
         }
-        item.append(nameWrap);
         item.addEventListener("click", () => {
           selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir));
         });
@@ -1184,8 +1294,8 @@ const mountAppFiles = () => {
     }
   };
 
-  const requestList = (path) => {
-    if (!confirmLeave()) return;
+  const requestList = async (path) => {
+    if (!(await confirmLeave())) return;
     loadList(path);
   };
 
@@ -1196,7 +1306,13 @@ const mountAppFiles = () => {
       showStatus(relative === "." ? "不能删除应用工作区根目录" : workspacePathError, true);
       return;
     }
-    if (!window.confirm(`确认删除 ${name || relative}？取消不会更改工作区。`)) {
+    if (!await askConfirm({
+      title: "删除",
+      body: `确认删除 ${name || relative}？取消不会更改工作区。`,
+      confirm: "删除",
+      cancel: "取消",
+      danger: true,
+    })) {
       showStatus("已取消，工作区未更改。", false);
       return;
     }
@@ -1213,11 +1329,36 @@ const mountAppFiles = () => {
     }
   };
 
+  const openNamedDialog = (dialog, input) => {
+    if (!dialog || typeof dialog.showModal !== "function") return;
+    if (input) input.value = "";
+    dialog.showModal();
+    if (input) input.focus();
+  };
+  const closeNamedDialog = (dialog) => {
+    if (dialog && dialog.open) dialog.close();
+  };
+  section.querySelectorAll("[data-dialog-close]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dialog = button.closest("dialog");
+      closeNamedDialog(dialog);
+    });
+  });
   if (mkdirBtn) {
-    mkdirBtn.addEventListener("click", async () => {
+    mkdirBtn.addEventListener("click", () => {
+      if (busy || !app) return;
+      openNamedDialog(mkdirDialog, mkdirName);
+    });
+  }
+  if (mkdirForm) {
+    mkdirForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
       if (busy || !app) return;
       const name = mkdirName ? mkdirName.value.trim() : "";
-      if (!name) return;
+      if (!name) {
+        if (mkdirName) mkdirName.focus();
+        return;
+      }
       const next = joinWorkspacePath(currentPath, name);
       if (!next) {
         showStatus(workspacePathError, true);
@@ -1227,6 +1368,7 @@ const mountAppFiles = () => {
       try {
         await postAppFiles(app, { action: "mkdir", path: next });
         if (mkdirName) mkdirName.value = "";
+        closeNamedDialog(mkdirDialog);
         showStatus("已新建目录。", false);
         await loadList(currentPath);
       } catch (error) {
@@ -1237,11 +1379,20 @@ const mountAppFiles = () => {
     });
   }
   if (newTextBtn) {
-    newTextBtn.addEventListener("click", () => {
+    newTextBtn.addEventListener("click", async () => {
+      if (busy || !app) return;
+      if (!(await confirmLeave())) return;
+      openNamedDialog(newDialog, newName);
+    });
+  }
+  if (newForm) {
+    newForm.addEventListener("submit", (event) => {
+      event.preventDefault();
       if (busy || !app) return;
       const name = newName ? newName.value.trim() : "";
       if (!name) {
         showStatus("请填写要新建的文本文件名。", true);
+        if (newName) newName.focus();
         return;
       }
       const next = joinWorkspacePath(currentPath, name);
@@ -1250,6 +1401,7 @@ const mountAppFiles = () => {
         return;
       }
       if (newName) newName.value = "";
+      closeNamedDialog(newDialog);
       openNewFile(next, name);
       setDirty(true);
     });
@@ -1347,8 +1499,8 @@ const mountAppFiles = () => {
     });
   }
   if (closeBtn) {
-    closeBtn.addEventListener("click", () => {
-      if (!confirmLeave()) return;
+    closeBtn.addEventListener("click", async () => {
+      if (!(await confirmLeave())) return;
       if (browser) browser.hidden = false;
       loadList(currentPath);
     });
@@ -1404,7 +1556,13 @@ const runAppAction = async (app, action) => {
     return;
   }
   if (action.id === "delete") {
-    if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
+    if (!await askConfirm({
+      title: "删除应用",
+      body: `确认删除 ${app.id}？取消不会更改应用。`,
+      confirm: "删除",
+      cancel: "取消",
+      danger: true,
+    })) {
       showStatus("已取消，应用未更改。", false);
       return;
     }
@@ -1464,16 +1622,57 @@ const actionGroups = (app, options = {}) => {
   return [primary, secondary, danger].filter((group) => group.childNodes.length);
 };
 
+const publicURLFromRule = (rule) => {
+  if (!rule || rule.enabled === false) return "";
+  const domain = String(rule.domain || "").trim();
+  if (!domain) return "";
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(domain) ? domain : `https://${domain}`);
+    if (parsed.username || parsed.password) return "";
+    parsed.search = "";
+    parsed.hash = "";
+    const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/$/, "") : "";
+    return `${parsed.protocol}//${parsed.host}${path}`;
+  } catch (_error) {
+    if (/^https?:\/\//i.test(domain)) return domain.replace(/\/$/, "");
+    return `https://${domain}`;
+  }
+};
+
+const backendPortFromRule = (rule) => {
+  const port = Number(rule && rule.port);
+  if (port > 0 && port <= 65535) return port;
+  const backend = String((rule && rule.backend) || "");
+  const match = backend.match(/:(\d{1,5})\s*$/);
+  if (!match) return 0;
+  const parsed = Number(match[1]);
+  return parsed > 0 && parsed <= 65535 ? parsed : 0;
+};
+
 const firstEnabledRuleURL = (app) => {
   const rules = Array.isArray(app.rules) ? app.rules : [];
   for (const rule of rules) {
-    if (!rule || rule.enabled === false) continue;
-    const domain = String(rule.domain || "").trim();
-    if (!domain) continue;
-    if (/^https?:\/\//i.test(domain)) return domain;
-    return `https://${domain}`;
+    const openURL = publicURLFromRule(rule);
+    if (openURL) return openURL;
   }
   return "";
+};
+
+const appMark = (id) => {
+  const text = String(id || "?").replace(/[^a-z0-9\u4e00-\u9fff]/gi, "") || "?";
+  const letters = text.slice(0, text.charCodeAt(0) > 127 ? 1 : 2).toUpperCase();
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 33 + text.charCodeAt(i)) >>> 0;
+  return { letters, tone: String(hash % 6) };
+};
+
+const displayHost = (url) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.host + (parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/$/, "") : "");
+  } catch (_error) {
+    return String(url || "").replace(/^https?:\/\//i, "");
+  }
 };
 
 const renderApp = (app) => {
@@ -1485,22 +1684,69 @@ const renderApp = (app) => {
   card.tabIndex = 0;
   const nameNode = card.querySelector("[data-app-name]");
   if (nameNode) nameNode.textContent = app.name || app.id;
+  const markNode = card.querySelector("[data-app-mark]");
+  if (markNode) {
+    const mark = appMark(app.name || app.id);
+    markNode.textContent = mark.letters;
+    markNode.dataset.tone = mark.tone;
+  }
   const statusHook = card.querySelector("[data-app-status]");
   if (statusHook) {
-    const parts = [];
-    if (app.status && app.status !== "有新版本") parts.push(app.status);
-    if (app.notice === "有新版本" || app.status === "有新版本") parts.push("有新版本");
-    statusHook.textContent = parts.join(" · ");
-    if (app.status) statusHook.dataset.status = app.status;
+    const status = app.status && app.status !== "有新版本" ? app.status : "";
+    const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
+    statusHook.textContent = status;
+    statusHook.hidden = !status;
+    if (status) statusHook.dataset.status = status;
+    else delete statusHook.dataset.status;
+    if (hasUpdate && statusHook.parentNode) {
+      const notice = document.createElement("span");
+      notice.className = "app-card-status";
+      notice.dataset.status = "有新版本";
+      notice.textContent = "有新版本";
+      statusHook.parentNode.append(notice);
+    }
+  }
+  const imageNode = card.querySelector("[data-app-image]");
+  if (imageNode) {
+    const version = appVersion(app);
+    const shown = cardImage(version);
+    imageNode.textContent = shown;
+    imageNode.hidden = !shown;
+    imageNode.title = version;
   }
   const portNode = card.querySelector("[data-app-ports]");
   if (portNode) {
     portNode.replaceChildren();
     const ports = appPorts(app);
-    if (ports.length) ports.forEach((port) => portNode.append(chip(`:${port}`)));
-    else portNode.hidden = true;
+    const services = Array.isArray(app.services) ? app.services.filter(Boolean) : [];
+    if (ports.length) {
+      ports.forEach((port) => {
+        const bit = document.createElement("span");
+        bit.className = "app-port";
+        bit.textContent = String(port);
+        portNode.append(bit);
+      });
+    } else {
+      const empty = document.createElement("span");
+      empty.className = "app-port app-port-empty";
+      empty.textContent = "无发布端口";
+      portNode.append(empty);
+    }
+    if (services.length > 1) {
+      const extra = document.createElement("span");
+      extra.className = "app-port app-port-empty";
+      extra.textContent = `${services.length} 个服务`;
+      portNode.append(extra);
+    }
+    portNode.hidden = false;
   }
   const openURL = firstEnabledRuleURL(app);
+  const urlNode = card.querySelector("[data-app-url]");
+  if (urlNode) {
+    urlNode.hidden = !openURL;
+    urlNode.textContent = openURL ? displayHost(openURL) : "";
+    urlNode.title = openURL;
+  }
   const openButton = card.querySelector('[data-action="open"]');
   if (openButton) {
     openButton.hidden = !openURL;
@@ -1564,15 +1810,150 @@ const fillCompose = (app) => {
 const renderOverview = (app) => {
   if (!overviewPanel) return;
   overviewPanel.replaceChildren();
-  const identity = document.createElement("div");
-  const title = document.createElement("h3");
-  title.textContent = app.id;
-  const chips = document.createElement("div");
-  chips.className = "app-chips";
-  appendAppChips(chips, app);
-  identity.append(title, chips);
-  overviewPanel.append(identity);
-  actionGroups(app, { overview: true }).forEach((group) => overviewPanel.append(group));
+  const services = Array.isArray(app.services) ? app.services.filter(Boolean) : [];
+  const ports = appPorts(app);
+  const rules = Array.isArray(app.rules) ? app.rules : [];
+  const volumes = parseComposeVolumes(app.compose);
+  const agent = selectedAgent();
+  const version = appVersion(app);
+  const image = splitImage(version);
+  const restart = parseComposeScalar(app.compose, "restart");
+  const user = parseComposeScalar(app.compose, "user");
+  const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
+  const statusValue = app.status && app.status !== "有新版本" ? app.status : (hasUpdate ? "有新版本" : "已停止");
+
+  const stats = document.createElement("div");
+  stats.className = "overview-stats";
+  [
+    [statusValue, "状态"],
+    [String(services.length || 1), "服务"],
+    [String(ports.length), "端口"],
+    [String(rules.length), "入口"],
+  ].forEach(([value, label]) => {
+    const item = document.createElement("div");
+    item.className = "overview-stat";
+    if (label === "状态") item.dataset.status = value;
+    const small = document.createElement("span");
+    small.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = value;
+    item.append(small, strong);
+    stats.append(item);
+  });
+  overviewPanel.append(stats);
+
+  const sheet = document.createElement("div");
+  sheet.className = "overview-sheet";
+  const addBlock = (title) => {
+    const block = document.createElement("section");
+    block.className = "overview-block";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const grid = document.createElement("dl");
+    grid.className = "overview-grid";
+    block.append(heading, grid);
+    sheet.append(block);
+    return grid;
+  };
+  const addRow = (grid, label, value, options = {}) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (options.node) dd.append(options.node);
+    else dd.textContent = value;
+    if (options.title) dd.title = options.title;
+    if (options.mono) dd.classList.add("overview-mono");
+    grid.append(dt, dd);
+  };
+
+  const run = addBlock("运行");
+  addRow(run, "节点", agentDisplayName(agent) || app.agent_id || "未绑定节点");
+  const imageNode = document.createElement("div");
+  imageNode.className = "overview-image";
+  const imageName = document.createElement("span");
+  imageName.className = "overview-mono";
+  imageName.textContent = image.name;
+  imageName.title = version;
+  imageNode.append(imageName);
+  if (image.digest) {
+    const digest = chip(image.digest.slice(0, 12));
+    digest.className = "chip app-version";
+    digest.title = version;
+    imageNode.append(digest);
+  }
+  addRow(run, "镜像", "", { node: imageNode });
+  addRow(run, "服务", services.length ? services.join(" · ") : app.id);
+  if (ports.length) {
+    const list = document.createElement("div");
+    list.className = "overview-chips";
+    ports.forEach((port) => list.append(chip(String(port))));
+    addRow(run, "端口", "", { node: list });
+  } else {
+    addRow(run, "端口", "无发布端口");
+  }
+  if (restart) addRow(run, "重启策略", restart);
+  if (user) addRow(run, "容器用户", user);
+  addRow(run, "自动更新", app.auto_update === true ? "已开启" : "默认关闭");
+  if (hasUpdate) addRow(run, "更新", "镜像有新版本");
+
+  const net = addBlock("入口");
+  if (rules.length) {
+    const list = document.createElement("div");
+    list.className = "overview-links";
+    rules.forEach((rule) => {
+      const domain = String(rule.domain || "").trim();
+      const openURL = rule.enabled === false ? "" : firstEnabledRuleURL({ rules: [rule] });
+      if (openURL) {
+        const link = document.createElement("a");
+        link.href = openURL;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "http-rule-open";
+        link.textContent = displayHost(openURL) || domain || openURL;
+        list.append(link);
+      } else {
+        const span = document.createElement("span");
+        span.textContent = domain ? `${domain}${rule.enabled === false ? "（已停用）" : ""}` : "未命名入口";
+        list.append(span);
+      }
+    });
+    addRow(net, "域名", "", { node: list });
+  } else {
+    addRow(net, "域名", "未配置 HTTP 入口");
+  }
+
+  const store = addBlock("存储");
+  if (volumes.length) {
+    const list = document.createElement("ul");
+    list.className = "overview-mounts";
+    volumes.forEach((volume) => {
+      const item = document.createElement("li");
+      const src = document.createElement("span");
+      src.className = "overview-mono";
+      src.textContent = volume.source;
+      const arrow = document.createElement("span");
+      arrow.className = "overview-arrow";
+      arrow.textContent = "→";
+      const dst = document.createElement("span");
+      dst.className = "overview-mono";
+      dst.textContent = volume.target;
+      item.append(src, arrow, dst);
+      list.append(item);
+    });
+    addRow(store, "数据卷", "", { node: list });
+  } else {
+    addRow(store, "数据卷", "无数据卷");
+  }
+  overviewPanel.append(sheet);
+  actionGroups(app, { overview: true }).forEach((group) => {
+    if (group.classList.contains("app-actions-danger")) {
+      const copy = document.createElement("p");
+      copy.className = "overview-danger-copy";
+      copy.textContent = "删除会停止容器并清掉该应用工作区。";
+      group.prepend(copy);
+    }
+    overviewPanel.append(group);
+  });
 };
 
 const renderHTTP = (app) => {
@@ -1580,36 +1961,41 @@ const renderHTTP = (app) => {
   httpPanel.replaceChildren();
   const ports = appPorts(app);
   const rules = Array.isArray(app.rules) ? app.rules : [];
-  const title = document.createElement("h4");
-  title.textContent = "HTTP 入口";
-  httpPanel.append(title);
   if (rules.length) {
     const ruleList = document.createElement("ul");
     ruleList.className = "http-rules";
     rules.forEach((rule) => {
       const item = document.createElement("li");
       const domain = String(rule.domain || "").trim();
-      const port = rule.port ? `:${rule.port}` : "";
       const disabled = rule.enabled === false;
-      const openURL = disabled ? "" : firstEnabledRuleURL({ rules: [rule] });
+      const openURL = disabled ? "" : publicURLFromRule(rule);
+      const main = document.createElement("div");
+      main.className = "http-rule-main";
       if (openURL) {
         const link = document.createElement("a");
         link.href = openURL;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.className = "http-rule-open";
-        link.textContent = `${domain}${port}`;
+        link.textContent = openURL;
         link.addEventListener("click", (event) => {
           event.preventDefault();
           window.open(openURL, "_blank", "noopener,noreferrer");
         });
-        item.append(link);
+        main.append(link);
       } else {
         const label = document.createElement("span");
-        label.textContent = `${domain}${port}${disabled ? "（已停用）" : ""}`;
+        label.textContent = `${domain || "未命名入口"}${disabled ? "（已停用）" : ""}`;
         if (disabled) label.className = "http-rule-disabled";
-        item.append(label);
+        main.append(label);
       }
+      const backendPort = backendPortFromRule(rule);
+      if (backendPort) {
+        const bound = chip(`后端 ${backendPort}`);
+        bound.title = "容器发布端口，不是入口监听端口";
+        main.append(bound);
+      }
+      item.append(main);
       if (rule.ref) {
         const deleteRule = document.createElement("button");
         deleteRule.type = "button";
@@ -1617,7 +2003,13 @@ const renderHTTP = (app) => {
         deleteRule.textContent = "删除";
         deleteRule.addEventListener("click", async () => {
           if (busy) return;
-          if (!window.confirm(`确认删除入口 ${domain || rule.ref}？取消不会更改规则。`)) {
+          if (!await askConfirm({
+            title: "删除入口",
+            body: `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`,
+            confirm: "删除",
+            cancel: "取消",
+            danger: true,
+          })) {
             showStatus("已取消，规则未更改。", false);
             return;
           }
@@ -1639,10 +2031,19 @@ const renderHTTP = (app) => {
       ruleList.append(item);
     });
     httpPanel.append(ruleList);
+  } else if (ports.length) {
+    const empty = document.createElement("p");
+    empty.className = "http-empty";
+    empty.textContent = "还没有入口。把域名绑定到下面的发布端口。";
+    httpPanel.append(empty);
   }
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
+    const formTitle = document.createElement("p");
+    formTitle.className = "http-form-title";
+    formTitle.textContent = "添加入口";
+    form.append(formTitle);
     const portLabel = document.createElement("label");
     portLabel.append("端口");
     const portSelect = document.createElement("select");
@@ -1666,7 +2067,7 @@ const renderHTTP = (app) => {
     const submit = document.createElement("button");
     submit.type = "submit";
     submit.className = "btn-primary";
-    submit.textContent = "保存规则";
+    submit.textContent = "添加入口";
     form.append(portLabel, domainLabel, submit);
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1722,6 +2123,34 @@ const setLogsState = (text, isError) => {
   logsStatus.dataset.error = isError ? "true" : "false";
 };
 
+const paintLogsView = () => {
+  if (!logsView) return;
+  const raw = logsView.textContent || "";
+  if (!raw) return;
+  const frag = document.createDocumentFragment();
+  raw.replace(/\n$/, "").split("\n").forEach((line) => {
+    const row = document.createElement("span");
+    row.className = "log-line";
+    const lower = line.toLowerCase();
+    if (/\b(error|fatal|panic|fail|failed)\b/.test(lower)) row.dataset.level = "error";
+    else if (/\b(warn|warning)\b/.test(lower)) row.dataset.level = "warn";
+    else if (/\b(ready|started|listening)\b/.test(lower)) row.dataset.level = "ok";
+    const time = line.match(/^(\d{4}-\d{2}-\d{2}[T ][\d:.Z+-]+)\s*(.*)$/);
+    if (time) {
+      const stamp = document.createElement("span");
+      stamp.className = "log-time";
+      stamp.textContent = `${time[1]} `;
+      const rest = document.createElement("span");
+      rest.textContent = time[2];
+      row.append(stamp, rest);
+    } else {
+      row.textContent = line || " ";
+    }
+    frag.append(row);
+  });
+  logsView.replaceChildren(frag);
+};
+
 const resetLogsTerminal = () => {
   logsSeq += 1;
   if (logsView) {
@@ -1751,6 +2180,7 @@ const fetchLogs = async () => {
     if (logsView) {
       logsView.textContent = payload.logs || "";
       logsView.dataset.error = "false";
+      paintLogsView();
     }
     logsLoaded = true;
     if (!logsPaused) setLogsState("自动刷新", false);
@@ -1777,11 +2207,10 @@ const paintDetail = (app) => {
   selectedAppID = app.id;
   if (detailTitle) detailTitle.textContent = app.id;
   if (detailStatus) {
-    const parts = [];
-    if (app.status && app.status !== "有新版本") parts.push(app.status);
-    if (app.notice === "有新版本" || app.status === "有新版本") parts.push("有新版本");
-    detailStatus.textContent = parts.join(" · ");
-    if (app.status) detailStatus.dataset.status = app.status;
+    const status = app.status && app.status !== "有新版本" ? app.status : "";
+    detailStatus.textContent = status;
+    detailStatus.hidden = !status;
+    if (status) detailStatus.dataset.status = status;
     else delete detailStatus.dataset.status;
   }
   const openURL = firstEnabledRuleURL(app);
@@ -1809,9 +2238,9 @@ const paintDetail = (app) => {
   if (appChanged) resetLogsTerminal();
 };
 
-const setDetailSection = (section) => {
+const setDetailSection = async (section) => {
   const next = section || "overview";
-  if (next !== "files" && !filesWorkspace.confirmLeave()) return false;
+  if (next !== "files" && !(await filesWorkspace.confirmLeave())) return false;
   if (detailSection === "logs" && next !== "logs") stopLogPolling();
   detailSection = next;
   document.querySelectorAll("[data-section-panel]").forEach((panel) => {
@@ -1823,18 +2252,25 @@ const setDetailSection = (section) => {
     });
   }
   if (next === "files" && detailApp) filesWorkspace.bind(detailApp);
+  if (next === "compose") {
+    paintCodeEditor(detailComposeInput);
+    paintCodeEditor(detailEnvInput);
+  }
   if (next === "logs") {
     logsPaused = false;
     logsLoaded = false;
-    if (logsPause) logsPause.textContent = "暂停";
+    if (logsPause) {
+      logsPause.textContent = "暂停";
+      logsPause.setAttribute("aria-pressed", "false");
+    }
     if (logsRefresh) logsRefresh.dataset.action = "logs";
     startLogPolling();
   }
   return true;
 };
 
-const leaveDetail = ({ force } = {}) => {
-  if (!force && !filesWorkspace.confirmLeave()) return false;
+const leaveDetail = async ({ force } = {}) => {
+  if (!force && !(await filesWorkspace.confirmLeave())) return false;
   stopLogPolling();
   resetLogsTerminal();
   if (force) filesWorkspace.discard();
@@ -1846,12 +2282,13 @@ const leaveDetail = ({ force } = {}) => {
   logsLoaded = false;
   composeFilledFor = "";
   filesMountedFor = "";
+  showStatus("", false);
   syncListPanel();
   return true;
 };
 
 const showDetail = async (appID, section) => {
-  if (!confirmLeaveEditor()) return;
+  if (!(await confirmLeaveEditor())) return;
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
     const app = payload.app;
@@ -1859,7 +2296,7 @@ const showDetail = async (appID, section) => {
     view = "detail";
     closeCreate();
     paintDetail(app);
-    if (!setDetailSection(section || detailSection || "overview")) return;
+    if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
   } catch (error) {
     const missing = error.status === 404 || error.message === "app is unknown";
@@ -1939,7 +2376,7 @@ const renderEngineBadge = (engine) => {
   engineReady = engine.ready === true;
   engineStatus.dataset.ready = engineReady ? "true" : "false";
   if (executionFaceUnavailable(engine)) {
-    engineStatus.textContent = "执行面未就绪";
+    engineStatus.textContent = "暂时无法执行";
     return;
   }
   engineStatus.textContent = engineReady
@@ -2028,7 +2465,7 @@ const loadAgents = async () => {
 };
 
 agentPicker.onChange = async (value) => {
-  if (!confirmLeaveEditor()) {
+  if (!(await confirmLeaveEditor())) {
     agentPicker.setValue(selectedAgentID);
     return;
   }
@@ -2119,6 +2556,7 @@ if (logsPause) {
     if (view !== "detail" || detailSection !== "logs") return;
     logsPaused = !logsPaused;
     logsPause.textContent = logsPaused ? "继续" : "暂停";
+    logsPause.setAttribute("aria-pressed", logsPaused ? "true" : "false");
     if (logsPaused) {
       stopLogPolling();
       setLogsState("已暂停", false);
