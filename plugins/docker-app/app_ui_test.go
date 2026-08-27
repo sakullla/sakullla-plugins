@@ -1600,8 +1600,203 @@ func cssRule(css, selector string) string {
 	return rest[:end]
 }
 
+func assertFilesManagerPage(t *testing.T) {
+	t.Helper()
+	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssBytes, err := appUIAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	js := string(scriptBytes)
+	style := string(cssBytes)
+
+	templateStart := strings.Index(html, `id="app-files-template"`)
+	if templateStart < 0 {
+		t.Fatal("files template is missing")
+	}
+	template := html[templateStart:]
+	toolbarStart := strings.Index(template, `class="files-toolbar"`)
+	selectionStart := strings.Index(template, `id="files-selection"`)
+	listStart := strings.Index(template, `id="files-list"`)
+	editorStart := strings.Index(template, `id="files-editor"`)
+	if toolbarStart < 0 || selectionStart < 0 || listStart < 0 || editorStart < 0 || !(toolbarStart < selectionStart && selectionStart < listStart && listStart < editorStart) {
+		t.Fatal("files create toolbar is not separate from selection actions and the current directory list")
+	}
+	createToolbar := template[toolbarStart:selectionStart]
+	if strings.Contains(createToolbar, `id="files-edit"`) || strings.Contains(createToolbar, `id="files-download"`) || strings.Contains(createToolbar, `id="files-delete"`) {
+		t.Fatal("file toolbar still puts 编辑/下载/删除 next to blank mkdir/new-file inputs")
+	}
+	selection := template[selectionStart:listStart]
+	for _, want := range []string{`id="files-selected"`, `id="files-edit"`, `id="files-download"`, `id="files-delete"`} {
+		if !strings.Contains(selection, want) {
+			t.Fatalf("selection actions missing %q", want)
+		}
+	}
+	if !strings.Contains(template, `id="files-breadcrumb"`) || !strings.Contains(template, `aria-label="工作区路径"`) {
+		t.Fatal("files browser is missing a path breadcrumb")
+	}
+	if !strings.Contains(template, `id="files-up"`) || !strings.Contains(template, "上一级") {
+		t.Fatal("files breadcrumb is missing 上一级")
+	}
+	if !strings.Contains(template, `id="files-editor-close"`) || !strings.Contains(template, "关闭") {
+		t.Fatal("text editor is missing a close control")
+	}
+
+	parentStart := strings.Index(js, "const parentWorkspacePath = (path) => {")
+	parentEnd := strings.Index(js, "const looksLikeText = (value) => {")
+	if parentStart < 0 || parentEnd <= parentStart {
+		t.Fatal("parentWorkspacePath is missing")
+	}
+	parentFn := js[parentStart:parentEnd]
+	if strings.Contains(parentFn, `".."`) || strings.Contains(parentFn, "'..'") {
+		t.Fatal("breadcrumb up uses .. host paths")
+	}
+
+	crumbStart := strings.Index(js, "const renderBreadcrumb = () => {")
+	crumbEnd := strings.Index(js, "const openFile = async (path, name) => {")
+	if crumbStart < 0 || crumbEnd <= crumbStart {
+		t.Fatal("renderBreadcrumb is missing")
+	}
+	crumbFn := js[crumbStart:crumbEnd]
+	if !strings.Contains(crumbFn, `addCrumb("工作区", ".", parts.length === 0)`) {
+		t.Fatal("breadcrumb is missing the workspace root")
+	}
+	if !strings.Contains(crumbFn, `button.addEventListener("click", () => requestList(path))`) {
+		t.Fatal("breadcrumb cannot return to a parent directory")
+	}
+	if !strings.Contains(crumbFn, "upBtn.hidden = currentPath === \".\"") {
+		t.Fatal("上一级 is not bound to the current breadcrumb path")
+	}
+	if !strings.Contains(js, "requestList(parentWorkspacePath(currentPath))") {
+		t.Fatal("上一级 does not open the parent workspace directory")
+	}
+
+	loadStart := strings.Index(js, "const loadList = async (path) => {")
+	loadEnd := strings.Index(js, "const requestList = (path) => {")
+	if loadStart < 0 || loadEnd <= loadStart {
+		t.Fatal("loadList is missing")
+	}
+	loadFn := js[loadStart:loadEnd]
+	if !strings.Contains(loadFn, "if (!entryPath) return;") {
+		t.Fatal("file list does not skip non-relative paths")
+	}
+	if strings.Contains(loadFn, `textContent = "编辑"`) || strings.Contains(loadFn, `textContent = "下载"`) || strings.Contains(loadFn, `textContent = "删除"`) {
+		t.Fatal("file list still repeats edit/download/delete on every row")
+	}
+	if !strings.Contains(loadFn, "selectEntry(entryPath") {
+		t.Fatal("clicking a file no longer selects without reading")
+	}
+	if strings.Contains(loadFn, "openFile(") {
+		t.Fatal("selecting a file still reads and opens the editor")
+	}
+	if !strings.Contains(loadFn, "if (entry.dir) requestList(entryPath)") {
+		t.Fatal("directories cannot be opened from the current listing")
+	}
+
+	hideStart := strings.Index(js, "const hideEditor = () => {")
+	hideEnd := strings.Index(js, "discardFileEditor = hideEditor")
+	if hideStart < 0 || hideEnd <= hideStart {
+		t.Fatal("hideEditor is missing")
+	}
+	hideFn := js[hideStart:hideEnd]
+	if !strings.Contains(hideFn, "browser.hidden = false") || !strings.Contains(hideFn, "editor.hidden = true") {
+		t.Fatal("closing the editor does not restore the current directory")
+	}
+	if strings.Contains(hideFn, "leaveDetail") || strings.Contains(hideFn, "setDetailSection") || strings.Contains(hideFn, "currentPath =") {
+		t.Fatal("hideEditor leaves the files section or resets the current path")
+	}
+
+	showStart := strings.Index(js, "const showEditor = (path, name, content) => {")
+	showEnd := strings.Index(js, "const renderBreadcrumb = () => {")
+	if showStart < 0 || showEnd <= showStart {
+		t.Fatal("showEditor is missing")
+	}
+	showFn := js[showStart:showEnd]
+	if strings.Contains(showFn, "detail-head") || strings.Contains(showFn, "detailBack") || strings.Contains(showFn, "detailNav") || strings.Contains(showFn, "leaveDetail") {
+		t.Fatal("opening the files editor hides detail chrome")
+	}
+
+	closeStart := strings.Index(js, "if (closeBtn) {")
+	if closeStart < 0 {
+		t.Fatal("files editor close is missing")
+	}
+	closeRest := js[closeStart:]
+	closeEnd := strings.Index(closeRest, "if (editorInput)")
+	if closeEnd <= 0 {
+		t.Fatal("files editor close handler is missing")
+	}
+	closeFn := closeRest[:closeEnd]
+	if !strings.Contains(closeFn, "confirmLeave") || !strings.Contains(closeFn, "browser.hidden = false") || !strings.Contains(closeFn, "loadList(currentPath)") {
+		t.Fatal("closing the editor does not stay on the current files directory")
+	}
+	if strings.Contains(closeFn, "leaveDetail") || strings.Contains(closeFn, "setDetailSection") {
+		t.Fatal("closing the editor leaves the files section")
+	}
+
+	for _, want := range []string{
+		"请先选择一个文件再编辑",
+		"请先选择一个文件再下载",
+		"请先选择要删除的文件或目录",
+		"syncSelectionActions",
+		"relativeWorkspacePath",
+		`id="files-edit"`,
+		"openFile(",
+	} {
+		if !strings.Contains(html+js, want) {
+			t.Fatalf("selection-based files manager missing %q", want)
+		}
+	}
+	if strings.Contains(js, "/mnt/data/komga") {
+		t.Fatal("files UI lists an absolute host mount")
+	}
+	for _, want := range []string{".files-breadcrumb", ".files-path", ".files-selection", ".files-browser", `li[aria-selected="true"]`} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("stylesheet missing files-manager rule %q", want)
+		}
+	}
+	if !strings.Contains(cssRule(style, `.files-list li[aria-selected="true"]`), "var(--color-primary") {
+		t.Fatal("selected file row does not use theme variables")
+	}
+	if strings.Contains(cssRule(style, ".files-toolbar"), "flex-wrap: wrap") || strings.Contains(cssRule(style, ".files-toolbar label"), "flex: 1 1") {
+		t.Fatal("files toolbar is still a wrapping junk drawer of fields")
+	}
+	if !strings.Contains(cssRule(style, ".files-selection"), "flex-wrap: nowrap") {
+		t.Fatal("selection toolbar is not a contextual action row")
+	}
+	if !strings.Contains(cssRule(style, ".files-path"), "var(--color-bg-sunken)") || !strings.Contains(cssRule(style, ".files-browser"), "var(--color-bg-surface)") {
+		t.Fatal("file browser chrome does not keep theme variables")
+	}
+
+	editorClose := strings.Index(template, `id="files-editor-close"`)
+	templateEnd := strings.Index(template, "</template>")
+	if editorClose < 0 || templateEnd <= editorClose {
+		t.Fatal("files editor close is missing from the files template")
+	}
+	if strings.Contains(template[editorClose:templateEnd], "返回列表") {
+		t.Fatal("files editor close is 返回列表 instead of returning to the current directory")
+	}
+	detailStart := strings.Index(html, `id="app-detail"`)
+	filesPanel := strings.Index(html, `id="detail-files"`)
+	if detailStart < 0 || filesPanel < 0 || filesPanel < detailStart {
+		t.Fatal("files panel is not kept under persistent detail chrome")
+	}
+	detailChrome := html[detailStart:filesPanel]
+	if !strings.Contains(detailChrome, `id="detail-back"`) || !strings.Contains(detailChrome, `id="detail-nav"`) {
+		t.Fatal("files are not under the persistent detail identity bar")
+	}
+}
+
 func TestPageWorkspaceFiles(t *testing.T) {
 	t.Parallel()
+	assertFilesManagerPage(t)
 	if appID, action, ok := parseAppAPIPath("/api/apps/media/files"); !ok || appID != "media" || action != "files" {
 		t.Fatalf("parseAppAPIPath files = %q %q %t", appID, action, ok)
 	}
@@ -1615,11 +1810,16 @@ func TestPageWorkspaceFiles(t *testing.T) {
 	for _, token := range []string{
 		`id="app-files"`,
 		`id="files-breadcrumb"`,
+		`id="files-up"`,
+		"上一级",
+		`id="files-selection"`,
+		`id="files-selected"`,
 		`id="files-list"`,
 		`id="files-mkdir"`,
 		`id="files-upload"`,
 		`id="files-download"`,
 		`id="files-editor"`,
+		`id="files-editor-close"`,
 		`id="files-delete"`,
 		`id="files-save"`,
 		`id="files-edit"`,
@@ -1630,6 +1830,8 @@ func TestPageWorkspaceFiles(t *testing.T) {
 		"/files",
 		"postAppFiles",
 		"relativeWorkspacePath",
+		"parentWorkspacePath",
+		`addCrumb("工作区", ".", parts.length === 0)`,
 	} {
 		if !strings.Contains(combined, token) {
 			t.Fatalf("workspace files UI missing %q", token)
@@ -1811,6 +2013,7 @@ func assertDetailWorkspacePage(t *testing.T) {
 func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	t.Parallel()
 	assertDetailWorkspacePage(t)
+	assertFilesManagerPage(t)
 	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -1904,7 +2107,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if strings.Contains(js, "else openFile(") {
 		t.Fatal("selecting a file still reads and opens the editor")
 	}
-	if !strings.Contains(js, "openFile(") || !strings.Contains(js, `textContent = "编辑"`) {
+	if !strings.Contains(js, "openFile(") || !strings.Contains(html, `id="files-edit"`) {
 		t.Fatal("workspace files are missing an explicit edit entry")
 	}
 	if !strings.Contains(js, "selectEntry(entryPath") {
@@ -1998,7 +2201,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, `if (action.id === "rollback") return;`) {
 		t.Fatal("management page no longer skips rollback")
 	}
-	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
+	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", ".files-breadcrumb", ".files-path", ".files-selection", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("stylesheet missing workspace rule %q", want)
 		}
@@ -2149,6 +2352,7 @@ func TestAppUIFilesListsRelativeWorkspaceAndRejectsAbsolutePath(t *testing.T) {
 	if len(controller.Apps()) != 1 || controller.Apps()[0].ID != "media" {
 		t.Fatalf("files mutated apps=%#v", controller.Apps())
 	}
+	assertFilesManagerPage(t)
 }
 
 func TestAppUIFilesSurfacesHandleErrorWithoutHostPath(t *testing.T) {

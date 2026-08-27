@@ -203,7 +203,10 @@
       <section class="app-section app-files" id="app-files">
         <h4>文件</h4>
         <div id="files-browser" class="files-browser">
-          <nav id="files-breadcrumb" class="files-breadcrumb" aria-label="工作区路径"></nav>
+          <nav class="files-path" aria-label="工作区路径">
+            <button id="files-up" type="button" class="btn-link" hidden>上一级</button>
+            <div id="files-breadcrumb" class="files-breadcrumb"></div>
+          </nav>
           <div class="files-toolbar">
             <label>目录名称 <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false"></label>
             <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
@@ -211,9 +214,12 @@
             <button id="files-new-text" type="button" class="btn-secondary">新建文本文件</button>
             <button id="files-upload" type="button" class="btn-secondary">上传</button>
             <input data-files-input type="file" hidden>
-            <button id="files-edit" type="button" class="btn-secondary">编辑</button>
-            <button id="files-download" type="button" class="btn-secondary">下载</button>
-            <button id="files-delete" type="button" class="btn-link danger">删除</button>
+          </div>
+          <div id="files-selection" class="files-selection">
+            <p id="files-selected" class="hint">请选择一个文件或目录后再编辑、下载或删除。</p>
+            <button id="files-edit" type="button" class="btn-secondary" disabled>编辑</button>
+            <button id="files-download" type="button" class="btn-secondary" disabled>下载</button>
+            <button id="files-delete" type="button" class="btn-link danger" disabled>删除</button>
           </div>
           <ul id="files-list" class="files-list"></ul>
           <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>

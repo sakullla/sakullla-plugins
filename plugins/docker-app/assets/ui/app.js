@@ -879,6 +879,14 @@ const joinWorkspacePath = (dir, name) => {
   return `${base}/${leaf}`;
 };
 
+const parentWorkspacePath = (path) => {
+  const relative = relativeWorkspacePath(path);
+  if (!relative || relative === ".") return ".";
+  const index = relative.lastIndexOf("/");
+  if (index <= 0) return ".";
+  return relative.slice(0, index);
+};
+
 const looksLikeText = (value) => {
   if (typeof value !== "string" || value.includes("\u0000")) return false;
   let bad = 0;
@@ -937,12 +945,14 @@ const mountAppFiles = () => {
   const section = filesPanel.querySelector(".app-files") || filesPanel;
   const browser = section.querySelector("#files-browser") || section.querySelector(".files-browser");
   const breadcrumb = section.querySelector("#files-breadcrumb") || section.querySelector(".files-breadcrumb");
+  const upBtn = section.querySelector("#files-up");
   const listEl = section.querySelector("#files-list") || section.querySelector(".files-list");
   const emptyEl = section.querySelector(".files-empty");
   const mkdirBtn = section.querySelector("#files-mkdir");
   const mkdirName = section.querySelector("#files-mkdir-name");
   const newName = section.querySelector("#files-new-name");
   const newTextBtn = section.querySelector("#files-new-text");
+  const selectedLabel = section.querySelector("#files-selected");
   const editBtn = section.querySelector("#files-edit");
   const uploadBtn = section.querySelector("#files-upload");
   const uploadInput = section.querySelector("[data-files-input]");
@@ -961,12 +971,32 @@ const mountAppFiles = () => {
   let currentPath = ".";
   let selectedPath = "";
   let selectedName = "";
-  let selectedDir = true;
+  let selectedDir = false;
   let savedContent = "";
 
   const setDirty = (next) => {
     filesDirty = Boolean(next);
     if (dirtyMark) dirtyMark.hidden = !filesDirty;
+  };
+
+  const paintSelection = () => {
+    if (!listEl) return;
+    listEl.querySelectorAll("li").forEach((item) => {
+      item.setAttribute("aria-selected", item.dataset.path === selectedPath ? "true" : "false");
+    });
+  };
+
+  const syncSelectionActions = () => {
+    const hasFile = Boolean(selectedPath) && !selectedDir;
+    const hasTarget = Boolean(selectedPath) && selectedPath !== ".";
+    if (editBtn) editBtn.disabled = !hasFile;
+    if (downloadBtn) downloadBtn.disabled = !hasFile;
+    if (deleteBtn) deleteBtn.disabled = !hasTarget;
+    if (selectedLabel) {
+      selectedLabel.textContent = hasTarget
+        ? `已选择 ${selectedName || selectedPath}`
+        : "请选择一个文件或目录后再编辑、下载或删除。";
+    }
   };
 
   const hideEditor = () => {
@@ -978,6 +1008,7 @@ const mountAppFiles = () => {
     if (binaryHint) binaryHint.hidden = true;
     if (browser) browser.hidden = false;
     if (editorName) editorName.textContent = "";
+    syncSelectionActions();
   };
 
   discardFileEditor = hideEditor;
@@ -992,18 +1023,12 @@ const mountAppFiles = () => {
     return true;
   };
 
-  const paintSelection = () => {
-    if (!listEl) return;
-    listEl.querySelectorAll("li").forEach((item) => {
-      item.setAttribute("aria-selected", item.dataset.path === selectedPath ? "true" : "false");
-    });
-  };
-
   const selectEntry = (path, name, isDir) => {
     selectedPath = path;
     selectedName = name;
     selectedDir = isDir;
     paintSelection();
+    syncSelectionActions();
   };
 
   const setEditorLang = (name) => {
@@ -1032,12 +1057,14 @@ const mountAppFiles = () => {
   };
 
   const renderBreadcrumb = () => {
+    if (upBtn) upBtn.hidden = currentPath === ".";
     if (!breadcrumb) return;
     breadcrumb.replaceChildren();
     const addCrumb = (label, path, current) => {
       if (current) {
         const currentNode = document.createElement("span");
         currentNode.textContent = label;
+        currentNode.setAttribute("aria-current", "page");
         breadcrumb.append(currentNode);
         return;
       }
@@ -1053,7 +1080,9 @@ const mountAppFiles = () => {
     let acc = "";
     parts.forEach((part, index) => {
       const sep = document.createElement("span");
+      sep.className = "files-sep";
       sep.textContent = "/";
+      sep.setAttribute("aria-hidden", "true");
       breadcrumb.append(sep);
       acc = acc ? `${acc}/${part}` : part;
       addCrumb(part, acc, index === parts.length - 1);
@@ -1104,13 +1133,19 @@ const mountAppFiles = () => {
     try {
       const payload = await postAppFiles(app, { action: "list", path: relative });
       currentPath = relativeWorkspacePath(payload.path) || relative;
-      if (!filesEditorOpen) selectEntry(currentPath, currentPath === "." ? "工作区" : currentPath.split("/").pop(), true);
-      renderBreadcrumb();
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      if (!filesEditorOpen) {
+        const visible = entries.some((entry) => relativeWorkspacePath(entry.path || entry.name) === selectedPath);
+        if (!visible) selectEntry("", "", false);
+        else paintSelection();
+      }
+      renderBreadcrumb();
       if (listEl) listEl.replaceChildren();
+      let listed = 0;
       entries.forEach((entry) => {
         const entryPath = relativeWorkspacePath(entry.path || entry.name);
         if (!entryPath) return;
+        listed += 1;
         const item = document.createElement("li");
         item.dataset.path = entryPath;
         item.setAttribute("aria-selected", selectedPath === entryPath ? "true" : "false");
@@ -1120,7 +1155,8 @@ const mountAppFiles = () => {
         open.type = "button";
         open.className = "btn-link";
         open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
-        open.addEventListener("click", () => {
+        open.addEventListener("click", (event) => {
+          event.stopPropagation();
           if (entry.dir) requestList(entryPath);
           else selectEntry(entryPath, entry.name || entryPath, false);
         });
@@ -1131,40 +1167,13 @@ const mountAppFiles = () => {
           size.textContent = formatFileSize(entry.size);
           nameWrap.append(size);
         }
-        const actions = document.createElement("div");
-        actions.className = "files-toolbar";
-        if (!entry.dir) {
-          const edit = document.createElement("button");
-          edit.type = "button";
-          edit.className = "btn-link";
-          edit.textContent = "编辑";
-          edit.addEventListener("click", () => openFile(entryPath, entry.name || entryPath));
-          actions.append(edit);
-          const download = document.createElement("button");
-          download.type = "button";
-          download.className = "btn-link";
-          download.textContent = "下载";
-          download.addEventListener("click", async () => {
-            try {
-              const file = await postAppFiles(app, { action: "read", path: entryPath });
-              downloadTextFile(entry.name || entryPath.split("/").pop(), file.content || "");
-              showStatus("已开始下载。", false);
-            } catch (error) {
-              showStatus(error.message, true);
-            }
-          });
-          actions.append(download);
-        }
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.className = "btn-link danger";
-        remove.textContent = "删除";
-        remove.addEventListener("click", () => removePath(entryPath, entry.name || entryPath));
-        actions.append(remove);
-        item.append(nameWrap, actions);
+        item.append(nameWrap);
+        item.addEventListener("click", () => {
+          selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir));
+        });
         if (listEl) listEl.append(item);
       });
-      if (emptyEl) emptyEl.hidden = entries.length !== 0;
+      if (emptyEl) emptyEl.hidden = listed !== 0;
     } catch (error) {
       if (listEl) listEl.replaceChildren();
       if (emptyEl) emptyEl.hidden = true;
@@ -1328,11 +1337,20 @@ const mountAppFiles = () => {
       }
     });
   }
+  if (upBtn) {
+    upBtn.addEventListener("click", () => {
+      if (busy || currentPath === ".") return;
+      requestList(parentWorkspacePath(currentPath));
+    });
+  }
   if (closeBtn) {
     closeBtn.addEventListener("click", () => {
       if (!confirmLeave()) return;
+      if (browser) browser.hidden = false;
+      loadList(currentPath);
     });
   }
+  syncSelectionActions();
   if (editorInput) {
     editorInput.addEventListener("input", () => {
       setDirty(editorInput.value !== savedContent);
@@ -1351,6 +1369,7 @@ const mountAppFiles = () => {
       if (filesMountedFor !== app.id) {
         hideEditor();
         currentPath = ".";
+        selectEntry("", "", false);
         filesMountedFor = app.id;
         loadList(".");
       }
