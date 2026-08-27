@@ -13,7 +13,7 @@
       <div class="page-head-copy">
         <p class="kicker">Docker 应用</p>
         <h1>组内 compose 应用</h1>
-        <p class="lede">选一台在线节点，把 compose 部署到该 Agent。引擎状态与应用镜像版本分开显示。有发布端口时可管理入口域名。已部署应用可管理其工作区相对文件。</p>
+        <p class="lede">先选一台在线节点，再照看该节点上的应用。卡片显示运行状态，有入口时可打开，也可启停或重启。点卡片或「详情」进入管理。有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="page-head-agent">
         <div class="node-card">
@@ -25,16 +25,6 @@
         </div>
       </div>
     </header>
-    <section class="face-summary" aria-label="插件运行面">
-      <div class="face-summary-item">
-        <strong>本地管理面</strong>
-        <span>当前页只下发配置与操作，不在控制面运行 Docker。</span>
-      </div>
-      <div class="face-summary-item">
-        <strong>Agent 执行面</strong>
-        <span>compose、镜像与引擎始终在所选节点本机执行。</span>
-      </div>
-    </section>
     <p id="app-loading" role="status">正在加载应用…</p>
     <p id="app-unavailable" role="status" hidden>暂时无法管理 Docker 应用。</p>
     <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
@@ -49,8 +39,8 @@
         <p>该节点离线，不能部署或改动 compose 应用。</p>
       </section>
       <section class="state-panel" id="app-execution-unavailable" hidden>
-        <h2>Agent 执行面未就绪</h2>
-        <p>该节点在线，但 Docker 应用执行面没有启动。不是本机缺 Docker。刷新本页，或检查该节点上的 docker-app 插件状态。</p>
+        <h2>该节点暂时无法执行应用</h2>
+        <p>该节点在线，但还不能执行 compose。刷新本页，或检查该节点上的 docker-app 插件状态。不是本机缺 Docker。</p>
       </section>
     </section>
     <section class="state-panel engine-guide" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
@@ -87,7 +77,7 @@
     </section>
     <section id="app-workspace" class="workspace-region" hidden>
       <div class="workspace-head">
-        <h2>工作区</h2>
+        <h2>应用</h2>
         <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
       </div>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
@@ -122,7 +112,7 @@
           <h2 id="app-list-title">应用</h2>
           <p id="app-count" class="count" hidden></p>
         </div>
-        <div id="app-list" class="app-list"></div>
+        <div id="app-list" class="app-list" data-card-wall="apps"></div>
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
       <section class="panel" id="app-detail" hidden>
@@ -175,6 +165,22 @@
         <section id="detail-http" class="detail-section" data-section-panel="http" hidden></section>
       </section>
     </section>
+    <template id="app-card-template">
+      <article class="app-card" tabindex="0">
+        <div class="app-card-head">
+          <h3 data-app-name></h3>
+          <p class="app-card-status" data-app-status></p>
+        </div>
+        <div class="app-chips" data-app-ports></div>
+        <div class="app-card-actions">
+          <button type="button" class="btn-primary" data-action="open" hidden>打开</button>
+          <button type="button" class="btn-secondary" data-action="start" hidden>启动</button>
+          <button type="button" class="btn-secondary" data-action="stop" hidden>停止</button>
+          <button type="button" class="btn-secondary" data-action="restart" hidden>重启</button>
+          <button type="button" class="btn-secondary" data-action="detail">详情</button>
+        </div>
+      </article>
+    </template>
     <template id="app-files-template">
       <section class="app-section app-files" id="app-files">
         <h4>文件</h4>

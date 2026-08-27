@@ -637,7 +637,9 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 			}
 			listed = cached
 		}
-		views = append(views, controller.appViewFor(ctx, app, listed))
+		view := controller.appViewFor(ctx, app, listed)
+		view.Rules = projectOpenHTTPRuleViews(view.Rules)
+		views = append(views, view)
 	}
 	return views, listErr
 }
@@ -696,6 +698,21 @@ func projectAppHTTPRuleViews(rules []HostHTTPRule) []appHTTPRuleView {
 			Ref:     rule.Ref,
 			Domain:  rule.Domain,
 			Backend: rule.Backend,
+			Port:    rule.Port,
+			Enabled: rule.Enabled,
+		})
+	}
+	return views
+}
+
+func projectOpenHTTPRuleViews(rules []appHTTPRuleView) []appHTTPRuleView {
+	if len(rules) == 0 {
+		return nil
+	}
+	views := make([]appHTTPRuleView, 0, len(rules))
+	for _, rule := range rules {
+		views = append(views, appHTTPRuleView{
+			Domain:  rule.Domain,
 			Port:    rule.Port,
 			Enabled: rule.Enabled,
 		})

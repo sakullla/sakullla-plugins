@@ -23,6 +23,7 @@ const deniedNode = document.querySelector("#app-denied");
 const contextNode = document.querySelector("#app-context");
 const workspaceNode = document.querySelector("#app-workspace");
 const listNode = document.querySelector("#app-list");
+const appCardTemplate = document.querySelector("#app-card-template");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#app-count");
 const createPanel = document.querySelector("#app-create");
@@ -793,12 +794,13 @@ const appVersion = (app) => app.version || parseImage(app.compose) || "未解析
 
 const appendAppChips = (chips, app) => {
   if (app.status && app.status !== "有新版本") {
-    const statusChip = chip(`Agent 执行面 · ${app.status}`);
+    const statusChip = chip(app.status);
     statusChip.className = "chip app-status";
+    statusChip.dataset.status = app.status;
     chips.append(statusChip);
   }
   if (app.notice === "有新版本" || app.status === "有新版本") {
-    const noticeChip = chip("Agent 执行面 · 有新版本");
+    const noticeChip = chip("有新版本");
     noticeChip.className = "chip app-status-update";
     chips.append(noticeChip);
   }
@@ -1345,6 +1347,10 @@ const runAppAction = async (app, action) => {
     showDetail(app.id, "compose");
     return;
   }
+  if (action.id === "logs") {
+    showDetail(app.id, "logs");
+    return;
+  }
   if (action.id === "delete") {
     if (!window.confirm(`确认删除 ${app.id}？取消不会更改应用。`)) {
       showStatus("已取消，应用未更改。", false);
@@ -1385,6 +1391,8 @@ const actionGroups = (app, options = {}) => {
   apiActions.forEach((action) => {
     if (action.id === "rollback") return;
     if (action.id === "configure") return;
+    if (action.id === "logs") return;
+    if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart") return;
     const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart";
     const isDelete = action.id === "delete";
     const button = actionButton(
@@ -1392,7 +1400,10 @@ const actionGroups = (app, options = {}) => {
       isDelete ? "btn-link danger" : (isPrimary ? "btn-primary" : "btn-secondary"),
       action.label || action.id,
     );
-    button.addEventListener("click", () => runAppAction(app, action));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      runAppAction(app, action);
+    });
     if (isDelete) danger.append(button);
     else if (isPrimary) primary.append(button);
     else secondary.append(button);
@@ -1400,45 +1411,88 @@ const actionGroups = (app, options = {}) => {
   return [primary, secondary, danger].filter((group) => group.childNodes.length);
 };
 
+const firstEnabledRuleURL = (app) => {
+  const rules = Array.isArray(app.rules) ? app.rules : [];
+  for (const rule of rules) {
+    if (!rule || rule.enabled === false) continue;
+    const domain = String(rule.domain || "").trim();
+    if (!domain) continue;
+    if (/^https?:\/\//i.test(domain)) return domain;
+    return `https://${domain}`;
+  }
+  return "";
+};
+
 const renderApp = (app) => {
-  const row = document.createElement("article");
-  row.className = "app-row";
-  row.dataset.id = app.id;
-  row.tabIndex = 0;
-  const main = document.createElement("div");
-  main.className = "app-row-main";
-  const title = document.createElement("h3");
-  title.textContent = app.id;
-  const chips = document.createElement("div");
-  chips.className = "app-chips";
-  appendAppChips(chips, app);
-  main.append(title, chips);
-  const actions = document.createElement("div");
-  actions.className = "app-row-actions";
-  actionGroups(app).forEach((group) => actions.append(group));
-  const manage = document.createElement("button");
-  manage.type = "button";
-  manage.className = "btn-secondary";
-  manage.textContent = "管理";
-  manage.addEventListener("click", (event) => {
-    event.stopPropagation();
-    showDetail(app.id, "overview");
+  const source = appCardTemplate && appCardTemplate.content.querySelector(".app-card");
+  const card = source ? source.cloneNode(true) : document.createElement("article");
+  card.className = "app-card";
+  card.dataset.id = app.id;
+  card.dataset.status = app.status || "已停止";
+  card.tabIndex = 0;
+  const nameNode = card.querySelector("[data-app-name]");
+  if (nameNode) nameNode.textContent = app.name || app.id;
+  const statusHook = card.querySelector("[data-app-status]");
+  if (statusHook) {
+    const parts = [];
+    if (app.status && app.status !== "有新版本") parts.push(app.status);
+    if (app.notice === "有新版本" || app.status === "有新版本") parts.push("有新版本");
+    statusHook.textContent = parts.join(" · ");
+    if (app.status) statusHook.dataset.status = app.status;
+  }
+  const portNode = card.querySelector("[data-app-ports]");
+  if (portNode) {
+    portNode.replaceChildren();
+    const ports = appPorts(app);
+    if (ports.length) ports.forEach((port) => portNode.append(chip(`:${port}`)));
+    else portNode.hidden = true;
+  }
+  const openURL = firstEnabledRuleURL(app);
+  const openButton = card.querySelector('[data-action="open"]');
+  if (openButton) {
+    openButton.hidden = !openURL;
+    openButton.textContent = "打开";
+    if (openURL) {
+      openButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        window.open(openURL, "_blank", "noopener,noreferrer");
+      });
+    }
+  }
+  const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
+  ["start", "stop", "restart"].forEach((id) => {
+    const button = card.querySelector(`[data-action="${id}"]`);
+    const action = actionsByID.get(id);
+    if (!button) return;
+    button.hidden = !action;
+    if (!action) return;
+    button.textContent = action.label || id;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      runAppAction(app, action);
+    });
   });
-  actions.append(manage);
-  row.append(main, actions);
-  const open = () => { showDetail(app.id, "overview"); };
-  row.addEventListener("click", (event) => {
+  const openDetail = () => { showDetail(app.id, "overview"); };
+  const detailButton = card.querySelector('[data-action="detail"]');
+  if (detailButton) {
+    detailButton.textContent = "详情";
+    detailButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDetail();
+    });
+  }
+  card.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
-    open();
+    openDetail();
   });
-  row.addEventListener("keydown", (event) => {
-    if (event.target !== row) return;
+  card.addEventListener("keydown", (event) => {
+    if (event.target !== card) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      open();
+      openDetail();
     }
   });
-  return row;
+  return card;
 };
 
 const fillCompose = (app) => {
@@ -1779,24 +1833,24 @@ const renderEngineBadge = (engine) => {
   if (!agentOnline) {
     engineReady = false;
     engineStatus.dataset.ready = "false";
-    engineStatus.textContent = "Agent 执行面 · 节点离线";
+    engineStatus.textContent = "节点离线";
     return;
   }
   if (!engine) {
     engineReady = false;
     engineStatus.dataset.ready = "false";
-    engineStatus.textContent = "Agent 执行面 · 引擎未就绪";
+    engineStatus.textContent = "引擎未就绪";
     return;
   }
   engineReady = engine.ready === true;
   engineStatus.dataset.ready = engineReady ? "true" : "false";
   if (executionFaceUnavailable(engine)) {
-    engineStatus.textContent = "Agent 执行面 · 执行面未就绪";
+    engineStatus.textContent = "执行面未就绪";
     return;
   }
   engineStatus.textContent = engineReady
-    ? (engine.version ? `Agent 执行面 · 引擎 ${engine.version} 已就绪` : "Agent 执行面 · 引擎已就绪")
-    : "Agent 执行面 · 引擎未就绪";
+    ? (engine.version ? `引擎 ${engine.version} 已就绪` : "引擎已就绪")
+    : "引擎未就绪";
 };
 
 const renderWorkspace = async () => {

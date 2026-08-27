@@ -107,7 +107,7 @@ func TestAppUIAuthorizedDeployListsAndRequiresDeleteConfirm(t *testing.T) {
 
 	listed := httptest.NewRecorder()
 	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
-	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"media"`) {
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"media"`) || !strings.Contains(listed.Body.String(), `"status":"运行中"`) {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
 
@@ -236,8 +236,8 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	}
 	listed := httptest.NewRecorder()
 	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
-	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"domain":"https://app.example.com"`) {
-		t.Fatalf("list did not project host rule: %s", listed.Body.String())
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"domain":"https://app.example.com"`) || !strings.Contains(listed.Body.String(), `"port":8080`) || !strings.Contains(listed.Body.String(), `"enabled":true`) {
+		t.Fatalf("list did not project host rule summary: %s", listed.Body.String())
 	}
 	handle.rules = nil
 	stale := httptest.NewRecorder()
@@ -1257,19 +1257,113 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(html), "本地管理面") || !strings.Contains(string(html), "Agent 执行面") {
-		t.Fatalf("dedicated UI omits runtime face labels: %s", html)
+	page := string(html)
+	js := string(script)
+	if strings.Contains(page, "本地管理面") || strings.Contains(page, `class="face-summary"`) {
+		t.Fatal("dedicated UI still leads with management/execution-face summary")
 	}
-	if !strings.Contains(string(html), `id="app-execution-unavailable"`) || !strings.Contains(string(html), "Agent 执行面未就绪") {
-		t.Fatal("dedicated UI omits execution-face unavailable state")
+	if strings.Contains(page, "Agent 执行面") {
+		t.Fatal("first screen still presents Agent 执行面 as primary copy")
 	}
-	for _, marker := range []string{"Agent 执行面 · 节点离线", "Agent 执行面 · 引擎未就绪", "Agent 执行面 · 执行面未就绪", "Agent 执行面 · ${app.status}", "Agent 执行面 · 有新版本"} {
-		if !strings.Contains(string(script), marker) {
-			t.Fatalf("dedicated UI script omits face-specific state %q", marker)
+	if !strings.Contains(page, `id="agent-select"`) || !strings.Contains(page, `data-agent-picker="workspace"`) || !strings.Contains(page, `class="page-head-agent"`) {
+		t.Fatal("node picker is no longer in the page head")
+	}
+	if !strings.Contains(page, `id="app-list"`) || !strings.Contains(page, `data-card-wall="apps"`) || !strings.Contains(page, `id="app-detail"`) {
+		t.Fatal("page is missing card wall / 详情 regions")
+	}
+	templateStart := strings.Index(page, `id="app-card-template"`)
+	templateEnd := strings.Index(page, `id="app-files-template"`)
+	if templateStart < 0 || templateEnd <= templateStart {
+		t.Fatal("card wall template is missing")
+	}
+	cardTemplate := page[templateStart:templateEnd]
+	for _, want := range []string{
+		`data-app-name`, `data-app-status`, `data-action="open"`,
+		`data-action="start"`, `data-action="stop"`, `data-action="restart"`,
+		`data-action="detail"`, "打开", "详情",
+	} {
+		if !strings.Contains(cardTemplate, want) {
+			t.Fatalf("card template missing hook %q", want)
 		}
 	}
-	if strings.Contains(string(script), "/panel-api/plugins/docker-app/configure") {
+	for _, forbidden := range []string{"删除", "日志", "files-list", "compose-form", "http-form", "logs-view"} {
+		if strings.Contains(cardTemplate, forbidden) {
+			t.Fatalf("cards still expose %q as list primary", forbidden)
+		}
+	}
+	if !strings.Contains(page, `id="app-execution-unavailable"`) || !strings.Contains(page, "该节点暂时无法执行应用") {
+		t.Fatal("dedicated UI omits execution-unavailable guide")
+	}
+	if !strings.Contains(page, `id="app-node-empty"`) || !strings.Contains(page, `id="app-offline"`) || !strings.Contains(page, `id="engine-guide"`) {
+		t.Fatal("dedicated UI omits node-first empty/offline/unready guides")
+	}
+	if !strings.Contains(js, "api/apps?agent_id=") {
+		t.Fatal("list load is not node-scoped")
+	}
+	for _, marker := range []string{"Agent 执行面 · 节点离线", "Agent 执行面 · 引擎未就绪", "Agent 执行面 · 执行面未就绪", "Agent 执行面 · ${app.status}", "Agent 执行面 · 有新版本"} {
+		if strings.Contains(js, marker) {
+			t.Fatalf("dedicated UI still prefixes status with %q", marker)
+		}
+	}
+	renderStart := strings.Index(js, "const renderApp = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	if renderStart < 0 || renderEnd <= renderStart {
+		t.Fatal("card renderer is missing")
+	}
+	listRender := js[renderStart:renderEnd]
+	if !strings.Contains(listRender, `className = "app-card"`) {
+		t.Fatal("application list is not a card wall")
+	}
+	if !strings.Contains(listRender, "[data-app-name]") || !strings.Contains(listRender, "[data-app-status]") {
+		t.Fatal("card renderer does not fill name/status hooks")
+	}
+	if !strings.Contains(listRender, `textContent = "详情"`) || !strings.Contains(listRender, `[data-action="detail"]`) || !strings.Contains(listRender, "showDetail(app.id") {
+		t.Fatal("cards do not open detail from 详情 or click")
+	}
+	if !strings.Contains(listRender, "window.open") || !strings.Contains(listRender, `textContent = "打开"`) || !strings.Contains(listRender, `[data-action="open"]`) {
+		t.Fatal("cards cannot open an enabled HTTP entry")
+	}
+	for _, action := range []string{"start", "stop", "restart"} {
+		if !strings.Contains(listRender, `[data-action="${id}"]`) && !strings.Contains(listRender, `[data-action="`+action+`"]`) {
+			t.Fatalf("card renderer does not fill %s hook", action)
+		}
+	}
+	if !strings.Contains(listRender, `["start", "stop", "restart"]`) {
+		t.Fatal("card wall does not filter actions to start/stop/restart")
+	}
+	for _, forbidden := range []string{"删除", "日志", "mountAppFiles", "http-form", "openCreate("} {
+		if strings.Contains(listRender, forbidden) {
+			t.Fatalf("card wall still embeds %q", forbidden)
+		}
+	}
+	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")
+	runEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
+	if runStart < 0 || runEnd <= runStart {
+		t.Fatal("runAppAction is missing")
+	}
+	runFn := js[runStart:runEnd]
+	logsGate := strings.Index(runFn, `action.id === "logs"`)
+	logsOpen := strings.Index(runFn, `showDetail(app.id, "logs")`)
+	logsPost := strings.Index(runFn, "postAppAction")
+	if logsGate < 0 || logsOpen < 0 || logsOpen < logsGate {
+		t.Fatal("logs action does not open the detail logs section")
+	}
+	if logsPost >= 0 && logsPost < logsGate {
+		t.Fatal("logs still posts as a list RPC before opening detail")
+	}
+	logsReturn := strings.Index(runFn[logsOpen:], "return;")
+	if logsReturn < 0 {
+		t.Fatal("logs action does not return after opening detail")
+	}
+	logsBranch := runFn[logsGate : logsOpen+logsReturn]
+	if strings.Contains(logsBranch, "已执行操作") || strings.Contains(logsBranch, "postAppAction") {
+		t.Fatal("list page still treats logs as 已执行操作 RPC from the card")
+	}
+	if strings.Contains(js, "/panel-api/plugins/docker-app/configure") {
 		t.Fatal("dedicated UI must not configure a second plugin instance")
+	}
+	if !strings.Contains(page, `id="detail-back"`) || !strings.Contains(page, "返回列表") {
+		t.Fatal("detail view is missing a return to the card wall")
 	}
 }
 
@@ -1326,9 +1420,9 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("YAML/.env editors can still grow with content instead of scrolling")
 	}
 	headStart := strings.Index(page, `class="page-head"`)
-	headEnd := strings.Index(page, `class="face-summary"`)
+	headEnd := strings.Index(page, `id="app-loading"`)
 	if headStart < 0 || headEnd < 0 || headEnd < headStart {
-		t.Fatal("page is missing page-head / face-summary regions")
+		t.Fatal("page is missing page-head / loading regions")
 	}
 	head := page[headStart:headEnd]
 	for _, want := range []string{
@@ -1390,20 +1484,27 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(workspaceHead, "space-between") {
 		t.Fatal(".workspace-head still uses space-between to fill main")
 	}
-	if !strings.Contains(workspaceHead, "justify-content: flex-start") || !strings.Contains(workspaceHead, "max-width: min(46rem, 100%)") {
-		t.Fatal(".workspace-head is not a capped operation group")
+	if !strings.Contains(workspaceHead, "justify-content: flex-start") {
+		t.Fatal(".workspace-head is not a left-aligned operation group")
 	}
 	createForm := cssRule(stylesheet, "#create-form")
 	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
 		t.Fatal("#create-form still fills main without a capped operation group")
 	}
+	appList := cssRule(stylesheet, ".app-list")
+	if !strings.Contains(appList, "repeat(auto-fill, minmax(") {
+		t.Fatal(".app-list is not a filling card grid")
+	}
+	if strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
+		t.Fatal(".app-list is still a single column")
+	}
 	for _, want := range []string{
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
-		"repeat(2, minmax(0, 1fr))",
-		"repeat(2, minmax(18rem, 1fr))",
-		"repeat(3, minmax(18rem, 1fr))",
+		"repeat(auto-fill, minmax(17.5rem, 1fr))",
+		"repeat(auto-fill, minmax(18rem, 1fr))",
+		"repeat(auto-fill, minmax(20rem, 1fr))",
 	} {
 		if !strings.Contains(stylesheet, want) {
 			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
@@ -1572,10 +1673,19 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("page missing list/detail markup %q", want)
 		}
 	}
+	for _, want := range []string{
+		`id="app-card-template"`, `data-app-name`, `data-app-status`,
+		`data-action="open"`, `data-action="start"`, `data-action="stop"`,
+		`data-action="restart"`, `data-action="detail"`, "详情",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("page missing card-wall hook %q", want)
+		}
+	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
 	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
 	if renderStart < 0 || renderEnd < 0 || renderEnd <= renderStart {
-		t.Fatal("compact list renderer is missing")
+		t.Fatal("card wall renderer is missing")
 	}
 	listRender := js[renderStart:renderEnd]
 	for _, forbidden := range []string{"mountAppFiles", "http-form", "app-logs", "查看日志", "openCreate("} {
@@ -1583,11 +1693,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("application list still embeds %q", forbidden)
 		}
 	}
-	if !strings.Contains(listRender, `className = "app-row"`) {
-		t.Fatal("application list is not a compact row")
+	if !strings.Contains(listRender, `className = "app-card"`) {
+		t.Fatal("application list is not a card wall")
 	}
-	if !strings.Contains(js, `textContent = "管理"`) || !strings.Contains(js, "无发布端口") {
-		t.Fatal("application list is missing manage entry or published-port copy")
+	if !strings.Contains(js, `textContent = "详情"`) || !strings.Contains(js, "无发布端口") {
+		t.Fatal("application list is missing detail entry or published-port copy")
 	}
 	if strings.Contains(js, "openCreate(app)") || strings.Contains(js, `loadLogs.textContent = "查看日志"`) {
 		t.Fatal("list still opens the deploy form for existing apps or gates logs behind 查看日志")
@@ -1670,7 +1780,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, `if (action.id === "rollback") return;`) {
 		t.Fatal("management page no longer skips rollback")
 	}
-	for _, want := range []string{".app-row", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus"} {
+	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus"} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("stylesheet missing workspace rule %q", want)
 		}
