@@ -1754,6 +1754,81 @@ func assertFilesManagerPage(t *testing.T) {
 			t.Fatalf("selection-based files manager missing %q", want)
 		}
 	}
+
+	setBusyStart := strings.Index(js, "const setBusy = (next) => {")
+	setBusyEnd := strings.Index(js, "const parseAgentTime = (value) => {")
+	if setBusyStart < 0 || setBusyEnd <= setBusyStart {
+		t.Fatal("setBusy is missing")
+	}
+	setBusyFn := js[setBusyStart:setBusyEnd]
+	for _, id := range []string{`"files-edit"`, `"files-download"`, `"files-delete"`} {
+		if !strings.Contains(setBusyFn, id) {
+			t.Fatalf("setBusy(false) still enables %s with no file selected", id)
+		}
+	}
+	if !strings.Contains(setBusyFn, "if (!next) syncSelectionActions()") {
+		t.Fatal("setBusy(false) does not restore selection-based disabled flags")
+	}
+	if !strings.Contains(setBusyFn, "node.disabled = next") {
+		t.Fatal("setBusy no longer toggles workspace controls")
+	}
+
+	syncBodyStart := strings.Index(js, "const hasFile = Boolean(selectedPath) && !selectedDir;")
+	if syncBodyStart < 0 {
+		t.Fatal("syncSelectionActions is missing")
+	}
+	syncBody := js[syncBodyStart:]
+	if end := strings.Index(syncBody, "};"); end > 0 {
+		syncBody = syncBody[:end]
+	}
+	if !strings.Contains(syncBody, "editBtn.disabled = !hasFile") || !strings.Contains(syncBody, "downloadBtn.disabled = !hasFile") || !strings.Contains(syncBody, "deleteBtn.disabled = !hasTarget") {
+		t.Fatal("syncSelectionActions no longer disables edit/download/delete when nothing is selected")
+	}
+	if !strings.Contains(js, `let selectedPath = "";`) {
+		t.Fatal("files manager does not start with no file selected")
+	}
+	for _, markup := range []string{
+		`id="files-edit" type="button" class="btn-secondary" disabled`,
+		`id="files-download" type="button" class="btn-secondary" disabled`,
+		`id="files-delete" type="button" class="btn-link danger" disabled`,
+	} {
+		if !strings.Contains(template, markup) {
+			t.Fatalf("selection action is not disabled before a file is selected: %s", markup)
+		}
+	}
+
+	mkdirStart := strings.Index(js, "if (mkdirBtn) {")
+	mkdirEnd := strings.Index(js, "if (newTextBtn) {")
+	if mkdirStart < 0 || mkdirEnd <= mkdirStart {
+		t.Fatal("mkdir handler is missing")
+	}
+	mkdirFn := js[mkdirStart:mkdirEnd]
+	if !strings.Contains(mkdirFn, "setBusy(true)") || !strings.Contains(mkdirFn, "setBusy(false)") {
+		t.Fatal("mkdir does not go through setBusy")
+	}
+
+	uploadStart := strings.Index(js, "if (uploadBtn && uploadInput) {")
+	uploadEnd := strings.Index(js, "if (downloadBtn) {")
+	if uploadStart < 0 || uploadEnd <= uploadStart {
+		t.Fatal("upload handler is missing")
+	}
+	uploadFn := js[uploadStart:uploadEnd]
+	if !strings.Contains(uploadFn, "setBusy(true)") || !strings.Contains(uploadFn, "setBusy(false)") {
+		t.Fatal("upload does not go through setBusy")
+	}
+
+	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")
+	runEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
+	if runStart < 0 || runEnd <= runStart {
+		t.Fatal("runAppAction is missing")
+	}
+	runFn := js[runStart:runEnd]
+	if !strings.Contains(runFn, "setBusy(true)") || !strings.Contains(runFn, "setBusy(false)") {
+		t.Fatal("detail start/stop does not go through setBusy")
+	}
+	if !strings.Contains(js, "runAppAction(detailApp, action)") {
+		t.Fatal("detail start/stop does not call runAppAction")
+	}
 	if strings.Contains(js, "/mnt/data/komga") {
 		t.Fatal("files UI lists an absolute host mount")
 	}

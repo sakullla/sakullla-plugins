@@ -98,6 +98,7 @@ let discardFileEditor = () => {
   filesDirty = false;
   filesEditorOpen = false;
 };
+let syncSelectionActions = () => {};
 const engineCache = new Map();
 const ENGINE_CACHE_MS = 15000;
 const ENGINE_PROBE_CONCURRENCY = 3;
@@ -185,9 +186,11 @@ const setBusy = (next) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect || node === copyScript || node === copyDaemon) return;
       if (agentPickerRoot && agentPickerRoot.contains(node)) return;
+      if (!next && (node.id === "files-edit" || node.id === "files-download" || node.id === "files-delete")) return;
       node.disabled = next;
     });
   });
+  if (!next) syncSelectionActions();
 };
 
 const parseAgentTime = (value) => {
@@ -986,7 +989,7 @@ const mountAppFiles = () => {
     });
   };
 
-  const syncSelectionActions = () => {
+  syncSelectionActions = () => {
     const hasFile = Boolean(selectedPath) && !selectedDir;
     const hasTarget = Boolean(selectedPath) && selectedPath !== ".";
     if (editBtn) editBtn.disabled = !hasFile;
