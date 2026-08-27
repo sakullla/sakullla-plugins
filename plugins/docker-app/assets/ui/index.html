@@ -83,10 +83,22 @@
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
           <h2 id="app-create-title">部署应用</h2>
-          <button id="create-cancel" class="btn-secondary" type="button">取消</button>
+          <div class="section-head-actions">
+            <button id="create-cancel" class="btn-secondary" type="button">取消</button>
+            <button id="create-back" class="btn-secondary" type="button">返回</button>
+          </div>
         </div>
         <form id="create-form" method="post">
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
+          <div class="create-templates" id="create-templates">
+            <p class="hint">常用模板会填入 YAML，仍可再改。</p>
+            <div class="create-template-list">
+              <button type="button" class="btn-secondary" data-template="site">静态站点</button>
+              <button type="button" class="btn-secondary" data-template="media">媒体库</button>
+              <button type="button" class="btn-secondary" data-template="files">文件站点</button>
+              <button type="button" class="btn-secondary" data-template="blank">空白</button>
+            </div>
+          </div>
           <label>Compose YAML
             <span class="code-editor" data-lang="yaml">
               <pre class="code-editor__highlight" aria-hidden="true"></pre>
@@ -120,7 +132,13 @@
           <button id="detail-back" class="btn-secondary" type="button">返回列表</button>
           <div class="detail-head-copy">
             <h2 id="detail-title">应用详情</h2>
-            <p id="detail-lede" class="hint">同一时间只展示一个分区。</p>
+            <p id="detail-status" class="app-card-status" data-detail-status></p>
+          </div>
+          <div class="detail-head-actions">
+            <a id="detail-open" class="btn-primary" data-action="open" hidden target="_blank" rel="noopener noreferrer">打开</a>
+            <button type="button" class="btn-secondary" id="detail-start" data-action="start" hidden>启动</button>
+            <button type="button" class="btn-secondary" id="detail-stop" data-action="stop" hidden>停止</button>
+            <button type="button" class="btn-secondary" id="detail-restart" data-action="restart" hidden>重启</button>
           </div>
         </div>
         <nav id="detail-nav" class="detail-nav" aria-label="应用分区">

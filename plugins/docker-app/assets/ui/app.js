@@ -31,8 +31,14 @@ const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-head");
 const detailPanel = document.querySelector("#app-detail");
 const detailTitle = document.querySelector("#detail-title");
+const detailStatus = document.querySelector("#detail-status");
+const detailOpen = document.querySelector("#detail-open");
+const detailStart = document.querySelector("#detail-start");
+const detailStop = document.querySelector("#detail-stop");
+const detailRestart = document.querySelector("#detail-restart");
 const detailNav = document.querySelector("#detail-nav");
 const detailBack = document.querySelector("#detail-back");
+const createTemplates = document.querySelector("#create-templates");
 const overviewPanel = document.querySelector("#detail-overview");
 const filesPanel = document.querySelector("#detail-files");
 const httpPanel = document.querySelector("#detail-http");
@@ -47,6 +53,7 @@ const createForm = document.querySelector("#create-form");
 const createTitle = document.querySelector("#app-create-title");
 const createSubmit = document.querySelector("#create-submit");
 const createCancel = document.querySelector("#create-cancel");
+const createBack = document.querySelector("#create-back");
 const deployToggle = document.querySelector("#deploy-toggle");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
@@ -96,6 +103,21 @@ const ENGINE_CACHE_MS = 15000;
 const ENGINE_PROBE_CONCURRENCY = 3;
 const LOG_REFRESH_MS = 4000;
 const OFFICIAL_INSTALL_SCRIPT = "curl -fsSL https://get.docker.com | sh";
+const COMPOSE_TEMPLATES = {
+  blank: { compose: "" },
+  site: {
+    id: "site",
+    compose: "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n    volumes:\n      - ./html:/usr/share/nginx/html\n",
+  },
+  media: {
+    id: "media",
+    compose: "services:\n  media:\n    image: jellyfin/jellyfin:latest\n    ports:\n      - \"8096:8096\"\n    volumes:\n      - ./config:/config\n      - ./media:/media\n",
+  },
+  files: {
+    id: "files",
+    compose: "services:\n  files:\n    image: filebrowser/filebrowser:latest\n    ports:\n      - \"8080:80\"\n    volumes:\n      - ./data:/srv\n",
+  },
+};
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -704,6 +726,14 @@ const confirmLeaveEditor = () => {
   return true;
 };
 
+const applyCreateTemplate = (name) => {
+  const template = COMPOSE_TEMPLATES[name];
+  if (!template || !composeInput) return;
+  composeInput.value = template.compose || "";
+  paintCodeEditor(composeInput);
+  composeInput.focus();
+};
+
 const openCreate = () => {
   if (!engineReady || !agentOnline) return;
   if (view === "detail" && !leaveDetail()) return;
@@ -745,9 +775,9 @@ const syncListPanel = () => {
   const creating = createPanel && createPanel.hidden === false;
   const inDetail = view === "detail";
   if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps || creating;
-  if (listPanel) listPanel.hidden = inDetail || Boolean(creating && !hasApps);
+  if (listPanel) listPanel.hidden = inDetail || creating;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (workspaceHead) workspaceHead.hidden = inDetail;
+  if (workspaceHead) workspaceHead.hidden = inDetail || creating;
   if (deployToggle) deployToggle.hidden = inDetail || creating || !(selectedAgentID && engineReady && agentOnline);
 };
 
@@ -1393,6 +1423,7 @@ const actionGroups = (app, options = {}) => {
     if (action.id === "configure") return;
     if (action.id === "logs") return;
     if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart") return;
+    if (options.overview && (action.id === "start" || action.id === "stop" || action.id === "restart")) return;
     const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart";
     const isDelete = action.id === "delete";
     const button = actionButton(
@@ -1519,7 +1550,7 @@ const renderOverview = (app) => {
   appendAppChips(chips, app);
   identity.append(title, chips);
   overviewPanel.append(identity);
-  actionGroups(app, { manage: false }).forEach((group) => overviewPanel.append(group));
+  actionGroups(app, { overview: true }).forEach((group) => overviewPanel.append(group));
 };
 
 const renderHTTP = (app) => {
@@ -1537,11 +1568,26 @@ const renderHTTP = (app) => {
       const item = document.createElement("li");
       const domain = String(rule.domain || "").trim();
       const port = rule.port ? `:${rule.port}` : "";
-      const enabled = rule.enabled === false;
-      const label = document.createElement("span");
-      label.textContent = `${domain}${port}${enabled ? "（已停用）" : ""}`;
-      if (enabled) label.className = "http-rule-disabled";
-      item.append(label);
+      const disabled = rule.enabled === false;
+      const openURL = disabled ? "" : firstEnabledRuleURL({ rules: [rule] });
+      if (openURL) {
+        const link = document.createElement("a");
+        link.href = openURL;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "http-rule-open";
+        link.textContent = `${domain}${port}`;
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          window.open(openURL, "_blank", "noopener,noreferrer");
+        });
+        item.append(link);
+      } else {
+        const label = document.createElement("span");
+        label.textContent = `${domain}${port}${disabled ? "（已停用）" : ""}`;
+        if (disabled) label.className = "http-rule-disabled";
+        item.append(label);
+      }
       if (rule.ref) {
         const deleteRule = document.createElement("button");
         deleteRule.type = "button";
@@ -1708,6 +1754,32 @@ const paintDetail = (app) => {
   detailApp = app;
   selectedAppID = app.id;
   if (detailTitle) detailTitle.textContent = app.id;
+  if (detailStatus) {
+    const parts = [];
+    if (app.status && app.status !== "有新版本") parts.push(app.status);
+    if (app.notice === "有新版本" || app.status === "有新版本") parts.push("有新版本");
+    detailStatus.textContent = parts.join(" · ");
+    if (app.status) detailStatus.dataset.status = app.status;
+    else delete detailStatus.dataset.status;
+  }
+  const openURL = firstEnabledRuleURL(app);
+  if (detailOpen) {
+    detailOpen.hidden = !openURL;
+    detailOpen.textContent = "打开";
+    if (openURL) detailOpen.setAttribute("href", openURL);
+    else detailOpen.removeAttribute("href");
+  }
+  const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
+  [
+    ["start", detailStart],
+    ["stop", detailStop],
+    ["restart", detailRestart],
+  ].forEach(([id, button]) => {
+    if (!button) return;
+    const action = actionsByID.get(id);
+    button.hidden = !action;
+    if (action) button.textContent = action.label || id;
+  });
   renderOverview(app);
   if (composeFilledFor !== app.id) fillCompose(app);
   renderHTTP(app);
@@ -1972,12 +2044,37 @@ if (deployToggle) {
 }
 
 if (createCancel) createCancel.addEventListener("click", closeCreate);
+if (createBack) createBack.addEventListener("click", closeCreate);
+
+const templateRoot = createTemplates || createPanel;
+if (templateRoot) {
+  templateRoot.querySelectorAll("[data-template]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyCreateTemplate(button.dataset.template);
+    });
+  });
+}
 
 if (detailBack) {
   detailBack.addEventListener("click", () => {
     leaveDetail();
   });
 }
+
+[
+  ["start", detailStart],
+  ["stop", detailStop],
+  ["restart", detailRestart],
+].forEach(([id, button]) => {
+  if (!button) return;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!detailApp || busy) return;
+    const action = (Array.isArray(detailApp.actions) ? detailApp.actions : []).find((item) => item.id === id);
+    if (action) runAppAction(detailApp, action);
+  });
+});
 
 if (detailNav) {
   detailNav.querySelectorAll("[data-section]").forEach((button) => {

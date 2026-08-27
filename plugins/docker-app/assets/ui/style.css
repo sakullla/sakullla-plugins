@@ -598,10 +598,20 @@ h2 { font-size: var(--text-sm); }
 }
 
 #app-create {
+  display: grid;
+  gap: var(--space-4);
   margin-top: 0;
   margin-inline: auto;
   width: min(46rem, 100%);
   max-width: min(46rem, 100%);
+}
+
+#app-workspace:has(#app-create:not([hidden])) #app-list-panel,
+#app-workspace:has(#app-create:not([hidden])) .workspace-head,
+#app-workspace:has(#app-detail:not([hidden])) #app-create,
+#app-workspace:has(#app-detail:not([hidden])) #app-list-panel,
+#app-workspace:has(#app-detail:not([hidden])) .workspace-head {
+  display: none !important;
 }
 
 #app-list-panel,
@@ -633,6 +643,18 @@ h2 { font-size: var(--text-sm); }
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
+}
+
+#app-create .section-head {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.section-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 .count { margin: 0; font-size: var(--text-xs); }
@@ -806,6 +828,13 @@ button {
 
 .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
 
+a.btn-primary,
+a.btn-secondary {
+  min-height: 2.375rem;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 .btn-secondary {
   display: inline-flex;
   align-items: center;
@@ -870,14 +899,89 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 }
 
 .detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 4;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  margin: calc(-1 * var(--space-5)) calc(-1 * var(--space-5)) var(--space-3);
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
-.detail-head h2 { font-size: 1.05rem; }
+.detail-head-copy {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.detail-head-copy h2,
+.detail-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.detail-head .app-card-status {
+  order: 0;
+  margin: 0;
+}
+
+.detail-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-left: auto;
+}
+
+.detail-head-actions .btn-primary,
+.detail-head-actions .btn-secondary {
+  min-width: 4.25rem;
+  min-height: 2.05rem;
+  padding: 0.35rem 0.7rem;
+  font-size: var(--text-xs);
+}
+
+.create-templates {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-sunken);
+}
+
+.create-templates .hint { margin: 0; }
+
+.template-row,
+.create-template-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.create-template-list .btn-secondary,
+.template-row .btn-secondary {
+  min-width: 5rem;
+  min-height: 2.05rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--color-bg-surface);
+}
+
+.http-rule-open {
+  color: var(--color-primary);
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.http-rule-open:hover { text-decoration: underline; }
 
 .detail-nav {
   display: flex;
@@ -1255,6 +1359,15 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   font-size: var(--text-sm);
 }
 
+.http-rules a {
+  color: var(--color-primary);
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.http-rules a:hover { text-decoration: underline; }
+
 .http-rule-disabled { color: var(--color-text-tertiary); }
 
 .files-breadcrumb {
@@ -1431,13 +1544,20 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   .http-form { grid-template-columns: 1fr; }
   .agent-search-select__dropdown { width: 100%; max-height: min(70vh, 24rem); }
   .section-head,
+  .section-head-actions,
   .form-footer,
   .app-card-head,
   .app-card-actions,
   .detail-head,
+  .detail-head-actions,
   .app-actions,
   .app-actions-primary,
   .app-actions-secondary { flex-wrap: wrap; }
+  .detail-head {
+    margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-3);
+    padding: var(--space-4) var(--space-4) var(--space-3);
+  }
+  .detail-head-actions { width: 100%; margin-left: 0; }
   .form-footer,
   .app-actions,
   .http-rules li { align-items: stretch; }

@@ -215,6 +215,7 @@ func TestAppUIRestoresPersistedAppsAfterControllerRestart(t *testing.T) {
 
 func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	t.Parallel()
+	assertDetailWorkspacePage(t)
 	handle := &recordingHTTPRuleCreate{}
 	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
 	created := httptest.NewRecorder()
@@ -239,6 +240,11 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"domain":"https://app.example.com"`) || !strings.Contains(listed.Body.String(), `"port":8080`) || !strings.Contains(listed.Body.String(), `"enabled":true`) {
 		t.Fatalf("list did not project host rule summary: %s", listed.Body.String())
 	}
+	detail := httptest.NewRecorder()
+	controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/media", ""))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"domain":"https://app.example.com"`) || !strings.Contains(detail.Body.String(), `"ref":`) {
+		t.Fatalf("detail omitted openable host rule: status=%d body=%s", detail.Code, detail.Body.String())
+	}
 	handle.rules = nil
 	stale := httptest.NewRecorder()
 	controller.ServeHTTP(stale, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
@@ -255,6 +261,7 @@ func TestAppUICreatesHTTPRuleFromPublishedPortAndDomain(t *testing.T) {
 
 func TestAppUIDeletesHTTPRuleFromHostList(t *testing.T) {
 	t.Parallel()
+	assertDetailWorkspacePage(t)
 	handle := &recordingHTTPRuleCreate{}
 	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
 	created := httptest.NewRecorder()
@@ -902,6 +909,7 @@ func TestAppUIRejectsOfflineAgentMutations(t *testing.T) {
 
 func TestAppUIStartStopRestartLogsAndConfirmedDelete(t *testing.T) {
 	t.Parallel()
+	assertDetailWorkspacePage(t)
 	controller := newUIController(t)
 	created := httptest.NewRecorder()
 	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
@@ -1635,8 +1643,174 @@ func TestPageWorkspaceFiles(t *testing.T) {
 	}
 }
 
+func assertDetailWorkspacePage(t *testing.T) {
+	t.Helper()
+	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	js := string(scriptBytes)
+
+	detailStart := strings.Index(html, `id="app-detail"`)
+	navStart := strings.Index(html, `id="detail-nav"`)
+	sectionStart := strings.Index(html, `data-section-panel="overview"`)
+	if detailStart < 0 || navStart <= detailStart || sectionStart <= navStart {
+		t.Fatal("detail identity/return is not above section nav and panels")
+	}
+	detailHead := html[detailStart:navStart]
+	for _, want := range []string{
+		`id="detail-back"`,
+		"返回列表",
+		`id="detail-title"`,
+		`id="detail-status"`,
+		`id="detail-open"`,
+		`id="detail-start"`,
+		`id="detail-stop"`,
+		`id="detail-restart"`,
+		`data-action="open"`,
+		`data-action="start"`,
+		`data-action="stop"`,
+		`data-action="restart"`,
+	} {
+		if !strings.Contains(detailHead, want) {
+			t.Fatalf("detail any-section head missing %q", want)
+		}
+	}
+	if strings.Contains(detailHead, "data-section-panel") {
+		t.Fatal("detail identity/return is inside a section panel")
+	}
+	if strings.Contains(detailHead, "删除") {
+		t.Fatal("detail head still exposes delete")
+	}
+	if strings.Contains(html, "同一时间只展示一个分区") {
+		t.Fatal("detail still leads with 同一时间只展示一个分区")
+	}
+
+	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintEnd := strings.Index(js, "const setDetailSection = (section) => {")
+	if paintStart < 0 || paintEnd <= paintStart {
+		t.Fatal("paintDetail is missing")
+	}
+	paintFn := js[paintStart:paintEnd]
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") {
+		t.Fatal("detail title does not show the app id")
+	}
+	if !strings.Contains(paintFn, "detailStatus") || !strings.Contains(paintFn, "detailOpen") {
+		t.Fatal("detail head does not paint status or open")
+	}
+
+	setStart := strings.Index(js, "const setDetailSection = (section) => {")
+	setEnd := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	if setStart < 0 || setEnd <= setStart {
+		t.Fatal("setDetailSection is missing")
+	}
+	setFn := js[setStart:setEnd]
+	if !strings.Contains(setFn, `panel.hidden = panel.getAttribute("data-section-panel") !== next`) {
+		t.Fatal("section switch no longer toggles only detail-section panels")
+	}
+	if strings.Contains(setFn, "detail-head") || strings.Contains(setFn, "detailBack.hidden") || strings.Contains(setFn, "detailTitle.hidden") {
+		t.Fatal("switching sections hides 返回列表 or app identity")
+	}
+
+	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")
+	runEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
+	if runStart < 0 || runEnd <= runStart {
+		t.Fatal("runAppAction is missing")
+	}
+	runFn := js[runStart:runEnd]
+	logsGate := strings.Index(runFn, `action.id === "logs"`)
+	logsOpen := strings.Index(runFn, `showDetail(app.id, "logs")`)
+	if logsGate < 0 || logsOpen < 0 || logsOpen < logsGate {
+		t.Fatal("logs entry does not open the detail logs section")
+	}
+	logsReturn := strings.Index(runFn[logsOpen:], "return;")
+	if logsReturn < 0 {
+		t.Fatal("logs entry does not return after opening the logs section")
+	}
+	logsBranch := runFn[logsGate : logsOpen+logsReturn]
+	if strings.Contains(logsBranch, "已执行操作") || strings.Contains(logsBranch, "postAppAction") {
+		t.Fatal("logs entry still treats logs as 已执行操作")
+	}
+	if !strings.Contains(js, "logsView.textContent = payload.logs") {
+		t.Fatal("logs section does not display log text")
+	}
+
+	httpStart := strings.Index(js, "const renderHTTP = (app) => {")
+	httpEnd := strings.Index(js, "const fillLogServices = (app) => {")
+	if httpStart < 0 || httpEnd <= httpStart {
+		t.Fatal("renderHTTP is missing")
+	}
+	httpFn := js[httpStart:httpEnd]
+	if !strings.Contains(httpFn, `createElement("a")`) || !strings.Contains(httpFn, `target = "_blank"`) || !strings.Contains(httpFn, "link.href") {
+		t.Fatal("HTTP entries are not openable links")
+	}
+	if !strings.Contains(httpFn, "确认删除入口") {
+		t.Fatal("HTTP delete is missing confirmation")
+	}
+
+	if !strings.Contains(runFn, "确认删除 ${app.id}") {
+		t.Fatal("app delete is missing confirmation in detail")
+	}
+	overviewStart := strings.Index(js, "const renderOverview = (app) => {")
+	overviewEnd := strings.Index(js, "const renderHTTP = (app) => {")
+	if overviewStart < 0 || overviewEnd <= overviewStart {
+		t.Fatal("renderOverview is missing")
+	}
+	if !strings.Contains(js[overviewStart:overviewEnd], "overview: true") {
+		t.Fatal("delete is not offered from the detail overview")
+	}
+	cardStart := strings.Index(html, `id="app-card-template"`)
+	cardEnd := strings.Index(html, `id="app-files-template"`)
+	if cardStart < 0 || cardEnd <= cardStart {
+		t.Fatal("card wall template is missing")
+	}
+	if strings.Contains(html[cardStart:cardEnd], "删除") {
+		t.Fatal("delete is still on the card wall")
+	}
+
+	if !strings.Contains(html, `id="create-cancel"`) || !strings.Contains(html, "取消") {
+		t.Fatal("deploy form is missing cancel")
+	}
+	if !strings.Contains(html, `id="create-back"`) || !strings.Contains(html, "返回") {
+		t.Fatal("deploy form is missing 返回")
+	}
+	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+		t.Fatal("deploy cancel is not wired back to the card wall")
+	}
+	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+		t.Fatal("deploy 返回 is not wired back to the card wall")
+	}
+	if strings.Count(html, `id="create-templates"`) != 1 {
+		t.Fatal("optional templates are missing or duplicated")
+	}
+	for _, want := range []string{
+		`data-template="blank"`,
+		`data-template="site"`,
+		`data-template="media"`,
+		"空白",
+		"静态站点",
+		"媒体",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("optional template %q is missing", want)
+		}
+	}
+	if !strings.Contains(js, "COMPOSE_TEMPLATES") || !strings.Contains(js, "applyCreateTemplate") || !strings.Contains(js, "composeInput.value = template.compose") {
+		t.Fatal("optional templates do not fill YAML")
+	}
+	if strings.Contains(html, "应用商店目录") || strings.Contains(html, "应用市场") || strings.Contains(html, "上架") || strings.Contains(js, "应用商店目录") {
+		t.Fatal("page grew an app store catalog")
+	}
+}
+
 func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	t.Parallel()
+	assertDetailWorkspacePage(t)
 	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -1655,7 +1829,13 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	for _, want := range []string{
 		`id="app-detail"`,
 		`id="detail-back"`,
-		"返回",
+		"返回列表",
+		`id="detail-title"`,
+		`id="detail-status"`,
+		`id="detail-open"`,
+		`id="detail-start"`,
+		`id="detail-stop"`,
+		`id="detail-restart"`,
 		`data-section="overview"`,
 		`data-section="compose"`,
 		`data-section="files"`,
@@ -1668,10 +1848,29 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		`id="files-edit"`,
 		"自动刷新",
 		`id="compose-form"`,
+		`id="create-cancel"`,
+		"取消",
+		`id="create-back"`,
+		"返回",
+		`id="create-templates"`,
+		`data-template="blank"`,
+		`data-template="site"`,
+		`data-template="media"`,
+		`data-template="files"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("page missing list/detail markup %q", want)
 		}
+	}
+	if strings.Contains(html, "同一时间只展示一个分区") {
+		t.Fatal("detail still presents 同一时间只展示一个分区 as primary copy")
+	}
+	if strings.Contains(html, "应用商店目录") || strings.Contains(html, "应用市场") || strings.Contains(html, "上架") {
+		t.Fatal("deploy form presents an application market")
+	}
+	templateCount := strings.Count(html, `data-template="`)
+	if templateCount < 3 || templateCount > 5 {
+		t.Fatalf("compose templates should stay a small fill-in set, got %d", templateCount)
 	}
 	for _, want := range []string{
 		`id="app-card-template"`, `data-app-name`, `data-app-status`,
@@ -1745,6 +1944,22 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(paintFn, "appChanged") || !strings.Contains(paintFn, "resetLogsTerminal();") {
 		t.Fatal("changing apps does not reset the logs terminal")
 	}
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") || !strings.Contains(paintFn, "detailStatus") {
+		t.Fatal("detail head does not keep app id and status across sections")
+	}
+	for _, want := range []string{
+		"detailTitle.textContent = app.id",
+		"detailStatus.textContent",
+		"firstEnabledRuleURL(app)",
+		"detailOpen.hidden",
+		`["start", detailStart]`,
+		`["stop", detailStop]`,
+		`["restart", detailRestart]`,
+	} {
+		if !strings.Contains(paintFn, want) {
+			t.Fatalf("detail chrome missing %q", want)
+		}
+	}
 	fetchStart := strings.Index(js, "const fetchLogs = async () => {")
 	fetchEnd := strings.Index(js, "const startLogPolling = () => {")
 	if fetchStart < 0 || fetchEnd <= fetchStart {
@@ -1753,6 +1968,9 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	fetchFn := js[fetchStart:fetchEnd]
 	if !strings.Contains(fetchFn, `if (!service)`) || !strings.Contains(fetchFn, "resetLogsTerminal();") || !strings.Contains(fetchFn, "没有可查看的服务") {
 		t.Fatal("fetchLogs does not clear #logs-view when there is no current service")
+	}
+	if !strings.Contains(fetchFn, "logsView.textContent = payload.logs") {
+		t.Fatal("logs section does not display log text")
 	}
 	pollStart := strings.Index(js, "const startLogPolling = () => {")
 	pollEnd := strings.Index(js, "const paintDetail = (app) => {")
@@ -1780,10 +1998,89 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, `if (action.id === "rollback") return;`) {
 		t.Fatal("management page no longer skips rollback")
 	}
-	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus"} {
+	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("stylesheet missing workspace rule %q", want)
 		}
+	}
+	detailHeadCSS := cssRule(style, ".detail-head")
+	if !strings.Contains(detailHeadCSS, "position: sticky") || !strings.Contains(detailHeadCSS, "background: var(--color-bg-surface)") {
+		t.Fatal("detail header is not a persistent theme-aware chrome")
+	}
+	if !strings.Contains(style, `#app-workspace:has(#app-create:not([hidden])) #app-list-panel`) {
+		t.Fatal("deploy form can still stack on the card wall")
+	}
+	setStart := strings.Index(js, "const setDetailSection = (section) => {")
+	setEnd := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	if setStart < 0 || setEnd <= setStart {
+		t.Fatal("setDetailSection is missing")
+	}
+	setFn := js[setStart:setEnd]
+	if !strings.Contains(setFn, "[data-section-panel]") {
+		t.Fatal("section switch no longer keeps the detail head mounted")
+	}
+	if strings.Contains(setFn, "detail-head") && strings.Contains(setFn, ".hidden") {
+		t.Fatal("switching sections hides the detail identity bar")
+	}
+	httpStart := strings.Index(js, "const renderHTTP = (app) => {")
+	httpEnd := strings.Index(js, "const fillLogServices = (app) => {")
+	if httpStart < 0 || httpEnd <= httpStart {
+		t.Fatal("renderHTTP is missing")
+	}
+	httpFn := js[httpStart:httpEnd]
+	if !strings.Contains(httpFn, `className = "http-rule-open"`) || !strings.Contains(httpFn, `createElement("a")`) || !strings.Contains(httpFn, "link.href") {
+		t.Fatal("existing HTTP entries are not openable in markup")
+	}
+	if !strings.Contains(httpFn, `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`) {
+		t.Fatal("HTTP rule delete no longer requires confirmation")
+	}
+	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")
+	runEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
+	if runStart < 0 || runEnd <= runStart {
+		t.Fatal("runAppAction is missing")
+	}
+	runFn := js[runStart:runEnd]
+	logsGate := strings.Index(runFn, `action.id === "logs"`)
+	logsOpen := strings.Index(runFn, `showDetail(app.id, "logs")`)
+	if logsGate < 0 || logsOpen < 0 || logsOpen < logsGate {
+		t.Fatal("named logs entry does not open the detail logs section")
+	}
+	logsReturn := strings.Index(runFn[logsOpen:], "return;")
+	if logsReturn < 0 {
+		t.Fatal("logs action does not return after opening detail")
+	}
+	if strings.Contains(runFn[logsGate:logsOpen+logsReturn], "已执行操作") || strings.Contains(runFn[logsGate:logsOpen+logsReturn], "postAppAction") {
+		t.Fatal("logs still reports 已执行操作 without opening the logs section")
+	}
+	if !strings.Contains(runFn, `确认删除 ${app.id}？取消不会更改应用。`) {
+		t.Fatal("app delete no longer requires confirmation")
+	}
+	if strings.Contains(listRender, "删除") {
+		t.Fatal("card wall still exposes delete")
+	}
+	if !strings.Contains(js, `options.overview && (action.id === "start" || action.id === "stop" || action.id === "restart")`) {
+		t.Fatal("detail overview still repeats start/stop/restart from the identity bar")
+	}
+	if !strings.Contains(js, "COMPOSE_TEMPLATES") || !strings.Contains(js, "applyCreateTemplate") || !strings.Contains(js, "composeInput.value = template.compose") {
+		t.Fatal("deploy form cannot fill a small YAML template")
+	}
+	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+		t.Fatal("deploy form cannot cancel back to the card wall")
+	}
+	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+		t.Fatal("deploy form cannot return back to the card wall")
+	}
+	syncStart := strings.Index(js, "const syncListPanel = () => {")
+	syncEnd := strings.Index(js, "const parsePublishedPorts = (compose) => {")
+	if syncStart < 0 || syncEnd <= syncStart {
+		t.Fatal("syncListPanel is missing")
+	}
+	syncFn := js[syncStart:syncEnd]
+	if !strings.Contains(syncFn, "listPanel.hidden = inDetail || creating") {
+		t.Fatal("deploy form still stacks over the card wall as the main operation")
+	}
+	if !strings.Contains(fetchFn, "logsView.textContent = payload.logs") {
+		t.Fatal("logs section does not display log text")
 	}
 }
 
