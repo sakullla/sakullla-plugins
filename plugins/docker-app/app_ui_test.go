@@ -1613,6 +1613,51 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, `addEventListener("visibilitychange"`) || !strings.Contains(js, "clearInterval(logsTimer)") {
 		t.Fatal("log polling is not stopped on hide or leave")
 	}
+	resetStart := strings.Index(js, "const resetLogsTerminal = () => {")
+	if resetStart < 0 || !strings.Contains(js[resetStart:], `logsView.textContent = "";`) {
+		t.Fatal("logs terminal reset does not clear #logs-view")
+	}
+	leaveStart := strings.Index(js, "const leaveDetail = ({ force } = {}) => {")
+	leaveEnd := strings.Index(js, "const showDetail = async (appID, section) => {")
+	if leaveStart < 0 || leaveEnd <= leaveStart {
+		t.Fatal("leaveDetail is missing")
+	}
+	leaveFn := js[leaveStart:leaveEnd]
+	if !strings.Contains(leaveFn, "resetLogsTerminal();") {
+		t.Fatal("leaveDetail does not reset the logs terminal")
+	}
+	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintEnd := strings.Index(js, "const setDetailSection = (section) => {")
+	if paintStart < 0 || paintEnd <= paintStart {
+		t.Fatal("paintDetail is missing")
+	}
+	paintFn := js[paintStart:paintEnd]
+	if !strings.Contains(paintFn, "appChanged") || !strings.Contains(paintFn, "resetLogsTerminal();") {
+		t.Fatal("changing apps does not reset the logs terminal")
+	}
+	fetchStart := strings.Index(js, "const fetchLogs = async () => {")
+	fetchEnd := strings.Index(js, "const startLogPolling = () => {")
+	if fetchStart < 0 || fetchEnd <= fetchStart {
+		t.Fatal("fetchLogs is missing")
+	}
+	fetchFn := js[fetchStart:fetchEnd]
+	if !strings.Contains(fetchFn, `if (!service)`) || !strings.Contains(fetchFn, "resetLogsTerminal();") || !strings.Contains(fetchFn, "没有可查看的服务") {
+		t.Fatal("fetchLogs does not clear #logs-view when there is no current service")
+	}
+	pollStart := strings.Index(js, "const startLogPolling = () => {")
+	pollEnd := strings.Index(js, "const paintDetail = (app) => {")
+	if pollStart < 0 || pollEnd <= pollStart {
+		t.Fatal("startLogPolling is missing")
+	}
+	pollFn := js[pollStart:pollEnd]
+	fetchCall := strings.Index(pollFn, "fetchLogs();")
+	pauseGate := strings.Index(pollFn, "logsPaused")
+	if fetchCall < 0 || pauseGate < 0 || fetchCall > pauseGate {
+		t.Fatal("paused log polling skips the immediate snapshot fetch")
+	}
+	if strings.Contains(pollFn, "if (logsPaused || document.visibilityState === \"hidden\" || view !== \"detail\"") {
+		t.Fatal("startLogPolling still returns before fetchLogs when paused")
+	}
 	if !strings.Contains(js, "panelJSON(`api/apps/${encodeURIComponent(appID)}`)") {
 		t.Fatal("detail view does not load GET /api/apps/{id}")
 	}

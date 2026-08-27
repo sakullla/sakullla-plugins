@@ -1600,19 +1600,32 @@ const setLogsState = (text, isError) => {
   logsStatus.dataset.error = isError ? "true" : "false";
 };
 
+const resetLogsTerminal = () => {
+  logsSeq += 1;
+  if (logsView) {
+    logsView.textContent = "";
+    logsView.dataset.error = "false";
+  }
+  setLogsState("", false);
+};
+
+const logsContextCurrent = () => detailApp && view === "detail" && detailSection === "logs";
+
 const fetchLogs = async () => {
-  if (!detailApp || view !== "detail" || detailSection !== "logs") return;
+  if (!logsContextCurrent()) return;
   const service = logsService ? logsService.value : "";
   if (!service) {
     logsLoaded = true;
+    resetLogsTerminal();
     setLogsState("没有可查看的服务", false);
     stopLogPolling();
     return;
   }
   const seq = ++logsSeq;
+  const appID = detailApp.id;
   try {
-    const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(detailApp.id)}/logs`, { service });
-    if (seq !== logsSeq) return;
+    const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(appID)}/logs`, { service });
+    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
     if (logsView) {
       logsView.textContent = payload.logs || "";
       logsView.dataset.error = "false";
@@ -1620,7 +1633,7 @@ const fetchLogs = async () => {
     logsLoaded = true;
     if (!logsPaused) setLogsState("自动刷新", false);
   } catch (error) {
-    if (seq !== logsSeq) return;
+    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
     if (logsView) logsView.dataset.error = "true";
     setLogsState("自动刷新失败，已保留上次快照", true);
     if (!logsLoaded) showStatus(error.message, true);
@@ -1629,13 +1642,15 @@ const fetchLogs = async () => {
 
 const startLogPolling = () => {
   stopLogPolling();
-  if (logsPaused || document.visibilityState === "hidden" || view !== "detail" || detailSection !== "logs") return;
+  if (view !== "detail" || detailSection !== "logs") return;
   fetchLogs();
+  if (logsPaused || document.visibilityState === "hidden") return;
   if (!(logsService && logsService.value)) return;
   logsTimer = setInterval(fetchLogs, LOG_REFRESH_MS);
 };
 
 const paintDetail = (app) => {
+  const appChanged = !detailApp || detailApp.id !== app.id;
   detailApp = app;
   selectedAppID = app.id;
   if (detailTitle) detailTitle.textContent = app.id;
@@ -1643,6 +1658,7 @@ const paintDetail = (app) => {
   if (composeFilledFor !== app.id) fillCompose(app);
   renderHTTP(app);
   fillLogServices(app);
+  if (appChanged) resetLogsTerminal();
 };
 
 const setDetailSection = (section) => {
@@ -1672,6 +1688,7 @@ const setDetailSection = (section) => {
 const leaveDetail = ({ force } = {}) => {
   if (!force && !filesWorkspace.confirmLeave()) return false;
   stopLogPolling();
+  resetLogsTerminal();
   if (force) filesWorkspace.discard();
   view = "list";
   selectedAppID = "";
