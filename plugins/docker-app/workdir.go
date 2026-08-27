@@ -2,12 +2,19 @@ package dockerapp
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+)
+
+var (
+	lchownPath = os.Lchown
+	chmodPath  = os.Chmod
 )
 
 const ComposeFileName = "compose.yaml"
@@ -22,11 +29,17 @@ const (
 
 // VolumeBind is a compose bind after classification. Relative binds resolve
 // against the app workdir; host mounts stay absolute and still require preview.
+// Numeric compose user: is applied only to relative binds. Agent plugin
+// sandboxes often map only uid 0, so chown to 1000:1000 can fail; those
+// binds are then made world-writable so the container user can write.
 type VolumeBind struct {
 	Source        string
 	HostPath      string
 	ContainerPath string
 	Relative      bool
+	uid           int
+	gid           int
+	applyOwner    bool
 }
 
 // Workspace is the Agent-local directory for one app, including the compose
@@ -76,6 +89,9 @@ func PrepareAppWorkspace(root, appID, compose string) (Workspace, error) {
 			continue
 		}
 		if err := ensureBindHostPath(bind.HostPath, bind.ContainerPath); err != nil {
+			return Workspace{}, err
+		}
+		if err := applyRelativeBindOwner(bind); err != nil {
 			return Workspace{}, err
 		}
 	}
@@ -141,6 +157,7 @@ type composeBindDocument struct {
 
 type composeBindService struct {
 	Volumes []composeBindVolume `yaml:"volumes"`
+	User    any                 `yaml:"user"`
 }
 
 type composeBindVolume struct {
@@ -189,16 +206,21 @@ func parseComposeVolumeBinds(document string) ([]VolumeBind, error) {
 	}
 	binds := make([]VolumeBind, 0)
 	for _, service := range file.Services {
+		uid, gid, applyOwner := parseComposeUser(service.User)
 		for _, spec := range service.Volumes {
 			source := spec.Source
 			class := classifyBindSource(source)
 			if class == bindNamed {
 				continue
 			}
+			relative := class == bindRelative
 			binds = append(binds, VolumeBind{
 				Source:        source,
 				ContainerPath: spec.Target,
-				Relative:      class == bindRelative,
+				Relative:      relative,
+				uid:           uid,
+				gid:           gid,
+				applyOwner:    applyOwner && relative,
 			})
 		}
 	}
@@ -335,6 +357,101 @@ func relativePathInside(rel string) bool {
 		return false
 	}
 	return true
+}
+
+func parseComposeUser(raw any) (uid, gid int, ok bool) {
+	switch value := raw.(type) {
+	case nil:
+		return 0, 0, false
+	case string:
+		return parseNumericUser(strings.TrimSpace(value))
+	case int:
+		return parseNumericUser(strconv.Itoa(value))
+	case int64:
+		return parseNumericUser(strconv.FormatInt(value, 10))
+	case uint64:
+		return parseNumericUser(strconv.FormatUint(value, 10))
+	default:
+		return 0, 0, false
+	}
+}
+
+func parseNumericUser(spec string) (uid, gid int, ok bool) {
+	if spec == "" {
+		return 0, 0, false
+	}
+	userPart, groupPart, hasGroup := strings.Cut(spec, ":")
+	uid, ok = parseHostID(userPart)
+	if !ok {
+		return 0, 0, false
+	}
+	if !hasGroup {
+		return uid, -1, true
+	}
+	if groupPart == "" || strings.Contains(groupPart, ":") {
+		return 0, 0, false
+	}
+	gid, ok = parseHostID(groupPart)
+	if !ok {
+		return 0, 0, false
+	}
+	return uid, gid, true
+}
+
+func parseHostID(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || parsed < 0 {
+		return 0, false
+	}
+	return int(parsed), true
+}
+
+func applyRelativeBindOwner(bind VolumeBind) error {
+	if !bind.applyOwner {
+		return nil
+	}
+	hostPath := bind.HostPath
+	if hostPath == "" {
+		return nil
+	}
+	info, err := os.Lstat(hostPath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("relative bind path is a symlink")
+	}
+	_ = walkRelativeBind(hostPath, info, func(path string, _ bool) error {
+		return lchownPath(path, bind.uid, bind.gid)
+	})
+	if bind.uid == 0 {
+		return nil
+	}
+	return walkRelativeBind(hostPath, info, func(path string, dir bool) error {
+		mode := os.FileMode(0o666)
+		if dir {
+			mode = 0o777
+		}
+		return chmodPath(path, mode)
+	})
+}
+
+func walkRelativeBind(hostPath string, info os.FileInfo, visit func(path string, dir bool) error) error {
+	if !info.IsDir() {
+		return visit(hostPath, false)
+	}
+	return filepath.WalkDir(hostPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return visit(path, entry.IsDir())
+	})
 }
 
 func ensureBindHostPath(hostPath, containerPath string) error {
