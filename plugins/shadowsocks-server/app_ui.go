@@ -66,6 +66,9 @@ type listenWriteRequest struct {
 	Port      int    `json:"port,omitempty"`
 	Password  string `json:"password,omitempty"`
 	ServerPSK string `json:"server_psk,omitempty"`
+	DDNS      string `json:"ddns_domain,omitempty"`
+	IPv4      string `json:"ipv4,omitempty"`
+	IPv6      string `json:"ipv6,omitempty"`
 }
 
 type listenAPIResponse struct {
@@ -289,6 +292,7 @@ func (c *Controller) serveListenItem(writer http.ResponseWriter, request *http.R
 			return
 		}
 		body, _ := decodeListenWrite(request)
+		c.rememberAgentNode(request.Context(), body.AgentID, requestNode(body))
 		if err := c.deleteListen(request.Context(), listenID, body.AgentID); err != nil {
 			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
 			return
@@ -354,6 +358,7 @@ func (c *Controller) serveUserItem(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		body, _ := decodeListenWrite(request)
+		c.rememberAgentNode(request.Context(), body.AgentID, requestNode(body))
 		var err error
 		if action == "delete" {
 			err = c.deleteUser(request.Context(), userID, body.AgentID)
@@ -410,9 +415,17 @@ func (c *Controller) directory() Configuration {
 	return cfg
 }
 
-func (c *Controller) commitDirectory(next Configuration) error {
+func (c *Controller) commitDirectory(ctx context.Context, next Configuration) error {
 	if err := next.Validate(); err != nil {
 		return err
+	}
+	c.mu.Lock()
+	state := c.listenState
+	c.mu.Unlock()
+	if state != nil {
+		if err := state.StoreListens(ctx, next.Listeners); err != nil {
+			return err
+		}
 	}
 	c.mu.Lock()
 	published := c.published
@@ -436,11 +449,38 @@ func (c *Controller) secrets() *issuedSecrets {
 	return c.controlSecrets
 }
 
-func (c *Controller) putSecret(ref, version, material string) {
+func (c *Controller) putSecret(ctx context.Context, ref, version, material string) error {
 	if ref == "" || version == "" {
-		return
+		return nil
 	}
 	c.secrets().put(ref, version, material)
+	c.mu.Lock()
+	state := c.listenState
+	c.mu.Unlock()
+	if state == nil {
+		return nil
+	}
+	return state.StoreSecrets(ctx, c.secrets().snapshot())
+}
+
+// RememberAgentNode stores a shareable public identity for agentID.
+func (c *Controller) RememberAgentNode(ctx context.Context, agentID string, node NodeAddresses) {
+	c.rememberAgentNode(ctx, agentID, node)
+}
+
+func (c *Controller) rememberAgentNode(ctx context.Context, agentID string, node NodeAddresses) {
+	if c == nil || c.listenHost == nil || !validAgentID(agentID) || !nodeHasAddr(node) {
+		return
+	}
+	c.listenHost.SetAgentNode(agentID, node)
+	if c.listenState == nil {
+		return
+	}
+	_ = c.listenState.StoreNodes(ctx, c.listenHost.snapshotNodes())
+}
+
+func requestNode(body listenWriteRequest) NodeAddresses {
+	return NodeAddresses{DDNS: strings.TrimSpace(body.DDNS), IPv4: strings.TrimSpace(body.IPv4), IPv6: strings.TrimSpace(body.IPv6)}
 }
 
 func (c *Controller) resolveMaterial(ctx context.Context, ref, version string) ([]byte, error) {
@@ -492,6 +532,7 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
 		return listenAPIView{}, err
 	}
+	c.rememberAgentNode(ctx, body.AgentID, requestNode(body))
 	spec := ListenSpec{AgentID: body.AgentID, Name: strings.TrimSpace(body.Name), Method: strings.TrimSpace(body.Method), Port: body.Port, Password: body.Password, ServerPSK: body.ServerPSK}
 	method, err := spec.resolveMethod()
 	if err != nil {
@@ -525,15 +566,19 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 		return listenAPIView{}, err
 	}
 	previous := current
-	c.putSecret(user.SecretRef, user.SecretVersion, password)
-	if SS2022Method(method) {
-		c.putSecret(listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK)
+	if err = c.putSecret(ctx, user.SecretRef, user.SecretVersion, password); err != nil {
+		return listenAPIView{}, err
 	}
-	if err = c.commitDirectory(next); err != nil {
+	if SS2022Method(method) {
+		if err = c.putSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK); err != nil {
+			return listenAPIView{}, err
+		}
+	}
+	if err = c.commitDirectory(ctx, next); err != nil {
 		return listenAPIView{}, err
 	}
 	if err = c.applyAgentListens(ctx, body.AgentID); err != nil {
-		_ = c.commitDirectory(previous)
+		_ = c.commitDirectory(ctx, previous)
 		return listenAPIView{}, err
 	}
 	return c.projectListen(ctx, listener.ID)
@@ -555,6 +600,7 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 	if err := c.requireMutableAgent(ctx, agentID); err != nil {
 		return listenAPIView{}, err
 	}
+	c.rememberAgentNode(ctx, agentID, requestNode(body))
 	if !SS2022Method(listener.Method) {
 		return listenAPIView{}, ErrTraditionalMultiUser
 	}
@@ -579,12 +625,14 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 		return listenAPIView{}, err
 	}
 	previous := current
-	c.putSecret(user.SecretRef, user.SecretVersion, password)
-	if err = c.commitDirectory(next); err != nil {
+	if err = c.putSecret(ctx, user.SecretRef, user.SecretVersion, password); err != nil {
+		return listenAPIView{}, err
+	}
+	if err = c.commitDirectory(ctx, next); err != nil {
 		return listenAPIView{}, err
 	}
 	if err = c.applyAgentListens(ctx, agentID); err != nil {
-		_ = c.commitDirectory(previous)
+		_ = c.commitDirectory(ctx, previous)
 		return listenAPIView{}, err
 	}
 	return c.projectListen(ctx, listenID)
@@ -610,11 +658,11 @@ func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string,
 		return err
 	}
 	previous := current
-	if err = c.commitDirectory(next); err != nil {
+	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
 	if err = c.applyAgentListens(ctx, agentID); err != nil {
-		_ = c.commitDirectory(previous)
+		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
 	return nil
@@ -640,11 +688,11 @@ func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) err
 		return err
 	}
 	previous := current
-	if err = c.commitDirectory(next); err != nil {
+	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
 	if err = c.applyAgentListens(ctx, agentID); err != nil {
-		_ = c.commitDirectory(previous)
+		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
 	return nil
@@ -670,11 +718,11 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		return err
 	}
 	previous := current
-	if err = c.commitDirectory(next); err != nil {
+	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
 	if err = c.applyAgentListens(ctx, agentID); err != nil {
-		_ = c.commitDirectory(previous)
+		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
 	return nil
@@ -834,20 +882,16 @@ func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, u
 }
 
 func (c *Controller) shareNode(ctx context.Context, agentID string) NodeAddresses {
-	if c.listenHost != nil && validAgentID(agentID) {
-		if report, err := c.ReportListen(ctx, agentID); err == nil {
-			if report.DDNS != "" || report.IPv4 != "" || report.IPv6 != "" {
-				return NodeAddresses{DDNS: report.DDNS, IPv4: report.IPv4, IPv6: report.IPv6}
-			}
+	if c.listenHost == nil || !validAgentID(agentID) {
+		return NodeAddresses{}
+	}
+	if report, err := c.ReportListen(ctx, agentID); err == nil {
+		if node := nodeFromReport(report); nodeHasAddr(node) {
+			c.rememberAgentNode(ctx, agentID, node)
+			return node
 		}
 	}
-	c.mu.Lock()
-	published := c.published
-	c.mu.Unlock()
-	if published != nil {
-		return published.NodeAddresses()
-	}
-	return NodeAddresses{}
+	return c.listenHost.AgentNode(ctx, agentID)
 }
 
 func (c *Controller) sharePassword(ctx context.Context, listener ListenRule, user User) (string, error) {

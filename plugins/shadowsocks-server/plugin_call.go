@@ -134,7 +134,7 @@ func (c *Controller) Call(ctx context.Context, generation, name string, payload 
 		if err != nil {
 			return nil, err
 		}
-		return c.attachReportNode(raw)
+		return c.attachReportNode(ctx, raw)
 	case pluginCallListenApply:
 		return exec.apply(ctx, payload)
 	case pluginCallListenStop:
@@ -669,21 +669,21 @@ func destroyListenEngines(engines []*ProtocolEngine) {
 	}
 }
 
-func (c *Controller) attachReportNode(raw []byte) ([]byte, error) {
+func (c *Controller) attachReportNode(ctx context.Context, raw []byte) ([]byte, error) {
 	var report ListenReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return raw, nil
 	}
-	if c == nil {
+	if nodeHasAddr(nodeFromReport(report)) {
 		return raw, nil
 	}
-	c.mu.Lock()
-	published := c.published
-	c.mu.Unlock()
-	if published == nil {
+	if c == nil || c.listenHost == nil {
 		return raw, nil
 	}
-	node := published.NodeAddresses()
+	node := c.listenHost.AgentNode(ctx, report.AgentID)
+	if !nodeHasAddr(node) {
+		return raw, nil
+	}
 	report.DDNS, report.IPv4, report.IPv6 = node.DDNS, node.IPv4, node.IPv6
 	encoded, err := json.Marshal(report)
 	if err != nil {

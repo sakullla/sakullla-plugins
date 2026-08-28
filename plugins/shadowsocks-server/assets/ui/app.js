@@ -138,6 +138,23 @@ const panelJSON = async (path, options = {}) => {
   return payload;
 };
 
+const selectedAgentRecord = () => agentsCache.find((agent) => agent && agent.id === selectedAgentID) || null;
+
+const agentIdentityFields = () => {
+  const agent = selectedAgentRecord();
+  if (!agent) return {};
+  const lastSeen = String(agent.last_seen_ip || "").trim();
+  const ipv4 = String(agent.last_seen_ipv4 || agent.ipv4 || "").trim();
+  const ipv6 = String(agent.last_seen_ipv6 || agent.ipv6 || "").trim();
+  return {
+    ddns_domain: String(agent.ddns_domain || "").trim(),
+    ipv4: ipv4 || (/^\d{1,3}(\.\d{1,3}){3}$/.test(lastSeen) ? lastSeen : ""),
+    ipv6: ipv6,
+  };
+};
+
+const mutateBody = (extra = {}) => ({ agent_id: selectedAgentID, ...agentIdentityFields(), ...extra });
+
 const sendPluginJSON = async (path, body) => {
   const response = await fetch(path, {
     method: "POST",
@@ -753,7 +770,7 @@ const mutateUser = async (user, action, confirmDelete = false) => {
   }
   setBusy(true);
   try {
-    await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, { agent_id: selectedAgentID });
+    await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, mutateBody());
     showStatus("已更新。", false);
     await renderWorkspace();
   } catch (error) {
@@ -767,7 +784,7 @@ const appendUser = async (listen) => {
   if (!canMutate()) return;
   setBusy(true);
   try {
-    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, { agent_id: selectedAgentID });
+    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, mutateBody());
     showStatus("已追加用户。", false);
     await renderWorkspace();
   } catch (error) {
@@ -783,7 +800,7 @@ const deleteListen = async (listen) => {
   if (!ok) return;
   setBusy(true);
   try {
-    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, { agent_id: selectedAgentID });
+    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, mutateBody());
     showStatus("已删除监听。", false);
     await renderWorkspace();
   } catch (error) {
@@ -907,13 +924,12 @@ if (createForm) {
     event.preventDefault();
     if (!canMutate()) return;
     const data = new FormData(createForm);
-    const body = {
-      agent_id: selectedAgentID,
+    const body = mutateBody({
       name: String(data.get("name") || "").trim(),
       method: String(data.get("method") || "").trim(),
       password: String(data.get("password") || "").trim(),
       server_psk: String(data.get("server_psk") || "").trim(),
-    };
+    });
     const port = Number(data.get("port"));
     if (Number.isFinite(port) && port > 0) body.port = port;
     setBusy(true);

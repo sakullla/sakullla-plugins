@@ -3,10 +3,26 @@ package shadowsocksserver
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"sync"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+const (
+	pluginListensStateKey = "listens"
+	pluginSecretsStateKey = "secrets"
+	pluginNodesStateKey   = "agent-nodes"
+	pluginNodeAddressesOp = "node.addresses"
+	maxAgentNodes         = 512
+)
+
+type persistedSecret struct {
+	Ref      string `json:"ref"`
+	Version  string `json:"version"`
+	Material string `json:"material"`
+}
 
 type hostRuntimeCaller interface {
 	Call(context.Context, pluginsdk.HostRuntimeCall, any) error
@@ -16,6 +32,7 @@ type hostCapabilityRuntime struct {
 	client hostRuntimeCaller
 	mu     sync.Mutex
 	live   map[string][]ListenPortStatus
+	nodes  map[string]NodeAddresses
 }
 
 func (c *Controller) ReportListen(ctx context.Context, agentID string) (ListenReport, error) {
@@ -52,7 +69,230 @@ func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 	if client == nil {
 		return nil
 	}
-	return &hostCapabilityRuntime{client: client, live: map[string][]ListenPortStatus{}}
+	return &hostCapabilityRuntime{client: client, live: map[string][]ListenPortStatus{}, nodes: map[string]NodeAddresses{}}
+}
+
+func (runtime *hostCapabilityRuntime) LoadListens(ctx context.Context) ([]ListenRule, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginListensStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var listeners []ListenRule
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &listeners) != nil || len(listeners) > MaxListeners {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	return cloneListeners(listeners), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreListens(ctx context.Context, listeners []ListenRule) error {
+	if runtime == nil || runtime.client == nil || len(listeners) > MaxListeners {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(cloneListeners(listeners))
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginListensStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (runtime *hostCapabilityRuntime) LoadSecrets(ctx context.Context) (map[string]string, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginSecretsStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var stored []persistedSecret
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &stored) != nil || len(stored) > MaxUsers+MaxListeners {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	return secretsFromPersisted(stored), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreSecrets(ctx context.Context, secrets map[string]string) error {
+	if runtime == nil || runtime.client == nil || len(secrets) > MaxUsers+MaxListeners {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(persistedFromSecrets(secrets))
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginSecretsStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (runtime *hostCapabilityRuntime) LoadNodes(ctx context.Context) (map[string]NodeAddresses, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginNodesStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var nodes map[string]NodeAddresses
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &nodes) != nil || len(nodes) > maxAgentNodes {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	return cloneAgentNodes(nodes), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreNodes(ctx context.Context, nodes map[string]NodeAddresses) error {
+	if runtime == nil || runtime.client == nil || len(nodes) > maxAgentNodes {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(cloneAgentNodes(nodes))
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginNodesStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+func (runtime *hostCapabilityRuntime) snapshotNodes() map[string]NodeAddresses {
+	if runtime == nil {
+		return map[string]NodeAddresses{}
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return cloneAgentNodes(runtime.nodes)
+}
+
+func cloneAgentNodes(nodes map[string]NodeAddresses) map[string]NodeAddresses {
+	out := make(map[string]NodeAddresses, len(nodes))
+	for agentID, node := range nodes {
+		out[agentID] = node
+	}
+	return out
+}
+
+func secretsFromPersisted(stored []persistedSecret) map[string]string {
+	out := make(map[string]string, len(stored))
+	for _, item := range stored {
+		if item.Ref == "" || item.Version == "" {
+			continue
+		}
+		out[issuedSecretKey(item.Ref, item.Version)] = item.Material
+	}
+	return out
+}
+
+func persistedFromSecrets(secrets map[string]string) []persistedSecret {
+	out := make([]persistedSecret, 0, len(secrets))
+	for key, material := range secrets {
+		ref, version, ok := strings.Cut(key, "\x00")
+		if !ok || ref == "" || version == "" {
+			continue
+		}
+		out = append(out, persistedSecret{Ref: ref, Version: version, Material: material})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ref == out[j].Ref {
+			return out[i].Version < out[j].Version
+		}
+		return out[i].Ref < out[j].Ref
+	})
+	return out
+}
+
+func (runtime *hostCapabilityRuntime) SetAgentNode(agentID string, node NodeAddresses) {
+	runtime.rememberNode(agentID, node)
+}
+
+func (runtime *hostCapabilityRuntime) AgentNode(ctx context.Context, agentID string) NodeAddresses {
+	if runtime == nil || !validAgentID(agentID) {
+		return NodeAddresses{}
+	}
+	runtime.mu.Lock()
+	node := runtime.nodes[agentID]
+	runtime.mu.Unlock()
+	if nodeHasAddr(node) {
+		return node
+	}
+	if runtime.client == nil {
+		return NodeAddresses{}
+	}
+	var result struct {
+		DDNS         string `json:"ddns_domain"`
+		IPv4         string `json:"ipv4"`
+		IPv6         string `json:"ipv6"`
+		LastSeenIPv4 string `json:"last_seen_ipv4"`
+		LastSeenIPv6 string `json:"last_seen_ipv6"`
+	}
+	if err := callHost(ctx, runtime.client, pluginNodeAddressesOp, map[string]any{"agent_id": agentID}, &result); err != nil {
+		return NodeAddresses{}
+	}
+	node = NodeAddresses{
+		DDNS: strings.TrimSpace(result.DDNS),
+		IPv4: strings.TrimSpace(result.IPv4),
+		IPv6: strings.TrimSpace(result.IPv6),
+	}
+	if node.IPv4 == "" {
+		node.IPv4 = strings.TrimSpace(result.LastSeenIPv4)
+	}
+	if node.IPv6 == "" {
+		node.IPv6 = strings.TrimSpace(result.LastSeenIPv6)
+	}
+	runtime.rememberNode(agentID, node)
+	return node
+}
+
+func (runtime *hostCapabilityRuntime) rememberNode(agentID string, node NodeAddresses) {
+	if runtime == nil || !validAgentID(agentID) || !nodeHasAddr(node) {
+		return
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.nodes == nil {
+		runtime.nodes = map[string]NodeAddresses{}
+	}
+	runtime.nodes[agentID] = node
 }
 
 func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string) (ListenReport, error) {
@@ -70,6 +310,9 @@ func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string
 		return ListenReport{}, ErrTypedHandlesUnavailable
 	}
 	report.AgentID = agentID
+	if node := nodeFromReport(report); nodeHasAddr(node) {
+		runtime.rememberNode(agentID, node)
+	}
 	return report, nil
 }
 
@@ -208,7 +451,9 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	if err != nil || client == nil {
 		return config
 	}
-	config.ListenRuntime = newHostCapabilityRuntime(client)
+	runtime := newHostCapabilityRuntime(client)
+	config.ListenRuntime = runtime
+	config.ListenState = runtime
 	return config
 }
 

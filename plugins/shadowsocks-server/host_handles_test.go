@@ -274,6 +274,112 @@ func TestHostProductionBindsHostCapabilityWhenClientExists(t *testing.T) {
 	if config.ListenRuntime == nil || config.ListenRuntime.client == nil {
 		t.Fatalf("listen runtime = %#v", config.ListenRuntime)
 	}
+	if config.ListenState == nil {
+		t.Fatal("production bind omitted listen catalog state")
+	}
+}
+
+func TestHostCapabilityRuntimePersistsListensThroughHostState(t *testing.T) {
+	stored := map[string]json.RawMessage{}
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		calls = append(calls, call)
+		var payload struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			return err
+		}
+		if payload.Key != pluginListensStateKey && payload.Key != pluginSecretsStateKey && payload.Key != pluginNodesStateKey {
+			t.Fatalf("state key=%q", payload.Key)
+		}
+		switch call.Operation {
+		case "state.put":
+			stored[payload.Key] = append(json.RawMessage(nil), payload.Value...)
+			return copyHostResult(map[string]any{"stored": true}, target)
+		case "state.get":
+			return copyHostResult(map[string]any{"found": true, "value": stored[payload.Key]}, target)
+		default:
+			t.Fatalf("state operation=%q", call.Operation)
+			return nil
+		}
+	})
+	runtime := newHostCapabilityRuntime(client)
+	want := []ListenRule{{
+		ID: "listen-1", AgentID: "agent-1", Port: 8388, Method: DefaultSS2022Method,
+		ServerSecretRef: "secret/server/listen-1", ServerSecretVersion: "v1",
+		Users: []User{{ID: "acct-1", Name: "alice", SecretRef: "secret/acct-1", SecretVersion: "v1", Enabled: true}},
+	}}
+	if err := runtime.StoreListens(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := runtime.LoadListens(context.Background())
+	if err != nil || !found || len(got) != 1 || got[0].ID != want[0].ID || got[0].AgentID != want[0].AgentID || got[0].Port != want[0].Port {
+		t.Fatalf("LoadListens()=(%#v,%t,%v)", got, found, err)
+	}
+	secrets := map[string]string{issuedSecretKey("secret/acct-1", "v1"): "user-psk"}
+	if err := runtime.StoreSecrets(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := runtime.LoadSecrets(context.Background())
+	if err != nil || !found || loaded[issuedSecretKey("secret/acct-1", "v1")] != "user-psk" {
+		t.Fatalf("LoadSecrets()=(%#v,%t,%v)", loaded, found, err)
+	}
+	if len(calls) != 4 || calls[0].Operation != "state.put" || calls[1].Operation != "state.get" || calls[2].Operation != "state.put" || calls[3].Operation != "state.get" {
+		t.Fatalf("state calls=%#v", calls)
+	}
+}
+
+func TestHostListenShareUsesCatalogNodeWithoutPluginCallIdentity(t *testing.T) {
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		switch call.Operation {
+		case pluginsdk.HostRuntimePluginCall:
+			request := decodePluginCallRequest(t, call)
+			if request.Name != pluginCallListenReport {
+				t.Fatalf("unexpected plugin.call name %q", request.Name)
+			}
+			return copyHostResult(ListenReport{AgentID: request.AgentID, Online: true}, target)
+		case pluginNodeAddressesOp:
+			return copyHostResult(map[string]any{"ddns_domain": "catalog.example.com", "ipv4": "198.51.100.8"}, target)
+		default:
+			t.Fatalf("unexpected host operation %q", call.Operation)
+			return nil
+		}
+	})
+	runtime := newHostCapabilityRuntime(client)
+	controller, err := NewController(ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		ListenRuntime: runtime,
+		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
+			return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) {
+				return RuntimeAdapters{}, nil
+			}}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(Configuration{Generation: "generation-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire}); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	node := controller.shareNode(context.Background(), "agent-1")
+	if node.DDNS != "catalog.example.com" || node.IPv4 != "198.51.100.8" {
+		t.Fatalf("share node=%#v", node)
+	}
 }
 
 func decodePluginCallRequest(t *testing.T, call pluginsdk.HostRuntimeCall) pluginsdk.PluginCallRequest {

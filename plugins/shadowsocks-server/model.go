@@ -978,6 +978,10 @@ func (f *flowToken) finishLocked(success bool) {
 		}
 	}
 }
+func cloneListeners(listeners []ListenRule) []ListenRule {
+	return clone(Configuration{Listeners: listeners}).Listeners
+}
+
 func clone(c Configuration) Configuration {
 	listeners := make([]ListenRule, len(c.Listeners))
 	for i, listener := range c.Listeners {

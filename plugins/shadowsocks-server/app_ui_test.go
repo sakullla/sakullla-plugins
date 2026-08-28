@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image/png"
 	"io"
 	"net"
@@ -61,23 +62,45 @@ func decodePluginCallRequestFromCall(call pluginsdk.HostRuntimeCall) pluginsdk.P
 	return request
 }
 
+type uiTestSetup struct {
+	host           *uiListenHost
+	node           NodeAddresses
+	state          ListenCatalogStore
+	publishService bool
+}
+
 func newUITestController(t *testing.T, host *uiListenHost, node NodeAddresses) *Controller {
 	t.Helper()
+	return startUITestController(t, uiTestSetup{host: host, node: node, publishService: true})
+}
+
+func startUITestController(t *testing.T, setup uiTestSetup) *Controller {
+	t.Helper()
+	host := setup.host
 	if host == nil {
-		host = &uiListenHost{online: true, node: node}
+		host = &uiListenHost{online: true, node: setup.node}
 	}
 	if host.node == (NodeAddresses{}) {
-		host.node = node
+		host.node = setup.node
 	}
-	runtime := &testRuntime{now: 10, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
-	controller, err := NewController(ControllerConfig{
-		PackageDigest: "package", ArtifactDigest: "artifact",
-		ListenRuntime: newHostCapabilityRuntime(host),
-		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
+	admission := TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
+		return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) {
+			return RuntimeAdapters{}, nil
+		}}, nil
+	})
+	if setup.publishService {
+		runtime := &testRuntime{now: 10, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
+		admission = TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
 			return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) {
 				return adapters(runtime), nil
 			}}, nil
-		}),
+		})
+	}
+	controller, err := NewController(ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		ListenRuntime: newHostCapabilityRuntime(host),
+		ListenState:   setup.state,
+		Admission:     admission,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +122,56 @@ func newUITestController(t *testing.T, host *uiListenHost, node NodeAddresses) *
 		t.Fatal(result.Error)
 	}
 	return controller
+}
+
+type uiMemoryListenState struct {
+	mu      sync.Mutex
+	listens []ListenRule
+	secrets map[string]string
+	nodes   map[string]NodeAddresses
+	found   bool
+}
+
+func (state *uiMemoryListenState) LoadListens(context.Context) ([]ListenRule, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return cloneListeners(state.listens), state.found, nil
+}
+
+func (state *uiMemoryListenState) StoreListens(_ context.Context, listeners []ListenRule) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.listens = cloneListeners(listeners)
+	state.found = true
+	return nil
+}
+
+func (state *uiMemoryListenState) LoadSecrets(context.Context) (map[string]string, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return cloneSecretMap(state.secrets), state.found, nil
+}
+
+func (state *uiMemoryListenState) StoreSecrets(_ context.Context, secrets map[string]string) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.secrets = cloneSecretMap(secrets)
+	state.found = true
+	return nil
+}
+
+func (state *uiMemoryListenState) LoadNodes(context.Context) (map[string]NodeAddresses, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return cloneAgentNodes(state.nodes), state.found, nil
+}
+
+func (state *uiMemoryListenState) StoreNodes(_ context.Context, nodes map[string]NodeAddresses) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.nodes = cloneAgentNodes(nodes)
+	state.found = true
+	return nil
 }
 
 func uiJSON(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -316,4 +389,101 @@ func TestControlAPICreateApplyBindsAndHandshakes(t *testing.T) {
 	}
 	defer client.Destroy()
 	completeTCPHandshake(t, client, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), target.Addr().String(), got)
+}
+
+func TestControlAPIShareAvailableWithoutPublishedService(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com", IPv4: "203.0.113.10"}}
+	controller := startUITestController(t, uiTestSetup{host: host, node: host.node})
+	if err := controller.Use(context.Background(), func(context.Context, *Service) error { return nil }); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("published Service still present: %v", err)
+	}
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	view := decodeListenAPI(t, created).Listen
+	if view == nil || len(view.Users) != 1 || !view.Users[0].ShareAvailable || view.Users[0].URI == "" || view.Users[0].QRContent != view.Users[0].URI || !strings.HasPrefix(view.Users[0].URI, "ss://") {
+		t.Fatalf("share without published Service=%#v", view)
+	}
+	listed := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || !listed.Listens[0].Users[0].ShareAvailable || listed.Listens[0].Users[0].QRContent != listed.Listens[0].Users[0].URI {
+		t.Fatalf("get share without published Service=%#v", listed.Listens)
+	}
+}
+
+func TestControlAPIShareUsesRequestCatalogIdentity(t *testing.T) {
+	host := &uiListenHost{online: true}
+	controller := startUITestController(t, uiTestSetup{host: host})
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","ddns_domain":"panel.example.com","ipv4":"203.0.113.20"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	view := decodeListenAPI(t, created).Listen
+	if view == nil || len(view.Users) != 1 || !view.Users[0].ShareAvailable || !strings.Contains(view.Users[0].URI, "panel.example.com") || view.Users[0].QRContent != view.Users[0].URI {
+		t.Fatalf("request catalog share=%#v", view)
+	}
+}
+
+func TestControlAPIShareUsesCatalogNodeWhenReportOmitsIdentity(t *testing.T) {
+	host := &uiListenHost{online: true}
+	controller := startUITestController(t, uiTestSetup{host: host})
+	controller.listenHost.SetAgentNode("agent-1", NodeAddresses{DDNS: "edge.example.com"})
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	view := decodeListenAPI(t, created).Listen
+	if view == nil || len(view.Users) != 1 || !view.Users[0].ShareAvailable || !strings.Contains(view.Users[0].URI, "edge.example.com") || view.Users[0].QRContent != view.Users[0].URI {
+		t.Fatalf("catalog share=%#v", view)
+	}
+}
+
+func TestControlAPIRestoresPersistedListensAfterRestart(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	state := &uiMemoryListenState{}
+	first := startUITestController(t, uiTestSetup{host: host, node: host.node, state: state})
+	created := uiJSON(t, first, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	original := decodeListenAPI(t, created).Listen
+	if original == nil || original.ID == "" || len(original.Users) != 1 || !original.Users[0].ShareAvailable {
+		t.Fatalf("created=%#v", original)
+	}
+	if !state.found || len(state.listens) != 1 || len(state.secrets) == 0 {
+		t.Fatalf("persist listens=%#v secrets=%d", state.listens, len(state.secrets))
+	}
+
+	restarted := startUITestController(t, uiTestSetup{host: host, node: host.node, state: state})
+	listed := decodeListenAPI(t, uiJSON(t, restarted, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || listed.Listens[0].ID != original.ID || listed.Listens[0].Port != original.Port || len(listed.Listens[0].Users) != 1 {
+		t.Fatalf("restored list=%#v", listed.Listens)
+	}
+	user := listed.Listens[0].Users[0]
+	if !user.ShareAvailable || user.URI == "" || user.QRContent != user.URI || user.URI != original.Users[0].URI {
+		t.Fatalf("restored share=%#v want %q", user, original.Users[0].URI)
+	}
+}
+
+func TestControlAPIRestoresShareFromPersistedCatalogNode(t *testing.T) {
+	host := &uiListenHost{online: true}
+	state := &uiMemoryListenState{}
+	first := startUITestController(t, uiTestSetup{host: host, state: state})
+	created := uiJSON(t, first, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","ddns_domain":"persist.example.com"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	original := decodeListenAPI(t, created).Listen
+	if original == nil || len(original.Users) != 1 || !strings.Contains(original.Users[0].URI, "persist.example.com") {
+		t.Fatalf("created=%#v", original)
+	}
+	restarted := startUITestController(t, uiTestSetup{host: host, state: state})
+	listed := decodeListenAPI(t, uiJSON(t, restarted, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || len(listed.Listens[0].Users) != 1 {
+		t.Fatalf("restored list=%#v", listed.Listens)
+	}
+	user := listed.Listens[0].Users[0]
+	if !user.ShareAvailable || !strings.Contains(user.URI, "persist.example.com") || user.QRContent != user.URI {
+		t.Fatalf("restored catalog share=%#v", user)
+	}
 }

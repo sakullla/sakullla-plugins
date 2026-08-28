@@ -13,11 +13,21 @@ import (
 	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
+type ListenCatalogStore interface {
+	LoadListens(context.Context) ([]ListenRule, bool, error)
+	StoreListens(context.Context, []ListenRule) error
+	LoadSecrets(context.Context) (map[string]string, bool, error)
+	StoreSecrets(context.Context, map[string]string) error
+	LoadNodes(context.Context) (map[string]NodeAddresses, bool, error)
+	StoreNodes(context.Context, map[string]NodeAddresses) error
+}
+
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	Admission                                                  TypedHandleAdmission
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 	ListenRuntime                                              *hostCapabilityRuntime
+	ListenState                                                ListenCatalogStore
 	ListenBinder                                               listenBinder
 }
 
@@ -34,6 +44,7 @@ type Controller struct {
 	transaction    *rpcplugin.Handle[PreparedAdmission]
 	admission      TypedHandleAdmission
 	listenHost     *hostCapabilityRuntime
+	listenState    ListenCatalogStore
 	listenExec     *listenExecutor
 	controlSecrets *issuedSecrets
 }
@@ -44,9 +55,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(time.Second))
 	c := &Controller{
-		admission:  config.Admission,
-		listenHost: config.ListenRuntime,
-		listenExec: newListenExecutor(config.ListenBinder),
+		admission:   config.Admission,
+		listenHost:  config.ListenRuntime,
+		listenState: config.ListenState,
+		listenExec:  newListenExecutor(config.ListenBinder),
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
@@ -195,6 +207,33 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 	if configuration.Generation != generation.ID() {
 		return rpcplugin.ErrGenerationMismatch
 	}
+	var restoredListeners []ListenRule
+	var restoredSecrets map[string]string
+	if c.listenState != nil {
+		persisted, found, loadErr := c.listenState.LoadListens(ctx)
+		if loadErr != nil {
+			return loadErr
+		}
+		if found {
+			restoredListeners = persisted
+		}
+		secrets, secretsFound, secretErr := c.listenState.LoadSecrets(ctx)
+		if secretErr != nil {
+			return secretErr
+		}
+		if secretsFound {
+			restoredSecrets = secrets
+		}
+		nodes, nodesFound, nodeErr := c.listenState.LoadNodes(ctx)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		if nodesFound && c.listenHost != nil {
+			for agentID, node := range nodes {
+				c.listenHost.SetAgentNode(agentID, node)
+			}
+		}
+	}
 	epoch := &controllerEpoch{}
 	epoch.live.Store(true)
 	handle, err := rpcplugin.BindHandle(generation, "listener", epoch, func(epoch *controllerEpoch) {
@@ -216,9 +255,20 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 		if !value.live.Load() {
 			return rpcplugin.ErrRevoked
 		}
+		next := clone(configuration)
+		if restoredListeners != nil {
+			next.Listeners = restoredListeners
+			next.Generation = generation.ID()
+			if err := next.Validate(); err != nil {
+				return err
+			}
+		}
 		c.mu.Lock()
-		c.configuration, c.epoch, c.commit = clone(configuration), epoch, handle
+		c.configuration, c.epoch, c.commit = next, epoch, handle
 		c.service, c.published, c.transaction = nil, nil, nil
+		if restoredSecrets != nil {
+			c.controlSecrets = &issuedSecrets{items: cloneSecretMap(restoredSecrets)}
+		}
 		c.mu.Unlock()
 		return nil
 	})
@@ -381,6 +431,23 @@ func (i *issuedSecrets) lookup(ref, version string) (string, bool) {
 	defer i.mu.Unlock()
 	material, ok := i.items[issuedSecretKey(ref, version)]
 	return material, ok
+}
+
+func (i *issuedSecrets) snapshot() map[string]string {
+	if i == nil {
+		return map[string]string{}
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return cloneSecretMap(i.items)
+}
+
+func cloneSecretMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func issuedVaultMaterial(material []byte) []byte {

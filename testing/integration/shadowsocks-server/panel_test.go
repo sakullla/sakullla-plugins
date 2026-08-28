@@ -129,6 +129,7 @@ func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Co
 		t.Fatal(err)
 	}
 	controller.BindLoopbackListenHost()
+	controller.RememberAgentNode(context.Background(), "agent-1", node)
 	t.Cleanup(func() {
 		_ = controller.StopListen(context.Background(), "agent-1", nil)
 	})

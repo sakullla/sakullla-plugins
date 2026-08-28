@@ -85,6 +85,14 @@ func (a NodeAddresses) SelectHost() (host, source string, ok bool) {
 	return "", "", false
 }
 
+func nodeFromReport(report ListenReport) NodeAddresses {
+	return NodeAddresses{DDNS: report.DDNS, IPv4: report.IPv4, IPv6: report.IPv6}
+}
+
+func nodeHasAddr(node NodeAddresses) bool {
+	return strings.TrimSpace(node.DDNS) != "" || strings.TrimSpace(node.IPv4) != "" || strings.TrimSpace(node.IPv6) != ""
+}
+
 // ProjectShareEndpoint maps the live bind and Host node addresses to a shareable endpoint.
 func ProjectShareEndpoint(binding ListenBinding, addresses NodeAddresses) ShareEndpoint {
 	if err := binding.Validate(); err != nil {
