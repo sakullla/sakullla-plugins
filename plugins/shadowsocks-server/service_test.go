@@ -908,6 +908,48 @@ func TestRotateServerPSKInvalidatesAllSS2022ClientPasswords(t *testing.T) {
 	assertGenerationLive(t, s)
 }
 
+func TestListenSS2022MethodsGetDistinctServerSecrets(t *testing.T) {
+	cfg := Configuration{
+		Generation: "gen-1",
+		Listeners: []ListenRule{
+			{ID: "z-ss2022", AgentID: "agent-1", Port: 8488, Method: DefaultSS2022Method},
+		},
+	}
+	r := &testRuntime{now: 10, used: map[string]uint64{}, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
+	s, err := NewService(cfg, adapters(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, gcm128Pass := createAccount(t, s, "ss2022-128", DefaultSS2022Method)
+	_, gcm256Pass := createAccount(t, s, "ss2022-256", "2022-blake3-aes-256-gcm")
+	gcm128Server, _, ok := splitSS2022ClientPassword([]byte(gcm128Pass))
+	if !ok {
+		t.Fatalf("128 password=%q", gcm128Pass)
+	}
+	gcm256Server, _, ok := splitSS2022ClientPassword([]byte(gcm256Pass))
+	if !ok {
+		t.Fatalf("256 password=%q", gcm256Pass)
+	}
+	if string(gcm128Server) == string(gcm256Server) {
+		t.Fatalf("ss2022 methods shared server psk: 128=%q 256=%q", gcm128Server, gcm256Server)
+	}
+	snapshot := s.Snapshot()
+	gcm128, _, ok := snapshot.userListener("ss2022-128")
+	if !ok || gcm128.ServerSecretRef == "" || gcm128.ServerSecretVersion == "" {
+		t.Fatalf("128-gcm server psk missing: %+v", gcm128)
+	}
+	gcm256, _, ok := snapshot.userListener("ss2022-256")
+	if !ok || gcm256.ServerSecretRef == "" || gcm256.ServerSecretVersion == "" {
+		t.Fatalf("256-gcm server psk missing: %+v", gcm256)
+	}
+	if gcm256.ServerSecretRef == gcm128.ServerSecretRef || gcm256.ServerSecretVersion == gcm128.ServerSecretVersion {
+		t.Fatalf("ss2022 methods shared server secret: 128=%s/%s 256=%s/%s", gcm128.ServerSecretRef, gcm128.ServerSecretVersion, gcm256.ServerSecretRef, gcm256.ServerSecretVersion)
+	}
+}
+
 func TestRotateServerPSKMapsAndRebuildsMatchingListenerOnly(t *testing.T) {
 	s := newAccountService(t)
 	_, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")

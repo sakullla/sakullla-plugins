@@ -262,8 +262,16 @@ func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *S
 	listenerIdx, listenerErr := s.configuration.ensureListenerForMethod(method)
 	serverRef, serverVersion := "", ""
 	if listenerErr == nil {
+		// clone re-sorts Listeners by ID; keep the ensured listener by ID, not index.
+		listenerID := s.configuration.Listeners[listenerIdx].ID
 		s.configuration = clone(s.configuration)
-		serverRef, serverVersion = s.configuration.Listeners[listenerIdx].ServerSecretRef, s.configuration.Listeners[listenerIdx].ServerSecretVersion
+		for _, listener := range s.configuration.Listeners {
+			if listener.ID != listenerID {
+				continue
+			}
+			serverRef, serverVersion = listener.ServerSecretRef, listener.ServerSecretVersion
+			break
+		}
 	}
 	s.mu.Unlock()
 	if listenerErr != nil {
