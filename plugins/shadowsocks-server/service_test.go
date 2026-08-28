@@ -1000,7 +1000,6 @@ func TestRotateServerPSKMapsAndRebuildsMatchingListenerOnly(t *testing.T) {
 }
 
 func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
-	t.Skip("Admit still verifies unmapped vault material; mapped PSK load is listen-exec")
 	s := newAccountService(t)
 	user, password := createAccountSpec(t, s, AccountSpec{ID: "admit-1", Family: AccountFamilyLegacy})
 	modern, modernPass := createAccountSpec(t, s, AccountSpec{ID: "admit-2022", Family: AccountFamily2022})
@@ -1049,6 +1048,32 @@ func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGenerationLive(t, s)
+}
+
+func TestServiceListenApplyBindFailureDoesNotMarkLive(t *testing.T) {
+	t.Parallel()
+	exec := newListenExecutor(&failListenBinder{err: errors.New("bind: address already in use")})
+	payload, err := json.Marshal(map[string]any{
+		"agent_id": "agent-1",
+		"listens": []map[string]any{{
+			"id": "listen-1", "port": 8388, "method": "aes-256-gcm",
+			"users": []map[string]any{{"id": "alice", "enabled": true, "password": "alice-password"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.apply(context.Background(), payload); !errors.Is(err, ErrListenBind) {
+		t.Fatalf("apply err=%v", err)
+	}
+	report, err := exec.report([]byte(`{"agent_id":"agent-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeListenReport(report)
+	if err != nil || !decoded.Online || len(decoded.Listens) != 0 {
+		t.Fatalf("bind failure still live: %#v err=%v", decoded, err)
+	}
 }
 
 func decodePreparedConfiguration(t *testing.T, wire []byte) Configuration {

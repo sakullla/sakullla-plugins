@@ -45,6 +45,8 @@ var (
 	ErrRevoked                 = errors.New("Shadowsocks generation revoked")
 	ErrDisabled                = errors.New("Shadowsocks account disabled")
 	ErrTypedHandlesUnavailable = errors.New("canonical typed Shadowsocks handles unavailable")
+	ErrAgentOffline            = errors.New("target Agent is offline")
+	ErrListenBind              = errors.New("listen bind failed")
 )
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 

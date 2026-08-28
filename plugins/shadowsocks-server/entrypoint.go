@@ -12,7 +12,7 @@ import (
 const CIHandshakeFlag = pluginsdk.RPCHandshakeProbeFlag
 
 func productionControllerConfig() ControllerConfig {
-	return ControllerConfig{}
+	return bindProductionHostCapabilities(ControllerConfig{})
 }
 
 func runtimeServices() pluginsdk.RPCServiceDeclaration {

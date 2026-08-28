@@ -354,6 +354,7 @@ func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *S
 	if err != nil {
 		return User{}, nil, err
 	}
+	s.rememberIssuedSecret(installed)
 	if auditErr := s.audit(ctx, AuditRecord{Action: "create-account", Outcome: "succeeded", UserID: user.ID}); auditErr != nil {
 		return user, installed, auditErr
 	}
@@ -536,41 +537,23 @@ func (s *Service) AcceptTCP(ctx context.Context, wire []byte) (Flow, *TCPServerS
 	s.engineGate.RLock()
 	defer s.engineGate.RUnlock()
 	s.mu.Lock()
-	type candidate struct {
-		userID string
-		engine *ProtocolEngine
-	}
-	candidates := make([]candidate, 0)
-	for _, listener := range s.configuration.Listeners {
-		for _, user := range listener.Users {
-			if engine := s.engines[user.ID]; user.Enabled && engine != nil {
-				candidates = append(candidates, candidate{userID: user.ID, engine: engine})
-			}
-		}
-	}
+	candidates := enabledEngineCandidates(s.configuration, s.engines)
 	s.mu.Unlock()
 	instant := time.Unix(int64(now), 0)
-	for _, candidate := range candidates {
-		request, session, openErr := candidate.engine.OpenTCPServerSession(wire, instant)
-		if openErr != nil {
-			if errors.Is(openErr, ErrReplay) {
-				return Flow{}, nil, ProxyRequest{}, openErr
-			}
-			continue
-		}
-		request.UserID = candidate.userID
-		flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: TCP, UserID: candidate.userID, ReplayToken: request.ReplayToken}, false)
-		if admissionErr != nil {
-			session.Close()
-			return Flow{}, nil, ProxyRequest{}, admissionErr
-		}
-		if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
-			session.Close()
-			return Flow{}, nil, ProxyRequest{}, admissionErr
-		}
-		return flow, session, request, nil
+	picked, request, session, openErr := pickTCPSession(candidates, wire, instant)
+	if openErr != nil {
+		return Flow{}, nil, ProxyRequest{}, openErr
 	}
-	return Flow{}, nil, ProxyRequest{}, ErrAuthentication
+	flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: TCP, UserID: picked.userID, ReplayToken: request.ReplayToken}, false)
+	if admissionErr != nil {
+		session.Close()
+		return Flow{}, nil, ProxyRequest{}, admissionErr
+	}
+	if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
+		session.Close()
+		return Flow{}, nil, ProxyRequest{}, admissionErr
+	}
+	return flow, session, request, nil
 }
 
 // OpenUDP authenticates one independent legacy UDP packet or one SS2022 UDP
@@ -590,44 +573,79 @@ func (s *Service) openWire(ctx context.Context, protocol Protocol, wire []byte) 
 	s.engineGate.RLock()
 	defer s.engineGate.RUnlock()
 	s.mu.Lock()
-	type candidate struct {
-		userID string
-		engine *ProtocolEngine
+	candidates := enabledEngineCandidates(s.configuration, s.engines)
+	s.mu.Unlock()
+	instant := time.Unix(int64(now), 0)
+	picked, request, openErr := pickUDPPacket(candidates, wire, instant)
+	if protocol == TCP {
+		picked, request, openErr = pickTCPRequest(candidates, wire, instant)
 	}
-	candidates := make([]candidate, 0)
-	for _, listener := range s.configuration.Listeners {
+	if openErr != nil {
+		return Flow{}, ProxyRequest{}, openErr
+	}
+	flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: protocol, UserID: picked.userID, ReplayToken: request.ReplayToken}, false)
+	if admissionErr != nil {
+		return Flow{}, ProxyRequest{}, admissionErr
+	}
+	if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
+		return Flow{}, ProxyRequest{}, admissionErr
+	}
+	return flow, request, nil
+}
+
+type engineCandidate struct {
+	userID string
+	engine *ProtocolEngine
+}
+
+func enabledEngineCandidates(cfg Configuration, engines map[string]*ProtocolEngine) []engineCandidate {
+	candidates := make([]engineCandidate, 0)
+	for _, listener := range cfg.Listeners {
 		for _, user := range listener.Users {
-			if engine := s.engines[user.ID]; user.Enabled && engine != nil {
-				candidates = append(candidates, candidate{userID: user.ID, engine: engine})
+			if engine := engines[user.ID]; user.Enabled && engine != nil {
+				candidates = append(candidates, engineCandidate{userID: user.ID, engine: engine})
 			}
 		}
 	}
-	s.mu.Unlock()
-	instant := time.Unix(int64(now), 0)
+	return candidates
+}
+
+func pickTCPSession(candidates []engineCandidate, wire []byte, now time.Time) (engineCandidate, ProxyRequest, *TCPServerSession, error) {
 	for _, candidate := range candidates {
-		var request ProxyRequest
-		if protocol == TCP {
-			request, err = candidate.engine.OpenTCPRequest(wire, instant)
-		} else {
-			request, err = candidate.engine.OpenUDPPacket(wire, instant)
-		}
+		request, session, err := candidate.engine.OpenTCPServerSession(wire, now)
 		if err != nil {
 			if errors.Is(err, ErrReplay) {
-				return Flow{}, ProxyRequest{}, err
+				return engineCandidate{}, ProxyRequest{}, nil, err
 			}
 			continue
 		}
 		request.UserID = candidate.userID
-		flow, admissionErr := s.admit(ctx, AdmissionRequest{Protocol: protocol, UserID: candidate.userID, ReplayToken: request.ReplayToken}, false)
-		if admissionErr != nil {
-			return Flow{}, ProxyRequest{}, admissionErr
-		}
-		if admissionErr = flow.Consume(ctx, uint64(len(request.Payload))); admissionErr != nil {
-			return Flow{}, ProxyRequest{}, admissionErr
-		}
-		return flow, request, nil
+		return candidate, request, session, nil
 	}
-	return Flow{}, ProxyRequest{}, ErrAuthentication
+	return engineCandidate{}, ProxyRequest{}, nil, ErrAuthentication
+}
+
+func pickTCPRequest(candidates []engineCandidate, wire []byte, now time.Time) (engineCandidate, ProxyRequest, error) {
+	picked, request, session, err := pickTCPSession(candidates, wire, now)
+	if session != nil {
+		session.Close()
+	}
+	return picked, request, err
+}
+
+func pickUDPPacket(candidates []engineCandidate, wire []byte, now time.Time) (engineCandidate, ProxyRequest, error) {
+	for _, candidate := range candidates {
+		request, err := candidate.engine.OpenUDPPacket(wire, now)
+		if err != nil {
+			if errors.Is(err, ErrReplay) {
+				return engineCandidate{}, ProxyRequest{}, err
+			}
+			continue
+		}
+		request.UserID = candidate.userID
+		return candidate, request, nil
+	}
+	return engineCandidate{}, ProxyRequest{}, ErrAuthentication
 }
 
 func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredential bool) (Flow, error) {
@@ -815,6 +833,7 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 	if previous != nil {
 		previous.Destroy()
 	}
+	s.rememberIssuedSecret(secret)
 	return secret, nil
 }
 
@@ -861,6 +880,7 @@ func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (
 	if err != nil {
 		return nil, err
 	}
+	s.rememberIssuedSecret(installed)
 	if auditErr := s.audit(ctx, AuditRecord{Action: "rotate-server-psk", Outcome: "succeeded"}); auditErr != nil {
 		return installed, auditErr
 	}

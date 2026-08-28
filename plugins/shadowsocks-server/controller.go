@@ -17,6 +17,8 @@ type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	Admission                                                  TypedHandleAdmission
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
+	ListenRuntime                                              *hostCapabilityRuntime
+	ListenBinder                                               listenBinder
 }
 
 type controllerEpoch struct{ live atomic.Bool }
@@ -31,6 +33,8 @@ type Controller struct {
 	published     *Service
 	transaction   *rpcplugin.Handle[PreparedAdmission]
 	admission     TypedHandleAdmission
+	listenHost    *hostCapabilityRuntime
+	listenExec    *listenExecutor
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -38,7 +42,11 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		config.Admission = unavailableAdmission{}
 	}
 	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(time.Second))
-	c := &Controller{admission: config.Admission}
+	c := &Controller{
+		admission:  config.Admission,
+		listenHost: config.ListenRuntime,
+		listenExec: newListenExecutor(config.ListenBinder),
+	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities: []string{"shadowsocks.business-model"}, RequiredGrants: requiredGrants(),
@@ -251,6 +259,10 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			transaction.Revoke()
 			return safeControllerError(err)
 		}
+		if !runtime.valid() {
+			transaction.Revoke()
+			return nil
+		}
 		runtime.Secrets = wrapIssuedSecrets(runtime.Secrets)
 		service, err := NewService(configuration, runtime)
 		if err != nil {
@@ -300,6 +312,9 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 }
 
 func (c *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
+	if c.listenExec != nil {
+		c.listenExec.stopAll()
+	}
 	c.mu.Lock()
 	service := c.published
 	c.service, c.published = nil, nil
