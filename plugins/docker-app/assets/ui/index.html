@@ -12,7 +12,8 @@
     <header class="page-head">
       <div class="page-head-copy">
         <h1>Docker 应用</h1>
-        <p class="lede">卡片上打开或启停，详情里管 Compose、文件、日志和入口。有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
+        <p class="lede">在节点上部署并照看 Compose 应用。</p>
+        <p class="sr-only">有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="page-head-agent">
         <div class="node-card">
@@ -84,21 +85,53 @@
       </div>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
+          <button id="create-back" class="btn-link back-link" type="button">返回</button>
           <h2 id="app-create-title">部署应用</h2>
-          <div class="section-head-actions">
-            <button id="create-back" class="btn-link" type="button">返回</button>
-            <button id="create-cancel" class="btn-secondary" type="button">取消</button>
-          </div>
         </div>
         <form id="create-form" method="post">
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
           <div class="create-templates" id="create-templates">
-            <p class="hint">常用模板会填入 YAML，仍可再改。</p>
-            <div class="create-template-list">
-              <button type="button" class="btn-secondary" data-template="site">静态站点</button>
-              <button type="button" class="btn-secondary" data-template="media">媒体库</button>
-              <button type="button" class="btn-secondary" data-template="files">文件站点</button>
-              <button type="button" class="btn-secondary" data-template="blank">空白</button>
+            <div class="create-templates-head">
+              <span class="create-templates-label">起步模板</span>
+              <p class="hint">常用模板会填入 YAML，仍可再改。</p>
+            </div>
+            <div class="create-template-list" role="group" aria-label="起步模板">
+              <button type="button" class="template-card" data-template="site" aria-pressed="false">
+                <span class="template-card-icon" data-kind="site" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 8h14"/></svg>
+                </span>
+                <span class="template-card-copy">
+                  <strong>静态站点</strong>
+                  <span>Nginx 页面</span>
+                </span>
+              </button>
+              <button type="button" class="template-card" data-template="media" aria-pressed="false">
+                <span class="template-card-icon" data-kind="media" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M8.2 7.2 13.2 10 8.2 12.8z" fill="currentColor" stroke="none"/></svg>
+                </span>
+                <span class="template-card-copy">
+                  <strong>媒体库</strong>
+                  <span>Jellyfin</span>
+                </span>
+              </button>
+              <button type="button" class="template-card" data-template="files" aria-pressed="false">
+                <span class="template-card-icon" data-kind="files" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3.5 7.5V6A1.5 1.5 0 0 1 5 4.5h3l1.5 2H15A1.5 1.5 0 0 1 16.5 8v7A1.5 1.5 0 0 1 15 16.5H5A1.5 1.5 0 0 1 3.5 15z"/></svg>
+                </span>
+                <span class="template-card-copy">
+                  <strong>文件站点</strong>
+                  <span>文件浏览</span>
+                </span>
+              </button>
+              <button type="button" class="template-card" data-template="blank" aria-pressed="true">
+                <span class="template-card-icon" data-kind="blank" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M10 5.5v9M5.5 10h9"/></svg>
+                </span>
+                <span class="template-card-copy">
+                  <strong>空白</strong>
+                  <span>手写 YAML</span>
+                </span>
+              </button>
             </div>
           </div>
           <label class="code-field">Compose YAML
@@ -116,10 +149,13 @@
           <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
           <div class="form-footer">
             <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
-            <button type="submit" class="btn-primary" id="create-submit">部署</button>
+            <div class="form-footer-actions">
+              <button type="button" class="btn-secondary" id="create-cancel">取消</button>
+              <button type="submit" class="btn-primary" id="create-submit">部署</button>
+            </div>
           </div>
         </form>
-        <p class="hint">./ 相对路径会映射到该应用工作目录，已部署应用可管理这些相对文件。绝对 host 路径不会进入文件列表。Compose YAML 仍用本页编辑框。镜像 tag/digest 与引擎版本分开显示；未点更新不会换镜像。</p>
+        <p class="hint hint-footnote">相对路径映射到应用工作目录。未点更新不会换镜像。</p>
       </section>
       <section class="panel" id="app-list-panel" aria-labelledby="app-list-title">
         <div id="app-list" class="app-list" data-card-wall="apps"></div>
@@ -127,7 +163,7 @@
       </section>
       <section class="panel" id="app-detail" hidden>
         <div class="detail-head">
-          <button id="detail-back" class="btn-link" type="button">返回列表</button>
+          <button id="detail-back" class="btn-link back-link" type="button">返回列表</button>
           <div class="detail-head-copy">
             <h2 id="detail-title">应用详情</h2>
             <p id="detail-status" class="app-card-status" data-detail-status></p>

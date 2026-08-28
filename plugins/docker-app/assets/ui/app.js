@@ -781,11 +781,20 @@ const confirmLeaveEditor = async () => {
   return true;
 };
 
+const markCreateTemplate = (name) => {
+  const root = createTemplates || createPanel;
+  if (!root) return;
+  root.querySelectorAll("[data-template]").forEach((button) => {
+    button.setAttribute("aria-pressed", button.dataset.template === name ? "true" : "false");
+  });
+};
+
 const applyCreateTemplate = (name) => {
   const template = COMPOSE_TEMPLATES[name];
   if (!template || !composeInput) return;
   composeInput.value = template.compose || "";
   paintCodeEditor(composeInput);
+  markCreateTemplate(name);
   composeInput.focus();
 };
 
@@ -807,6 +816,7 @@ const openCreate = async () => {
     paintCodeEditor(envInput);
   }
   if (autoUpdateInput) autoUpdateInput.checked = false;
+  markCreateTemplate("blank");
   createPanel.hidden = false;
   syncListPanel();
   if (composeInput) composeInput.focus();
@@ -818,6 +828,7 @@ const closeCreate = () => {
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
   if (createPanel) createPanel.hidden = true;
+  markCreateTemplate("blank");
   requestAnimationFrame(() => {
     paintCodeEditor(composeInput);
     paintCodeEditor(envInput);
