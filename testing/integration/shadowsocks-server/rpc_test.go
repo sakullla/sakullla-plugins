@@ -180,8 +180,19 @@ func TestShadowsocksCanonicalRPCEntrypointAndSecretRedact(t *testing.T) {
 	if err := ss.RunEntrypoint(context.Background(), []string{ss.CIHandshakeFlag}, &output); err != nil || strings.TrimSpace(output.String()) != pluginsdk.RPCABIV1 {
 		t.Fatalf("output=%q err=%v", output.String(), err)
 	}
-	if err := ss.RunEntrypoint(context.Background(), nil, &output); !errors.Is(err, ss.ErrTypedHandlesUnavailable) {
-		t.Fatalf("default=%v", err)
+	t.Setenv("NRE_PLUGIN_ENDPOINT", "")
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
+	t.Setenv("NRE_PLUGIN_HTTP_ENDPOINT", "")
+	t.Setenv("NRE_PLUGIN_HTTP_COOKIE_FILE", "")
+	err := ss.RunEntrypoint(context.Background(), nil, &output)
+	if err == nil {
+		t.Fatal("RunEntrypoint() unexpectedly succeeded without host endpoints")
+	}
+	if errors.Is(err, ss.ErrTypedHandlesUnavailable) {
+		t.Fatalf("RunEntrypoint() returned the old startup sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NRE_PLUGIN_") {
+		t.Fatalf("RunEntrypoint() error = %v, want canonical SDK endpoint validation", err)
 	}
 	c, _ := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	_, _ = c.Handshake(context.Background(), handshake(grants()))

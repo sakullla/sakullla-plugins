@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -20,7 +21,6 @@ import (
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	ss "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
-	_ "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server/web"
 )
 
 type panelRuntime struct {
@@ -347,10 +347,40 @@ func TestShadowsocksPluginYAMLDeclaresUIRouteNotConfigSchema(t *testing.T) {
 	if !strings.Contains(text, "ui.route") || !strings.Contains(text, "ui_route_id: shadowsocks-server") {
 		t.Fatalf("plugin.yaml must declare ui.route: %s", text)
 	}
+	if !strings.Contains(text, "ui.nav.group: 网络") || !strings.Contains(text, "ui.nav.label: Shadowsocks 账号") {
+		t.Fatalf("plugin.yaml must declare host nav metadata: %s", text)
+	}
+	if !strings.Contains(text, "- resource.group") || !strings.Contains(text, "resource_group_id: shadowsocks-server") {
+		t.Fatalf("plugin.yaml must declare resource.group support: %s", text)
+	}
+	if !strings.Contains(text, "host_scope: control-plane") {
+		t.Fatalf("plugin.yaml must declare control-plane host_scope: %s", text)
+	}
+	if !strings.Contains(text, "host_scopes:") || (!strings.Contains(text, "- agent") && !strings.Contains(text, "[agent]")) {
+		t.Fatalf("plugin.yaml must declare host_scopes including agent: %s", text)
+	}
+	if regexp.MustCompile(`(?m)^[[:space:]]*host_scope:[[:space:]]*agent[[:space:]]*$`).MatchString(text) {
+		t.Fatal("shadowsocks-server primary host_scope must not be agent")
+	}
+	if strings.Contains(text, "tunnel.provider") {
+		t.Fatal("shadowsocks-server must not declare tunnel.provider")
+	}
+	if strings.Contains(text, "http.backend-provider") || strings.Contains(text, "http_backend_providers") {
+		t.Fatal("admin panel must not register an HTTP backend provider")
+	}
+	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") || !strings.Contains(text, "assets/ui/style.css") {
+		t.Fatal("plugin.yaml must declare frontend files below assets/")
+	}
 	if strings.Contains(text, "ui_schema:") {
 		t.Fatal("admin panel must not declare host config ui_schema")
 	}
-	if strings.Contains(text, "http.backend-provider") {
-		t.Fatal("admin panel must not register an HTTP backend provider")
+	for _, want := range []string{
+		"resource.group.ref: resource-group/shadowsocks-server",
+		"resource.group.label: Shadowsocks 服务",
+		"resource.group.description: 在组内按节点管理 Shadowsocks 监听与账号",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plugin.yaml must declare %q: %s", want, text)
+		}
 	}
 }

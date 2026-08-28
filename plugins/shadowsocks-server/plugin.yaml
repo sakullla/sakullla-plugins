@@ -9,7 +9,9 @@ compatibility:
 runtime:
   kind: rpc-service
   abi: nre:rpc/v1
-  host_scope: agent
+  host_scope: control-plane
+  host_scopes:
+    - agent
   entry: shadowsocks-server
 artifacts:
   - path: artifacts/linux-amd64/shadowsocks-server
@@ -19,12 +21,20 @@ artifacts:
     goos: linux
     goarch: amd64
 extension_points:
-  - tunnel.provider
   - ui.route
+  - resource.group
 ui_route_id: shadowsocks-server
+resource_group_id: shadowsocks-server
 metadata:
   ui.nav.group: 网络
   ui.nav.label: Shadowsocks 账号
+  resource.group.ref: resource-group/shadowsocks-server
+  resource.group.label: Shadowsocks 服务
+  resource.group.description: 在组内按节点管理 Shadowsocks 监听与账号
+assets:
+  - assets/ui/index.html
+  - assets/ui/app.js
+  - assets/ui/style.css
 permissions:
   - name: secret.use
   - name: storage.read

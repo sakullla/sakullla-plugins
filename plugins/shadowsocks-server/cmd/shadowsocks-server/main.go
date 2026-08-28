@@ -6,7 +6,6 @@ import (
 	"os"
 
 	shadowsocksserver "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
-	_ "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server/web"
 )
 
 func main() {
