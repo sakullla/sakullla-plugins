@@ -489,6 +489,9 @@ func (c *Controller) BindLoopbackListenHost() {
 		return
 	}
 	c.listenHost = newHostCapabilityRuntime(loopbackRuntimeCaller{controller: c})
+	if c.listenExec != nil {
+		c.listenExec.bindHost = "127.0.0.1"
+	}
 }
 
 func callHost(ctx context.Context, client hostRuntimeCaller, operation string, payload any, result any) error {

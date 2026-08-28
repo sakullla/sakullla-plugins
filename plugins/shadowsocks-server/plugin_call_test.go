@@ -56,6 +56,9 @@ func newCallController(t *testing.T, binder listenBinder) *Controller {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if controller.listenExec != nil {
+		controller.listenExec.bindHost = "127.0.0.1"
+	}
 	t.Cleanup(func() {
 		if controller.listenExec != nil {
 			controller.listenExec.stopAll()
@@ -75,23 +78,27 @@ func callListen(t *testing.T, controller *Controller, name string, payload map[s
 
 func freeTCPUDPPort(t *testing.T) int {
 	t.Helper()
-	tcp, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
+	for attempt := 0; attempt < 16; attempt++ {
+		tcp, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := tcp.Addr().(*net.TCPAddr).Port
+		udp, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			_ = tcp.Close()
+			continue
+		}
+		if err := tcp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := udp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return port
 	}
-	port := tcp.Addr().(*net.TCPAddr).Port
-	udp, err := net.ListenPacket("udp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
-	if err != nil {
-		_ = tcp.Close()
-		t.Fatal(err)
-	}
-	if err := tcp.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := udp.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
+	t.Fatal("no free tcp/udp port")
+	return 0
 }
 
 func TestPluginCallListenApplySuccessBindsTCPUDPAndHandshakes(t *testing.T) {
@@ -402,7 +409,7 @@ func TestPluginCallListenApplyKeepsPreviousSocketsOnReplacementBindFailure(t *te
 	t.Parallel()
 	port := freeTCPUDPPort(t)
 	blocked := freeTCPUDPPort(t)
-	blocker, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(blocked)))
+	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(blocked)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +524,353 @@ func TestPluginCallListenUnknownNameFailsClosed(t *testing.T) {
 	}
 	if binder.tcp.Load() != 0 {
 		t.Fatal("unknown name invoked local bind")
+	}
+}
+
+func boundListenEngine(controller *Controller, listenID, userID string) *ProtocolEngine {
+	if controller == nil || controller.listenExec == nil {
+		return nil
+	}
+	exec := controller.listenExec
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	bound := exec.bound[listenID]
+	if bound == nil {
+		return nil
+	}
+	return bound.engineByUser(userID)
+}
+
+func pausedEchoTCPHandshake(target net.Listener, got chan<- []byte, release <-chan struct{}) {
+	conn, acceptErr := target.Accept()
+	if acceptErr != nil {
+		got <- nil
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 5)
+	if _, readErr := io.ReadFull(conn, buf); readErr != nil {
+		got <- nil
+		return
+	}
+	got <- append([]byte(nil), buf...)
+	<-release
+	if _, writeErr := conn.Write([]byte("world")); writeErr != nil {
+		return
+	}
+	if _, readErr := io.ReadFull(conn, buf); readErr != nil {
+		return
+	}
+	got <- append([]byte(nil), buf...)
+	_, _ = conn.Write([]byte("again"))
+}
+
+func TestPluginCallListenApplyDisableUserDoesNotDropPeerSession(t *testing.T) {
+	t.Parallel()
+	method := "2022-blake3-aes-128-gcm"
+	serverPSK, alicePSK, err := GenerateSS2022Identity(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPSK, err := MapSS2022PSK(method, "bob-user-psk-material")
+	if err != nil || bobPSK == "" || bobPSK == serverPSK || bobPSK == alicePSK {
+		t.Fatalf("bob psk=%q err=%v", bobPSK, err)
+	}
+
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	got := make(chan []byte, 2)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	go pausedEchoTCPHandshake(target, got, release)
+
+	aliceTarget, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceTarget.Close()
+	aliceGot := make(chan []byte, 1)
+	go func() {
+		conn, acceptErr := aliceTarget.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 5)
+		if _, readErr := io.ReadFull(conn, buf); readErr != nil {
+			return
+		}
+		aliceGot <- append([]byte(nil), buf...)
+	}()
+
+	port := freeTCPUDPPort(t)
+	controller := newCallController(t, nil)
+	if _, err := callListen(t, controller, pluginCallListenApply, map[string]any{
+		"agent_id": "agent-1",
+		"listens": []map[string]any{{
+			"id": "listen-1", "port": port, "method": method, "server_psk": serverPSK,
+			"users": []map[string]any{
+				{"id": "alice", "enabled": true, "password": alicePSK},
+				{"id": "bob", "enabled": true, "password": bobPSK},
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bobEngine := boundListenEngine(controller, "listen-1", "bob")
+	if bobEngine == nil {
+		t.Fatal("missing bob engine")
+	}
+
+	client, err := NewProtocolEngine(method, []byte(serverPSK+":"+bobPSK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Destroy()
+	salt := make([]byte, client.SaltSize())
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tcpWire, err := client.SealTCPRequest(salt, target.Addr().String(), []byte("hello"), now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write(tcpWire); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-got:
+		if string(payload) != "hello" {
+			t.Fatalf("tcp handshake payload=%q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tcp handshake did not reach target")
+	}
+
+	if _, err := callListen(t, controller, pluginCallListenApply, map[string]any{
+		"agent_id": "agent-1",
+		"listens": []map[string]any{{
+			"id": "listen-1", "port": port, "method": method, "server_psk": serverPSK,
+			"users": []map[string]any{
+				{"id": "alice", "enabled": false, "password": alicePSK},
+				{"id": "bob", "enabled": true, "password": bobPSK},
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if boundListenEngine(controller, "listen-1", "alice") != nil {
+		t.Fatal("disabled user A engine still live")
+	}
+	if gotEngine := boundListenEngine(controller, "listen-1", "bob"); gotEngine != bobEngine {
+		t.Fatal("re-apply replaced unchanged user B engine")
+	}
+
+	close(release)
+	first, response := readTCPClientResponse(t, conn, client, salt)
+	if string(first) != "world" {
+		t.Fatalf("tcp handshake response=%q", first)
+	}
+	key, err := client.keySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestSession, err := client.newSession(key, salt)
+	clear(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestSession.nonce[0] = 2
+	if _, err := conn.Write(sealPayloadChunk(requestSession, []byte("next!"))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-got:
+		if string(payload) != "next!" {
+			t.Fatalf("tcp follow payload=%q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tcp follow chunk did not reach target")
+	}
+	follow, err := readOpenedTCPChunk(conn, response, max2022Payload)
+	if err != nil || string(follow) != "again" {
+		t.Fatalf("tcp follow response=%q err=%v", follow, err)
+	}
+
+	aliceClient, err := NewProtocolEngine(method, []byte(serverPSK+":"+alicePSK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceClient.Destroy()
+	aliceSalt := make([]byte, aliceClient.SaltSize())
+	if _, err := rand.Read(aliceSalt); err != nil {
+		t.Fatal(err)
+	}
+	aliceWire, err := aliceClient.SealTCPRequest(aliceSalt, aliceTarget.Addr().String(), []byte("hello"), time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceConn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceConn.Close()
+	_ = aliceConn.SetDeadline(time.Now().Add(time.Second))
+	if _, err := aliceConn.Write(aliceWire); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-aliceGot:
+		t.Fatalf("disabled user A still reached target: %q", payload)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestPluginCallListenApplyReusesUnchangedEngineOnLaterListen(t *testing.T) {
+	t.Parallel()
+	method := "2022-blake3-aes-128-gcm"
+	serverPSK, alicePSK, err := GenerateSS2022Identity(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, carolPSK, err := GenerateSS2022Identity(method)
+	if err != nil || carolPSK == serverPSK {
+		t.Fatalf("carol psk=%q err=%v", carolPSK, err)
+	}
+	port1 := freeTCPUDPPort(t)
+	port2 := freeTCPUDPPort(t)
+	controller := newCallController(t, nil)
+	first := map[string]any{
+		"id": "listen-1", "port": port1, "method": method, "server_psk": serverPSK,
+		"users": []map[string]any{{"id": "alice", "enabled": true, "password": alicePSK}},
+	}
+	if _, err := callListen(t, controller, pluginCallListenApply, map[string]any{
+		"agent_id": "agent-1",
+		"listens":  []map[string]any{first},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	aliceEngine := boundListenEngine(controller, "listen-1", "alice")
+	if aliceEngine == nil {
+		t.Fatal("missing alice engine")
+	}
+	if _, err := callListen(t, controller, pluginCallListenApply, map[string]any{
+		"agent_id": "agent-1",
+		"listens": []map[string]any{first, {
+			"id": "listen-2", "port": port2, "method": method, "server_psk": serverPSK,
+			"users": []map[string]any{{"id": "carol", "enabled": true, "password": carolPSK}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := boundListenEngine(controller, "listen-1", "alice"); got != aliceEngine {
+		t.Fatal("later apply replaced unchanged listen engine")
+	}
+	if boundListenEngine(controller, "listen-2", "carol") == nil {
+		t.Fatal("missing carol engine")
+	}
+}
+
+func TestPluginCallListenApplyCoalescedFirstFrameHandshake(t *testing.T) {
+	t.Parallel()
+	method := "2022-blake3-aes-128-gcm"
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	got := make(chan []byte, 2)
+	go echoTCPHandshake(target, got)
+
+	port := freeTCPUDPPort(t)
+	serverPSK, identityPSK, err := GenerateSS2022Identity(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newCallController(t, nil)
+	if _, err := callListen(t, controller, pluginCallListenApply, map[string]any{
+		"agent_id": "agent-1",
+		"listens": []map[string]any{{
+			"id": "listen-1", "port": port, "method": method, "server_psk": serverPSK,
+			"users": []map[string]any{{"id": "alice", "enabled": true, "password": identityPSK}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewProtocolEngine(method, []byte(serverPSK+":"+identityPSK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Destroy()
+	salt := make([]byte, client.SaltSize())
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tcpWire, err := client.SealTCPRequest(salt, target.Addr().String(), []byte("hello"), now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := client.keySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestSession, err := client.newSession(key, salt)
+	clear(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestSession.nonce[0] = 2
+	combined := append(append([]byte{}, tcpWire...), sealPayloadChunk(requestSession, []byte("next!"))...)
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write(combined); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-got:
+		if string(payload) != "hello" {
+			t.Fatalf("tcp handshake payload=%q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("coalesced handshake did not reach target")
+	}
+	first, response := readTCPClientResponse(t, conn, client, salt)
+	if string(first) != "world" {
+		t.Fatalf("tcp handshake response=%q", first)
+	}
+	select {
+	case payload := <-got:
+		if string(payload) != "next!" {
+			t.Fatalf("tcp follow payload=%q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("coalesced follow chunk did not reach target")
+	}
+	follow, err := readOpenedTCPChunk(conn, response, max2022Payload)
+	if err != nil || string(follow) != "again" {
+		t.Fatalf("tcp follow response=%q err=%v", follow, err)
 	}
 }
 

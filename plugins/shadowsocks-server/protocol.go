@@ -63,9 +63,11 @@ type ProxyRequest struct {
 type TCPServerSession struct {
 	mu          sync.Mutex
 	engine      *ProtocolEngine
+	key         []byte // retained until Close so live TCP can drain after engine Destroy
 	inbound     *streamCipher
 	outbound    *streamCipher
 	requestSalt []byte
+	leftover    []byte
 	modern      bool
 	closed      bool
 }
@@ -260,6 +262,31 @@ func (e *ProtocolEngine) Destroy() {
 	e.mu.Unlock()
 }
 
+func (e *ProtocolEngine) sameSecrets(other *ProtocolEngine) bool {
+	if e == nil || other == nil {
+		return false
+	}
+	if e == other {
+		return true
+	}
+	if e.method != other.method || e.keyLen != other.keyLen || e.modern != other.modern {
+		return false
+	}
+	leftUser, leftIdentity, err := e.keysSnapshot()
+	if err != nil {
+		return false
+	}
+	defer clear(leftUser)
+	defer clear(leftIdentity)
+	rightUser, rightIdentity, err := other.keysSnapshot()
+	if err != nil {
+		return false
+	}
+	defer clear(rightUser)
+	defer clear(rightIdentity)
+	return bytes.Equal(leftUser, rightUser) && bytes.Equal(leftIdentity, rightIdentity)
+}
+
 func (e *ProtocolEngine) keySnapshot() ([]byte, error) {
 	user, identity, err := e.keysSnapshot()
 	clear(identity)
@@ -316,7 +343,22 @@ func (s *TCPServerSession) Close() {
 	s.outbound = nil
 	clear(s.requestSalt)
 	s.requestSalt = nil
+	clear(s.key)
+	s.key = nil
+	clear(s.leftover)
+	s.leftover = nil
 	s.mu.Unlock()
+}
+
+func (s *TCPServerSession) takeLeftover() []byte {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	leftover := s.leftover
+	s.leftover = nil
+	return leftover
 }
 
 func (s *TCPServerSession) OpenPayloadChunk(wire []byte) ([]byte, error) {
@@ -344,13 +386,10 @@ func (s *TCPServerSession) SealResponse(responseSalt, payload []byte, now time.T
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.outbound != nil || s.engine == nil || len(responseSalt) != s.engine.SaltSize() {
+	if s.closed || s.outbound != nil || s.engine == nil || len(s.key) != s.engine.SaltSize() || len(responseSalt) != s.engine.SaltSize() {
 		return nil, ErrProtocol
 	}
-	key, err := s.engine.keySnapshot()
-	if err != nil {
-		return nil, err
-	}
+	key := append([]byte(nil), s.key...)
 	defer clear(key)
 	outbound, err := s.engine.newSession(key, responseSalt)
 	if err != nil {
@@ -594,10 +633,14 @@ func (e *ProtocolEngine) openLegacyTCP(key, wire []byte) (ProxyRequest, *TCPServ
 		return ProxyRequest{}, nil, ErrAuthentication
 	}
 	length := int(binary.BigEndian.Uint16(lengthPlain))
-	if length == 0 || length > maxLegacyPayload || len(wire)-position != length+session.aead.Overhead() {
+	if length == 0 || length > maxLegacyPayload {
 		return ProxyRequest{}, nil, ErrProtocol
 	}
-	body, err := session.open(wire[position:])
+	frameEnd := position + length + session.aead.Overhead()
+	if len(wire) < frameEnd {
+		return ProxyRequest{}, nil, ErrProtocol
+	}
+	body, err := session.open(wire[position:frameEnd])
 	if err != nil {
 		return ProxyRequest{}, nil, err
 	}
@@ -605,8 +648,12 @@ func (e *ProtocolEngine) openLegacyTCP(key, wire []byte) (ProxyRequest, *TCPServ
 	if err != nil {
 		return ProxyRequest{}, nil, err
 	}
+	var leftover []byte
+	if frameEnd < len(wire) {
+		leftover = append([]byte(nil), wire[frameEnd:]...)
+	}
 	request := ProxyRequest{Target: target, Payload: append([]byte(nil), body[consumed:]...), ReplayToken: append([]byte(nil), salt...)}
-	return request, &TCPServerSession{engine: e, inbound: session, requestSalt: salt}, nil
+	return request, &TCPServerSession{engine: e, key: append([]byte(nil), key...), inbound: session, requestSalt: salt, leftover: leftover}, nil
 }
 
 func (e *ProtocolEngine) sealLegacyUDP(key, salt []byte, target string, payload []byte) ([]byte, error) {
@@ -705,10 +752,14 @@ func (e *ProtocolEngine) open2022TCP(key, identity, wire []byte, now time.Time) 
 	}
 	variableLength := int(binary.BigEndian.Uint16(fixed[9:11]))
 	position += fixedWireLength
-	if variableLength == 0 || len(wire)-position != variableLength+16 {
+	if variableLength == 0 {
 		return ProxyRequest{}, nil, ErrProtocol
 	}
-	variable, err := session.open(wire[position:])
+	frameEnd := position + variableLength + 16
+	if len(wire) < frameEnd {
+		return ProxyRequest{}, nil, ErrProtocol
+	}
+	variable, err := session.open(wire[position:frameEnd])
 	if err != nil {
 		return ProxyRequest{}, nil, err
 	}
@@ -725,8 +776,12 @@ func (e *ProtocolEngine) open2022TCP(key, identity, wire []byte, now time.Time) 
 	if paddingLength == 0 && consumed == len(variable) {
 		return ProxyRequest{}, nil, ErrProtocol
 	}
+	var leftover []byte
+	if frameEnd < len(wire) {
+		leftover = append([]byte(nil), wire[frameEnd:]...)
+	}
 	request := ProxyRequest{Target: target, Payload: append([]byte(nil), variable[consumed:]...), ReplayToken: append([]byte(nil), salt...)}
-	return request, &TCPServerSession{engine: e, inbound: session, requestSalt: salt, modern: true}, nil
+	return request, &TCPServerSession{engine: e, key: append([]byte(nil), key...), inbound: session, requestSalt: salt, leftover: leftover, modern: true}, nil
 }
 
 func (e *ProtocolEngine) seal2022UDP(key, identity, sessionID []byte, packetID uint64, target string, payload []byte, now time.Time, padding []byte) ([]byte, error) {

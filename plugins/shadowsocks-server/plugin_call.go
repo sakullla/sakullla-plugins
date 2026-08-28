@@ -92,9 +92,15 @@ type listenApplyResult struct {
 }
 
 type listenExecutor struct {
-	mu     sync.Mutex
-	binder listenBinder
-	bound  map[string]*boundListen
+	mu       sync.Mutex
+	binder   listenBinder
+	bound    map[string]*boundListen
+	bindHost string
+}
+
+type boundUserEngine struct {
+	id     string
+	engine *ProtocolEngine
 }
 
 type boundListen struct {
@@ -104,9 +110,22 @@ type boundListen struct {
 	port    int
 	tcp     net.Listener
 	udp     net.PacketConn
-	engines []*ProtocolEngine
+	engines []*boundUserEngine
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+}
+
+type prefixConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) {
+	if n := copy(p, c.prefix); n > 0 {
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
 }
 
 func newListenExecutor(binder listenBinder) *listenExecutor {
@@ -244,33 +263,33 @@ func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
 	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
 		return ErrInvalid
 	}
-	engines := make([]*ProtocolEngine, 0, len(item.Users))
-	for _, user := range item.Users {
-		if !user.Enabled || strings.TrimSpace(user.Password) == "" {
-			continue
-		}
-		engine, err := engineFromMaterial(item.Method, []byte(user.Password), item.ServerPSK)
-		if err != nil {
-			destroyListenEngines(engines)
-			return err
-		}
-		engines = append(engines, engine)
-	}
 	existing := exec.bound[item.ID]
+	var current []*boundUserEngine
 	if existing != nil && existing.port == item.Port {
-		existing.replaceEngines(engines)
+		current = existing.snapshotUserEngines()
+	}
+	engines, err := assembleUserEngines(item, current)
+	if err != nil {
+		return err
+	}
+	if existing != nil && existing.port == item.Port {
+		existing.replaceUserEngines(engines)
 		return nil
 	}
-	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(item.Port))
+	host := exec.bindHost
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(item.Port))
 	tcp, err := exec.binder.Listen("tcp", address)
 	if err != nil {
-		destroyListenEngines(engines)
+		destroyUserEngines(engines, nil)
 		return ErrListenBind
 	}
 	udp, err := exec.binder.ListenPacket("udp", address)
 	if err != nil {
 		_ = tcp.Close()
-		destroyListenEngines(engines)
+		destroyUserEngines(engines, nil)
 		return ErrListenBind
 	}
 	if existing != nil {
@@ -289,6 +308,36 @@ func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
 	}()
 	exec.bound[item.ID] = bound
 	return nil
+}
+
+func assembleUserEngines(item ListenApplyItem, current []*boundUserEngine) ([]*boundUserEngine, error) {
+	byID := make(map[string]*ProtocolEngine, len(current))
+	for _, existing := range current {
+		if existing == nil || existing.engine == nil || existing.id == "" {
+			continue
+		}
+		byID[existing.id] = existing.engine
+	}
+	next := make([]*boundUserEngine, 0, len(item.Users))
+	created := make([]*ProtocolEngine, 0, len(item.Users))
+	for _, user := range item.Users {
+		if !user.Enabled || strings.TrimSpace(user.Password) == "" {
+			continue
+		}
+		engine, err := engineFromMaterial(item.Method, []byte(user.Password), item.ServerPSK)
+		if err != nil {
+			destroyListenEngines(created)
+			return nil, err
+		}
+		if old := byID[user.ID]; user.ID != "" && old != nil && old.sameSecrets(engine) {
+			engine.Destroy()
+			next = append(next, &boundUserEngine{id: user.ID, engine: old})
+			continue
+		}
+		created = append(created, engine)
+		next = append(next, &boundUserEngine{id: user.ID, engine: engine})
+	}
+	return next, nil
 }
 
 func (exec *listenExecutor) unbindLocked(id string) {
@@ -321,7 +370,7 @@ func (b *boundListen) close() {
 	engines := b.engines
 	b.engines = nil
 	b.mu.Unlock()
-	destroyListenEngines(engines)
+	destroyUserEngines(engines, nil)
 }
 
 func (b *boundListen) goHandle(fn func()) bool {
@@ -352,25 +401,56 @@ func (b *boundListen) serveTCP(ctx context.Context) {
 	}
 }
 
-func (b *boundListen) snapshotEngines() []*ProtocolEngine {
+func (b *boundListen) snapshotUserEngines() []*boundUserEngine {
 	if b == nil {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]*ProtocolEngine(nil), b.engines...)
+	return append([]*boundUserEngine(nil), b.engines...)
 }
 
-func (b *boundListen) replaceEngines(engines []*ProtocolEngine) {
+func (b *boundListen) snapshotEngines() []*ProtocolEngine {
+	users := b.snapshotUserEngines()
+	out := make([]*ProtocolEngine, 0, len(users))
+	for _, item := range users {
+		if item != nil && item.engine != nil {
+			out = append(out, item.engine)
+		}
+	}
+	return out
+}
+
+func (b *boundListen) replaceUserEngines(engines []*boundUserEngine) {
 	if b == nil {
-		destroyListenEngines(engines)
+		destroyUserEngines(engines, nil)
 		return
+	}
+	keep := make(map[*ProtocolEngine]struct{}, len(engines))
+	for _, item := range engines {
+		if item != nil && item.engine != nil {
+			keep[item.engine] = struct{}{}
+		}
 	}
 	b.mu.Lock()
 	old := b.engines
 	b.engines = engines
 	b.mu.Unlock()
-	destroyListenEngines(old)
+	destroyUserEngines(old, keep)
+}
+
+func (b *boundListen) engineByUser(userID string) *ProtocolEngine {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, item := range b.engines {
+		if item != nil && item.id == userID {
+			return item.engine
+		}
+	}
+	return nil
 }
 
 func (b *boundListen) packetConn() net.PacketConn {
@@ -409,6 +489,9 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	request, session, err := readTCPHandshake(conn, b.snapshotEngines())
 	if session != nil {
 		defer session.Close()
+		if leftover := session.takeLeftover(); len(leftover) > 0 {
+			conn = &prefixConn{Conn: conn, prefix: leftover}
+		}
 	}
 	if err != nil {
 		return
@@ -666,6 +749,18 @@ func destroyListenEngines(engines []*ProtocolEngine) {
 		if engine != nil {
 			engine.Destroy()
 		}
+	}
+}
+
+func destroyUserEngines(engines []*boundUserEngine, keep map[*ProtocolEngine]struct{}) {
+	for _, item := range engines {
+		if item == nil || item.engine == nil {
+			continue
+		}
+		if _, ok := keep[item.engine]; ok {
+			continue
+		}
+		item.engine.Destroy()
 	}
 }
 

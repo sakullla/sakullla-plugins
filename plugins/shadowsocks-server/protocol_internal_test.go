@@ -116,6 +116,96 @@ func TestShadowsocksTCPServerSessionRequestAndResponseChunks(t *testing.T) {
 	}
 }
 
+func TestTCPServerSessionSealResponseSurvivesEngineDestroy(t *testing.T) {
+	for _, test := range []struct {
+		method   string
+		material []byte
+	}{
+		{method: "aes-128-gcm", material: []byte("password")},
+		{method: "2022-blake3-aes-128-gcm", material: []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 16)))},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			engine, err := NewProtocolEngine(test.method, test.material)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(1_700_000_000, 0)
+			requestSalt := bytes.Repeat([]byte{1}, engine.SaltSize())
+			padding := []byte{9}
+			if !strings.HasPrefix(test.method, "2022-") {
+				padding = nil
+			}
+			first, err := engine.SealTCPRequest(requestSalt, "example.com:443", []byte("first"), now, padding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, server, err := engine.OpenTCPServerSession(first, now)
+			if err != nil || string(request.Payload) != "first" {
+				t.Fatalf("request=%+v err=%v", request, err)
+			}
+			engine.Destroy()
+			responseSalt := bytes.Repeat([]byte{2}, engine.SaltSize())
+			if _, err := server.SealResponse(responseSalt, []byte("response-first"), now); err != nil {
+				t.Fatalf("live session lost key material after Destroy: %v", err)
+			}
+			server.Close()
+		})
+	}
+}
+
+func TestOpenTCPServerSessionKeepsCoalescedLeftover(t *testing.T) {
+	for _, test := range []struct {
+		method   string
+		material []byte
+	}{
+		{method: "aes-128-gcm", material: []byte("password")},
+		{method: "2022-blake3-aes-128-gcm", material: []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 16)))},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			engine, err := NewProtocolEngine(test.method, test.material)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Destroy()
+			now := time.Unix(1_700_000_000, 0)
+			requestSalt := bytes.Repeat([]byte{1}, engine.SaltSize())
+			padding := []byte{9}
+			if !strings.HasPrefix(test.method, "2022-") {
+				padding = nil
+			}
+			first, err := engine.SealTCPRequest(requestSalt, "example.com:443", []byte("first"), now, padding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := engine.keySnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			clientRequest, err := engine.newSession(key, requestSalt)
+			clear(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clientRequest.nonce[0] = 2
+			nextWire := sealPayloadChunk(clientRequest, []byte("next"))
+			combined := append(append([]byte{}, first...), nextWire...)
+			request, server, err := engine.OpenTCPServerSession(combined, now)
+			if err != nil || string(request.Payload) != "first" {
+				t.Fatalf("request=%+v err=%v", request, err)
+			}
+			leftover := server.takeLeftover()
+			if !bytes.Equal(leftover, nextWire) {
+				t.Fatalf("leftover=%x want=%x", leftover, nextWire)
+			}
+			next, err := server.OpenPayloadChunk(leftover)
+			if err != nil || string(next) != "next" {
+				t.Fatalf("next=%q err=%v", next, err)
+			}
+			server.Close()
+		})
+	}
+}
+
 func TestShadowsocks2022IdentityPSKsAreCanonicalDistinctAndFormClientPassword(t *testing.T) {
 	for _, test := range []struct {
 		method string
