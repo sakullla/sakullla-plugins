@@ -55,8 +55,22 @@ func (r *runtime) adapters() ss.RuntimeAdapters {
 	return ss.RuntimeAdapters{Secrets: r, Traffic: r, Clock: r, Replay: r, Listener: r, Vault: r, Auditor: r}
 }
 
+func listenRules(method string, users []ss.User) []ss.ListenRule {
+	if len(users) == 0 {
+		return []ss.ListenRule{{ID: "listener-1", AgentID: "agent-1", Port: 8388, Method: method}}
+	}
+	if ss.SS2022Method(method) {
+		return []ss.ListenRule{{ID: "listener-1", AgentID: "agent-1", Port: 8388, Method: method, Users: users}}
+	}
+	out := make([]ss.ListenRule, len(users))
+	for i, user := range users {
+		out[i] = ss.ListenRule{ID: "listener-" + user.ID, AgentID: "agent-1", Port: 8388 + i, Method: method, Users: []ss.User{user}}
+	}
+	return out
+}
+
 func config() ss.Configuration {
-	return ss.Configuration{Generation: "generation-1", ListenerRef: "listener/1", Cipher: "aes-256-gcm", MaxSessions: 4, Users: []ss.User{{ID: "alice", SecretRef: "secret/alice", SecretVersion: "v1", Enabled: true, QuotaBytes: 100}}}
+	return ss.Configuration{Generation: "generation-1", Listeners: listenRules("aes-256-gcm", []ss.User{{ID: "alice", SecretRef: "secret/alice", SecretVersion: "v1", Enabled: true}})}
 }
 func wire(t *testing.T) []byte {
 	t.Helper()

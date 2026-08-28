@@ -104,7 +104,7 @@ func (r *panelRuntime) adapters() ss.RuntimeAdapters {
 }
 
 func panelConfig() ss.Configuration {
-	return ss.Configuration{Generation: "generation-1", ListenerRef: "listener/1", Cipher: "aes-256-gcm", MaxSessions: 16}
+	return ss.Configuration{Generation: "generation-1", Listeners: listenRules("aes-256-gcm", nil)}
 }
 
 func panelWire(t *testing.T) []byte {
@@ -245,8 +245,14 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 	if seen["ss"] == nil || seen["ss2022"] == nil {
 		t.Fatalf("families=%#v", seen)
 	}
-	if !strings.Contains(seen["ss2022"]["uri"].(string), "%") {
-		t.Fatalf("ss2022 uri should percent-encode method/password: %q", seen["ss2022"]["uri"])
+	ss2022URI, _ := seen["ss2022"]["uri"].(string)
+	userinfo := strings.TrimPrefix(ss2022URI, "ss://")
+	if at := strings.Index(userinfo, "@"); at >= 0 {
+		userinfo = userinfo[:at]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(userinfo)
+	if err != nil || !strings.HasPrefix(string(decoded), "2022-blake3-aes-128-gcm:") {
+		t.Fatalf("ss2022 uri should use Base64 method:password userinfo: %q", ss2022URI)
 	}
 
 	disabledID, _ := seen["ss"]["id"].(string)

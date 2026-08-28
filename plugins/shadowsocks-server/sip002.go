@@ -3,13 +3,13 @@ package shadowsocksserver
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +24,7 @@ type SIP002Account struct {
 	IdentityPSK string
 	Host        string
 	Port        int
+	Name        string
 }
 
 // SIP002Share is an importable ss:// URI and a QR whose payload equals that URI.
@@ -81,13 +82,13 @@ func generateSS2022Identity(method string, src io.Reader) (string, string, error
 }
 
 // BuildSIP002 projects an importable SIP002 URI and a QR with the same content.
-// SS2022 userinfo is percent-encoded method:password and is not Base64URL.
+// Every method uses standard-Base64 userinfo; SS2022 password is serverPSK:userPSK.
 func BuildSIP002(account SIP002Account) (SIP002Share, error) {
 	password, err := sip002ClientPassword(account)
 	if err != nil {
 		return SIP002Share{}, err
 	}
-	uri, err := SIP002URI(account.Method, password, account.Host, account.Port)
+	uri, err := encodeSIP002(account.Method, password, account.Host, account.Port, account.Name)
 	if err != nil {
 		return SIP002Share{}, err
 	}
@@ -95,22 +96,42 @@ func BuildSIP002(account SIP002Account) (SIP002Share, error) {
 	if err != nil {
 		return SIP002Share{}, err
 	}
-	parsed, err := url.Parse(uri)
+	host, port, err := sip002URIHostPort(uri)
 	if err != nil {
-		return SIP002Share{}, ErrInvalid
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil {
-		return SIP002Share{}, ErrInvalid
+		return SIP002Share{}, err
 	}
 	return SIP002Share{
 		Method:   account.Method,
 		Password: password,
-		Host:     parsed.Hostname(),
+		Host:     host,
 		Port:     port,
 		URI:      uri,
 		QR:       qr,
 	}, nil
+}
+
+func sip002URIHostPort(uri string) (string, int, error) {
+	rest, ok := strings.CutPrefix(uri, "ss://")
+	if !ok {
+		return "", 0, ErrInvalid
+	}
+	rest, _, _ = strings.Cut(rest, "#")
+	_, hostport, ok := strings.Cut(rest, "@")
+	if !ok || hostport == "" {
+		return "", 0, ErrInvalid
+	}
+	host, portText, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", 0, ErrInvalid
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, ErrInvalid
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) > 2 {
+		host = host[1 : len(host)-1]
+	}
+	return host, port, nil
 }
 
 func sip002ClientPassword(account SIP002Account) (string, error) {
@@ -126,14 +147,38 @@ func sip002ClientPassword(account SIP002Account) (string, error) {
 	return account.Password, nil
 }
 
-// SS2022ClientPassword returns the SIP002 password serverPSK:userPSK. Both
-// values must be canonical standard Base64 of the method key length and differ.
+// MapSS2022PSK keeps a canonical standard-Base64 PSK of the method key length.
+// Any other input is SHA-256(utf-8) truncated to keyLen and standard-Base64.
+func MapSS2022PSK(method, input string) (string, error) {
+	keyLen, ok := ss2022KeyLen(method)
+	if !ok {
+		return "", ErrUnsupportedMethod
+	}
+	if decoded, err := base64.StdEncoding.Strict().DecodeString(input); err == nil && len(decoded) == keyLen && base64.StdEncoding.EncodeToString(decoded) == input {
+		return input, nil
+	}
+	sum := sha256.Sum256([]byte(input))
+	mapped := base64.StdEncoding.EncodeToString(sum[:keyLen])
+	clear(sum[:])
+	return mapped, nil
+}
+
+// SS2022ClientPassword returns the SIP002 password serverPSK:userPSK. Each
+// side is mapped independently to a canonical PSK; the two values must differ.
 func SS2022ClientPassword(method string, serverPSK, userPSK []byte) (string, error) {
-	server, err := decodeCanonicalPSK(method, string(serverPSK))
+	serverEnc, err := MapSS2022PSK(method, string(serverPSK))
 	if err != nil {
 		return "", err
 	}
-	user, err := decodeCanonicalPSK(method, string(userPSK))
+	userEnc, err := MapSS2022PSK(method, string(userPSK))
+	if err != nil {
+		return "", err
+	}
+	server, err := decodeCanonicalPSK(method, serverEnc)
+	if err != nil {
+		return "", err
+	}
+	user, err := decodeCanonicalPSK(method, userEnc)
 	if err != nil {
 		clear(server)
 		return "", err
@@ -144,7 +189,7 @@ func SS2022ClientPassword(method string, serverPSK, userPSK []byte) (string, err
 	if same {
 		return "", ErrInvalid
 	}
-	return string(serverPSK) + ":" + string(userPSK), nil
+	return serverEnc + ":" + userEnc, nil
 }
 
 func decodeCanonicalPSK(method, encoded string) ([]byte, error) {
@@ -166,28 +211,6 @@ func ss2022KeyLen(method string) (int, bool) {
 	}
 	n, ok := supportedMethods[method]
 	return n, ok
-}
-
-func sip002HostPort(host string, port int) (string, error) {
-	if port < 1 || port > 65535 {
-		return "", ErrInvalid
-	}
-	host = strings.TrimSpace(host)
-	if strings.HasPrefix(host, "[") {
-		if !strings.HasSuffix(host, "]") || len(host) < 4 {
-			return "", ErrInvalid
-		}
-		host = host[1 : len(host)-1]
-	}
-	if host == "" {
-		return "", ErrInvalid
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		host = ip.String()
-	} else if strings.ContainsAny(host, " /?#@:[]\x00\r\n") {
-		return "", ErrInvalid
-	}
-	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func encodeSIP002QR(content string) (QRCode, error) {

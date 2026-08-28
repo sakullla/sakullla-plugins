@@ -103,13 +103,28 @@ func awaitHost[T any](ctx context.Context, s *Service, cleanup bool, f func(cont
 	}
 }
 func engineFromMaterial(method string, material []byte, serverPSK string) (*ProtocolEngine, error) {
-	if SS2022Method(method) && serverPSK != "" {
-		if _, _, ok := splitSS2022ClientPassword(material); ok {
-			return NewProtocolEngine(method, material)
-		}
-		return NewSS2022IdentityEngine(method, []byte(serverPSK), material)
+	if !SS2022Method(method) {
+		return NewProtocolEngine(method, material)
 	}
-	return NewProtocolEngine(method, material)
+	if serverPart, userPart, ok := splitSS2022ClientPassword(material); ok {
+		mapped, err := SS2022ClientPassword(method, serverPart, userPart)
+		if err != nil {
+			return nil, err
+		}
+		return NewProtocolEngine(method, []byte(mapped))
+	}
+	userEnc, err := MapSS2022PSK(method, string(material))
+	if err != nil {
+		return nil, err
+	}
+	if serverPSK == "" {
+		return NewProtocolEngine(method, []byte(userEnc))
+	}
+	serverEnc, err := MapSS2022PSK(method, serverPSK)
+	if err != nil {
+		return nil, err
+	}
+	return NewSS2022IdentityEngine(method, []byte(serverEnc), []byte(userEnc))
 }
 
 func ss2022ClientPasswordFromEngine(engine *ProtocolEngine) (string, error) {
@@ -174,7 +189,7 @@ func NewService(c Configuration, r RuntimeAdapters) (*Service, error) {
 	root, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		configuration: clone(c), runtime: r,
-		slots: make(chan struct{}, c.MaxSessions), hostSlots: make(chan struct{}, c.MaxSessions), cleanupSlots: make(chan struct{}, c.MaxSessions*2),
+		slots: make(chan struct{}, DefaultMaxSessions), hostSlots: make(chan struct{}, DefaultMaxSessions), cleanupSlots: make(chan struct{}, DefaultMaxSessions*2),
 		hostOpen: true, root: root, cancel: cancel, secrets: map[*SecretOnce]struct{}{}, engines: map[string]*ProtocolEngine{},
 	}
 	s.live.Store(true)
@@ -182,35 +197,35 @@ func NewService(c Configuration, r RuntimeAdapters) (*Service, error) {
 }
 func (s *Service) Initialize(ctx context.Context) error {
 	s.mu.Lock()
-	users := append([]User(nil), s.configuration.Users...)
-	cipher := s.configuration.Cipher
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	listeners := append([]ListenRule(nil), s.configuration.Listeners...)
 	s.mu.Unlock()
-	var serverPSK string
-	if serverRef != "" && serverVersion != "" {
-		material, err := s.resolveSecret(ctx, serverRef, serverVersion)
-		if err != nil {
-			return err
+	for _, listener := range listeners {
+		serverPSK := ""
+		if listener.ServerSecretRef != "" && listener.ServerSecretVersion != "" {
+			material, err := s.resolveSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion)
+			if err != nil {
+				return err
+			}
+			serverPSK = string(material)
+			clear(material)
 		}
-		serverPSK = string(material)
-		clear(material)
-	}
-	for _, user := range users {
-		if !user.Enabled {
-			continue
-		}
-		engine, err := s.resolveUserEngine(ctx, user.ResolvedMethod(cipher), user.SecretRef, user.SecretVersion, serverPSK)
-		if err != nil {
-			return err
-		}
-		s.mu.Lock()
-		if !s.live.Load() {
+		for _, user := range listener.Users {
+			if !user.Enabled {
+				continue
+			}
+			engine, err := s.resolveUserEngine(ctx, listener.Method, user.SecretRef, user.SecretVersion, serverPSK)
+			if err != nil {
+				return err
+			}
+			s.mu.Lock()
+			if !s.live.Load() {
+				s.mu.Unlock()
+				engine.Destroy()
+				return ErrRevoked
+			}
+			s.engines[user.ID] = engine
 			s.mu.Unlock()
-			engine.Destroy()
-			return ErrRevoked
 		}
-		s.engines[user.ID] = engine
-		s.mu.Unlock()
 	}
 	return nil
 }
@@ -231,10 +246,8 @@ func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *S
 		return User{}, nil, ErrRevoked
 	}
 	generation := s.configuration.Generation
-	cipher := s.configuration.Cipher
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
 	s.mu.Unlock()
-	method, err := spec.resolveMethod(cipher)
+	method, err := spec.resolveMethod(DefaultSS2022Method)
 	if err != nil {
 		return User{}, nil, err
 	}
@@ -244,6 +257,17 @@ func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *S
 			return User{}, nil, ErrDenied
 		}
 		spec.ID = id
+	}
+	s.mu.Lock()
+	listenerIdx, listenerErr := s.configuration.ensureListenerForMethod(method)
+	serverRef, serverVersion := "", ""
+	if listenerErr == nil {
+		s.configuration = clone(s.configuration)
+		serverRef, serverVersion = s.configuration.Listeners[listenerIdx].ServerSecretRef, s.configuration.Listeners[listenerIdx].ServerSecretVersion
+	}
+	s.mu.Unlock()
+	if listenerErr != nil {
+		return User{}, nil, listenerErr
 	}
 	var mintedServer *SecretOnce
 	serverPSK := ""
@@ -295,10 +319,23 @@ func (s *Service) CreateAccount(ctx context.Context, spec AccountSpec) (User, *S
 		return User{}, nil, err
 	}
 	client := append([]byte(nil), material...)
-	if SS2022Method(method) && serverPSK != "" {
-		if _, _, ok := splitSS2022ClientPassword(material); !ok {
-			client = []byte(serverPSK + ":" + string(material))
+	if SS2022Method(method) {
+		userMaterial := material
+		serverMaterial := []byte(serverPSK)
+		if serverPart, userPart, ok := splitSS2022ClientPassword(material); ok {
+			serverMaterial, userMaterial = serverPart, userPart
 		}
+		mapped, mapErr := SS2022ClientPassword(method, serverMaterial, userMaterial)
+		if mapErr != nil {
+			clear(material)
+			engine.Destroy()
+			secret.discard()
+			if mintedServer != nil {
+				mintedServer.discard()
+			}
+			return User{}, nil, mapErr
+		}
+		client = []byte(mapped)
 	}
 	clear(material)
 	revealed := NewSecretOnce(secret.SecretRef, secret.SecretVersion, client)
@@ -336,14 +373,10 @@ func (s *Service) installCreatedAccount(spec AccountSpec, secret *SecretOnce, en
 		}
 		return User{}, nil, err
 	}
-	if user.QuotaBytes == 0 {
-		user.QuotaBytes = UnlimitedQuotaBytes
-		if index, _, ok := next.lookupUser(user.ID); ok {
-			next.Users[index].QuotaBytes = UnlimitedQuotaBytes
+	if serverRef != "" {
+		if listenerIdx, _, _, ok := next.lookupUser(user.ID); ok && next.Listeners[listenerIdx].ServerSecretVersion == "" {
+			next.Listeners[listenerIdx].ServerSecretRef, next.Listeners[listenerIdx].ServerSecretVersion = serverRef, serverVersion
 		}
-	}
-	if serverRef != "" && next.ServerPSKVersion == "" {
-		next.ServerPSKRef, next.ServerPSKVersion = serverRef, serverVersion
 	}
 	s.configuration = next
 	s.engines[user.ID] = engine
@@ -376,14 +409,14 @@ func (s *Service) SetAccountEnabled(ctx context.Context, userID string, enabled 
 		s.mu.Unlock()
 		return ErrRevoked
 	}
-	_, user, ok := s.configuration.lookupUser(userID)
+	listener, user, ok := s.configuration.userListener(userID)
 	if !ok {
 		s.mu.Unlock()
 		return ErrDenied
 	}
 	needEngine := enabled && s.engines[userID] == nil
-	method := user.ResolvedMethod(s.configuration.Cipher)
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	method := listener.Method
+	serverRef, serverVersion := listener.ServerSecretRef, listener.ServerSecretVersion
 	if !needEngine {
 		next, err := s.configuration.SetAccountEnabled(userID, enabled)
 		if err != nil {
@@ -499,10 +532,12 @@ func (s *Service) AcceptTCP(ctx context.Context, wire []byte) (Flow, *TCPServerS
 		userID string
 		engine *ProtocolEngine
 	}
-	candidates := make([]candidate, 0, len(s.configuration.Users))
-	for _, user := range s.configuration.Users {
-		if engine := s.engines[user.ID]; user.Enabled && engine != nil {
-			candidates = append(candidates, candidate{userID: user.ID, engine: engine})
+	candidates := make([]candidate, 0)
+	for _, listener := range s.configuration.Listeners {
+		for _, user := range listener.Users {
+			if engine := s.engines[user.ID]; user.Enabled && engine != nil {
+				candidates = append(candidates, candidate{userID: user.ID, engine: engine})
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -551,10 +586,12 @@ func (s *Service) openWire(ctx context.Context, protocol Protocol, wire []byte) 
 		userID string
 		engine *ProtocolEngine
 	}
-	candidates := make([]candidate, 0, len(s.configuration.Users))
-	for _, user := range s.configuration.Users {
-		if engine := s.engines[user.ID]; user.Enabled && engine != nil {
-			candidates = append(candidates, candidate{userID: user.ID, engine: engine})
+	candidates := make([]candidate, 0)
+	for _, listener := range s.configuration.Listeners {
+		for _, user := range listener.Users {
+			if engine := s.engines[user.ID]; user.Enabled && engine != nil {
+				candidates = append(candidates, candidate{userID: user.ID, engine: engine})
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -604,15 +641,8 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 		return Flow{}, ErrDenied
 	}
 	s.sessions.Add(1)
-	var user User
-	found := false
-	for _, u := range s.configuration.Users {
-		if u.ID == r.UserID {
-			user, found = u, true
-			break
-		}
-	}
-	generation, cipher := s.configuration.Generation, s.configuration.Cipher
+	listener, user, found := s.configuration.userListener(r.UserID)
+	generation, method := s.configuration.Generation, listener.Method
 	s.mu.Unlock()
 	releaseSlot := func() { <-s.slots; s.sessions.Done() }
 	var reservation TrafficReservation
@@ -629,27 +659,24 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 	if !found || !user.Enabled {
 		return fail(ErrDenied)
 	}
-	now, err := awaitHost(ctx, s, false, s.runtime.Clock.Now)
-	if err != nil {
+	if _, clockErr := awaitHost(ctx, s, false, s.runtime.Clock.Now); clockErr != nil {
 		return fail(ErrDenied)
-	}
-	if user.Expired(now) {
-		return fail(ErrExpired)
 	}
 	credential, replay := append([]byte(nil), r.Credential...), append([]byte(nil), r.ReplayToken...)
 	defer clear(credential)
 	defer clear(replay)
 	op := sha256.Sum256([]byte(generation + "\x00" + user.ID + "\x00" + string(replay)))
 	opKey := hex.EncodeToString(op[:])
+	var err error
 	reservation, err = awaitHost(ctx, s, false, func(ctx context.Context) (TrafficReservation, error) {
-		return s.runtime.Traffic.Reserve(ctx, user.ID, user.EffectiveQuota(), opKey)
+		return s.runtime.Traffic.Reserve(ctx, user.ID, UnlimitedQuotaBytes, opKey)
 	})
 	if err != nil {
 		return fail(ErrQuota)
 	}
 	if verifyCredential {
 		credentialForHost := append([]byte(nil), credential...)
-		if SS2022Method(user.ResolvedMethod(cipher)) {
+		if SS2022Method(method) {
 			if _, userPSK, ok := splitSS2022ClientPassword(credentialForHost); ok {
 				// Copy before clearing: split aliases into credentialForHost.
 				extracted := append([]byte(nil), userPSK...)
@@ -681,10 +708,10 @@ func (s *Service) admit(ctx context.Context, r AdmissionRequest, verifyCredentia
 }
 func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*SecretOnce, error) {
 	s.mu.Lock()
-	_, current, ok := s.configuration.lookupUser(userID)
+	listener, current, ok := s.configuration.userListener(userID)
 	generation := s.configuration.Generation
-	method := current.ResolvedMethod(s.configuration.Cipher)
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	method := listener.Method
+	serverRef, serverVersion := listener.ServerSecretRef, listener.ServerSecretVersion
 	s.mu.Unlock()
 	if !ok || expectedVersion == "" || current.SecretVersion != expectedVersion {
 		return nil, ErrDenied
@@ -698,8 +725,8 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 		s.engineGate.Lock()
 		defer s.engineGate.Unlock()
 		s.mu.Lock()
-		if index, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
-			s.configuration.Users[index].Enabled = false
+		if listenerIdx, userIdx, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
+			s.configuration.Listeners[listenerIdx].Users[userIdx].Enabled = false
 			if engine := s.engines[userID]; engine != nil {
 				engine.Destroy()
 				delete(s.engines, userID)
@@ -733,23 +760,21 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 		secret.discard()
 		return nil, ErrRevoked
 	}
-	if index, user, found := s.configuration.lookupUser(userID); !found || user.SecretRef != current.SecretRef || user.SecretVersion != current.SecretVersion {
+	if _, _, user, found := s.configuration.lookupUser(userID); !found || user.SecretRef != current.SecretRef || user.SecretVersion != current.SecretVersion {
 		s.mu.Unlock()
 		clear(material)
 		secret.discard()
 		return nil, ErrRevoked
-	} else {
-		_ = index
 	}
-	method = current.ResolvedMethod(s.configuration.Cipher)
-	if latest, found := s.configuration.User(userID); found {
-		method = latest.ResolvedMethod(s.configuration.Cipher)
+	if latest, latestUser, found := s.configuration.userListener(userID); found {
+		method = latest.Method
+		_ = latestUser
 	}
 	replacement, resolveErr := engineFromMaterial(method, material, serverPSK)
 	clear(material)
 	if resolveErr != nil {
-		if index, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
-			s.configuration.Users[index].Enabled = false
+		if listenerIdx, userIdx, user, found := s.configuration.lookupUser(userID); found && user.SecretRef == current.SecretRef && user.SecretVersion == current.SecretVersion {
+			s.configuration.Listeners[listenerIdx].Users[userIdx].Enabled = false
 			if engine := s.engines[userID]; engine != nil {
 				engine.Destroy()
 				delete(s.engines, userID)
@@ -797,7 +822,7 @@ func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (
 		return nil, ErrRevoked
 	}
 	generation := s.configuration.Generation
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	serverRef, serverVersion := s.configuration.instanceServerPSK()
 	s.mu.Unlock()
 	if expectedVersion == "" || serverVersion != expectedVersion {
 		return nil, ErrDenied
@@ -835,7 +860,7 @@ func (s *Service) installRotatedServerPSK(expectedVersion string, secret *Secret
 		secret.discard()
 		return nil, ErrRevoked
 	}
-	if s.configuration.ServerPSKVersion != expectedVersion {
+	if s.configuration.ServerPSKVersion() != expectedVersion {
 		s.mu.Unlock()
 		secret.discard()
 		return nil, ErrDenied
@@ -970,7 +995,7 @@ func (s *Service) RefreshListenShare(ctx context.Context) error {
 		return ErrRevoked
 	}
 	runtime := s.runtime
-	ref := s.configuration.ListenerRef
+	ref := s.configuration.firstListenerID()
 	s.mu.Unlock()
 	if err := refreshListenBinding(ctx, s, runtime.Listener, ref); err != nil {
 		return err
@@ -1072,7 +1097,7 @@ func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare
 		out.Reason = "share unavailable"
 		return out, nil
 	}
-	account := SIP002Account{Method: method, Host: endpoint.Host, Port: endpoint.Port}
+	account := SIP002Account{Method: method, Host: endpoint.Host, Port: endpoint.Port, Name: user.Name}
 	if SS2022Method(method) {
 		server, identity, ok := splitSS2022ClientPassword([]byte(password))
 		if !ok {
@@ -1113,8 +1138,10 @@ func (s *Service) shareClientPassword(ctx context.Context, user User) (string, s
 	s.engineGate.RLock()
 	s.mu.Lock()
 	engine := s.engines[user.ID]
-	method := user.ResolvedMethod(s.configuration.Cipher)
-	serverRef, serverVersion := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion
+	listener, _, ok := s.configuration.userListener(user.ID)
+	method := listener.Method
+	serverRef, serverVersion := listener.ServerSecretRef, listener.ServerSecretVersion
+	_ = ok
 	s.mu.Unlock()
 	if SS2022Method(method) && engine != nil && engine.HasIdentity() {
 		password, err := ss2022ClientPasswordFromEngine(engine)

@@ -310,7 +310,7 @@ func (handler *panelHandler) panel(ctx context.Context) (panelResponse, error) {
 	}
 	version := ""
 	if snapshotErr := handler.controller.Use(ctx, func(_ context.Context, service *Service) error {
-		version = service.Snapshot().ServerPSKVersion
+		version = service.Snapshot().ServerPSKVersion()
 		return nil
 	}); snapshotErr != nil {
 		return panelResponse{}, snapshotErr

@@ -159,8 +159,11 @@ func TestShadowsocksOfficialRustTCPUDPFixtures(t *testing.T) {
 
 			runtime := &runtime{now: uint64(now.Unix()), secrets: map[string]string{"secret/a-wrong": fixture.wrongMaterial, "secret/z-correct": fixture.material}}
 			service, serviceErr := ss.NewService(ss.Configuration{
-				Generation: "generation-1", ListenerRef: "listener/1", Cipher: fixture.method, MaxSessions: 2,
-				Users: []ss.User{{ID: "a-wrong", SecretRef: "secret/a-wrong", SecretVersion: "v1", Enabled: true, QuotaBytes: 1024}, {ID: "z-correct", SecretRef: "secret/z-correct", SecretVersion: "v1", Enabled: true, QuotaBytes: 1024}},
+				Generation: "generation-1",
+				Listeners: listenRules(fixture.method, []ss.User{
+					{ID: "a-wrong", SecretRef: "secret/a-wrong", SecretVersion: "v1", Enabled: true},
+					{ID: "z-correct", SecretRef: "secret/z-correct", SecretVersion: "v1", Enabled: true},
+				}),
 			}, runtime.adapters())
 			if serviceErr != nil {
 				t.Fatal(serviceErr)
@@ -411,8 +414,8 @@ func TestShadowsocksProtocol2022IdentityPSKClientPasswordAndWire(t *testing.T) {
 
 			runtime := &runtime{now: uint64(now.Unix()), secrets: map[string]string{"secret/identity": clientPassword}}
 			service, serviceErr := ss.NewService(ss.Configuration{
-				Generation: "generation-1", ListenerRef: "listener/1", Cipher: test.method, MaxSessions: 2,
-				Users: []ss.User{{ID: "identity-user", SecretRef: "secret/identity", SecretVersion: "v1", Enabled: true, QuotaBytes: 1024}},
+				Generation: "generation-1",
+				Listeners:  listenRules(test.method, []ss.User{{ID: "identity-user", SecretRef: "secret/identity", SecretVersion: "v1", Enabled: true}}),
 			}, runtime.adapters())
 			if serviceErr != nil {
 				t.Fatal(serviceErr)
@@ -506,11 +509,12 @@ func assertImportableSIP002(t *testing.T, uri, method, password, host string, po
 		t.Fatalf("parsed method=%q password=%q userinfo=%q", gotMethod, gotPassword, userinfo)
 	}
 	if modern {
-		if strings.Count(userinfo, ":") != 1 || !strings.Contains(userinfo, "%") {
-			t.Fatalf("ss2022 userinfo=%q", userinfo)
+		decoded, err := decodeSIP002Userinfo(userinfo)
+		if err != nil {
+			t.Fatalf("ss2022 userinfo=%q err=%v", userinfo, err)
 		}
-		if sip002UserinfoIsBase64URL(userinfo, method, password) {
-			t.Fatalf("ss2022 userinfo is Base64URL: %q", userinfo)
+		if got := string(decoded); !strings.HasPrefix(got, method+":") || strings.Count(got, ":") < 2 {
+			t.Fatalf("ss2022 decoded=%q", got)
 		}
 		return
 	}

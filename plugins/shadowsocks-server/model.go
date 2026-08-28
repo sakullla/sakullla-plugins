@@ -18,10 +18,12 @@ const (
 	PluginID             = "shadowsocks-server"
 	PluginVersion        = "0.1.2"
 	MaxConfigBytes       = 1 << 20
+	MaxListeners         = 256
 	MaxUsers             = 256
 	UnlimitedQuotaBytes  = ^uint64(0)
+	DefaultMaxSessions   = 256
 	DefaultLegacyMethod  = "aes-256-gcm"
-	DefaultSS2022Method  = "2022-blake3-aes-256-gcm"
+	DefaultSS2022Method  = "2022-blake3-aes-128-gcm"
 	AccountFamilyLegacy  = "ss"
 	AccountFamily2022    = "ss2022"
 	ServerPSKID          = "server-psk"
@@ -30,6 +32,8 @@ const (
 	accountSecretPrefix  = "secret/"
 	serverPSKSecretRef   = "secret/server-psk"
 	accountIDRandomBytes = 8
+	maxUserNameBytes     = 128
+	maxAgentIDBytes      = 128
 )
 
 var (
@@ -46,27 +50,33 @@ var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 
 type User struct {
 	ID            string `json:"id"`
-	Method        string `json:"method,omitempty"`
+	Name          string `json:"name,omitempty"`
 	SecretRef     string `json:"secret_ref"`
 	SecretVersion string `json:"secret_version"`
 	Enabled       bool   `json:"enabled"`
-	ExpiresAt     uint64 `json:"expires_at"`
-	QuotaBytes    uint64 `json:"quota_bytes"`
 }
+
+type ListenRule struct {
+	ID                  string `json:"id"`
+	AgentID             string `json:"agent_id"`
+	Port                int    `json:"port"`
+	Method              string `json:"method"`
+	ServerSecretRef     string `json:"server_secret_ref,omitempty"`
+	ServerSecretVersion string `json:"server_secret_version,omitempty"`
+	Users               []User `json:"users"`
+}
+
 type Configuration struct {
-	Generation       string `json:"generation"`
-	ListenerRef      string `json:"listener_ref"`
-	Cipher           string `json:"cipher"`
-	ServerPSKRef     string `json:"server_psk_ref,omitempty"`
-	ServerPSKVersion string `json:"server_psk_version,omitempty"`
-	MaxSessions      int    `json:"max_sessions"`
-	Users            []User `json:"users"`
+	Generation       string       `json:"generation,omitempty"`
+	ResourceGroupRef string       `json:"resource_group_ref,omitempty"`
+	Listeners        []ListenRule `json:"listeners"`
 }
 
 // AccountSpec creates one account without quota or expiry. Family selects
 // traditional SS or SS2022 when Method is omitted.
 type AccountSpec struct {
 	ID     string `json:"id,omitempty"`
+	Name   string `json:"name,omitempty"`
 	Family string `json:"family,omitempty"`
 	Method string `json:"method,omitempty"`
 }
@@ -75,40 +85,98 @@ type AccountSpec struct {
 // secret material or generation identity.
 type AccountRecord struct {
 	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
 	Family        string `json:"family"`
 	Method        string `json:"method"`
 	Enabled       bool   `json:"enabled"`
 	SecretVersion string `json:"secret_version"`
-	ExpiresAt     uint64 `json:"expires_at,omitempty"`
-	QuotaBytes    uint64 `json:"quota_bytes,omitempty"`
 }
 
 func (c Configuration) Validate() error {
-	if !refPattern.MatchString(c.Generation) || !refPattern.MatchString(c.ListenerRef) || c.MaxSessions < 1 || c.MaxSessions > 4096 || len(c.Users) > MaxUsers {
+	if c.Generation != "" && !refPattern.MatchString(c.Generation) {
 		return ErrInvalid
 	}
-	if !SupportedMethod(c.Cipher) {
+	if c.ResourceGroupRef != "" && !refPattern.MatchString(c.ResourceGroupRef) {
 		return ErrInvalid
 	}
-	if c.ServerPSKRef != "" || c.ServerPSKVersion != "" {
-		if !refPattern.MatchString(c.ServerPSKRef) || !refPattern.MatchString(c.ServerPSKVersion) {
-			return ErrInvalid
-		}
+	if len(c.Listeners) > MaxListeners {
+		return ErrInvalid
 	}
-	seen := map[string]struct{}{}
-	for _, u := range c.Users {
-		if !refPattern.MatchString(u.ID) || !refPattern.MatchString(u.SecretRef) || !refPattern.MatchString(u.SecretVersion) {
+	listenerIDs := map[string]struct{}{}
+	userIDs := map[string]struct{}{}
+	ports := map[string]map[int]struct{}{}
+	totalUsers := 0
+	for _, listener := range c.Listeners {
+		if err := listener.Validate(); err != nil {
+			return err
+		}
+		if _, ok := listenerIDs[listener.ID]; ok {
 			return ErrInvalid
 		}
-		if method := u.ResolvedMethod(c.Cipher); !SupportedMethod(method) {
+		listenerIDs[listener.ID] = struct{}{}
+		used, ok := ports[listener.AgentID]
+		if !ok {
+			used = map[int]struct{}{}
+			ports[listener.AgentID] = used
+		}
+		if _, ok = used[listener.Port]; ok {
 			return ErrInvalid
 		}
-		if _, ok := seen[u.ID]; ok {
+		used[listener.Port] = struct{}{}
+		totalUsers += len(listener.Users)
+		if totalUsers > MaxUsers {
 			return ErrInvalid
 		}
-		seen[u.ID] = struct{}{}
+		for _, user := range listener.Users {
+			if _, ok = userIDs[user.ID]; ok {
+				return ErrInvalid
+			}
+			userIDs[user.ID] = struct{}{}
+		}
 	}
 	return nil
+}
+
+func (l ListenRule) Validate() error {
+	if !refPattern.MatchString(l.ID) || !validAgentID(l.AgentID) || l.Port < 1 || l.Port > 65535 || !SupportedMethod(l.Method) {
+		return ErrInvalid
+	}
+	if l.ServerSecretRef != "" || l.ServerSecretVersion != "" {
+		if !SS2022Method(l.Method) || !refPattern.MatchString(l.ServerSecretRef) || !refPattern.MatchString(l.ServerSecretVersion) {
+			return ErrInvalid
+		}
+	}
+	if !SS2022Method(l.Method) && len(l.Users) > 1 {
+		return ErrInvalid
+	}
+	if len(l.Users) > MaxUsers {
+		return ErrInvalid
+	}
+	seen := map[string]struct{}{}
+	for _, user := range l.Users {
+		if err := user.Validate(); err != nil {
+			return err
+		}
+		if _, ok := seen[user.ID]; ok {
+			return ErrInvalid
+		}
+		seen[user.ID] = struct{}{}
+	}
+	return nil
+}
+
+func (u User) Validate() error {
+	if !refPattern.MatchString(u.ID) || !refPattern.MatchString(u.SecretRef) || !refPattern.MatchString(u.SecretVersion) {
+		return ErrInvalid
+	}
+	if strings.ContainsAny(u.Name, "\r\n\x00") || len(u.Name) > maxUserNameBytes {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validAgentID(value string) bool {
+	return value != "" && len(value) <= maxAgentIDBytes && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\r\n\x00\t ")
 }
 
 func SS2022Method(method string) bool {
@@ -120,24 +188,6 @@ func AccountFamilyOf(method string) string {
 		return AccountFamily2022
 	}
 	return AccountFamilyLegacy
-}
-
-func (u User) ResolvedMethod(defaultMethod string) string {
-	if u.Method != "" {
-		return u.Method
-	}
-	return defaultMethod
-}
-
-func (u User) EffectiveQuota() uint64 {
-	if u.QuotaBytes == 0 {
-		return UnlimitedQuotaBytes
-	}
-	return u.QuotaBytes
-}
-
-func (u User) Expired(now uint64) bool {
-	return u.ExpiresAt > 0 && now >= u.ExpiresAt
 }
 
 func (spec AccountSpec) resolveMethod(defaultMethod string) (string, error) {
@@ -152,6 +202,9 @@ func (spec AccountSpec) resolveMethod(defaultMethod string) (string, error) {
 	}
 	switch spec.Family {
 	case "":
+		if defaultMethod == "" {
+			defaultMethod = DefaultSS2022Method
+		}
 		if !SupportedMethod(defaultMethod) {
 			return "", ErrInvalid
 		}
@@ -190,51 +243,160 @@ func InitialSecretVersion() string {
 }
 
 func (c Configuration) User(id string) (User, bool) {
-	_, user, ok := c.lookupUser(id)
+	_, _, user, ok := c.lookupUser(id)
 	return user, ok
 }
 
-func (c Configuration) lookupUser(id string) (int, User, bool) {
-	for i, user := range c.Users {
-		if user.ID == id {
-			return i, user, true
+func (c Configuration) lookupUser(id string) (listenerIdx, userIdx int, user User, ok bool) {
+	for i, listener := range c.Listeners {
+		for j, current := range listener.Users {
+			if current.ID == id {
+				return i, j, current, true
+			}
 		}
 	}
-	return -1, User{}, false
+	return -1, -1, User{}, false
+}
+
+func (c Configuration) userListener(id string) (ListenRule, User, bool) {
+	listenerIdx, _, user, ok := c.lookupUser(id)
+	if !ok {
+		return ListenRule{}, User{}, false
+	}
+	return c.Listeners[listenerIdx], user, true
+}
+
+func (c Configuration) allUsers() []User {
+	users := make([]User, 0, len(c.Listeners))
+	for _, listener := range c.Listeners {
+		users = append(users, listener.Users...)
+	}
+	return users
+}
+
+func (c Configuration) firstListenerID() string {
+	if len(c.Listeners) == 0 {
+		return ""
+	}
+	return c.Listeners[0].ID
+}
+
+func (c Configuration) instanceServerPSK() (ref, version string) {
+	for _, listener := range c.Listeners {
+		if listener.ServerSecretRef != "" && listener.ServerSecretVersion != "" {
+			return listener.ServerSecretRef, listener.ServerSecretVersion
+		}
+	}
+	return "", ""
+}
+
+func (c Configuration) ServerPSKVersion() string {
+	_, version := c.instanceServerPSK()
+	return version
+}
+
+func (c Configuration) listenerIndexForMethod(method string) (int, error) {
+	if !SupportedMethod(method) {
+		return -1, ErrInvalid
+	}
+	for i, listener := range c.Listeners {
+		if listener.Method != method {
+			continue
+		}
+		if SS2022Method(method) {
+			if len(listener.Users) >= MaxUsers {
+				continue
+			}
+			return i, nil
+		}
+		if len(listener.Users) >= 1 {
+			continue
+		}
+		return i, nil
+	}
+	return -1, ErrInvalid
+}
+
+func (c *Configuration) ensureListenerForMethod(method string) (int, error) {
+	if index, err := c.listenerIndexForMethod(method); err == nil {
+		return index, nil
+	}
+	agentID := "agent-1"
+	if len(c.Listeners) > 0 {
+		agentID = c.Listeners[0].AgentID
+	}
+	port := 0
+	used := map[int]struct{}{}
+	for _, listener := range c.Listeners {
+		if listener.AgentID == agentID {
+			used[listener.Port] = struct{}{}
+		}
+	}
+	for candidate := 8388; candidate <= 65535; candidate++ {
+		if _, ok := used[candidate]; !ok {
+			port = candidate
+			break
+		}
+	}
+	if port == 0 || !validAgentID(agentID) {
+		return -1, ErrInvalid
+	}
+	id, err := NewAccountID()
+	if err != nil {
+		return -1, err
+	}
+	id = "listen-" + strings.TrimPrefix(id, accountIDPrefix)
+	if !refPattern.MatchString(id) {
+		return -1, ErrInvalid
+	}
+	c.Listeners = append(c.Listeners, ListenRule{ID: id, AgentID: agentID, Port: port, Method: method})
+	return len(c.Listeners) - 1, nil
 }
 
 func (c Configuration) AccountRecord(user User) AccountRecord {
-	method := user.ResolvedMethod(c.Cipher)
+	listener, current, ok := c.userListener(user.ID)
+	if !ok {
+		current = user
+	}
+	method := listener.Method
 	return AccountRecord{
-		ID:            user.ID,
+		ID:            current.ID,
+		Name:          current.Name,
 		Family:        AccountFamilyOf(method),
 		Method:        method,
-		Enabled:       user.Enabled,
-		SecretVersion: user.SecretVersion,
-		ExpiresAt:     user.ExpiresAt,
-		QuotaBytes:    user.QuotaBytes,
+		Enabled:       current.Enabled,
+		SecretVersion: current.SecretVersion,
 	}
 }
 
 func (c Configuration) ListAccounts() []AccountRecord {
-	accounts := make([]AccountRecord, 0, len(c.Users))
-	for _, user := range clone(c).Users {
-		accounts = append(accounts, c.AccountRecord(user))
+	accounts := make([]AccountRecord, 0)
+	for _, listener := range clone(c).Listeners {
+		for _, user := range listener.Users {
+			accounts = append(accounts, AccountRecord{
+				ID:            user.ID,
+				Name:          user.Name,
+				Family:        AccountFamilyOf(listener.Method),
+				Method:        listener.Method,
+				Enabled:       user.Enabled,
+				SecretVersion: user.SecretVersion,
+			})
+		}
 	}
 	return accounts
 }
 
 func (c Configuration) HasSS2022() bool {
-	for _, user := range c.Users {
-		if SS2022Method(user.ResolvedMethod(c.Cipher)) {
+	for _, listener := range c.Listeners {
+		if SS2022Method(listener.Method) {
 			return true
 		}
 	}
 	return false
 }
 
-// CreateAccount appends one enabled account. Quota and expiry stay unset.
-// Generation is not changed.
+// CreateAccount appends one enabled user onto a listener of the requested method.
+// Traditional methods reject a second user. Generation is not changed.
 func (c Configuration) CreateAccount(spec AccountSpec, secretRef, secretVersion string) (Configuration, User, error) {
 	next := clone(c)
 	id := spec.ID
@@ -245,7 +407,7 @@ func (c Configuration) CreateAccount(spec AccountSpec, secretRef, secretVersion 
 		}
 		id = generated
 	}
-	method, err := spec.resolveMethod(next.Cipher)
+	method, err := spec.resolveMethod(DefaultSS2022Method)
 	if err != nil {
 		return Configuration{}, User{}, err
 	}
@@ -255,14 +417,22 @@ func (c Configuration) CreateAccount(spec AccountSpec, secretRef, secretVersion 
 	if secretVersion == "" {
 		secretVersion = defaultSecretVersion
 	}
-	if !refPattern.MatchString(id) || !refPattern.MatchString(secretRef) || !refPattern.MatchString(secretVersion) || len(next.Users) >= MaxUsers {
+	name := spec.Name
+	if name == "" {
+		name = id
+	}
+	if !refPattern.MatchString(id) || !refPattern.MatchString(secretRef) || !refPattern.MatchString(secretVersion) || len(next.allUsers()) >= MaxUsers {
 		return Configuration{}, User{}, ErrInvalid
 	}
-	if _, _, exists := next.lookupUser(id); exists {
+	if _, _, _, exists := next.lookupUser(id); exists {
 		return Configuration{}, User{}, ErrInvalid
 	}
-	user := User{ID: id, Method: method, SecretRef: secretRef, SecretVersion: secretVersion, Enabled: true}
-	next.Users = append(next.Users, user)
+	index, err := next.ensureListenerForMethod(method)
+	if err != nil {
+		return Configuration{}, User{}, err
+	}
+	user := User{ID: id, Name: name, SecretRef: secretRef, SecretVersion: secretVersion, Enabled: true}
+	next.Listeners[index].Users = append(next.Listeners[index].Users, user)
 	if err := next.Validate(); err != nil {
 		return Configuration{}, User{}, err
 	}
@@ -272,39 +442,47 @@ func (c Configuration) CreateAccount(spec AccountSpec, secretRef, secretVersion 
 // SetAccountEnabled toggles one account. It does not revoke the generation.
 func (c Configuration) SetAccountEnabled(id string, enabled bool) (Configuration, error) {
 	next := clone(c)
-	index, _, ok := next.lookupUser(id)
+	listenerIdx, userIdx, _, ok := next.lookupUser(id)
 	if !ok {
 		return Configuration{}, ErrDenied
 	}
-	next.Users[index].Enabled = enabled
+	next.Listeners[listenerIdx].Users[userIdx].Enabled = enabled
 	return next, nil
 }
 
 // ReplaceUserSecret CAS-updates one account secret and leaves Generation intact.
 func (c Configuration) ReplaceUserSecret(id, expectedVersion, newRef, newVersion string) (Configuration, error) {
 	next := clone(c)
-	index, current, ok := next.lookupUser(id)
+	listenerIdx, userIdx, current, ok := next.lookupUser(id)
 	if !ok || expectedVersion == "" || current.SecretVersion != expectedVersion {
 		return Configuration{}, ErrDenied
 	}
 	if !refPattern.MatchString(newRef) || !refPattern.MatchString(newVersion) {
 		return Configuration{}, ErrInvalid
 	}
-	next.Users[index].SecretRef, next.Users[index].SecretVersion = newRef, newVersion
+	next.Listeners[listenerIdx].Users[userIdx].SecretRef, next.Listeners[listenerIdx].Users[userIdx].SecretVersion = newRef, newVersion
 	return next, nil
 }
 
-// ReplaceServerPSK CAS-updates the instance SS2022 server PSK. User identity
+// ReplaceServerPSK CAS-updates one SS2022 listener server PSK. User identity
 // PSK versions and Generation stay unchanged.
 func (c Configuration) ReplaceServerPSK(expectedVersion, newRef, newVersion string) (Configuration, error) {
-	if c.ServerPSKVersion != expectedVersion {
-		return Configuration{}, ErrDenied
-	}
-	if !refPattern.MatchString(newRef) || !refPattern.MatchString(newVersion) {
+	if expectedVersion == "" || !refPattern.MatchString(newRef) || !refPattern.MatchString(newVersion) {
 		return Configuration{}, ErrInvalid
 	}
 	next := clone(c)
-	next.ServerPSKRef, next.ServerPSKVersion = newRef, newVersion
+	matched := false
+	for i, listener := range next.Listeners {
+		if !SS2022Method(listener.Method) || listener.ServerSecretVersion != expectedVersion {
+			continue
+		}
+		next.Listeners[i].ServerSecretRef, next.Listeners[i].ServerSecretVersion = newRef, newVersion
+		matched = true
+		break
+	}
+	if !matched {
+		return Configuration{}, ErrDenied
+	}
 	return next, nil
 }
 
@@ -525,7 +703,13 @@ func (f *flowToken) finishLocked(success bool) {
 	}
 }
 func clone(c Configuration) Configuration {
-	c.Users = append([]User(nil), c.Users...)
-	sort.Slice(c.Users, func(i, j int) bool { return c.Users[i].ID < c.Users[j].ID })
+	listeners := make([]ListenRule, len(c.Listeners))
+	for i, listener := range c.Listeners {
+		listener.Users = append([]User(nil), listener.Users...)
+		sort.Slice(listener.Users, func(a, b int) bool { return listener.Users[a].ID < listener.Users[b].ID })
+		listeners[i] = listener
+	}
+	sort.Slice(listeners, func(i, j int) bool { return listeners[i].ID < listeners[j].ID })
+	c.Listeners = listeners
 	return c
 }

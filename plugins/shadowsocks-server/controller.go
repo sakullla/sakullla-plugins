@@ -269,7 +269,7 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			return err
 		}
 		if err = serviceHandle.Use(ctx, func(ctx context.Context, service *Service) error {
-			if err := runtime.Listener.Register(ctx, configuration.ListenerRef, service); err != nil {
+			if err := runtime.Listener.Register(ctx, configuration.firstListenerID(), service); err != nil {
 				return err
 			}
 			return service.RefreshListenShare(ctx)
@@ -438,7 +438,7 @@ func (s *Service) rememberIssuedSecret(secret *SecretOnce) {
 	if serverPSK, userPSK, ok := splitSS2022ClientPassword(material); ok {
 		// Host Verify/Resolve see the user identity PSK, not SIP002 serverPSK:userPSK.
 		issued.put(secret.SecretRef, secret.SecretVersion, string(userPSK))
-		if ref, version := s.configuration.ServerPSKRef, s.configuration.ServerPSKVersion; ref != "" && version != "" {
+		if ref, version := s.configuration.instanceServerPSK(); ref != "" && version != "" {
 			issued.put(ref, version, string(serverPSK))
 		}
 	} else {

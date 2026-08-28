@@ -1,9 +1,8 @@
 package shadowsocksserver
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
-	"net/url"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -69,18 +68,100 @@ func TestSIP002SS2022URIUsesIdentityPasswordAndMatchingQR(t *testing.T) {
 			if method != test.method || gotPassword != password || host != test.host || port != test.port {
 				t.Fatalf("parsed method=%q password=%q host=%q port=%d", method, gotPassword, host, port)
 			}
-			userinfo, _, ok := strings.Cut(strings.TrimPrefix(share.URI, "ss://"), "@")
-			if !ok {
-				t.Fatalf("uri=%q", share.URI)
+			userinfo := sip002Userinfo(t, share.URI)
+			decoded := decodeStandardUserinfo(t, userinfo)
+			if string(decoded) != test.method+":"+server+":"+identity {
+				t.Fatalf("decoded userinfo=%q", decoded)
 			}
-			if _, hasPassword := sip002URLPassword(t, share.URI); !hasPassword {
-				t.Fatal("client password missing from SIP002 password position")
-			}
-			if strings.Count(userinfo, ":") != 1 || !strings.Contains(userinfo, "%") {
+			if strings.Contains(userinfo, "%") || strings.Contains(userinfo, ":") {
 				t.Fatalf("userinfo=%q", userinfo)
 			}
-			if userinfoLooksLikeBase64URL(userinfo, test.method, password) {
-				t.Fatalf("userinfo is Base64URL: %q", userinfo)
+		})
+	}
+}
+
+func TestSIP002URIUsesStandardBase64UserinfoForAllMethods(t *testing.T) {
+	server, identity, err := GenerateSS2022Identity("2022-blake3-aes-128-gcm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		method   string
+		password string
+		name     string
+	}{
+		{method: "aes-128-gcm", password: "correct-horse-battery", name: "legacy"},
+		{method: "aes-256-gcm", password: "correct-horse-battery", name: ""},
+		{method: "2022-blake3-aes-128-gcm", password: server + ":" + identity, name: "alice"},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			uri, err := EncodeSIP002(test.method, test.password, "ss.example.com", 8388, test.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if SIP002QRContent(uri) != uri {
+				t.Fatalf("qr=%q uri=%q", SIP002QRContent(uri), uri)
+			}
+			userinfo := sip002Userinfo(t, uri)
+			decoded := decodeStandardUserinfo(t, userinfo)
+			want := test.method + ":" + test.password
+			if string(decoded) != want {
+				t.Fatalf("decoded=%q want=%q", decoded, want)
+			}
+			if strings.Contains(userinfo, "%") || strings.Contains(userinfo, ":") {
+				t.Fatalf("percent-encoded userinfo: %q", uri)
+			}
+			if test.name != "" && !strings.HasSuffix(uri, "#"+test.name) {
+				t.Fatalf("name fragment missing: %q", uri)
+			}
+		})
+	}
+}
+
+func TestIdentityPSKMapsNonCanonicalInputAndKeepsCanonical(t *testing.T) {
+	for method, keyLen := range map[string]int{
+		"2022-blake3-aes-128-gcm": 16,
+		"2022-blake3-aes-256-gcm": 32,
+	} {
+		t.Run(method, func(t *testing.T) {
+			mapped, err := MapSS2022PSK(method, "hello")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256([]byte("hello"))
+			want := base64.StdEncoding.EncodeToString(sum[:keyLen])
+			if mapped != want {
+				t.Fatalf("mapped=%q want=%q", mapped, want)
+			}
+			assertCanonicalPSK(t, method, keyLen, mapped)
+			again, err := MapSS2022PSK(method, mapped)
+			if err != nil || again != mapped {
+				t.Fatalf("canonical remapped: got=%q err=%v", again, err)
+			}
+			raw := base64.RawStdEncoding.EncodeToString(sum[:keyLen])
+			if raw == mapped {
+				t.Fatal("non-canonical fixture equals canonical PSK")
+			}
+			fromRaw, err := MapSS2022PSK(method, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fromRaw == raw {
+				t.Fatalf("non-canonical PSK was kept rather than mapped: %q", raw)
+			}
+			assertCanonicalPSK(t, method, keyLen, fromRaw)
+			password, err := SS2022ClientPassword(method, []byte("server-secret"), []byte("user-secret"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, user, ok := splitSS2022ClientPassword([]byte(password))
+			if !ok {
+				t.Fatalf("password=%q", password)
+			}
+			assertCanonicalPSK(t, method, keyLen, string(server))
+			assertCanonicalPSK(t, method, keyLen, string(user))
+			if _, engineErr := NewProtocolEngine(method, []byte(password)); engineErr != nil {
+				t.Fatalf("mapped password rejected by engine: %v", engineErr)
 			}
 		})
 	}
@@ -104,6 +185,10 @@ func TestSIP002LegacyURIIsImportableWithSinglePassword(t *testing.T) {
 			if strings.Contains(gotPassword, ":") {
 				t.Fatalf("legacy password must be a single secret: %q", gotPassword)
 			}
+			userinfo := sip002Userinfo(t, share.URI)
+			if string(decodeStandardUserinfo(t, userinfo)) != method+":"+password {
+				t.Fatalf("decoded userinfo=%q", userinfo)
+			}
 		})
 	}
 }
@@ -121,60 +206,40 @@ func assertCanonicalPSK(t *testing.T, method string, keyLen int, encoded string)
 
 func parseSIP002(t *testing.T, uri string) (method, password, host string, port int) {
 	t.Helper()
-	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Scheme != "ss" {
-		t.Fatalf("uri=%q err=%v", uri, err)
+	if !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "?") {
+		t.Fatalf("uri=%q", uri)
 	}
-	if parsed.RawQuery != "" {
-		t.Fatalf("query=%q", parsed.RawQuery)
-	}
-	host = parsed.Hostname()
-	port, err = strconv.Atoi(parsed.Port())
-	if err != nil || port <= 0 {
-		t.Fatalf("port=%q", parsed.Port())
-	}
-	if password, ok := parsed.User.Password(); ok {
-		return parsed.User.Username(), password, host, port
-	}
-	decoded, err := decodeBase64Userinfo(parsed.User.Username())
-	if err != nil {
-		t.Fatalf("userinfo=%q err=%v", parsed.User.Username(), err)
-	}
+	userinfo := sip002Userinfo(t, uri)
+	decoded := decodeStandardUserinfo(t, userinfo)
 	method, password, ok := strings.Cut(string(decoded), ":")
 	if !ok || method == "" || password == "" {
 		t.Fatalf("decoded userinfo=%q", decoded)
 	}
+	host, port, err := sip002URIHostPort(uri)
+	if err != nil {
+		t.Fatalf("uri=%q err=%v", uri, err)
+	}
 	return method, password, host, port
 }
 
-func sip002URLPassword(t *testing.T, uri string) (string, bool) {
+func sip002Userinfo(t *testing.T, uri string) string {
 	t.Helper()
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		t.Fatal(err)
+	rest, ok := strings.CutPrefix(uri, "ss://")
+	if !ok {
+		t.Fatalf("uri=%q", uri)
 	}
-	return parsed.User.Password()
+	userinfo, _, ok := strings.Cut(rest, "@")
+	if !ok || userinfo == "" {
+		t.Fatalf("uri=%q", uri)
+	}
+	return userinfo
 }
 
-func userinfoLooksLikeBase64URL(userinfo, method, password string) bool {
-	want := method + ":" + password
-	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding} {
-		decoded, err := enc.DecodeString(userinfo)
-		if err == nil && string(decoded) == want {
-			return true
-		}
+func decodeStandardUserinfo(t *testing.T, userinfo string) []byte {
+	t.Helper()
+	decoded, err := base64.StdEncoding.Strict().DecodeString(userinfo)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != userinfo {
+		t.Fatalf("userinfo is not canonical standard Base64: %q err=%v", userinfo, err)
 	}
-	return false
-}
-
-func decodeBase64Userinfo(userinfo string) ([]byte, error) {
-	var last error
-	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.StdEncoding} {
-		decoded, err := enc.DecodeString(userinfo)
-		if err == nil {
-			return decoded, nil
-		}
-		last = err
-	}
-	return nil, last
+	return decoded
 }

@@ -2,27 +2,92 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generation", "listener_ref", "cipher", "max_sessions", "users"],
+  "required": ["listeners"],
   "properties": {
-    "generation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "listener_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "cipher": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
-    "server_psk_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "server_psk_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-    "max_sessions": {"type": "integer", "minimum": 1, "maximum": 4096},
-    "users": {
-      "type": "array", "maxItems": 256,
+    "generation": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
+    },
+    "resource_group_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+      "description": "由宿主写入，不作为用户填写项。",
+      "hostInjected": true
+    },
+    "listeners": {
+      "type": "array",
+      "maxItems": 256,
+      "default": [],
+      "hostInjected": true,
+      "description": "由插件管理页写入，不作为通用配置表单。",
       "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["id", "secret_ref", "secret_version", "enabled"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "agent_id", "port", "method", "users"],
         "properties": {
-          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "method": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
-          "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
-          "enabled": {"type": "boolean"},
-          "expires_at": {"type": "integer", "minimum": 0},
-          "quota_bytes": {"type": "integer", "minimum": 1}
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+            "description": "由宿主或插件写入，不作为用户填写项。",
+            "hostInjected": true
+          },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "目标 Agent。由插件管理页写入，不作为通用配置表单。",
+            "hostInjected": true
+          },
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "method": {
+            "enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"],
+            "default": "2022-blake3-aes-128-gcm"
+          },
+          "server_secret_ref": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+            "description": "由宿主写入，不作为用户填写项。",
+            "hostInjected": true
+          },
+          "server_secret_version": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+            "description": "由宿主写入，不作为用户填写项。",
+            "hostInjected": true
+          },
+          "users": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "secret_ref", "secret_version", "enabled"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                  "description": "由宿主或插件写入，不作为用户填写项。",
+                  "hostInjected": true
+                },
+                "name": {"type": "string", "maxLength": 128},
+                "secret_ref": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                  "description": "由宿主写入，不作为用户填写项。",
+                  "hostInjected": true
+                },
+                "secret_version": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                  "description": "由宿主写入，不作为用户填写项。",
+                  "hostInjected": true
+                },
+                "enabled": {"type": "boolean"}
+              }
+            }
+          }
         }
       }
     }

@@ -173,9 +173,17 @@ func sip002ShareHostPort(host string, port int) (string, error) {
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
-// EncodeSIP002 builds an importable ss:// URI. SS2022 percent-encodes method
-// and password and never Base64URL-encodes userinfo. QR content is this URI.
-func EncodeSIP002(method, password, host string, port int) (string, error) {
+// EncodeSIP002 builds an importable ss:// URI for every method: standard
+// Base64 with padding of method:password, optional #name. QR content is this URI.
+func EncodeSIP002(method, password, host string, port int, name ...string) (string, error) {
+	remark := ""
+	if len(name) > 0 {
+		remark = name[0]
+	}
+	return encodeSIP002(method, password, host, port, remark)
+}
+
+func encodeSIP002(method, password, host string, port int, name string) (string, error) {
 	if !SupportedMethod(method) || password == "" {
 		return "", ErrInvalid
 	}
@@ -192,15 +200,18 @@ func EncodeSIP002(method, password, host string, port int) (string, error) {
 			return "", err
 		}
 		engine.Destroy()
-		return "ss://" + url.UserPassword(method, password).String() + "@" + hostport, nil
 	}
-	userinfo := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
-	return "ss://" + userinfo + "@" + hostport, nil
+	userinfo := base64.StdEncoding.EncodeToString([]byte(method + ":" + password))
+	uri := "ss://" + userinfo + "@" + hostport
+	if name = strings.TrimSpace(name); name != "" {
+		uri += "#" + url.PathEscape(name)
+	}
+	return uri, nil
 }
 
 // SIP002URI is EncodeSIP002.
-func SIP002URI(method, password, host string, port int) (string, error) {
-	return EncodeSIP002(method, password, host, port)
+func SIP002URI(method, password, host string, port int, name ...string) (string, error) {
+	return EncodeSIP002(method, password, host, port, name...)
 }
 
 // SIP002QRCode is the QR payload, which is exactly the SIP002 URI.
