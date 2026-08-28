@@ -2,9 +2,12 @@ package shadowsocksserver
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -173,7 +176,6 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 			return nil, err
 		}
 		if err := exec.bindOneLocked(item); err != nil {
-			exec.unbindLocked(item.ID)
 			if applyErr == nil {
 				applyErr = err
 			}
@@ -235,7 +237,6 @@ func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
 	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
 		return ErrInvalid
 	}
-	exec.unbindLocked(item.ID)
 	engines := make([]*ProtocolEngine, 0, len(item.Users))
 	for _, user := range item.Users {
 		if !user.Enabled || strings.TrimSpace(user.Password) == "" {
@@ -248,6 +249,11 @@ func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
 		}
 		engines = append(engines, engine)
 	}
+	existing := exec.bound[item.ID]
+	if existing != nil && existing.port == item.Port {
+		existing.replaceEngines(engines)
+		return nil
+	}
 	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(item.Port))
 	tcp, err := exec.binder.Listen("tcp", address)
 	if err != nil {
@@ -259,6 +265,9 @@ func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
 		_ = tcp.Close()
 		destroyListenEngines(engines)
 		return ErrListenBind
+	}
+	if existing != nil {
+		exec.unbindLocked(item.ID)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, cancel: cancel}
@@ -301,8 +310,11 @@ func (b *boundListen) close() {
 		_ = b.udp.Close()
 	}
 	b.wg.Wait()
-	destroyListenEngines(b.engines)
+	b.mu.Lock()
+	engines := b.engines
 	b.engines = nil
+	b.mu.Unlock()
+	destroyListenEngines(engines)
 }
 
 func (b *boundListen) goHandle(fn func()) bool {
@@ -333,10 +345,43 @@ func (b *boundListen) serveTCP(ctx context.Context) {
 	}
 }
 
+func (b *boundListen) snapshotEngines() []*ProtocolEngine {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*ProtocolEngine(nil), b.engines...)
+}
+
+func (b *boundListen) replaceEngines(engines []*ProtocolEngine) {
+	if b == nil {
+		destroyListenEngines(engines)
+		return
+	}
+	b.mu.Lock()
+	old := b.engines
+	b.engines = engines
+	b.mu.Unlock()
+	destroyListenEngines(old)
+}
+
+func (b *boundListen) packetConn() net.PacketConn {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	return b.udp
+}
+
 func (b *boundListen) serveUDP(ctx context.Context) {
 	buf := make([]byte, maxUDPPacket)
 	for {
-		n, _, err := b.udp.ReadFrom(buf)
+		n, addr, err := b.udp.ReadFrom(buf)
 		if err != nil {
 			return
 		}
@@ -344,7 +389,8 @@ func (b *boundListen) serveUDP(ctx context.Context) {
 			return
 		}
 		packet := append([]byte(nil), buf[:n]...)
-		if !b.goHandle(func() { b.handleUDP(packet) }) {
+		clientAddr := clonePacketAddr(addr)
+		if !b.goHandle(func() { b.handleUDP(ctx, packet, clientAddr) }) {
 			return
 		}
 	}
@@ -353,7 +399,7 @@ func (b *boundListen) serveUDP(ctx context.Context) {
 func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	request, session, err := readTCPHandshake(conn, b.engines)
+	request, session, err := readTCPHandshake(conn, b.snapshotEngines())
 	if session != nil {
 		defer session.Close()
 	}
@@ -367,16 +413,40 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	}
 	defer target.Close()
 	if len(request.Payload) > 0 {
-		_, _ = target.Write(request.Payload)
+		if _, err := target.Write(request.Payload); err != nil {
+			return
+		}
 	}
 	_ = conn.SetDeadline(time.Time{})
+	_ = target.SetDeadline(time.Time{})
+
+	var once sync.Once
+	shutdown := func() {
+		once.Do(func() {
+			_ = conn.Close()
+			_ = target.Close()
+		})
+	}
+	defer shutdown()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		relayTCPClientToTarget(conn, target, session)
+	}()
+	relayTCPTargetToClient(conn, target, session)
+	shutdown()
+	<-done
 }
 
-func (b *boundListen) handleUDP(wire []byte) {
+func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net.Addr) {
+	if clientAddr == nil {
+		return
+	}
 	now := time.Now()
 	var request ProxyRequest
-	matched := false
-	for _, engine := range b.engines {
+	var matched *ProtocolEngine
+	for _, engine := range b.snapshotEngines() {
 		req, err := engine.OpenUDPPacket(wire, now)
 		if err != nil {
 			if errors.Is(err, ErrReplay) {
@@ -385,20 +455,166 @@ func (b *boundListen) handleUDP(wire []byte) {
 			continue
 		}
 		request = req
-		matched = true
+		matched = engine
 		break
 	}
-	if !matched {
+	if matched == nil {
 		return
 	}
-	conn, err := net.DialTimeout("udp", request.Target, 5*time.Second)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "udp", request.Target)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if len(request.Payload) > 0 {
-		_, _ = conn.Write(request.Payload)
+		if _, err := conn.Write(request.Payload); err != nil {
+			return
+		}
 	}
+	buf := make([]byte, maxUDPPacket)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		return
+	}
+	saltSize := 8
+	if !matched.modern {
+		saltSize = matched.SaltSize()
+	}
+	responseSalt := make([]byte, saltSize)
+	if _, err := rand.Read(responseSalt); err != nil {
+		return
+	}
+	sealed, err := matched.SealUDPResponse(responseSalt, 0, request.SessionID, request.Target, buf[:n], time.Now(), nil)
+	if err != nil {
+		return
+	}
+	udp := b.packetConn()
+	if udp == nil {
+		return
+	}
+	_, _ = udp.WriteTo(sealed, clientAddr)
+}
+
+func relayTCPClientToTarget(conn, target net.Conn, session *TCPServerSession) {
+	for {
+		payload, err := readTCPPayloadChunk(conn, session)
+		if err != nil {
+			return
+		}
+		if len(payload) == 0 {
+			continue
+		}
+		if _, err := target.Write(payload); err != nil {
+			return
+		}
+	}
+}
+
+func relayTCPTargetToClient(conn, target net.Conn, session *TCPServerSession) {
+	buf := make([]byte, 32*1024)
+	startResponse := true
+	for {
+		n, err := target.Read(buf)
+		if n > 0 {
+			var writeErr error
+			startResponse, writeErr = writeTCPClientChunks(conn, session, buf[:n], startResponse)
+			if writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func writeTCPClientChunks(conn net.Conn, session *TCPServerSession, payload []byte, startResponse bool) (bool, error) {
+	maximum := maxLegacyPayload
+	if session != nil && session.modern {
+		maximum = max2022Payload
+	}
+	for len(payload) > 0 {
+		chunk := payload
+		if len(chunk) > maximum {
+			chunk = chunk[:maximum]
+		}
+		var wire []byte
+		var err error
+		if startResponse {
+			saltSize := 0
+			if session != nil && session.engine != nil {
+				saltSize = session.engine.SaltSize()
+			}
+			salt := make([]byte, saltSize)
+			if _, err := rand.Read(salt); err != nil {
+				return startResponse, err
+			}
+			wire, err = session.SealResponse(salt, chunk, time.Now())
+			startResponse = false
+		} else {
+			wire, err = session.SealPayloadChunk(chunk)
+		}
+		if err != nil {
+			return startResponse, err
+		}
+		if _, err := conn.Write(wire); err != nil {
+			return startResponse, err
+		}
+		payload = payload[len(chunk):]
+	}
+	return startResponse, nil
+}
+
+func readTCPPayloadChunk(conn net.Conn, session *TCPServerSession) ([]byte, error) {
+	if session == nil {
+		return nil, ErrRevoked
+	}
+	session.mu.Lock()
+	inbound := session.inbound
+	modern := session.modern
+	closed := session.closed
+	session.mu.Unlock()
+	if closed || inbound == nil {
+		return nil, ErrRevoked
+	}
+	headerSize := 2 + inbound.aead.Overhead()
+	header := make([]byte, headerSize)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
+	}
+	session.mu.Lock()
+	lengthPlain, err := inbound.aead.Open(nil, inbound.nonce[:], header, nil)
+	session.mu.Unlock()
+	if err != nil || len(lengthPlain) != 2 {
+		return nil, ErrAuthentication
+	}
+	length := int(binary.BigEndian.Uint16(lengthPlain))
+	maximum := maxLegacyPayload
+	if modern {
+		maximum = max2022Payload
+	}
+	if length > maximum {
+		return nil, ErrProtocol
+	}
+	rest := make([]byte, length+inbound.aead.Overhead())
+	if _, err := io.ReadFull(conn, rest); err != nil {
+		return nil, err
+	}
+	return session.OpenPayloadChunk(append(header, rest...))
+}
+
+func clonePacketAddr(addr net.Addr) net.Addr {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok || udpAddr == nil {
+		return addr
+	}
+	out := *udpAddr
+	if udpAddr.IP != nil {
+		out.IP = append(net.IP(nil), udpAddr.IP...)
+	}
+	return &out
 }
 
 func readTCPHandshake(conn net.Conn, engines []*ProtocolEngine) (ProxyRequest, *TCPServerSession, error) {

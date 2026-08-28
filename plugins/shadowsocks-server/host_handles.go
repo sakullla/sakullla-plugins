@@ -85,13 +85,27 @@ func (runtime *hostCapabilityRuntime) Apply(ctx context.Context, agentID string,
 		"agent_id": agentID,
 		"listens":  listens,
 	}, &result); err != nil {
+		runtime.refreshLive(ctx, agentID)
 		return err
 	}
 	if !result.Accepted {
+		runtime.refreshLive(ctx, agentID)
 		return ErrListenBind
 	}
 	runtime.setLive(agentID, result.Listens)
 	return nil
+}
+
+func (runtime *hostCapabilityRuntime) refreshLive(ctx context.Context, agentID string) {
+	if runtime == nil {
+		return
+	}
+	report, err := runtime.Report(ctx, agentID)
+	if err != nil {
+		runtime.setLive(agentID, nil)
+		return
+	}
+	runtime.setLive(agentID, report.Listens)
 }
 
 func (runtime *hostCapabilityRuntime) Stop(ctx context.Context, agentID string, listenIDs []string) error {

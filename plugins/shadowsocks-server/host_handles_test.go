@@ -113,13 +113,18 @@ func TestHostListenOfflineAgentIDDoesNotDispatch(t *testing.T) {
 func TestHostListenApplyBindFailureDoesNotMarkLive(t *testing.T) {
 	t.Parallel()
 	var calls int
-	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, _ any) error {
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
 		calls++
 		request := decodePluginCallRequest(t, call)
-		if request.Name != pluginCallListenApply {
+		switch request.Name {
+		case pluginCallListenApply:
+			return ErrListenBind
+		case pluginCallListenReport:
+			return copyHostResult(map[string]any{"agent_id": "agent-1", "online": true, "listens": []any{}}, target)
+		default:
 			t.Fatalf("unexpected name %q", request.Name)
+			return nil
 		}
-		return ErrListenBind
 	})
 	runtime := newHostCapabilityRuntime(client)
 	if err := runtime.Apply(context.Background(), "agent-1", []ListenApplyItem{{
@@ -127,7 +132,7 @@ func TestHostListenApplyBindFailureDoesNotMarkLive(t *testing.T) {
 	}}); !errors.Is(err, ErrListenBind) {
 		t.Fatalf("apply err=%v", err)
 	}
-	if calls != 1 {
+	if calls < 1 {
 		t.Fatalf("calls=%d", calls)
 	}
 	if runtime.HasLiveListen("agent-1", "listen-1") {
@@ -135,6 +140,47 @@ func TestHostListenApplyBindFailureDoesNotMarkLive(t *testing.T) {
 	}
 	if live := runtime.LiveListens("agent-1"); len(live) != 0 {
 		t.Fatalf("live=%#v", live)
+	}
+}
+
+func TestHostListenApplyErrorRefreshesLiveFromAgentReport(t *testing.T) {
+	t.Parallel()
+	applied := 0
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		switch request.Name {
+		case pluginCallListenApply:
+			applied++
+			if applied == 1 {
+				return copyHostResult(map[string]any{
+					"accepted": true, "agent_id": "agent-1",
+					"listens": []map[string]any{{"id": "listen-1", "port": 8388, "tcp": true, "udp": true}},
+				}, target)
+			}
+			return ErrListenBind
+		case pluginCallListenReport:
+			return copyHostResult(map[string]any{"agent_id": "agent-1", "online": true, "listens": []any{}}, target)
+		default:
+			t.Fatalf("unexpected name %q", request.Name)
+			return nil
+		}
+	})
+	runtime := newHostCapabilityRuntime(client)
+	if err := runtime.Apply(context.Background(), "agent-1", []ListenApplyItem{{
+		ID: "listen-1", Port: 8388, Method: "aes-256-gcm",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.HasLiveListen("agent-1", "listen-1") {
+		t.Fatal("successful apply did not mark listen live")
+	}
+	if err := runtime.Apply(context.Background(), "agent-1", []ListenApplyItem{{
+		ID: "listen-1", Port: 8389, Method: "aes-256-gcm",
+	}}); !errors.Is(err, ErrListenBind) {
+		t.Fatalf("apply err=%v", err)
+	}
+	if runtime.HasLiveListen("agent-1", "listen-1") {
+		t.Fatal("apply error left stale live listen")
 	}
 }
 
