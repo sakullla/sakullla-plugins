@@ -15,92 +15,11 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	ss "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
 )
-
-type panelRuntime struct {
-	mu        sync.Mutex
-	now       uint64
-	refs      map[string]string
-	rotations int
-	node      ss.NodeAddresses
-	listen    ss.ListenBinding
-}
-
-type panelReservation struct{}
-
-func (panelReservation) Consume(context.Context, uint64) error { return nil }
-func (panelReservation) Finish(context.Context) error          { return nil }
-func (panelReservation) Abort(context.Context) error           { return nil }
-
-func (r *panelRuntime) Verify(_ context.Context, ref, _ string, material []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.refs[ref] != string(material) {
-		return ss.ErrDenied
-	}
-	return nil
-}
-
-func (r *panelRuntime) Resolve(_ context.Context, ref, _ string) ([]byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	material, ok := r.refs[ref]
-	if !ok {
-		return nil, ss.ErrDenied
-	}
-	return []byte(material), nil
-}
-
-func (*panelRuntime) Reserve(context.Context, string, uint64, string) (ss.TrafficReservation, error) {
-	return panelReservation{}, nil
-}
-
-func (r *panelRuntime) Now(context.Context) (uint64, error) {
-	if r.now != 0 {
-		return r.now, nil
-	}
-	return 10, nil
-}
-
-func (*panelRuntime) Admit(context.Context, string, []byte) error { return nil }
-func (*panelRuntime) Register(context.Context, string, *ss.Service) error {
-	return nil
-}
-func (r *panelRuntime) Binding(_ context.Context, _ string) (pluginsdk.DualStackListenBinding, error) {
-	return pluginsdk.DualStackListenBinding{Port: r.listen.Port, BindHost: r.listen.BindHost, TCP: r.listen.TCP, UDP: r.listen.UDP}, nil
-}
-func (r *panelRuntime) NodeAddresses(context.Context) (pluginsdk.NodeAddresses, error) {
-	return pluginsdk.NodeAddresses{DDNS: r.node.DDNS, IPv4: r.node.IPv4, IPv6: r.node.IPv6}, nil
-}
-
-func (r *panelRuntime) Rotate(_ context.Context, id, _, _, _ string) (*ss.SecretOnce, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rotations++
-	raw := make([]byte, 32)
-	for i := range raw {
-		raw[i] = byte(r.rotations) ^ byte(i*17+3)
-	}
-	material := []byte(base64.StdEncoding.EncodeToString(raw))
-	ref := "secret/account/" + id + "/" + strconv.Itoa(r.rotations)
-	version := "v" + strconv.Itoa(r.rotations)
-	if r.refs == nil {
-		r.refs = map[string]string{}
-	}
-	r.refs[ref] = string(material)
-	return ss.NewSecretOnce(ref, version, material), nil
-}
-
-func (*panelRuntime) Audit(context.Context, ss.AuditRecord) error { return nil }
-
-func (r *panelRuntime) adapters() ss.RuntimeAdapters {
-	return ss.RuntimeAdapters{Secrets: r, Traffic: r, Clock: r, Replay: r, Listener: r, Vault: r, Auditor: r}
-}
 
 func panelConfig() ss.Configuration {
 	return ss.Configuration{Generation: "generation-1"}
@@ -115,21 +34,17 @@ func panelWire(t *testing.T) []byte {
 	return body
 }
 
-func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Controller, http.Handler) {
+func startPanelController(t *testing.T) (*ss.Controller, http.Handler) {
 	t.Helper()
-	listen, err := ss.DualStackListen(port, "0.0.0.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime := &panelRuntime{now: 10, refs: map[string]string{}, node: node, listen: listen}
 	controller, err := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", Admission: ss.TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, ss.Configuration) (ss.PreparedAdmission, error) {
-		return ss.PreparedAdmissionFuncs{CommitFunc: func(context.Context) (ss.RuntimeAdapters, error) { return runtime.adapters(), nil }}, nil
+		return ss.PreparedAdmissionFuncs{CommitFunc: func(context.Context) (ss.RuntimeAdapters, error) {
+			return ss.RuntimeAdapters{}, nil
+		}}, nil
 	})})
 	if err != nil {
 		t.Fatal(err)
 	}
 	controller.BindLoopbackListenHost()
-	controller.RememberAgentNode(context.Background(), "agent-1", node)
 	t.Cleanup(func() {
 		_ = controller.StopListen(context.Background(), "agent-1", nil)
 	})
@@ -143,6 +58,14 @@ func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Co
 		t.Fatal(result.Error)
 	}
 	return controller, controller
+}
+
+func panelMutateBody(extra string) string {
+	body := `{"agent_id":"agent-1","ddns_domain":"ss.example.com","ipv4":"203.0.113.10"`
+	if extra != "" {
+		body += "," + extra
+	}
+	return body + "}"
 }
 
 func panelJSON(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -200,7 +123,7 @@ func panelUsers(t *testing.T, listen map[string]any) []map[string]any {
 }
 
 func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
-	_, handler := startPanelController(t, ss.NodeAddresses{DDNS: "ss.example.com", IPv4: "203.0.113.10"}, 8388)
+	_, handler := startPanelController(t)
 
 	page := panelJSON(t, handler, http.MethodGet, "/", "")
 	if page.Code != http.StatusOK {
@@ -222,7 +145,7 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		t.Fatalf("unselected create=%d %s", unselected.Code, unselected.Body.String())
 	}
 
-	created := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	created := panelJSON(t, handler, http.MethodPost, "/api/listens", panelMutateBody(""))
 	if created.Code != http.StatusOK {
 		t.Fatalf("default create=%d %s", created.Code, created.Body.String())
 	}
@@ -258,12 +181,12 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 	}
 
 	listenID, _ := listen["id"].(string)
-	dup := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","port":`+strconv.Itoa(port)+`}`)
+	dup := panelJSON(t, handler, http.MethodPost, "/api/listens", panelMutateBody(`"port":`+strconv.Itoa(port)))
 	if dup.Code != http.StatusConflict || !strings.Contains(dup.Body.String(), "该节点已使用此端口") {
 		t.Fatalf("duplicate port=%d %s", dup.Code, dup.Body.String())
 	}
 
-	appended := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/users", `{"agent_id":"agent-1"}`)
+	appended := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/users", panelMutateBody(""))
 	if appended.Code != http.StatusOK {
 		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
 	}
@@ -282,7 +205,7 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		t.Fatalf("peer=%#v", peer)
 	}
 
-	disabled := panelJSON(t, handler, http.MethodPost, "/api/users/"+firstID+"/disable", `{"agent_id":"agent-1"}`)
+	disabled := panelJSON(t, handler, http.MethodPost, "/api/users/"+firstID+"/disable", panelMutateBody(""))
 	if disabled.Code != http.StatusOK {
 		t.Fatalf("disable=%d %s", disabled.Code, disabled.Body.String())
 	}
@@ -305,25 +228,25 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		t.Fatalf("enabled=%#v", enabledView)
 	}
 
-	legacy := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","method":"aes-256-gcm"}`)
+	legacy := panelJSON(t, handler, http.MethodPost, "/api/listens", panelMutateBody(`"method":"aes-256-gcm"`))
 	if legacy.Code != http.StatusOK {
 		t.Fatalf("legacy create=%d %s", legacy.Code, legacy.Body.String())
 	}
 	legacyListen, _ := decodePanel(t, legacy)["listen"].(map[string]any)
 	legacyID, _ := legacyListen["id"].(string)
-	secondLegacy := panelJSON(t, handler, http.MethodPost, "/api/listens/"+legacyID+"/users", `{"agent_id":"agent-1"}`)
+	secondLegacy := panelJSON(t, handler, http.MethodPost, "/api/listens/"+legacyID+"/users", panelMutateBody(""))
 	if secondLegacy.Code != http.StatusBadRequest || !strings.Contains(secondLegacy.Body.String(), "传统方法不能在同一端口追加用户") {
 		t.Fatalf("traditional second user=%d %s", secondLegacy.Code, secondLegacy.Body.String())
 	}
 
-	deleted := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/delete", `{"agent_id":"agent-1"}`)
+	deleted := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/delete", panelMutateBody(""))
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete listen=%d %s", deleted.Code, deleted.Body.String())
 	}
 }
 
 func TestShadowsocksAdminPanelKeepsAccountWhenShareHostMissing(t *testing.T) {
-	_, handler := startPanelController(t, ss.NodeAddresses{}, 8488)
+	_, handler := startPanelController(t)
 	created := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
