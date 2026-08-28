@@ -438,7 +438,7 @@ func (s *Service) rememberIssuedSecret(secret *SecretOnce) {
 	if serverPSK, userPSK, ok := splitSS2022ClientPassword(material); ok {
 		// Host Verify/Resolve see the user identity PSK, not SIP002 serverPSK:userPSK.
 		issued.put(secret.SecretRef, secret.SecretVersion, string(userPSK))
-		if ref, version := s.configuration.instanceServerPSK(); ref != "" && version != "" {
+		if ref, version := listenServerSecret(s.configuration, secret.SecretRef, secret.SecretVersion); ref != "" && version != "" {
 			issued.put(ref, version, string(serverPSK))
 		}
 	} else {
@@ -446,4 +446,18 @@ func (s *Service) rememberIssuedSecret(secret *SecretOnce) {
 	}
 	s.mu.Unlock()
 	clear(material)
+}
+
+func listenServerSecret(cfg Configuration, secretRef, secretVersion string) (ref, version string) {
+	if secretRef == "" || secretVersion == "" {
+		return "", ""
+	}
+	for _, listener := range cfg.Listeners {
+		for _, user := range listener.Users {
+			if user.SecretRef == secretRef && user.SecretVersion == secretVersion {
+				return listener.ServerSecretRef, listener.ServerSecretVersion
+			}
+		}
+	}
+	return "", ""
 }
