@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -229,9 +228,24 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		if uri == "" || qr != uri || !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "plugin=") {
 			t.Fatalf("share=%#v", account)
 		}
-		parsed, err := url.Parse(uri)
-		if err != nil || parsed.Hostname() != "ss.example.com" || parsed.Port() != "8388" {
-			t.Fatalf("uri=%q err=%v", uri, err)
+		userinfo, host, port := sip002UserinfoAndHostPort(t, uri)
+		if host != "ss.example.com" {
+			t.Fatalf("uri=%q", uri)
+		}
+		wantPort := 8388
+		if family == "ss2022" {
+			wantPort = 8389
+		}
+		if port != wantPort {
+			t.Fatalf("family=%s uri=%q port=%d want=%d", family, uri, port, wantPort)
+		}
+		decoded := decodeStrictSIP002Userinfo(t, userinfo)
+		if family == "ss2022" {
+			if !strings.HasPrefix(decoded, "2022-blake3-aes-128-gcm:") || strings.Count(decoded, ":") != 2 {
+				t.Fatalf("ss2022 decoded=%q uri=%q", decoded, uri)
+			}
+		} else if strings.Count(decoded, ":") != 1 {
+			t.Fatalf("legacy decoded=%q uri=%q", decoded, uri)
 		}
 		pngB64, _ := account["qr_png_base64"].(string)
 		pngBytes, err := base64.StdEncoding.DecodeString(pngB64)
@@ -244,15 +258,6 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 	}
 	if seen["ss"] == nil || seen["ss2022"] == nil {
 		t.Fatalf("families=%#v", seen)
-	}
-	ss2022URI, _ := seen["ss2022"]["uri"].(string)
-	userinfo := strings.TrimPrefix(ss2022URI, "ss://")
-	if at := strings.Index(userinfo, "@"); at >= 0 {
-		userinfo = userinfo[:at]
-	}
-	decoded, err := base64.StdEncoding.DecodeString(userinfo)
-	if err != nil || !strings.HasPrefix(string(decoded), "2022-blake3-aes-128-gcm:") {
-		t.Fatalf("ss2022 uri should use Base64 method:password userinfo: %q", ss2022URI)
 	}
 
 	disabledID, _ := seen["ss"]["id"].(string)

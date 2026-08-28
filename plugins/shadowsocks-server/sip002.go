@@ -16,7 +16,7 @@ import (
 )
 
 // SIP002Account is the share material for one client. Traditional SS uses a
-// single Password. SS2022 uses the instance ServerPSK plus a per-user IdentityPSK.
+// single Password. SS2022 uses the listener ServerPSK plus a per-user IdentityPSK.
 type SIP002Account struct {
 	Method      string
 	Password    string

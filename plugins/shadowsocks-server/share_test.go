@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -222,7 +221,7 @@ func TestShareUnavailableWithoutPublicAddressKeepsAccount(t *testing.T) {
 }
 
 func TestShareListenHostUsesProjectedAddressNotBind(t *testing.T) {
-	binding, err := DualStackListen(8488, "0.0.0.0")
+	binding, err := DualStackListen(8388, "0.0.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,14 +229,14 @@ func TestShareListenHostUsesProjectedAddressNotBind(t *testing.T) {
 	user, password := createAccount(t, service, "legacy-share", "aes-256-gcm")
 	_ = password
 	endpoint := service.ShareEndpoint()
-	if !endpoint.Available || endpoint.Host != "ss.example.com" || endpoint.Port != 8488 || !endpoint.TCP || !endpoint.UDP {
+	if !endpoint.Available || endpoint.Host != "ss.example.com" || endpoint.Port != 8388 || !endpoint.TCP || !endpoint.UDP {
 		t.Fatalf("endpoint=%+v", endpoint)
 	}
-	if endpoint.HostPort != "ss.example.com:8488" {
+	if endpoint.HostPort != "ss.example.com:8388" {
 		t.Fatalf("hostport=%q", endpoint.HostPort)
 	}
 	backend, err := endpoint.L4Backend()
-	if err != nil || backend.BackendHost != "ss.example.com" || backend.BackendPort != 8488 {
+	if err != nil || backend.BackendHost != "ss.example.com" || backend.BackendPort != 8388 {
 		t.Fatalf("l4=%+v err=%v", backend, err)
 	}
 	share, err := service.ShareAccount(context.Background(), user.ID)
@@ -247,12 +246,41 @@ func TestShareListenHostUsesProjectedAddressNotBind(t *testing.T) {
 	if !share.Available || share.Share.URI == "" || share.Share.QR.Content != share.Share.URI {
 		t.Fatalf("share=%+v", share)
 	}
-	parsed, err := url.Parse(share.Share.URI)
+	_, _, host, port := parseSIP002(t, share.Share.URI)
+	if host != "ss.example.com" || port != 8388 {
+		t.Fatalf("uri=%q", share.Share.URI)
+	}
+}
+
+func TestShareAccountUsesListenRulePortAndNodeHost(t *testing.T) {
+	binding, err := DualStackListen(8388, "0.0.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Hostname() != "ss.example.com" || parsed.Port() != "8488" {
-		t.Fatalf("uri=%q", share.Share.URI)
+	service := newShareService(t, NodeAddresses{DDNS: "ss.example.com", IPv4: "203.0.113.9"}, binding)
+	legacy, _ := createAccount(t, service, "legacy-share", "aes-256-gcm")
+	modern, _ := createAccount(t, service, "ss2022-share", DefaultSS2022Method)
+	legacyShare, err := service.ShareAccount(context.Background(), legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modernShare, err := service.ShareAccount(context.Background(), modern.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !legacyShare.Available || !modernShare.Available {
+		t.Fatalf("legacy=%+v modern=%+v", legacyShare, modernShare)
+	}
+	_, _, host, port := parseSIP002(t, legacyShare.Share.URI)
+	if host != "ss.example.com" || port != 8388 || legacyShare.Endpoint.Port != 8388 {
+		t.Fatalf("legacy uri=%q endpoint=%+v", legacyShare.Share.URI, legacyShare.Endpoint)
+	}
+	_, _, host, port = parseSIP002(t, modernShare.Share.URI)
+	if host != "ss.example.com" || port != 8488 || modernShare.Endpoint.Port != 8488 {
+		t.Fatalf("modern uri=%q endpoint=%+v", modernShare.Share.URI, modernShare.Endpoint)
+	}
+	if service.ShareEndpoint().Port == modernShare.Endpoint.Port {
+		t.Fatalf("second listen share reused first listener port: %+v", service.ShareEndpoint())
 	}
 }
 

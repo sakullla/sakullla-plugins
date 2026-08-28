@@ -908,6 +908,55 @@ func TestRotateServerPSKInvalidatesAllSS2022ClientPasswords(t *testing.T) {
 	assertGenerationLive(t, s)
 }
 
+func TestRotateServerPSKMapsAndRebuildsMatchingListenerOnly(t *testing.T) {
+	s := newAccountService(t)
+	_, legacyPass := createAccount(t, s, "legacy-1", "aes-256-gcm")
+	_, gcm128Pass := createAccount(t, s, "ss2022-128", DefaultSS2022Method)
+	_, gcm256Pass := createAccount(t, s, "ss2022-256", "2022-blake3-aes-256-gcm")
+	_, gcm128Identity, ok := splitSS2022ClientPassword([]byte(gcm128Pass))
+	if !ok {
+		t.Fatalf("128 password=%q", gcm128Pass)
+	}
+	snapshot := s.Snapshot()
+	gcm128, _, ok := snapshot.userListener("ss2022-128")
+	if !ok || gcm128.ServerSecretVersion == "" {
+		t.Fatal("128-gcm server psk missing")
+	}
+	gcm256, _, ok := snapshot.userListener("ss2022-256")
+	if !ok || gcm256.ServerSecretVersion == "" || gcm256.ServerSecretVersion == gcm128.ServerSecretVersion {
+		t.Fatalf("256-gcm server psk=%q 128=%q", gcm256.ServerSecretVersion, gcm128.ServerSecretVersion)
+	}
+	rotated, err := s.RotateServerPSK(context.Background(), gcm128.ServerSecretVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newServer := string(rotated.RevealOnce())
+	if newServer == "" {
+		t.Fatal("rotated server psk empty")
+	}
+	assertCanonicalPSK(t, DefaultSS2022Method, 16, newServer)
+	assertTCPDenied(t, s, DefaultSS2022Method, gcm128Pass, 12)
+	if err = mustOpenTCP(t, s, DefaultSS2022Method, newServer+":"+string(gcm128Identity), 13).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "2022-blake3-aes-256-gcm", gcm256Pass, 14).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = mustOpenTCP(t, s, "aes-256-gcm", legacyPass, 15).Close(); err != nil {
+		t.Fatal(err)
+	}
+	after := s.Snapshot()
+	after128, _, _ := after.userListener("ss2022-128")
+	after256, _, _ := after.userListener("ss2022-256")
+	if after128.ServerSecretVersion == gcm128.ServerSecretVersion {
+		t.Fatal("128-gcm server version unchanged")
+	}
+	if after256.ServerSecretVersion != gcm256.ServerSecretVersion {
+		t.Fatalf("256-gcm server version changed: %q", after256.ServerSecretVersion)
+	}
+	assertGenerationLive(t, s)
+}
+
 func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
 	t.Skip("Admit still verifies unmapped vault material; mapped PSK load is listen-exec")
 	s := newAccountService(t)

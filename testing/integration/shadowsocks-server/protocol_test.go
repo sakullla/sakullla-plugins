@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"net/url"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
@@ -493,28 +493,18 @@ func assertImportableSIP002(t *testing.T, uri, method, password, host string, po
 	if !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "plugin=") {
 		t.Fatalf("uri=%q", uri)
 	}
-	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Scheme != "ss" {
-		t.Fatalf("uri=%q err=%v", uri, err)
+	userinfo, gotHost, gotPort := sip002UserinfoAndHostPort(t, uri)
+	if gotHost != host || gotPort != port {
+		t.Fatalf("hostport=%s:%d want=%s:%d", gotHost, gotPort, host, port)
 	}
-	if parsed.Hostname() != host || parsed.Port() != strconv.Itoa(port) {
-		t.Fatalf("hostport=%s:%s", parsed.Hostname(), parsed.Port())
-	}
-	userinfo := uri[len("ss://"):]
-	if at := strings.Index(userinfo, "@"); at >= 0 {
-		userinfo = userinfo[:at]
-	}
-	gotMethod, gotPassword, ok := sip002Credentials(parsed, userinfo)
+	decoded := decodeStrictSIP002Userinfo(t, userinfo)
+	gotMethod, gotPassword, ok := strings.Cut(decoded, ":")
 	if !ok || gotMethod != method || gotPassword != password {
 		t.Fatalf("parsed method=%q password=%q userinfo=%q", gotMethod, gotPassword, userinfo)
 	}
 	if modern {
-		decoded, err := decodeSIP002Userinfo(userinfo)
-		if err != nil {
-			t.Fatalf("ss2022 userinfo=%q err=%v", userinfo, err)
-		}
-		if got := string(decoded); !strings.HasPrefix(got, method+":") || strings.Count(got, ":") < 2 {
-			t.Fatalf("ss2022 decoded=%q", got)
+		if decoded != method+":"+password || strings.Count(decoded, ":") != 2 {
+			t.Fatalf("ss2022 decoded=%q", decoded)
 		}
 		return
 	}
@@ -523,37 +513,36 @@ func assertImportableSIP002(t *testing.T, uri, method, password, host string, po
 	}
 }
 
-func sip002Credentials(parsed *url.URL, userinfo string) (method, password string, ok bool) {
-	if parsed.User != nil {
-		if secret, has := parsed.User.Password(); has {
-			return parsed.User.Username(), secret, parsed.User.Username() != "" && secret != ""
-		}
+func sip002UserinfoAndHostPort(t *testing.T, uri string) (userinfo, host string, port int) {
+	t.Helper()
+	rest, ok := strings.CutPrefix(uri, "ss://")
+	if !ok {
+		t.Fatalf("uri=%q", uri)
 	}
-	decoded, err := decodeSIP002Userinfo(userinfo)
+	rest, _, _ = strings.Cut(rest, "#")
+	userinfo, hostport, ok := strings.Cut(rest, "@")
+	if !ok || userinfo == "" || hostport == "" {
+		t.Fatalf("uri=%q", uri)
+	}
+	host, portText, err := net.SplitHostPort(hostport)
 	if err != nil {
-		return "", "", false
+		t.Fatalf("uri=%q err=%v", uri, err)
 	}
-	method, password, ok = strings.Cut(string(decoded), ":")
-	return method, password, ok && method != "" && password != ""
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) > 2 {
+		host = host[1 : len(host)-1]
+	}
+	port, err = strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatalf("uri=%q port=%q", uri, portText)
+	}
+	return userinfo, host, port
 }
 
-func sip002UserinfoIsBase64URL(userinfo, method, password string) bool {
-	want := method + ":" + password
-	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding} {
-		decoded, err := encoding.DecodeString(userinfo)
-		if err == nil && string(decoded) == want {
-			return true
-		}
+func decodeStrictSIP002Userinfo(t *testing.T, userinfo string) string {
+	t.Helper()
+	decoded, err := base64.StdEncoding.Strict().DecodeString(userinfo)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != userinfo {
+		t.Fatalf("userinfo is not canonical standard Base64: %q err=%v", userinfo, err)
 	}
-	return false
-}
-
-func decodeSIP002Userinfo(userinfo string) ([]byte, error) {
-	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.StdEncoding, base64.RawStdEncoding} {
-		decoded, err := encoding.DecodeString(userinfo)
-		if err == nil {
-			return decoded, nil
-		}
-	}
-	return nil, errors.New("userinfo is not importable SIP002")
+	return string(decoded)
 }

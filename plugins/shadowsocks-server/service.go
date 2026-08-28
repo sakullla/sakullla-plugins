@@ -810,8 +810,8 @@ func (s *Service) Rotate(ctx context.Context, userID, expectedVersion string) (*
 	return secret, nil
 }
 
-// RotateServerPSK replaces the instance SS2022 server PSK. User identity PSKs
-// stay; every SS2022 client password serverPSK:userPSK becomes invalid.
+// RotateServerPSK replaces one SS2022 listener server PSK. User identity PSKs
+// stay; only that listener's client passwords serverPSK:userPSK become invalid.
 func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (*SecretOnce, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -822,12 +822,12 @@ func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (
 		return nil, ErrRevoked
 	}
 	generation := s.configuration.Generation
-	serverRef, serverVersion := s.configuration.instanceServerPSK()
+	listener, ok := s.configuration.ss2022ListenerByServerVersion(expectedVersion)
 	s.mu.Unlock()
-	if expectedVersion == "" || serverVersion != expectedVersion {
+	if !ok {
 		return nil, ErrDenied
 	}
-	secret, err := s.rotateVault(ctx, ServerPSKID, serverRef, serverVersion, generation, "server-psk")
+	secret, err := s.rotateVault(ctx, ServerPSKID, listener.ServerSecretRef, listener.ServerSecretVersion, generation, "server-psk")
 	if err != nil {
 		return nil, err
 	}
@@ -838,8 +838,17 @@ func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (
 	}
 	serverPSK := string(material)
 	clear(material)
+	mapped, err := MapSS2022PSK(listener.Method, serverPSK)
+	if err != nil {
+		secret.discard()
+		return nil, err
+	}
+	secret.mu.Lock()
+	clear(secret.material)
+	secret.material = append([]byte(nil), mapped...)
+	secret.mu.Unlock()
 	s.engineGate.Lock()
-	installed, err := s.installRotatedServerPSK(expectedVersion, secret, serverPSK)
+	installed, err := s.installRotatedServerPSK(listener.ID, expectedVersion, secret, mapped)
 	s.engineGate.Unlock()
 	if err != nil {
 		return nil, err
@@ -850,7 +859,7 @@ func (s *Service) RotateServerPSK(ctx context.Context, expectedVersion string) (
 	return installed, nil
 }
 
-func (s *Service) installRotatedServerPSK(expectedVersion string, secret *SecretOnce, serverPSK string) (*SecretOnce, error) {
+func (s *Service) installRotatedServerPSK(listenerID, expectedVersion string, secret *SecretOnce, serverPSK string) (*SecretOnce, error) {
 	type ss2022Account struct {
 		id, method, userPSK string
 	}
@@ -860,13 +869,21 @@ func (s *Service) installRotatedServerPSK(expectedVersion string, secret *Secret
 		secret.discard()
 		return nil, ErrRevoked
 	}
-	if s.configuration.ServerPSKVersion() != expectedVersion {
+	listener, ok := s.configuration.ss2022ListenerByServerVersion(expectedVersion)
+	if !ok || listener.ID != listenerID {
 		s.mu.Unlock()
 		secret.discard()
 		return nil, ErrDenied
 	}
-	accounts := make([]ss2022Account, 0, len(s.engines))
-	for id, engine := range s.engines {
+	mapped, err := MapSS2022PSK(listener.Method, serverPSK)
+	if err != nil {
+		s.mu.Unlock()
+		secret.discard()
+		return nil, err
+	}
+	accounts := make([]ss2022Account, 0, len(listener.Users))
+	for _, user := range listener.Users {
+		engine := s.engines[user.ID]
 		if engine == nil || !SS2022Method(engine.Name()) {
 			continue
 		}
@@ -876,7 +893,7 @@ func (s *Service) installRotatedServerPSK(expectedVersion string, secret *Secret
 			secret.discard()
 			return nil, ErrDenied
 		}
-		accounts = append(accounts, ss2022Account{id: id, method: engine.Name(), userPSK: encodedPSK(key)})
+		accounts = append(accounts, ss2022Account{id: user.ID, method: engine.Name(), userPSK: encodedPSK(key)})
 		clear(key)
 	}
 	generation := s.configuration.Generation
@@ -888,7 +905,7 @@ func (s *Service) installRotatedServerPSK(expectedVersion string, secret *Secret
 		}
 	}
 	for _, account := range accounts {
-		engine, buildErr := NewSS2022IdentityEngine(account.method, []byte(serverPSK), []byte(account.userPSK))
+		engine, buildErr := NewSS2022IdentityEngine(account.method, []byte(mapped), []byte(account.userPSK))
 		if buildErr != nil {
 			rollback()
 			secret.discard()
@@ -903,7 +920,7 @@ func (s *Service) installRotatedServerPSK(expectedVersion string, secret *Secret
 		secret.discard()
 		return nil, ErrRevoked
 	}
-	next, err := s.configuration.ReplaceServerPSK(expectedVersion, secret.SecretRef, secret.SecretVersion)
+	next, err := s.configuration.ReplaceServerPSK(listenerID, expectedVersion, secret.SecretRef, secret.SecretVersion)
 	if err != nil {
 		s.mu.Unlock()
 		rollback()
@@ -1068,6 +1085,15 @@ func refreshNodeAddresses(ctx context.Context, s *Service, listener Listener) er
 	return nil
 }
 
+func shareEndpointForListener(listener ListenRule, state listenShareAttachment) ShareEndpoint {
+	return ProjectShareEndpoint(ListenBinding{
+		Port:     listener.Port,
+		BindHost: state.binding.BindHost,
+		TCP:      true,
+		UDP:      true,
+	}, state.node)
+}
+
 func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare, error) {
 	if err := ctx.Err(); err != nil {
 		return AccountShare{}, err
@@ -1079,11 +1105,11 @@ func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare
 	}
 	snapshot := clone(s.configuration)
 	s.mu.Unlock()
-	user, ok := snapshot.User(userID)
+	listener, user, ok := snapshot.userListener(userID)
 	if !ok {
 		return AccountShare{}, ErrDenied
 	}
-	endpoint := s.ShareEndpoint()
+	endpoint := shareEndpointForListener(listener, listenShareOf(s))
 	out := AccountShare{Account: snapshot.AccountRecord(user), Endpoint: endpoint}
 	if !endpoint.Available {
 		out.Reason = endpoint.Reason
@@ -1097,7 +1123,7 @@ func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare
 		out.Reason = "share unavailable"
 		return out, nil
 	}
-	account := SIP002Account{Method: method, Host: endpoint.Host, Port: endpoint.Port, Name: user.Name}
+	account := SIP002Account{Method: method, Host: endpoint.Host, Port: listener.Port, Name: user.Name}
 	if SS2022Method(method) {
 		server, identity, ok := splitSS2022ClientPassword([]byte(password))
 		if !ok {

@@ -290,6 +290,18 @@ func (c Configuration) instanceServerPSK() (ref, version string) {
 	return "", ""
 }
 
+func (c Configuration) ss2022ListenerByServerVersion(version string) (ListenRule, bool) {
+	if version == "" {
+		return ListenRule{}, false
+	}
+	for _, listener := range c.Listeners {
+		if SS2022Method(listener.Method) && listener.ServerSecretVersion == version {
+			return listener, true
+		}
+	}
+	return ListenRule{}, false
+}
+
 func (c Configuration) ServerPSKVersion() string {
 	_, version := c.instanceServerPSK()
 	return version
@@ -466,24 +478,22 @@ func (c Configuration) ReplaceUserSecret(id, expectedVersion, newRef, newVersion
 
 // ReplaceServerPSK CAS-updates one SS2022 listener server PSK. User identity
 // PSK versions and Generation stay unchanged.
-func (c Configuration) ReplaceServerPSK(expectedVersion, newRef, newVersion string) (Configuration, error) {
-	if expectedVersion == "" || !refPattern.MatchString(newRef) || !refPattern.MatchString(newVersion) {
+func (c Configuration) ReplaceServerPSK(listenerID, expectedVersion, newRef, newVersion string) (Configuration, error) {
+	if listenerID == "" || expectedVersion == "" || !refPattern.MatchString(newRef) || !refPattern.MatchString(newVersion) {
 		return Configuration{}, ErrInvalid
 	}
 	next := clone(c)
-	matched := false
 	for i, listener := range next.Listeners {
-		if !SS2022Method(listener.Method) || listener.ServerSecretVersion != expectedVersion {
+		if listener.ID != listenerID {
 			continue
 		}
+		if !SS2022Method(listener.Method) || listener.ServerSecretVersion != expectedVersion {
+			return Configuration{}, ErrDenied
+		}
 		next.Listeners[i].ServerSecretRef, next.Listeners[i].ServerSecretVersion = newRef, newVersion
-		matched = true
-		break
+		return next, nil
 	}
-	if !matched {
-		return Configuration{}, ErrDenied
-	}
-	return next, nil
+	return Configuration{}, ErrDenied
 }
 
 type Protocol string
