@@ -25,16 +25,17 @@ type controllerEpoch struct{ live atomic.Bool }
 
 type Controller struct {
 	*rpcplugin.Adapter
-	mu            sync.Mutex
-	configuration Configuration
-	epoch         *controllerEpoch
-	commit        *rpcplugin.Handle[*controllerEpoch]
-	service       *rpcplugin.Handle[*Service]
-	published     *Service
-	transaction   *rpcplugin.Handle[PreparedAdmission]
-	admission     TypedHandleAdmission
-	listenHost    *hostCapabilityRuntime
-	listenExec    *listenExecutor
+	mu             sync.Mutex
+	configuration  Configuration
+	epoch          *controllerEpoch
+	commit         *rpcplugin.Handle[*controllerEpoch]
+	service        *rpcplugin.Handle[*Service]
+	published      *Service
+	transaction    *rpcplugin.Handle[PreparedAdmission]
+	admission      TypedHandleAdmission
+	listenHost     *hostCapabilityRuntime
+	listenExec     *listenExecutor
+	controlSecrets *issuedSecrets
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {

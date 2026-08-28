@@ -103,7 +103,7 @@ func (r *panelRuntime) adapters() ss.RuntimeAdapters {
 }
 
 func panelConfig() ss.Configuration {
-	return ss.Configuration{Generation: "generation-1", Listeners: listenRules("aes-256-gcm", nil)}
+	return ss.Configuration{Generation: "generation-1"}
 }
 
 func panelWire(t *testing.T) []byte {
@@ -128,6 +128,10 @@ func startPanelController(t *testing.T, node ss.NodeAddresses, port int) (*ss.Co
 	if err != nil {
 		t.Fatal(err)
 	}
+	controller.BindLoopbackListenHost()
+	t.Cleanup(func() {
+		_ = controller.StopListen(context.Background(), "agent-1", nil)
+	})
 	if _, err = controller.Handshake(context.Background(), handshake(grants())); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +151,8 @@ func panelJSON(t *testing.T, handler http.Handler, method, path, body string) *h
 		reader = strings.NewReader(body)
 	}
 	request := httptest.NewRequest(method, path, reader)
+	request.Header.Set(pluginsdk.HeaderPluginActor, "panel/admin")
+	request.Header.Set(pluginsdk.HeaderPluginOperationKey, "operation/ui-test")
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -164,16 +170,30 @@ func decodePanel(t *testing.T, recorder *httptest.ResponseRecorder) map[string]a
 	return payload
 }
 
-func panelAccounts(t *testing.T, payload map[string]any) []map[string]any {
+func panelListens(t *testing.T, payload map[string]any) []map[string]any {
 	t.Helper()
-	raw, _ := payload["accounts"].([]any)
+	raw, _ := payload["listens"].([]any)
 	out := make([]map[string]any, 0, len(raw))
 	for _, item := range raw {
-		account, ok := item.(map[string]any)
+		listen, ok := item.(map[string]any)
 		if !ok {
-			t.Fatalf("account=%#v", item)
+			t.Fatalf("listen=%#v", item)
 		}
-		out = append(out, account)
+		out = append(out, listen)
+	}
+	return out
+}
+
+func panelUsers(t *testing.T, listen map[string]any) []map[string]any {
+	t.Helper()
+	raw, _ := listen["users"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		user, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("user=%#v", item)
+		}
+		out = append(out, user)
 	}
 	return out
 }
@@ -186,93 +206,96 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		t.Fatalf("page=%d", page.Code)
 	}
 	html := page.Body.String()
-	for _, fragment := range []string{"生成传统 SS 账号", "生成 SS2022 账号", "不必先建 L4", "无需打开 L4", "SIP002", "二维码", "对外监听"} {
-		if !strings.Contains(html, fragment) {
+	script := panelJSON(t, handler, http.MethodGet, "/app.js", "").Body.String()
+	for _, fragment := range []string{"选择节点", "新增监听", "data-agent-picker", "/panel-api/agents"} {
+		if !strings.Contains(html, fragment) && !strings.Contains(script, fragment) {
 			t.Fatalf("page missing %q", fragment)
 		}
 	}
-	if strings.Contains(html, "http.backend-provider") || strings.Contains(html, "plugin=") {
-		t.Fatal("page must not present L4/HTTP provider or SIP003 as the main path")
+	if strings.Contains(html, "http.backend-provider") || strings.Contains(html, "plugin=") || strings.Contains(html, "订阅") || strings.Contains(html, "ss2022://") {
+		t.Fatal("page must not present L4/HTTP provider, subscription, SIP003, or ss2022://")
 	}
 
-	legacy := panelJSON(t, handler, http.MethodPost, "/api/accounts", `{"family":"ss"}`)
-	if legacy.Code != http.StatusOK {
-		t.Fatalf("create ss=%d %s", legacy.Code, legacy.Body.String())
-	}
-	modern := panelJSON(t, handler, http.MethodPost, "/api/accounts", `{"family":"ss2022"}`)
-	if modern.Code != http.StatusOK {
-		t.Fatalf("create ss2022=%d %s", modern.Code, modern.Body.String())
+	unselected := panelJSON(t, handler, http.MethodPost, "/api/listens", `{}`)
+	if unselected.Code != http.StatusConflict {
+		t.Fatalf("unselected create=%d %s", unselected.Code, unselected.Body.String())
 	}
 
-	listed := decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/panel", ""))
-	if listed["ready"] != true {
-		t.Fatalf("panel=%#v", listed)
+	created := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("default create=%d %s", created.Code, created.Body.String())
 	}
-	listen, _ := listed["listen"].(map[string]any)
-	if listen["available"] != true || listen["host"] != "ss.example.com" || listen["host_port"] != "ss.example.com:8388" || listen["tcp"] != true || listen["udp"] != true {
-		t.Fatalf("listen=%#v", listen)
+	createdPayload := decodePanel(t, created)
+	listen, _ := createdPayload["listen"].(map[string]any)
+	if listen["method"] != "2022-blake3-aes-128-gcm" {
+		t.Fatalf("default method=%#v", listen)
 	}
-	accounts := panelAccounts(t, listed)
-	if len(accounts) != 2 {
-		t.Fatalf("accounts=%#v", accounts)
+	users := panelUsers(t, listen)
+	if len(users) != 1 || users[0]["share_available"] != true {
+		t.Fatalf("default users=%#v", users)
 	}
-	seen := map[string]map[string]any{}
-	for _, account := range accounts {
-		family, _ := account["family"].(string)
-		seen[family] = account
-		if account["enabled"] != true || account["share_available"] != true {
-			t.Fatalf("account=%#v", account)
-		}
-		uri, _ := account["uri"].(string)
-		qr, _ := account["qr_content"].(string)
-		if uri == "" || qr != uri || !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "plugin=") {
-			t.Fatalf("share=%#v", account)
-		}
-		userinfo, host, port := sip002UserinfoAndHostPort(t, uri)
-		if host != "ss.example.com" {
-			t.Fatalf("uri=%q", uri)
-		}
-		wantPort := 8388
-		if family == "ss2022" {
-			wantPort = 8389
-		}
-		if port != wantPort {
-			t.Fatalf("family=%s uri=%q port=%d want=%d", family, uri, port, wantPort)
-		}
-		decoded := decodeStrictSIP002Userinfo(t, userinfo)
-		if family == "ss2022" {
-			if !strings.HasPrefix(decoded, "2022-blake3-aes-128-gcm:") || strings.Count(decoded, ":") != 2 {
-				t.Fatalf("ss2022 decoded=%q uri=%q", decoded, uri)
-			}
-		} else if strings.Count(decoded, ":") != 1 {
-			t.Fatalf("legacy decoded=%q uri=%q", decoded, uri)
-		}
-		pngB64, _ := account["qr_png_base64"].(string)
-		pngBytes, err := base64.StdEncoding.DecodeString(pngB64)
-		if err != nil || len(pngBytes) == 0 {
-			t.Fatalf("qr png=%v", err)
-		}
-		if _, err = png.Decode(bytes.NewReader(pngBytes)); err != nil {
-			t.Fatalf("qr decode=%v", err)
-		}
+	uri, _ := users[0]["uri"].(string)
+	qr, _ := users[0]["qr_content"].(string)
+	if uri == "" || qr != uri || !strings.HasPrefix(uri, "ss://") || strings.Contains(uri, "plugin=") || strings.Contains(uri, "ss2022://") {
+		t.Fatalf("share=%#v", users[0])
 	}
-	if seen["ss"] == nil || seen["ss2022"] == nil {
-		t.Fatalf("families=%#v", seen)
+	userinfo, host, port := sip002UserinfoAndHostPort(t, uri)
+	if host != "ss.example.com" {
+		t.Fatalf("uri=%q", uri)
+	}
+	decoded := decodeStrictSIP002Userinfo(t, userinfo)
+	if !strings.HasPrefix(decoded, "2022-blake3-aes-128-gcm:") || strings.Count(decoded, ":") != 2 {
+		t.Fatalf("ss2022 decoded=%q uri=%q", decoded, uri)
+	}
+	pngB64, _ := users[0]["qr_png_base64"].(string)
+	pngBytes, err := base64.StdEncoding.DecodeString(pngB64)
+	if err != nil || len(pngBytes) == 0 {
+		t.Fatalf("qr png=%v", err)
+	}
+	if _, err = png.Decode(bytes.NewReader(pngBytes)); err != nil {
+		t.Fatalf("qr decode=%v", err)
 	}
 
-	disabledID, _ := seen["ss"]["id"].(string)
-	disabled := panelJSON(t, handler, http.MethodPost, "/api/accounts/"+disabledID+"/disable", "{}")
+	listenID, _ := listen["id"].(string)
+	dup := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","port":`+strconv.Itoa(port)+`}`)
+	if dup.Code != http.StatusConflict || !strings.Contains(dup.Body.String(), "该节点已使用此端口") {
+		t.Fatalf("duplicate port=%d %s", dup.Code, dup.Body.String())
+	}
+
+	appended := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/users", `{"agent_id":"agent-1"}`)
+	if appended.Code != http.StatusOK {
+		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
+	}
+	two := panelUsers(t, decodePanel(t, appended)["listen"].(map[string]any))
+	if len(two) != 2 {
+		t.Fatalf("append users=%#v", two)
+	}
+	firstID, _ := users[0]["id"].(string)
+	var peer map[string]any
+	for _, user := range two {
+		if user["id"] != firstID {
+			peer = user
+		}
+	}
+	if peer["share_available"] != true {
+		t.Fatalf("peer=%#v", peer)
+	}
+
+	disabled := panelJSON(t, handler, http.MethodPost, "/api/users/"+firstID+"/disable", `{"agent_id":"agent-1"}`)
 	if disabled.Code != http.StatusOK {
 		t.Fatalf("disable=%d %s", disabled.Code, disabled.Body.String())
 	}
-	afterDisable := panelAccounts(t, decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/panel", "")))
+	afterDisable := panelListens(t, decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/listens?agent_id=agent-1", "")))
+	if len(afterDisable) != 1 {
+		t.Fatalf("after disable listens=%#v", afterDisable)
+	}
 	var disabledView, enabledView map[string]any
-	for _, account := range afterDisable {
-		if account["id"] == disabledID {
-			disabledView = account
+	for _, user := range panelUsers(t, afterDisable[0]) {
+		if user["id"] == firstID {
+			disabledView = user
 			continue
 		}
-		enabledView = account
+		enabledView = user
 	}
 	if disabledView["enabled"] != false || disabledView["share_available"] == true || disabledView["uri"] != nil {
 		t.Fatalf("disabled=%#v", disabledView)
@@ -281,51 +304,40 @@ func TestShadowsocksAdminPanelCreatesListsAndSharesWithoutL4(t *testing.T) {
 		t.Fatalf("enabled=%#v", enabledView)
 	}
 
-	enabled := panelJSON(t, handler, http.MethodPost, "/api/accounts/"+disabledID+"/enable", "{}")
-	if enabled.Code != http.StatusOK {
-		t.Fatalf("enable=%d %s", enabled.Code, enabled.Body.String())
+	legacy := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","method":"aes-256-gcm"}`)
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("legacy create=%d %s", legacy.Code, legacy.Body.String())
 	}
-	afterEnable := panelAccounts(t, decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/panel", "")))
-	for _, account := range afterEnable {
-		if account["id"] == disabledID && (account["enabled"] != true || account["share_available"] != true) {
-			t.Fatalf("reenabled=%#v", account)
-		}
-	}
-
-	oldURI, _ := seen["ss2022"]["uri"].(string)
-	modernID, _ := seen["ss2022"]["id"].(string)
-	rotated := panelJSON(t, handler, http.MethodPost, "/api/accounts/"+modernID+"/rotate", "{}")
-	if rotated.Code != http.StatusOK {
-		t.Fatalf("rotate=%d %s", rotated.Code, rotated.Body.String())
-	}
-	rotatedView := panelAccounts(t, decodePanel(t, rotated))
-	if len(rotatedView) != 1 || rotatedView[0]["uri"] == oldURI || rotatedView[0]["share_available"] != true {
-		t.Fatalf("rotated=%#v", rotatedView)
+	legacyListen, _ := decodePanel(t, legacy)["listen"].(map[string]any)
+	legacyID, _ := legacyListen["id"].(string)
+	secondLegacy := panelJSON(t, handler, http.MethodPost, "/api/listens/"+legacyID+"/users", `{"agent_id":"agent-1"}`)
+	if secondLegacy.Code != http.StatusBadRequest || !strings.Contains(secondLegacy.Body.String(), "传统方法不能在同一端口追加用户") {
+		t.Fatalf("traditional second user=%d %s", secondLegacy.Code, secondLegacy.Body.String())
 	}
 
-	qr := panelJSON(t, handler, http.MethodGet, "/api/accounts/"+modernID+"/qr.png", "")
-	if qr.Code != http.StatusOK || qr.Header().Get("Content-Type") != "image/png" || qr.Body.Len() == 0 {
-		t.Fatalf("qr image=%d %s", qr.Code, qr.Header().Get("Content-Type"))
+	deleted := panelJSON(t, handler, http.MethodPost, "/api/listens/"+listenID+"/delete", `{"agent_id":"agent-1"}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete listen=%d %s", deleted.Code, deleted.Body.String())
 	}
 }
 
 func TestShadowsocksAdminPanelKeepsAccountWhenShareHostMissing(t *testing.T) {
 	_, handler := startPanelController(t, ss.NodeAddresses{}, 8488)
-	created := panelJSON(t, handler, http.MethodPost, "/api/accounts", `{"family":"ss"}`)
+	created := panelJSON(t, handler, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
 	}
-	listed := decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/panel", ""))
-	listen, _ := listed["listen"].(map[string]any)
-	if listen["available"] != false || listen["reason"] != "缺少对外地址" {
-		t.Fatalf("listen=%#v", listen)
+	listed := decodePanel(t, panelJSON(t, handler, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	listens := panelListens(t, listed)
+	if len(listens) != 1 {
+		t.Fatalf("listens=%#v", listens)
 	}
-	accounts := panelAccounts(t, listed)
-	if len(accounts) != 1 || accounts[0]["enabled"] != true || accounts[0]["share_available"] == true || accounts[0]["uri"] != nil {
-		t.Fatalf("accounts=%#v", accounts)
+	users := panelUsers(t, listens[0])
+	if len(users) != 1 || users[0]["enabled"] != true || users[0]["share_available"] == true || users[0]["uri"] != nil {
+		t.Fatalf("users=%#v", users)
 	}
-	if accounts[0]["reason"] != "缺少对外地址" {
-		t.Fatalf("reason=%#v", accounts[0])
+	if users[0]["reason"] != "缺少对外地址" {
+		t.Fatalf("reason=%#v", users[0])
 	}
 }
 
@@ -335,10 +347,10 @@ func TestShadowsocksAdminPanelUnavailableUntilActivated(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := panelJSON(t, controller, http.MethodGet, "/", "")
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Shadowsocks 账号") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Shadowsocks 服务") {
 		t.Fatalf("page should still render: %d", page.Code)
 	}
-	api := panelJSON(t, controller, http.MethodGet, "/api/panel", "")
+	api := panelJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", "")
 	if api.Code != http.StatusServiceUnavailable || !strings.Contains(api.Body.String(), "服务未就绪") {
 		t.Fatalf("inactive=%d %s", api.Code, api.Body.String())
 	}

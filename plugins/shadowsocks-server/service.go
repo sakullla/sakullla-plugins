@@ -989,6 +989,19 @@ func (s *Service) Snapshot() Configuration {
 	return clone(s.configuration)
 }
 
+func (s *Service) commitDirectory(next Configuration) error {
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.live.Load() || s.root.Err() != nil {
+		return ErrRevoked
+	}
+	s.configuration = clone(next)
+	return nil
+}
+
 func listenShareOf(s *Service) listenShareAttachment {
 	listenShareMu.Lock()
 	defer listenShareMu.Unlock()

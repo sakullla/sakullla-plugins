@@ -29,11 +29,15 @@ const (
 	ServerPSKID          = "server-psk"
 	defaultSecretVersion = "v1"
 	accountIDPrefix      = "acct-"
+	listenIDPrefix       = "listen-"
 	accountSecretPrefix  = "secret/"
 	serverPSKSecretRef   = "secret/server-psk"
 	accountIDRandomBytes = 8
 	maxUserNameBytes     = 128
 	maxAgentIDBytes      = 128
+	minAutoListenPort    = 8388
+	legacyPasswordBytes  = 16
+	legacyPasswordAlpha  = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 )
 
 var (
@@ -47,6 +51,9 @@ var (
 	ErrTypedHandlesUnavailable = errors.New("canonical typed Shadowsocks handles unavailable")
 	ErrAgentOffline            = errors.New("target Agent is offline")
 	ErrListenBind              = errors.New("listen bind failed")
+	ErrPortConflict            = errors.New("该节点已使用此端口")
+	ErrExecutionUnavailable    = errors.New("该节点暂时无法执行监听")
+	ErrTraditionalMultiUser    = errors.New("传统方法不能在同一端口追加用户")
 )
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 
@@ -81,6 +88,18 @@ type AccountSpec struct {
 	Name   string `json:"name,omitempty"`
 	Family string `json:"family,omitempty"`
 	Method string `json:"method,omitempty"`
+}
+
+// ListenSpec creates a listen or appends a user on a selected Agent.
+type ListenSpec struct {
+	AgentID   string `json:"agent_id,omitempty"`
+	ListenID  string `json:"listen_id,omitempty"`
+	UserID    string `json:"user_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Method    string `json:"method,omitempty"`
+	Port      int    `json:"port,omitempty"`
+	Password  string `json:"password,omitempty"`
+	ServerPSK string `json:"server_psk,omitempty"`
 }
 
 // AccountRecord is the plugin account API projection. It never includes
@@ -232,6 +251,47 @@ func NewAccountID() (string, error) {
 	return id, nil
 }
 
+func NewListenID() (string, error) {
+	id, err := NewAccountID()
+	if err != nil {
+		return "", err
+	}
+	id = listenIDPrefix + strings.TrimPrefix(id, accountIDPrefix)
+	if !refPattern.MatchString(id) {
+		return "", ErrInvalid
+	}
+	return id, nil
+}
+
+func DefaultUserName(id string) string {
+	trimmed := strings.TrimPrefix(id, accountIDPrefix)
+	if trimmed == "" || trimmed == id {
+		return id
+	}
+	return "user-" + trimmed
+}
+
+func GenerateLegacyPassword() (string, error) {
+	raw := make([]byte, legacyPasswordBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	out := make([]byte, legacyPasswordBytes)
+	alpha := []byte(legacyPasswordAlpha)
+	for i, value := range raw {
+		out[i] = alpha[int(value)%len(alpha)]
+	}
+	clear(raw)
+	return string(out), nil
+}
+
+func ServerPSKSecretRefFor(listenID string) string {
+	if listenID == "" {
+		return serverPSKSecretRef
+	}
+	return accountSecretPrefix + "server/" + listenID
+}
+
 func AccountSecretRef(id string) string {
 	return accountSecretPrefix + id
 }
@@ -365,6 +425,210 @@ func (c *Configuration) ensureListenerForMethod(method string) (int, error) {
 	}
 	c.Listeners = append(c.Listeners, ListenRule{ID: id, AgentID: agentID, Port: port, Method: method})
 	return len(c.Listeners) - 1, nil
+}
+
+func (c Configuration) ListenersForAgent(agentID string) []ListenRule {
+	out := make([]ListenRule, 0, len(c.Listeners))
+	for _, listener := range clone(c).Listeners {
+		if listener.AgentID == agentID {
+			out = append(out, listener)
+		}
+	}
+	return out
+}
+
+func (c Configuration) Listen(id string) (ListenRule, bool) {
+	for _, listener := range c.Listeners {
+		if listener.ID == id {
+			return listener, true
+		}
+	}
+	return ListenRule{}, false
+}
+
+func (c Configuration) usedPorts(agentID string) map[int]string {
+	used := map[int]string{}
+	for _, listener := range c.Listeners {
+		if listener.AgentID == agentID {
+			used[listener.Port] = listener.ID
+		}
+	}
+	return used
+}
+
+func (c Configuration) NextListenPort(agentID string) (int, error) {
+	used := c.usedPorts(agentID)
+	for port := minAutoListenPort; port <= 65535; port++ {
+		if _, ok := used[port]; !ok {
+			return port, nil
+		}
+	}
+	return 0, ErrInvalid
+}
+
+func (c Configuration) PortConflict(agentID string, port int, exceptListenID string) bool {
+	if port < 1 || port > 65535 || !validAgentID(agentID) {
+		return false
+	}
+	owner, ok := c.usedPorts(agentID)[port]
+	return ok && owner != exceptListenID
+}
+
+func (spec ListenSpec) resolveMethod() (string, error) {
+	return AccountSpec{Method: spec.Method}.resolveMethod(DefaultSS2022Method)
+}
+
+// CreateListen adds one listen with one enabled user. Duplicate ports on the
+// same agent are rejected. Traditional methods cannot share a port.
+func (c Configuration) CreateListen(spec ListenSpec, user User, serverRef, serverVersion string) (Configuration, ListenRule, User, error) {
+	next := clone(c)
+	if !validAgentID(spec.AgentID) {
+		return Configuration{}, ListenRule{}, User{}, ErrAgentOffline
+	}
+	method, err := spec.resolveMethod()
+	if err != nil {
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	listenID := spec.ListenID
+	if listenID == "" {
+		listenID, err = NewListenID()
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	port := spec.Port
+	if port == 0 {
+		port, err = next.NextListenPort(spec.AgentID)
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	if port < 1 || port > 65535 {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if next.PortConflict(spec.AgentID, port, "") {
+		return Configuration{}, ListenRule{}, User{}, ErrPortConflict
+	}
+	if _, exists := next.Listen(listenID); exists {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if user.ID == "" {
+		user.ID, err = NewAccountID()
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	if user.Name == "" {
+		user.Name = DefaultUserName(user.ID)
+	}
+	if user.SecretRef == "" {
+		user.SecretRef = AccountSecretRef(user.ID)
+	}
+	if user.SecretVersion == "" {
+		user.SecretVersion = defaultSecretVersion
+	}
+	user.Enabled = true
+	if err := user.Validate(); err != nil {
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	if _, _, _, exists := next.lookupUser(user.ID); exists {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	listener := ListenRule{ID: listenID, AgentID: spec.AgentID, Port: port, Method: method, Users: []User{user}}
+	if SS2022Method(method) {
+		if serverRef == "" {
+			serverRef = ServerPSKSecretRefFor(listenID)
+		}
+		if serverVersion == "" {
+			serverVersion = defaultSecretVersion
+		}
+		listener.ServerSecretRef, listener.ServerSecretVersion = serverRef, serverVersion
+	} else if serverRef != "" || serverVersion != "" {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	next.Listeners = append(next.Listeners, listener)
+	if err := next.Validate(); err != nil {
+		if next.PortConflict(spec.AgentID, port, listenID) {
+			return Configuration{}, ListenRule{}, User{}, ErrPortConflict
+		}
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	created, _ := next.Listen(listenID)
+	return next, created, user, nil
+}
+
+// AppendListenUser adds one user to an existing SS2022 listen. Traditional
+// methods reject a second user. Method, port, and server PSK are reused.
+func (c Configuration) AppendListenUser(listenID string, user User) (Configuration, ListenRule, User, error) {
+	next := clone(c)
+	listener, ok := next.Listen(listenID)
+	if !ok {
+		return Configuration{}, ListenRule{}, User{}, ErrDenied
+	}
+	if !SS2022Method(listener.Method) {
+		return Configuration{}, ListenRule{}, User{}, ErrTraditionalMultiUser
+	}
+	if user.ID == "" {
+		id, err := NewAccountID()
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+		user.ID = id
+	}
+	if user.Name == "" {
+		user.Name = DefaultUserName(user.ID)
+	}
+	if user.SecretRef == "" {
+		user.SecretRef = AccountSecretRef(user.ID)
+	}
+	if user.SecretVersion == "" {
+		user.SecretVersion = defaultSecretVersion
+	}
+	user.Enabled = true
+	if err := user.Validate(); err != nil {
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	if _, _, _, exists := next.lookupUser(user.ID); exists {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if len(next.allUsers()) >= MaxUsers {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	for i, current := range next.Listeners {
+		if current.ID != listenID {
+			continue
+		}
+		next.Listeners[i].Users = append(next.Listeners[i].Users, user)
+		if err := next.Validate(); err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+		return next, next.Listeners[i], user, nil
+	}
+	return Configuration{}, ListenRule{}, User{}, ErrDenied
+}
+
+func (c Configuration) DeleteUser(id string) (Configuration, ListenRule, error) {
+	next := clone(c)
+	listenerIdx, userIdx, _, ok := next.lookupUser(id)
+	if !ok {
+		return Configuration{}, ListenRule{}, ErrDenied
+	}
+	listener := next.Listeners[listenerIdx]
+	users := append([]User(nil), listener.Users...)
+	next.Listeners[listenerIdx].Users = append(users[:userIdx], users[userIdx+1:]...)
+	return next, next.Listeners[listenerIdx], nil
+}
+
+func (c Configuration) DeleteListen(id string) (Configuration, ListenRule, error) {
+	next := clone(c)
+	for i, listener := range next.Listeners {
+		if listener.ID != id {
+			continue
+		}
+		next.Listeners = append(append([]ListenRule(nil), next.Listeners[:i]...), next.Listeners[i+1:]...)
+		return next, listener, nil
+	}
+	return Configuration{}, ListenRule{}, ErrDenied
 }
 
 func (c Configuration) AccountRecord(user User) AccountRecord {

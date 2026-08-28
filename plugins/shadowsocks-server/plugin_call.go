@@ -46,6 +46,9 @@ type ListenReport struct {
 	AgentID string             `json:"agent_id"`
 	Online  bool               `json:"online"`
 	Listens []ListenPortStatus `json:"listens"`
+	DDNS    string             `json:"ddns_domain,omitempty"`
+	IPv4    string             `json:"ipv4,omitempty"`
+	IPv6    string             `json:"ipv6,omitempty"`
 }
 
 // ListenPortStatus is one bound TCP+UDP port without keys or passwords.
@@ -127,7 +130,11 @@ func (c *Controller) Call(ctx context.Context, generation, name string, payload 
 	}
 	switch strings.TrimSpace(name) {
 	case pluginCallListenReport:
-		return exec.report(payload)
+		raw, err := exec.report(payload)
+		if err != nil {
+			return nil, err
+		}
+		return c.attachReportNode(raw)
 	case pluginCallListenApply:
 		return exec.apply(ctx, payload)
 	case pluginCallListenStop:
@@ -660,6 +667,29 @@ func destroyListenEngines(engines []*ProtocolEngine) {
 			engine.Destroy()
 		}
 	}
+}
+
+func (c *Controller) attachReportNode(raw []byte) ([]byte, error) {
+	var report ListenReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return raw, nil
+	}
+	if c == nil {
+		return raw, nil
+	}
+	c.mu.Lock()
+	published := c.published
+	c.mu.Unlock()
+	if published == nil {
+		return raw, nil
+	}
+	node := published.NodeAddresses()
+	report.DDNS, report.IPv4, report.IPv6 = node.DDNS, node.IPv4, node.IPv6
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		return raw, nil
+	}
+	return encoded, nil
 }
 
 func agentIDFromListenPayload(payload []byte) (string, error) {

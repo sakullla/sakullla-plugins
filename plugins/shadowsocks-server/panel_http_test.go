@@ -34,38 +34,42 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	page := bodies["/"]
 	script := bodies["/app.js"]
 	for _, fragment := range []string{
-		"Shadowsocks 账号",
-		"生成传统 SS 账号",
-		"生成 SS2022 账号",
-		"不必先建 L4",
-		"无需打开 L4",
-		"SIP002",
+		"Shadowsocks 服务",
+		"选择节点",
+		"新增监听",
+		"data-agent-picker=\"workspace\"",
+		"id=\"agent-select\"",
+		"复制 ss://",
 		"二维码",
-		"对外监听",
-		"id=\"create-ss\" method=\"post\"",
-		"id=\"create-ss2022\" method=\"post\"",
-		"data-action=\"rotate-server\"",
+		"id=\"app-node-empty\"",
+		"id=\"app-offline\"",
+		"id=\"app-execution-unavailable\"",
 	} {
-		if !strings.Contains(page, fragment) {
-			t.Fatalf("panel page missing %q", fragment)
+		if !strings.Contains(page, fragment) && !strings.Contains(script, fragment) {
+			t.Fatalf("panel missing %q", fragment)
 		}
 	}
-	if strings.Contains(page, "ui.schema") || strings.Contains(page, "plugin=") || strings.Contains(page, "订阅") {
-		t.Fatal("panel page must not require config UI, SIP003, or a subscription")
+	if strings.Contains(page, "ui.schema") || strings.Contains(page, "plugin=") || strings.Contains(page, "订阅") || strings.Contains(page, "ss2022://") {
+		t.Fatal("panel page must not require config UI, SIP003, subscription, or ss2022://")
 	}
-	for _, fragment := range []string{"api/panel", "api/accounts", "api/server-psk/rotate", "复制 SIP002 URI", "再启用"} {
+	for _, fragment := range []string{"配额", "过期", "扫码", "SIP003", "ss2022://", "api/accounts", "api/server-psk/rotate"} {
+		if strings.Contains(page, fragment) || strings.Contains(script, fragment) {
+			t.Fatalf("panel still exposes excluded entry %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"/panel-api/agents", "api/listens", "api/execution", "mountAgentSearchSelect", "复制 ss://"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("panel script missing %q", fragment)
 		}
 	}
 	inactive := httptest.NewRecorder()
-	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/panel", nil))
+	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/listens?agent_id=agent-1", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), serviceNotReady) {
 		t.Fatalf("inactive panel=%d %s", inactive.Code, inactive.Body.String())
 	}
 	style := bodies["/style.css"]
 	for _, fragment := range []string{
-		"width: calc(100% - 32px)",
+		"width: calc(100% - 2.5rem)",
 		"max-width: min(46rem, 100%)",
 		"@media (max-width: 720px)",
 		"@media (min-width: 1920px)",
@@ -74,8 +78,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
+		".agent-search-select",
 		"repeat(2, minmax(0, 1fr))",
-		"repeat(2, minmax(18rem, 1fr))",
 		"repeat(3, minmax(18rem, 1fr))",
 	} {
 		if !strings.Contains(style, fragment) {
@@ -85,8 +89,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
 		t.Fatal("panel stylesheet still caps main at 52rem, 64rem, or 880px")
 	}
-	if !strings.Contains(cssRule(style, ".card"), "max-width: min(46rem, 100%)") {
-		t.Fatal(".card still fills main without a capped operation group")
+	if !strings.Contains(cssRule(style, ".panel"), "max-width: min(46rem, 100%)") {
+		t.Fatal(".panel still fills main without a capped operation group")
 	}
 }
 

@@ -67,6 +67,67 @@ func TestListenAllowsSS2022MultipleUsersAndUniquePorts(t *testing.T) {
 	}
 }
 
+func TestCreateListenDefaultsAndAppendDelete(t *testing.T) {
+	cfg := Configuration{Generation: "gen-1"}
+	user := User{ID: "user-1", Name: "alice", SecretRef: "secret/user-1", SecretVersion: "v1", Enabled: true}
+	next, listener, created, err := cfg.CreateListen(ListenSpec{AgentID: "agent-1", Method: DefaultSS2022Method}, user, "secret/server-1", "v1")
+	if err != nil || listener.Port != minAutoListenPort || listener.Method != DefaultSS2022Method || created.ID != "user-1" {
+		t.Fatalf("create=%+v user=%+v err=%v", listener, created, err)
+	}
+	second := User{ID: "user-2", Name: "bob", SecretRef: "secret/user-2", SecretVersion: "v1", Enabled: true}
+	next, listener, created, err = next.AppendListenUser(listener.ID, second)
+	if err != nil || created.ID != "user-2" || len(listener.Users) != 2 {
+		t.Fatalf("append=%+v err=%v", listener, err)
+	}
+	next, _, err = next.DeleteUser("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, ok := next.User("user-2")
+	if !ok || !kept.Enabled {
+		t.Fatalf("kept=%+v", kept)
+	}
+	if _, ok = next.User("user-1"); ok {
+		t.Fatal("deleted user still present")
+	}
+	listenID := listener.ID
+	next, _, err = next.DeleteListen(listenID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok = next.Listen(listenID); ok {
+		t.Fatal("deleted listen still present")
+	}
+}
+
+func TestAppendListenUserRejectsTraditional(t *testing.T) {
+	cfg := Configuration{
+		Generation: "gen-1",
+		Listeners: []ListenRule{{
+			ID: "listener-1", AgentID: "agent-1", Port: 8388, Method: "aes-256-gcm",
+			Users: []User{{ID: "user-1", SecretRef: "secret/user-1", SecretVersion: "v1", Enabled: true}},
+		}},
+	}
+	_, _, _, err := cfg.AppendListenUser("listener-1", User{ID: "user-2", SecretRef: "secret/user-2", SecretVersion: "v1", Enabled: true})
+	if !errors.Is(err, ErrTraditionalMultiUser) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCreateListenRejectsDuplicatePort(t *testing.T) {
+	cfg := Configuration{
+		Generation: "gen-1",
+		Listeners: []ListenRule{{
+			ID: "listener-1", AgentID: "agent-1", Port: 8388, Method: DefaultSS2022Method,
+			Users: []User{{ID: "user-1", SecretRef: "secret/user-1", SecretVersion: "v1", Enabled: true}},
+		}},
+	}
+	_, _, _, err := cfg.CreateListen(ListenSpec{AgentID: "agent-1", Port: 8388, Method: DefaultSS2022Method}, User{ID: "user-2", SecretRef: "secret/user-2", SecretVersion: "v1"}, "secret/server-2", "v1")
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestListenRejectsDuplicatePortOnSameAgent(t *testing.T) {
 	cfg := Configuration{
 		Generation: "gen-1",

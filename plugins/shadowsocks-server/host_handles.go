@@ -212,6 +212,40 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	return config
 }
 
+type loopbackRuntimeCaller struct {
+	controller *Controller
+}
+
+func (caller loopbackRuntimeCaller) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	if caller.controller == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	if call.Operation != pluginsdk.HostRuntimePluginCall {
+		return ErrTypedHandlesUnavailable
+	}
+	var request pluginsdk.PluginCallRequest
+	if err := json.Unmarshal(call.Payload, &request); err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	raw, err := caller.controller.Call(ctx, "", request.Name, request.Payload)
+	if err != nil {
+		return err
+	}
+	if target == nil || len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, target)
+}
+
+// BindLoopbackListenHost routes plugin.call back to this process so a control
+// plane and Agent can share one Controller in tests.
+func (c *Controller) BindLoopbackListenHost() {
+	if c == nil {
+		return
+	}
+	c.listenHost = newHostCapabilityRuntime(loopbackRuntimeCaller{controller: c})
+}
+
 func callHost(ctx context.Context, client hostRuntimeCaller, operation string, payload any, result any) error {
 	if client == nil {
 		return ErrTypedHandlesUnavailable
