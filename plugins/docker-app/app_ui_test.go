@@ -1482,6 +1482,12 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
 		t.Fatalf("same-id redeploy restored history: %#v", record)
 	}
+	got = waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest && len(deployment.History) == 0
+	})
+	if len(got.History) != 0 {
+		t.Fatalf("same-id observe restored history: %#v", got)
+	}
 }
 
 func waitForImageObservation(t *testing.T, controller *Controller, appID string) {

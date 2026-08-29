@@ -85,9 +85,9 @@ func (s *DeploymentStore) Load(_ context.Context, id string) (DeploymentRecord, 
 func (s *DeploymentStore) AcquireLease(_ context.Context, id string, version uint64, value Deployment, until time.Time) (DeploymentRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.values[id]
-	if err := leaseCreateConflict(ok, current.Version, version, s.fences[id]); err != nil {
-		return DeploymentRecord{}, err
+	current := s.values[id]
+	if current.Version != version {
+		return DeploymentRecord{}, ErrStateConflict
 	}
 	s.fences[id]++
 	value.AppID, value.FencingToken, value.Lease, value.LeaseUntil = id, s.fences[id], fmt.Sprintf("fence-%d", s.fences[id]), until
@@ -861,16 +861,6 @@ func (r Rollout) ready(app *App) error {
 	if r.Executor == nil {
 		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "unavailable", Detail: ErrTypedHandlesUnavailable.Error()})
 		return ErrTypedHandlesUnavailable
-	}
-	return nil
-}
-
-func leaseCreateConflict(exists bool, currentVersion, requestedVersion, fence uint64) error {
-	if requestedVersion == 0 && !exists && fence != 0 {
-		return ErrStateConflict
-	}
-	if currentVersion != requestedVersion {
-		return ErrStateConflict
 	}
 	return nil
 }

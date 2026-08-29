@@ -57,9 +57,9 @@ func (s *persistedDeploymentStore) AcquireLease(ctx context.Context, id string, 
 	if err != nil {
 		return DeploymentRecord{}, err
 	}
-	current, ok := snapshot.Records[id]
-	if err := leaseCreateConflict(ok, current.Version, version, snapshot.Fences[id]); err != nil {
-		return DeploymentRecord{}, err
+	current := snapshot.Records[id]
+	if current.Version != version {
+		return DeploymentRecord{}, ErrStateConflict
 	}
 	snapshot.Fences[id]++
 	value.AppID, value.FencingToken, value.Lease, value.LeaseUntil = id, snapshot.Fences[id], fmt.Sprintf("fence-%d", snapshot.Fences[id]), until
@@ -109,6 +109,7 @@ func (s *persistedDeploymentStore) DeleteCAS(ctx context.Context, id string, ver
 		return ErrStateConflict
 	}
 	delete(snapshot.Records, id)
+	delete(snapshot.Fences, id)
 	return s.persist(ctx, snapshot)
 }
 

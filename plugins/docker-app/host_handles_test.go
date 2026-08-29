@@ -215,8 +215,12 @@ func TestHostCapabilityRuntimePersistsDeploymentStoreThroughHostState(t *testing
 	if _, ok, err := store.Load(ctx, "media"); err != nil || ok {
 		t.Fatalf("deleted deployment still present ok=%v err=%v", ok, err)
 	}
-	if _, err := store.AcquireLease(ctx, "media", 0, seed, time.Now().Add(time.Second)); !errors.Is(err, ErrStateConflict) {
-		t.Fatalf("deleted deployment reseed err=%v", err)
+	fresh := seed
+	fresh.History = nil
+	fresh.AvailableDigest = "sha256:latest"
+	leased, err = store.AcquireLease(ctx, "media", 0, fresh, time.Now().Add(time.Second))
+	if err != nil || leased.Value.ImageDigest != "sha256:current" || len(leased.Value.History) != 0 {
+		t.Fatalf("same-id version-0 lease=%#v err=%v", leased, err)
 	}
 	if len(calls) == 0 {
 		t.Fatal("deployment store did not use host state.get/put")

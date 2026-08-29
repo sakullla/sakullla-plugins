@@ -301,7 +301,7 @@ func TestDockerComposeOnlyConfirmUpdateRestoresPriorWithoutHTTPRule(t *testing.T
 	}
 }
 
-func TestDockerAutoUpdateDoesNotReseedDeletedDeployment(t *testing.T) {
+func TestDockerAutoUpdatePersistsFreshDigestAfterDeletedRecord(t *testing.T) {
 	app := dockerapp.App{ID: "media", Image: "nginx:latest", Generation: "generation-1", Compose: testComposeYAML("nginx:latest")}
 	store := dockerapp.NewDeploymentStore()
 	rollout := dockerapp.Rollout{Store: store, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})}
@@ -316,11 +316,15 @@ func TestDockerAutoUpdateDoesNotReseedDeletedDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
-	if err == nil || !errors.Is(err, dockerapp.ErrReconcilePending) {
-		t.Fatalf("deleted reseed err=%v view=%#v", err, view)
+	got, exists := store.Get(app.ID)
+	if err != nil || !view.HasUpdate || view.Published || !exists {
+		t.Fatalf("same-id persist view=%#v exists=%v err=%v", view, exists, err)
 	}
-	if _, exists, err := store.Load(context.Background(), app.ID); err != nil || exists {
-		t.Fatalf("deleted deployment was reseeded exists=%v err=%v", exists, err)
+	if got.ImageDigest != "sha256:current" || got.AvailableDigest != "sha256:latest" || len(got.History) != 0 {
+		t.Fatalf("same-id digest restored history: %#v", got)
+	}
+	if err := rollout.ConfirmUpdate(context.Background(), app); !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
+		t.Fatalf("same-id confirm without executor err=%v", err)
 	}
 }
 
