@@ -326,6 +326,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		controller.invalidateObservation(appID)
 		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, true, controller.uiRemove, controller.uiAuditor)
 		if err != nil {
+			controller.allowImageObservation(appID)
 			stage := "delete"
 			if droppedRules {
 				stage = "delete-after-rules"
@@ -610,8 +611,15 @@ func (controller *Controller) invalidateObservation(appID string) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	delete(controller.imageCache, appID)
-	delete(controller.imageRefresh, appID)
+	controller.imageRefresh[appID] = true
 	controller.imageObserveToken[appID]++
+	controller.imageDeleteEpoch[appID]++
+}
+
+func (controller *Controller) allowImageObservation(appID string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.imageRefresh[appID] = false
 }
 
 func (controller *Controller) setAppRunning(ctx context.Context, appID string, running bool) error {
@@ -822,10 +830,11 @@ func (controller *Controller) scheduleImageObservation(app App) {
 	controller.imageRefresh[app.ID] = true
 	controller.imageObserveToken[app.ID]++
 	token := controller.imageObserveToken[app.ID]
+	epoch := controller.imageDeleteEpoch[app.ID]
 	controller.mu.Unlock()
 	select {
 	case controller.imageSlots <- struct{}{}:
-		go controller.observeImageInBackground(app, token)
+		go controller.observeImageInBackground(app, token, epoch)
 	default:
 		controller.mu.Lock()
 		controller.imageRefresh[app.ID] = false
@@ -833,15 +842,17 @@ func (controller *Controller) scheduleImageObservation(app App) {
 	}
 }
 
-func (controller *Controller) observeImageInBackground(app App, token uint64) {
+func (controller *Controller) observeImageInBackground(app App, token, epoch uint64) {
 	defer func() { <-controller.imageSlots }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
 	controller.mu.Lock()
-	currentApp, ok := controller.snapshotObservationLocked(app, token)
+	currentApp, ok := controller.snapshotObservationLocked(app, token, epoch)
 	if err != nil || !ok {
-		controller.imageRefresh[app.ID] = false
+		if controller.imageDeleteEpoch[app.ID] == epoch {
+			controller.imageRefresh[app.ID] = false
+		}
 		controller.mu.Unlock()
 		return
 	}
@@ -849,13 +860,15 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	ctx = withObservationPersistGuard(ctx, func() bool {
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
-		_, allowed := controller.snapshotObservationLocked(app, token)
+		_, allowed := controller.snapshotObservationLocked(app, token, epoch)
 		return allowed
 	})
 	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
 	controller.mu.Lock()
-	controller.imageRefresh[app.ID] = false
-	_, still := controller.snapshotObservationLocked(app, token)
+	if controller.imageDeleteEpoch[app.ID] == epoch {
+		controller.imageRefresh[app.ID] = false
+	}
+	_, still := controller.snapshotObservationLocked(app, token, epoch)
 	keepRecord := still || controller.catalogHasAppIDLocked(app.ID)
 	if still {
 		controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
@@ -866,8 +879,8 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	}
 }
 
-func (controller *Controller) snapshotObservationLocked(app App, token uint64) (App, bool) {
-	if controller.imageObserveToken[app.ID] != token {
+func (controller *Controller) snapshotObservationLocked(app App, token, epoch uint64) (App, bool) {
+	if controller.imageObserveToken[app.ID] != token || controller.imageDeleteEpoch[app.ID] != epoch {
 		return App{}, false
 	}
 	return controller.currentCatalogAppLocked(app)

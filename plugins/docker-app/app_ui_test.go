@@ -1598,14 +1598,26 @@ func TestAppUIDeleteInvalidatesObserveBeforeRemoveAppSkipsStart(t *testing.T) {
 	}
 	controller.mu.Lock()
 	token := controller.imageObserveToken["media"]
+	epoch := controller.imageDeleteEpoch["media"]
 	controller.mu.Unlock()
 	if token <= observeToken {
 		t.Fatalf("observe token not bumped before RemoveApp: before=%d during=%d", observeToken, token)
 	}
+	if epoch == 0 {
+		t.Fatal("delete epoch not bumped before RemoveApp")
+	}
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list during compose down status=%d body=%s", listed.Code, listed.Body.String())
+	}
 	close(pullRelease)
-	waitForImageObservation(t, controller, "media")
-	if rolloutCallHas(rollout.calls, "start") {
-		t.Fatalf("Start ran during compose down: %v", rollout.calls)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if rolloutCallHas(rollout.calls, "start") {
+			t.Fatalf("Start ran during compose down: %v", rollout.calls)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	close(removeRelease)
 	select {
