@@ -37,6 +37,12 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"Shadowsocks 服务",
 		"选择节点",
 		"新增监听",
+		"追加用户",
+		"id=\"append-dialog\"",
+		"连接地址",
+		"id=\"share-host\"",
+		"恢复自动",
+		"id=\"share-host-auto\"",
 		"data-agent-picker=\"workspace\"",
 		"id=\"agent-select\"",
 		"复制 ss://",
@@ -57,7 +63,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 			t.Fatalf("panel still exposes excluded entry %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"/panel-api/agents", "api/listens", "api/execution", "mountAgentSearchSelect", "复制 ss://"} {
+	for _, fragment := range []string{"/panel-api/agents", "api/listens", "api/execution", "api/share-host", "share_host_source", "mountAgentSearchSelect", "复制 ss://", "host_port", "二维码", "append-form", "已复制"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("panel script missing %q", fragment)
 		}

@@ -260,7 +260,7 @@ func TestShadowsocksAdminPanelKeepsAccountWhenShareHostMissing(t *testing.T) {
 	if len(users) != 1 || users[0]["enabled"] != true || users[0]["share_available"] == true || users[0]["uri"] != nil {
 		t.Fatalf("users=%#v", users)
 	}
-	if users[0]["reason"] != "缺少对外地址" {
+	if users[0]["reason"] != "缺少对外地址，暂时无法分享" {
 		t.Fatalf("reason=%#v", users[0])
 	}
 }

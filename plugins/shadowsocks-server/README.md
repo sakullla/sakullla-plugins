@@ -9,10 +9,13 @@ Administrators manage accounts from the plugin's simple panel: generate a
 traditional SS or SS2022 account, list enabled and disabled users, disable or
 re-enable one account, rotate that account's client key, optionally rotate the
 instance SS2022 server PSK, and copy a SIP002 URI or show the matching QR.
-The panel also shows the R4 listen host and port as copyable `host:port`.
-Sharing uses the instance's own TCP+UDP listen; generating and sharing do not
-require opening the L4 rules page or filling a backend. There is no
-subscription URL and no SIP003 plugin parameter.
+The panel lets administrators set the client-facing share host (domain or
+public IP) used in SIP002 URIs. The default follows the Host node snapshot
+(configured DDNS, then heartbeat IPv4, then IPv6). A saved override is
+per-agent and is not replaced by later heartbeats; clearing it restores the
+automatic address. Sharing uses the instance's own TCP+UDP listen;
+generating and sharing do not require opening the L4 rules page or filling a
+backend. There is no subscription URL and no SIP003 plugin parameter.
 
 The host may mount this page because `plugin.yaml` declares `ui.route` and
 `resource.group` with id `shadowsocks-server`. Control-plane `ServeHTTP` serves

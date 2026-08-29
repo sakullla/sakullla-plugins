@@ -25,14 +25,24 @@ const workspaceNode = document.querySelector("#app-workspace");
 const listNode = document.querySelector("#listen-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#listen-count");
-const createPanel = document.querySelector("#app-create");
 const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-head");
+const createDialog = document.querySelector("#create-dialog");
 const createForm = document.querySelector("#create-form");
 const createSubmit = document.querySelector("#create-submit");
 const createCancel = document.querySelector("#create-cancel");
-const createBack = document.querySelector("#create-back");
 const createToggle = document.querySelector("#create-toggle");
+const emptyCreate = document.querySelector("#empty-create");
+const shareHostInput = document.querySelector("#share-host");
+const shareHostSave = document.querySelector("#share-host-save");
+const shareHostAuto = document.querySelector("#share-host-auto");
+const shareHostSource = document.querySelector("#share-host-source");
+const shareHostBar = document.querySelector(".share-host-bar");
+const detailDialog = document.querySelector("#detail-dialog");
+const detailTitle = document.querySelector("#detail-title");
+const detailMeta = document.querySelector("#detail-meta");
+const detailUsers = document.querySelector("#detail-users");
+const detailActions = document.querySelector("#detail-actions");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
@@ -45,6 +55,24 @@ const confirmTitle = document.querySelector("#confirm-title");
 const confirmBody = document.querySelector("#confirm-body");
 const confirmOk = document.querySelector("#confirm-ok");
 const confirmCancel = document.querySelector("#confirm-cancel");
+const qrDialog = document.querySelector("#qr-dialog");
+const qrTitle = document.querySelector("#qr-title");
+const qrCaption = document.querySelector("#qr-caption");
+const qrImage = document.querySelector("#qr-image");
+const qrCopy = document.querySelector("#qr-copy");
+const advancedKeys = document.querySelector("#advanced-keys");
+const appendDialog = document.querySelector("#append-dialog");
+const appendForm = document.querySelector("#append-form");
+const appendName = document.querySelector("#append-name");
+const appendMeta = document.querySelector("#append-meta");
+const appendCancel = document.querySelector("#append-cancel");
+
+const METHOD_LABELS = {
+  "2022-blake3-aes-128-gcm": "SS2022 · AES-128",
+  "2022-blake3-aes-256-gcm": "SS2022 · AES-256",
+  "aes-128-gcm": "AES-128-GCM",
+  "aes-256-gcm": "AES-256-GCM",
+};
 
 const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false } = {}) => {
   if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
@@ -72,6 +100,9 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
 let busy = false;
 let selectedAgentID = "";
 let agentsCache = [];
+let listensCache = [];
+let openListenID = "";
+let pendingAppendListen = null;
 let executionReady = false;
 let agentOnline = false;
 let lastExecution = null;
@@ -173,12 +204,17 @@ const sendPluginJSON = async (path, body) => {
 };
 
 const syncSelectionActions = () => {
-  if (createToggle) createToggle.disabled = busy || !selectedAgentID || !executionReady || !agentOnline;
+  const blocked = busy || !selectedAgentID || !executionReady || !agentOnline;
+  if (createToggle) createToggle.disabled = blocked;
+  if (emptyCreate) emptyCreate.disabled = blocked;
+  if (shareHostSave) shareHostSave.disabled = blocked;
+  if (shareHostAuto) shareHostAuto.disabled = blocked;
+  if (shareHostInput) shareHostInput.disabled = blocked;
 };
 
 const setBusy = (next) => {
   busy = next;
-  const roots = [workspaceNode, contextNode].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createDialog, detailDialog, appendDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
@@ -288,7 +324,7 @@ const executionMark = (state) => {
   const node = document.createElement("span");
   node.className = "agent-search-select__engine";
   node.dataset.ready = state.ready ? "true" : "false";
-  node.textContent = state.ready ? "执行面就绪" : "执行面未就绪";
+  node.textContent = state.ready ? "可创建" : "不可用";
   return node;
 };
 
@@ -416,10 +452,10 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       statusDot.hidden = true;
       trigger.title = placeholder;
     }
-    if (execution) {
+    if (execution && !execution.ready && agent && isAgentOnline(agent)) {
       triggerEngine.hidden = false;
-      triggerEngine.dataset.ready = execution.ready ? "true" : "false";
-      triggerEngine.textContent = execution.ready ? "执行面就绪" : "执行面未就绪";
+      triggerEngine.dataset.ready = "false";
+      triggerEngine.textContent = "不可用";
     } else {
       triggerEngine.hidden = true;
     }
@@ -495,7 +531,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
       option.append(dot, name, meta);
       const execution = cachedExecution(agent.id);
-      if (execution) option.append(executionMark(execution));
+      if (execution && !execution.ready && isAgentOnline(agent)) option.append(executionMark(execution));
       option.addEventListener("click", () => emitChange(agent.id));
       list.append(option);
     });
@@ -577,12 +613,34 @@ const isSS2022 = (method) => String(method || "").startsWith("2022-");
 const copyText = async (text) => {
   const value = String(text || "");
   if (!value) throw new Error("没有可复制的内容");
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(value);
-  } else {
-    throw new Error("当前环境无法复制");
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch (_error) {
+    // Fall back to a selected textarea; iframe panels often deny clipboard.
   }
-  showStatus("已复制。", false);
+  const area = document.createElement("textarea");
+  area.value = value;
+  area.setAttribute("readonly", "");
+  area.style.cssText = "position:fixed;left:-9999px;top:0";
+  document.body.append(area);
+  area.focus();
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  if (!ok) throw new Error("当前环境无法复制");
+};
+
+const markCopied = (button) => {
+  if (!button) return;
+  const original = button.dataset.copyLabel || button.textContent;
+  button.dataset.copyLabel = original;
+  button.textContent = "已复制";
+  window.setTimeout(() => {
+    if (button.textContent === "已复制") button.textContent = original;
+  }, 1600);
 };
 
 const showContext = (kind) => {
@@ -593,30 +651,50 @@ const showContext = (kind) => {
   if (executionUnavailableNode) executionUnavailableNode.hidden = kind !== "execution-unavailable";
 };
 
+const methodLabel = (method) => METHOD_LABELS[String(method || "")] || String(method || "");
+
+const listenHostPort = (listen) => {
+  if (listen && listen.host_port) return String(listen.host_port);
+  const user = ((listen && listen.users) || []).find((item) => item && item.host_port);
+  return user ? String(user.host_port) : "";
+};
+
+const listenShareHost = (listen) => {
+  const hostPort = listenHostPort(listen);
+  if (!hostPort) return "";
+  if (hostPort.startsWith("[")) {
+    const end = hostPort.indexOf("]");
+    return end > 0 ? hostPort.slice(1, end) : hostPort;
+  }
+  const index = hostPort.lastIndexOf(":");
+  return index > 0 ? hostPort.slice(0, index) : hostPort;
+};
+
 const renderExecutionBadge = (execution) => {
   if (!executionStatus) return;
-  if (!execution) {
+  if (!execution || execution.ready) {
     executionStatus.hidden = true;
     executionStatus.textContent = "";
+    delete executionStatus.dataset.ready;
     return;
   }
   executionStatus.hidden = false;
-  executionStatus.dataset.ready = execution.ready ? "true" : "false";
-  executionStatus.textContent = execution.ready ? "执行面就绪" : "执行面未就绪";
+  executionStatus.dataset.ready = "false";
+  executionStatus.textContent = "暂时不能创建";
 };
 
 const syncListPanel = () => {
   const hasListens = listNode && listNode.children.length > 0;
-  const creating = createPanel && createPanel.hidden === false;
-  if (emptyNode) emptyNode.hidden = !selectedAgentID || !executionReady || hasListens || creating;
-  if (listPanel) listPanel.hidden = creating;
-  if (workspaceHead) workspaceHead.hidden = creating;
-  if (createToggle) createToggle.hidden = creating || !(selectedAgentID && executionReady && agentOnline);
+  if (emptyNode) emptyNode.hidden = !selectedAgentID || !executionReady || hasListens;
+  if (listPanel) listPanel.hidden = false;
+  if (workspaceHead) workspaceHead.hidden = false;
+  if (createToggle) createToggle.hidden = !(selectedAgentID && executionReady && agentOnline);
 };
 
 const closeCreate = () => {
   if (createForm) createForm.reset();
-  if (createPanel) createPanel.hidden = true;
+  if (advancedKeys) advancedKeys.open = false;
+  if (createDialog && createDialog.open) createDialog.close();
   syncListPanel();
 };
 
@@ -629,11 +707,12 @@ const syncServerPskField = () => {
 
 const fillDefaults = (defaults) => {
   if (!createForm || !defaults) return;
-  createForm.querySelector('input[name="name"]').value = defaults.name || "";
+  createForm.querySelector('input[name="name"]').value = "";
   createForm.querySelector('select[name="method"]').value = defaults.method || "2022-blake3-aes-128-gcm";
   createForm.querySelector('input[name="port"]').value = defaults.port || "";
-  createForm.querySelector('input[name="password"]').value = defaults.password || "";
-  createForm.querySelector('input[name="server_psk"]').value = defaults.server_psk || "";
+  createForm.querySelector('input[name="password"]').value = "";
+  createForm.querySelector('input[name="server_psk"]').value = "";
+  if (advancedKeys) advancedKeys.open = false;
   syncServerPskField();
 };
 
@@ -646,8 +725,10 @@ const openCreate = async () => {
     showStatus(error.message, true);
     return;
   }
-  createPanel.hidden = false;
-  syncListPanel();
+  if (createDialog) {
+    if (createDialog.open) createDialog.close();
+    createDialog.showModal();
+  }
 };
 
 const qrDataURL = (user) => {
@@ -655,53 +736,106 @@ const qrDataURL = (user) => {
   return "";
 };
 
-const renderUser = (listen, user) => {
-  const article = document.createElement("article");
-  article.className = "account";
-  article.dataset.id = user.id;
-  article.dataset.enabled = user.enabled ? "true" : "false";
+const qrFallbackURL = (user) => (user && user.id ? `api/users/${encodeURIComponent(user.id)}/qr.png` : "");
 
-  const title = document.createElement("p");
-  const identity = document.createElement("strong");
-  identity.textContent = user.name || user.id;
-  const status = document.createElement("span");
-  status.className = user.enabled ? "status-on" : "status-off";
-  status.textContent = user.enabled ? "启用" : "停用";
-  title.append(identity, document.createTextNode(` · ${user.method || ""} · `), status);
-  article.append(title);
+let pendingQRURI = "";
 
-  if (user.share_available && user.uri) {
-    const uri = document.createElement("code");
-    uri.className = "uri";
-    uri.textContent = user.uri;
-    const shareRow = document.createElement("div");
-    shareRow.className = "share-row";
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "btn-secondary";
-    copy.textContent = "复制 ss://";
-    copy.addEventListener("click", async () => {
-      try {
-        await copyText(user.uri);
-      } catch (error) {
-        showStatus(error.message, true);
-      }
-    });
-    shareRow.append(copy);
-    const qr = document.createElement("img");
-    qr.className = "qr";
-    qr.alt = "ss:// 二维码";
-    qr.src = qrDataURL(user) || `api/users/${encodeURIComponent(user.id)}/qr.png`;
-    article.append(uri, shareRow, qr);
+const bindQRImage = (img, user) => {
+  if (!img) return;
+  img.alt = "ss:// 二维码";
+  img.hidden = false;
+  const data = qrDataURL(user);
+  const fallback = qrFallbackURL(user);
+  const fail = () => {
+    if (fallback && !img.dataset.fallbackUsed) {
+      img.dataset.fallbackUsed = "true";
+      img.src = fallback;
+      return;
+    }
+    img.hidden = true;
+  };
+  img.onerror = fail;
+  if (data) img.src = data;
+  else if (fallback) {
+    img.dataset.fallbackUsed = "true";
+    img.src = fallback;
   } else {
-    const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent = user.reason || (user.enabled ? "分享不可用" : "停用账号不提供可导入 URI");
-    article.append(hint);
+    img.hidden = true;
   }
+};
 
+const qrButton = (user) => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn-secondary";
+  button.textContent = "二维码";
+  button.addEventListener("click", () => openQR(user));
+  return button;
+};
+
+const openQR = (user) => {
+  if (!qrDialog || typeof qrDialog.showModal !== "function") return;
+  pendingQRURI = user && user.uri ? String(user.uri) : "";
+  if (qrTitle) qrTitle.textContent = (user && (user.name || user.id)) || "二维码";
+  if (qrCaption) {
+    qrCaption.textContent = (user && user.host_port) || "";
+    qrCaption.hidden = !qrCaption.textContent;
+  }
+  if (qrImage) {
+    delete qrImage.dataset.fallbackUsed;
+    bindQRImage(qrImage, user);
+  }
+  if (qrDialog.open) qrDialog.close();
+  qrDialog.showModal();
+};
+
+const renderStatusPill = (text, on) => {
+  const status = document.createElement("span");
+  status.className = "status-pill";
+  status.dataset.on = on ? "true" : "false";
+  status.textContent = text;
+  return status;
+};
+
+const copyURIButton = (user) => {
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "btn-primary";
+  copy.textContent = "复制 ss://";
+  copy.addEventListener("click", async () => {
+    try {
+      await copyText(user.uri);
+      markCopied(copy);
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  });
+  return copy;
+};
+
+const shareHint = (user) => {
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = user.enabled
+    ? (user.reason || "暂时无法分享")
+    : "停用后无法导入。再启用即可复制链接。";
+  return hint;
+};
+
+const renderShare = (user) => {
+  const wrap = document.createElement("div");
+  wrap.className = "share-row";
+  if (user.share_available && user.uri) {
+    wrap.append(copyURIButton(user), qrButton(user));
+  } else {
+    wrap.append(shareHint(user));
+  }
+  return wrap;
+};
+
+const userManageButtons = (user) => {
   const actions = document.createElement("div");
-  actions.className = "actions";
+  actions.className = "account-actions";
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "btn-secondary";
@@ -713,26 +847,40 @@ const renderUser = (listen, user) => {
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
   actions.append(toggle, remove);
-  article.append(actions);
+  return actions;
+};
+
+const renderUser = (user, { manage = false, compact = false } = {}) => {
+  const article = document.createElement("article");
+  article.className = compact ? "account account--card" : "account";
+  article.dataset.id = user.id;
+  article.dataset.enabled = user.enabled ? "true" : "false";
+  const head = document.createElement("div");
+  head.className = "account-head";
+  const identity = document.createElement("strong");
+  identity.textContent = user.name || user.id;
+  head.append(identity, renderStatusPill(user.enabled ? "启用" : "已停用", user.enabled));
+  article.append(head, renderShare(user));
+  if (manage) article.append(userManageButtons(user));
   return article;
 };
 
-const renderListen = (listen) => {
-  const card = document.createElement("article");
-  card.className = "listen-card";
-  card.dataset.id = listen.id;
-  const head = document.createElement("div");
-  head.className = "listen-card-head";
-  const title = document.createElement("h3");
-  title.textContent = `端口 ${listen.port} · ${listen.method}`;
-  const bound = document.createElement("span");
-  bound.className = listen.bound ? "status-on" : "status-off";
-  bound.textContent = listen.bound ? "已绑定" : "未生效";
-  head.append(title, bound);
-  card.append(head);
-  (listen.users || []).forEach((user) => card.append(renderUser(listen, user)));
+const primaryUser = (listen) => {
+  const users = (listen && listen.users) || [];
+  return users.find((user) => user && user.enabled && user.share_available && user.uri) || users[0] || null;
+};
+
+const listenFooterActions = (listen, { detail = false, close = false } = {}) => {
   const actions = document.createElement("div");
-  actions.className = "listen-card-actions";
+  actions.className = detail ? "dialog-actions" : "listen-card-actions";
+  if (!detail) {
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "btn-secondary";
+    open.textContent = "详情";
+    open.addEventListener("click", () => openDetail(listen));
+    actions.append(open);
+  }
   if (isSS2022(listen.method)) {
     const append = document.createElement("button");
     append.type = "button";
@@ -747,32 +895,127 @@ const renderListen = (listen) => {
   remove.textContent = "删除监听";
   remove.addEventListener("click", () => deleteListen(listen));
   actions.append(remove);
-  card.append(actions);
+  if (close) {
+    const done = document.createElement("button");
+    done.type = "button";
+    done.className = "btn-secondary";
+    done.textContent = "关闭";
+    done.addEventListener("click", closeDetail);
+    actions.append(done);
+  }
+  return actions;
+};
+
+const renderListen = (listen) => {
+  const card = document.createElement("article");
+  card.className = "listen-card";
+  card.dataset.id = listen.id;
+  card.dataset.bound = listen.bound ? "true" : "false";
+
+  const head = document.createElement("div");
+  head.className = "listen-card-head";
+  const mark = document.createElement("span");
+  mark.className = "listen-card-mark";
+  mark.dataset.tone = String((Number(listen.port) || 0) % 6);
+  mark.textContent = String(listen.port || "");
+  const identity = document.createElement("div");
+  identity.className = "listen-card-identity";
+  const titleRow = document.createElement("div");
+  titleRow.className = "listen-card-title-row";
+  const title = document.createElement("h3");
+  title.textContent = `端口 ${listen.port}`;
+  titleRow.append(title, renderStatusPill(listen.bound ? "运行中" : "未生效", listen.bound));
+  const meta = document.createElement("p");
+  meta.className = "listen-card-meta";
+  const users = listen.users || [];
+  meta.textContent = [methodLabel(listen.method), users.length ? `${users.length} 个用户` : ""].filter(Boolean).join(" · ");
+  identity.append(titleRow, meta);
+  head.append(mark, identity);
+  card.append(head);
+  const first = primaryUser(listen);
+  if (first) {
+    const account = renderUser(first, { compact: true });
+    if (users.length > 1) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "btn-link more-users";
+      more.textContent = `还有 ${users.length - 1} 个用户`;
+      more.addEventListener("click", () => openDetail(listen));
+      const share = account.querySelector(".share-row");
+      if (share) share.append(more);
+      else account.append(more);
+    }
+    card.append(account);
+  }
+  card.append(listenFooterActions(listen));
   return card;
+};
+
+const closeDetail = () => {
+  openListenID = "";
+  if (detailDialog && detailDialog.open) detailDialog.close();
+};
+
+const renderDetail = (listen) => {
+  if (!detailDialog) return;
+  openListenID = listen.id;
+  if (detailTitle) detailTitle.textContent = `端口 ${listen.port}`;
+  if (detailMeta) {
+    const parts = [methodLabel(listen.method), listenShareHost(listen), listen.bound ? "运行中" : "未生效"].filter(Boolean);
+    detailMeta.textContent = parts.join(" · ");
+    detailMeta.hidden = !detailMeta.textContent;
+  }
+  if (detailUsers) {
+    detailUsers.replaceChildren();
+    (listen.users || []).forEach((user) => detailUsers.append(renderUser(user, { manage: true })));
+  }
+  if (detailActions) {
+    const footer = listenFooterActions(listen, { detail: true, close: true });
+    detailActions.replaceChildren(...Array.from(footer.children));
+  }
+};
+
+const openDetail = (listen) => {
+  renderDetail(listen);
+  if (detailDialog && typeof detailDialog.showModal === "function") {
+    if (detailDialog.open) return;
+    detailDialog.showModal();
+  }
+};
+
+const refreshOpenDetail = () => {
+  if (!openListenID || !detailDialog || !detailDialog.open) return;
+  const listen = listensCache.find((item) => item && item.id === openListenID);
+  if (listen) renderDetail(listen);
+  else if (listensCache.length) closeDetail();
 };
 
 const renderListens = (listens) => {
   if (!listNode) return;
+  listensCache = listens || [];
   listNode.replaceChildren();
-  (listens || []).forEach((listen) => listNode.append(renderListen(listen)));
+  listensCache.forEach((listen) => listNode.append(renderListen(listen)));
   if (countNode) {
-    countNode.hidden = !listens || !listens.length;
-    countNode.textContent = listens && listens.length ? `${listens.length} 条监听` : "";
+    countNode.hidden = !listensCache.length;
+    countNode.textContent = listensCache.length ? `${listensCache.length} 条监听` : "";
   }
   syncListPanel();
+  refreshOpenDetail();
+  if (busy) setBusy(true);
 };
 
 const mutateUser = async (user, action, confirmDelete = false) => {
   if (!canMutate()) return;
   if (confirmDelete) {
-    const ok = await askConfirm({ title: "删除用户", body: "删除后无法恢复该用户密钥。同端口其他用户会继续。", confirm: "删除", danger: true });
+    const ok = await askConfirm({ title: "删除用户", body: "删掉后不能恢复。同一端口的其他人不受影响。", confirm: "删除", danger: true });
     if (!ok) return;
   }
   setBusy(true);
   try {
     await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, mutateBody());
-    showStatus("已更新。", false);
     await renderWorkspace();
+    const message = action === "enable" ? "已启用该用户。" : action === "disable" ? "已停用该用户。" : "已删除用户。";
+    showStatus(message, false);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
@@ -780,29 +1023,41 @@ const mutateUser = async (user, action, confirmDelete = false) => {
   }
 };
 
-const appendUser = async (listen) => {
-  if (!canMutate()) return;
-  setBusy(true);
-  try {
-    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, mutateBody());
-    showStatus("已追加用户。", false);
-    await renderWorkspace();
-  } catch (error) {
-    showStatus(error.message, true);
-  } finally {
-    setBusy(false);
+const closeAppend = () => {
+  pendingAppendListen = null;
+  if (appendForm) appendForm.reset();
+  if (appendDialog && appendDialog.open) appendDialog.close();
+};
+
+const openAppend = (listen) => {
+  if (!canMutate() || !listen) return;
+  pendingAppendListen = listen;
+  if (appendMeta) {
+    appendMeta.textContent = `端口 ${listen.port} · ${methodLabel(listen.method)}`;
+    appendMeta.hidden = !appendMeta.textContent;
   }
+  if (appendForm) appendForm.reset();
+  if (appendDialog && typeof appendDialog.showModal === "function") {
+    if (appendDialog.open) appendDialog.close();
+    appendDialog.showModal();
+  }
+  if (appendName) appendName.focus();
+};
+
+const appendUser = (listen) => {
+  openAppend(listen);
 };
 
 const deleteListen = async (listen) => {
   if (!canMutate()) return;
-  const ok = await askConfirm({ title: "删除监听", body: "将解绑该端口并删除其上全部用户。", confirm: "删除", danger: true });
+  const ok = await askConfirm({ title: "删除监听", body: "会关掉这个端口，上面的用户也会一起删掉。", confirm: "删除", danger: true });
   if (!ok) return;
   setBusy(true);
   try {
+    if (openListenID === listen.id) closeDetail();
     await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, mutateBody());
-    showStatus("已删除监听。", false);
     await renderWorkspace();
+    showStatus("已删除监听。", false);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
@@ -829,7 +1084,59 @@ const canMutate = () => {
 const loadExecution = async () => {
   if (!selectedAgentID) return null;
   const payload = await panelJSON(`api/execution?agent_id=${encodeURIComponent(selectedAgentID)}`);
-  return rememberExecution(selectedAgentID, payload.execution || null);
+  rememberExecution(selectedAgentID, payload.execution || null);
+  return payload.execution || null;
+};
+
+const agentShareHost = (agent) => {
+  if (!agent) return "";
+  return String(agent.ddns_domain || agent.last_seen_ipv4 || agent.ipv4 || "").trim();
+};
+
+const shareHostSourceLabel = (source) => {
+  if (source === "override") return "已手动指定，保存后不随节点变更";
+  if (source === "ddns") return "来自节点域名，随节点自动更新";
+  if (source === "ipv4") return "来自节点 IPv4，随节点自动更新";
+  if (source === "ipv6") return "来自节点 IPv6，随节点自动更新";
+  return "";
+};
+
+const fillShareHost = (execution, listens) => {
+  if (!shareHostInput) return;
+  shareHostInput.value = String(
+    (execution && execution.share_host) ||
+      listenShareHost((listens || [])[0] || null) ||
+      agentShareHost(selectedAgent()) ||
+      ""
+  );
+  const source = String((execution && execution.share_host_source) || "");
+  const note = shareHostSourceLabel(source);
+  if (shareHostSource) {
+    shareHostSource.textContent = note;
+    shareHostSource.hidden = !note;
+  }
+  if (shareHostAuto) shareHostAuto.hidden = source !== "override";
+};
+
+const syncShareHostBar = (visible) => {
+  if (shareHostBar) shareHostBar.hidden = !visible;
+  if (!visible && shareHostAuto) shareHostAuto.hidden = true;
+  if (!visible && shareHostSource) {
+    shareHostSource.hidden = true;
+    shareHostSource.textContent = "";
+  }
+};
+
+const clearWorkspace = (kind) => {
+  executionReady = false;
+  lastExecution = null;
+  workspaceNode.hidden = true;
+  emptyNode.hidden = true;
+  renderListens([]);
+  renderExecutionBadge(null);
+  showContext(kind);
+  fillShareHost(null, []);
+  syncShareHostBar(Boolean(selectedAgentID));
 };
 
 const renderWorkspace = async () => {
@@ -837,21 +1144,21 @@ const renderWorkspace = async () => {
   workspaceSeq = seq;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
-  executionReady = false;
-  lastExecution = null;
-  workspaceNode.hidden = true;
-  emptyNode.hidden = true;
   closeCreate();
-  showStatus("", false);
-  renderListens([]);
   if (!selectedAgentID) {
-    renderExecutionBadge(null);
-    showContext("empty");
+    clearWorkspace("empty");
     return;
   }
   if (!agentOnline) {
-    renderExecutionBadge(null);
-    showContext("offline");
+    let execution = null;
+    try {
+      execution = await loadExecution();
+    } catch (_error) {
+      execution = null;
+    }
+    if (seq !== workspaceSeq) return;
+    clearWorkspace("offline");
+    fillShareHost(execution, []);
     return;
   }
   showContext("");
@@ -862,8 +1169,7 @@ const renderWorkspace = async () => {
     if (seq !== workspaceSeq) return;
     if (error && error.denied) throw error;
     if (error && error.message === "暂时无法管理 Shadowsocks 服务。") throw error;
-    renderExecutionBadge(null);
-    showContext("execution-unavailable");
+    clearWorkspace("execution-unavailable");
     return;
   }
   if (seq !== workspaceSeq) return;
@@ -871,14 +1177,15 @@ const renderWorkspace = async () => {
   executionReady = execution?.ready === true;
   renderExecutionBadge(execution);
   if (!executionReady) {
-    showContext("execution-unavailable");
+    clearWorkspace("execution-unavailable");
     return;
   }
-  showContext("");
   workspaceNode.hidden = false;
   const payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
   if (seq !== workspaceSeq) return;
   renderListens(payload.listens);
+  fillShareHost(execution, payload.listens);
+  syncShareHostBar(true);
   if (payload.error) showStatus(payload.error, true);
 };
 
@@ -901,6 +1208,10 @@ agentPicker.onChange = async (value) => {
   else url.searchParams.delete("agent_id");
   window.history.replaceState({}, "", url);
   closeCreate();
+  closeDetail();
+  closeAppend();
+  fillShareHost(null, []);
+  syncShareHostBar(Boolean(selectedAgentID));
   try {
     await renderWorkspace();
   } catch (error) {
@@ -908,16 +1219,92 @@ agentPicker.onChange = async (value) => {
   }
 };
 
-if (createToggle) {
-  createToggle.addEventListener("click", () => {
-    if (!canMutate()) return;
-    openCreate();
+const openCreateFromButton = () => {
+  if (!canMutate()) return;
+  openCreate();
+};
+if (createToggle) createToggle.addEventListener("click", openCreateFromButton);
+if (emptyCreate) emptyCreate.addEventListener("click", openCreateFromButton);
+
+if (createCancel) createCancel.addEventListener("click", closeCreate);
+if (createDialog) {
+  createDialog.addEventListener("click", (event) => {
+    if (event.target === createDialog) closeCreate();
+  });
+}
+if (detailDialog) {
+  detailDialog.addEventListener("click", (event) => {
+    if (event.target === detailDialog) closeDetail();
+  });
+  detailDialog.addEventListener("close", () => {
+    openListenID = "";
+  });
+}
+if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
+if (qrCopy) {
+  qrCopy.addEventListener("click", async () => {
+    try {
+      await copyText(pendingQRURI);
+      markCopied(qrCopy);
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  });
+}
+const saveShareHost = async (host, message) => {
+  if (!canMutate()) return;
+  setBusy(true);
+  try {
+    await sendPluginJSON("api/share-host", mutateBody({ host }));
+    await renderWorkspace();
+    showStatus(message, false);
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (shareHostSave) {
+  shareHostSave.addEventListener("click", () => {
+    const host = shareHostInput ? String(shareHostInput.value || "").trim() : "";
+    saveShareHost(host, "已更新连接地址。");
+  });
+}
+if (shareHostAuto) {
+  shareHostAuto.addEventListener("click", () => {
+    saveShareHost("", "已恢复为节点自动地址。");
   });
 }
 
-if (createCancel) createCancel.addEventListener("click", closeCreate);
-if (createBack) createBack.addEventListener("click", closeCreate);
-if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
+if (appendCancel) appendCancel.addEventListener("click", closeAppend);
+if (appendDialog) {
+  appendDialog.addEventListener("click", (event) => {
+    if (event.target === appendDialog) closeAppend();
+  });
+}
+if (appendForm) {
+  appendForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const listen = pendingAppendListen;
+    if (!listen || !canMutate()) return;
+    const name = String(new FormData(appendForm).get("name") || "").trim();
+    setBusy(true);
+    try {
+      await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, mutateBody({ name }));
+      const listenID = listen.id;
+      closeAppend();
+      await renderWorkspace();
+      const updated = listensCache.find((item) => item && item.id === listenID);
+      if (updated) openDetail(updated);
+      showStatus("已追加用户。", false);
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      setBusy(false);
+    }
+  });
+}
 
 if (createForm) {
   createForm.addEventListener("submit", async (event) => {

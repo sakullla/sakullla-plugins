@@ -33,6 +33,7 @@ type hostCapabilityRuntime struct {
 	mu     sync.Mutex
 	live   map[string][]ListenPortStatus
 	nodes  map[string]NodeAddresses
+	hints  map[string]NodeAddresses
 }
 
 func (c *Controller) ReportListen(ctx context.Context, agentID string) (ListenReport, error) {
@@ -69,7 +70,12 @@ func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 	if client == nil {
 		return nil
 	}
-	return &hostCapabilityRuntime{client: client, live: map[string][]ListenPortStatus{}, nodes: map[string]NodeAddresses{}}
+	return &hostCapabilityRuntime{
+		client: client,
+		live:   map[string][]ListenPortStatus{},
+		nodes:  map[string]NodeAddresses{},
+		hints:  map[string]NodeAddresses{},
+	}
 }
 
 func (runtime *hostCapabilityRuntime) LoadListens(ctx context.Context) ([]ListenRule, bool, error) {
@@ -245,17 +251,21 @@ func (runtime *hostCapabilityRuntime) SetAgentNode(agentID string, node NodeAddr
 	runtime.rememberNode(agentID, node)
 }
 
-func (runtime *hostCapabilityRuntime) AgentNode(ctx context.Context, agentID string) NodeAddresses {
+func (runtime *hostCapabilityRuntime) AgentNode(_ context.Context, agentID string) NodeAddresses {
+	return runtime.overrideNode(agentID)
+}
+
+func (runtime *hostCapabilityRuntime) overrideNode(agentID string) NodeAddresses {
 	if runtime == nil || !validAgentID(agentID) {
 		return NodeAddresses{}
 	}
 	runtime.mu.Lock()
-	node := runtime.nodes[agentID]
-	runtime.mu.Unlock()
-	if nodeHasAddr(node) {
-		return node
-	}
-	if runtime.client == nil {
+	defer runtime.mu.Unlock()
+	return runtime.nodes[agentID]
+}
+
+func (runtime *hostCapabilityRuntime) CatalogNode(ctx context.Context, agentID string) NodeAddresses {
+	if runtime == nil || !validAgentID(agentID) || runtime.client == nil {
 		return NodeAddresses{}
 	}
 	var result struct {
@@ -268,7 +278,7 @@ func (runtime *hostCapabilityRuntime) AgentNode(ctx context.Context, agentID str
 	if err := callHost(ctx, runtime.client, pluginNodeAddressesOp, map[string]any{"agent_id": agentID}, &result); err != nil {
 		return NodeAddresses{}
 	}
-	node = NodeAddresses{
+	node := NodeAddresses{
 		DDNS: strings.TrimSpace(result.DDNS),
 		IPv4: strings.TrimSpace(result.IPv4),
 		IPv6: strings.TrimSpace(result.IPv6),
@@ -279,7 +289,6 @@ func (runtime *hostCapabilityRuntime) AgentNode(ctx context.Context, agentID str
 	if node.IPv6 == "" {
 		node.IPv6 = strings.TrimSpace(result.LastSeenIPv6)
 	}
-	runtime.rememberNode(agentID, node)
 	return node
 }
 
@@ -293,6 +302,36 @@ func (runtime *hostCapabilityRuntime) rememberNode(agentID string, node NodeAddr
 		runtime.nodes = map[string]NodeAddresses{}
 	}
 	runtime.nodes[agentID] = node
+}
+
+func (runtime *hostCapabilityRuntime) clearOverride(agentID string) {
+	if runtime == nil || !validAgentID(agentID) {
+		return
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	delete(runtime.nodes, agentID)
+}
+
+func (runtime *hostCapabilityRuntime) setHint(agentID string, node NodeAddresses) {
+	if runtime == nil || !validAgentID(agentID) || !nodeHasAddr(node) {
+		return
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.hints == nil {
+		runtime.hints = map[string]NodeAddresses{}
+	}
+	runtime.hints[agentID] = node
+}
+
+func (runtime *hostCapabilityRuntime) hintNode(agentID string) NodeAddresses {
+	if runtime == nil || !validAgentID(agentID) {
+		return NodeAddresses{}
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.hints[agentID]
 }
 
 func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string) (ListenReport, error) {
@@ -310,9 +349,6 @@ func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string
 		return ListenReport{}, ErrTypedHandlesUnavailable
 	}
 	report.AgentID = agentID
-	if node := nodeFromReport(report); nodeHasAddr(node) {
-		runtime.rememberNode(agentID, node)
-	}
 	return report, nil
 }
 

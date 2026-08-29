@@ -206,9 +206,16 @@ func encodeSIP002(method, password, host string, port int, name string) (string,
 	userinfo := base64.StdEncoding.EncodeToString([]byte(method + ":" + password))
 	uri := "ss://" + userinfo + "@" + hostport
 	if name = strings.TrimSpace(name); name != "" {
-		uri += "#" + url.PathEscape(name)
+		uri += "#" + sip002TagEscape(name)
 	}
 	return uri, nil
+}
+
+// sip002TagEscape percent-encodes a SIP002 profile tag as UTF-8.
+// SIP002 requires the optional #tag to be URI-encoded; Clash, v2rayN and
+// Shadowrocket decode encodeURIComponent-style fragments. Spaces are %20, not '+'.
+func sip002TagEscape(name string) string {
+	return strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 }
 
 // SIP002URI is EncodeSIP002.

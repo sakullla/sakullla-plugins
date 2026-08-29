@@ -47,6 +47,34 @@ func newShareService(t *testing.T, node NodeAddresses, listen ListenBinding) *Se
 	return service
 }
 
+func TestNodeFromShareHostAcceptsDomainAndPublicIP(t *testing.T) {
+	for _, test := range []struct {
+		host string
+		want NodeAddresses
+	}{
+		{host: "ss.example.com", want: NodeAddresses{DDNS: "ss.example.com"}},
+		{host: "203.0.113.10", want: NodeAddresses{IPv4: "203.0.113.10"}},
+		{host: "2001:db8::10", want: NodeAddresses{IPv6: "2001:db8::10"}},
+		{host: "[2001:db8::10]", want: NodeAddresses{IPv6: "2001:db8::10"}},
+	} {
+		t.Run(test.host, func(t *testing.T) {
+			got, err := NodeFromShareHost(test.host)
+			if err != nil || got != test.want {
+				t.Fatalf("got=%#v err=%v want=%#v", got, err, test.want)
+			}
+			host, _, ok := got.SelectHost()
+			if !ok || (host != test.want.DDNS && host != test.want.IPv4 && host != test.want.IPv6) {
+				t.Fatalf("select=%q ok=%v", host, ok)
+			}
+		})
+	}
+	for _, host := range []string{"", "0.0.0.0", "127.0.0.1", "localhost", "ss.example.com:8388"} {
+		if _, err := NodeFromShareHost(host); err == nil {
+			t.Fatalf("accepted %q", host)
+		}
+	}
+}
+
 func TestShareHostPrefersDDNSThenIPv4ThenIPv6(t *testing.T) {
 	binding, err := DualStackListen(8388, "0.0.0.0")
 	if err != nil {

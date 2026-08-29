@@ -93,6 +93,22 @@ func nodeHasAddr(node NodeAddresses) bool {
 	return strings.TrimSpace(node.DDNS) != "" || strings.TrimSpace(node.IPv4) != "" || strings.TrimSpace(node.IPv6) != ""
 }
 
+// NodeFromShareHost maps a client-facing domain or public IP to a NodeAddresses
+// override. Only one field is set so SelectHost uses the saved address.
+func NodeFromShareHost(host string) (NodeAddresses, error) {
+	value, ok := shareableHost(host)
+	if !ok {
+		return NodeAddresses{}, ErrInvalid
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		if ip.To4() != nil {
+			return NodeAddresses{IPv4: ip.String()}, nil
+		}
+		return NodeAddresses{IPv6: ip.String()}, nil
+	}
+	return NodeAddresses{DDNS: value}, nil
+}
+
 // ProjectShareEndpoint maps the live bind and Host node addresses to a shareable endpoint.
 func ProjectShareEndpoint(binding ListenBinding, addresses NodeAddresses) ShareEndpoint {
 	if err := binding.Validate(); err != nil {

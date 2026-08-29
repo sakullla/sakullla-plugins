@@ -19,12 +19,16 @@ const (
 	offlineText       = "该节点离线，不能新增或改动监听"
 	executionText     = "该节点暂时无法执行监听"
 	bindFailedText    = "节点绑定失败，请改端口后重试"
+	shareHostText     = "请填写可连接的域名或公网 IP"
 )
 
 type executionView struct {
-	AgentID string `json:"agent_id"`
-	Online  bool   `json:"online"`
-	Ready   bool   `json:"ready"`
+	AgentID         string `json:"agent_id"`
+	Online          bool   `json:"online"`
+	Ready           bool   `json:"ready"`
+	ShareHost       string `json:"share_host,omitempty"`
+	ShareHostSource string `json:"share_host_source,omitempty"`
+	ShareHostAuto   string `json:"share_host_auto,omitempty"`
 }
 
 type listenUserView struct {
@@ -37,17 +41,19 @@ type listenUserView struct {
 	URI            string `json:"uri,omitempty"`
 	QRContent      string `json:"qr_content,omitempty"`
 	QRPNGBase64    string `json:"qr_png_base64,omitempty"`
+	HostPort       string `json:"host_port,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 }
 
 type listenAPIView struct {
-	ID      string           `json:"id"`
-	AgentID string           `json:"agent_id"`
-	Port    int              `json:"port"`
-	Method  string           `json:"method"`
-	Family  string           `json:"family"`
-	Bound   bool             `json:"bound"`
-	Users   []listenUserView `json:"users"`
+	ID       string           `json:"id"`
+	AgentID  string           `json:"agent_id"`
+	Port     int              `json:"port"`
+	Method   string           `json:"method"`
+	Family   string           `json:"family"`
+	Bound    bool             `json:"bound"`
+	HostPort string           `json:"host_port,omitempty"`
+	Users    []listenUserView `json:"users"`
 }
 
 type listenDefaultsView struct {
@@ -69,6 +75,7 @@ type listenWriteRequest struct {
 	DDNS      string `json:"ddns_domain,omitempty"`
 	IPv4      string `json:"ipv4,omitempty"`
 	IPv6      string `json:"ipv6,omitempty"`
+	Host      string `json:"host,omitempty"`
 }
 
 type listenAPIResponse struct {
@@ -89,6 +96,10 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	path := request.URL.Path
 	if path == "/api/execution" {
 		c.serveExecution(writer, request)
+		return true
+	}
+	if path == "/api/share-host" {
+		c.serveShareHost(writer, request)
 		return true
 	}
 	if path == "/api/defaults" {
@@ -188,7 +199,54 @@ func (c *Controller) serveExecution(writer http.ResponseWriter, request *http.Re
 		view.Online = report.Online
 		view.Ready = report.Online
 	}
-	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Execution: &view, Access: readWriteAccess()})
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Execution: c.executionShare(request.Context(), view), Access: readWriteAccess()})
+}
+
+func (c *Controller) serveShareHost(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "POST")
+		writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := c.uiIdentity(request); err != nil {
+		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
+		return
+	}
+	body, err := decodeListenWrite(request)
+	if err != nil {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+		return
+	}
+	if !validAgentID(body.AgentID) {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: agentRequiredText})
+		return
+	}
+	if err := c.requireMutableAgent(request.Context(), body.AgentID); err != nil {
+		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		return
+	}
+	host := strings.TrimSpace(body.Host)
+	if host == "" {
+		c.clearAgentNode(request.Context(), body.AgentID)
+	} else {
+		node, err := NodeFromShareHost(host)
+		if err != nil {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: shareHostText})
+			return
+		}
+		c.rememberAgentNode(request.Context(), body.AgentID, node)
+	}
+	views, err := c.projectListens(request.Context(), body.AgentID)
+	if err != nil {
+		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		return
+	}
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{
+		Ready:     true,
+		Listens:   views,
+		Execution: c.executionShare(request.Context(), executionView{AgentID: body.AgentID, Online: true, Ready: true}),
+		Access:    readWriteAccess(),
+	})
 }
 
 func (c *Controller) serveDefaults(writer http.ResponseWriter, request *http.Request) {
@@ -292,7 +350,7 @@ func (c *Controller) serveListenItem(writer http.ResponseWriter, request *http.R
 			return
 		}
 		body, _ := decodeListenWrite(request)
-		c.rememberAgentNode(request.Context(), body.AgentID, requestNode(body))
+		c.rememberRequestNode(request.Context(), body.AgentID, requestNode(body))
 		if err := c.deleteListen(request.Context(), listenID, body.AgentID); err != nil {
 			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
 			return
@@ -358,7 +416,7 @@ func (c *Controller) serveUserItem(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		body, _ := decodeListenWrite(request)
-		c.rememberAgentNode(request.Context(), body.AgentID, requestNode(body))
+		c.rememberRequestNode(request.Context(), body.AgentID, requestNode(body))
 		var err error
 		if action == "delete" {
 			err = c.deleteUser(request.Context(), userID, body.AgentID)
@@ -479,6 +537,27 @@ func (c *Controller) rememberAgentNode(ctx context.Context, agentID string, node
 	_ = c.listenState.StoreNodes(ctx, c.listenHost.snapshotNodes())
 }
 
+func (c *Controller) rememberRequestNode(ctx context.Context, agentID string, node NodeAddresses) {
+	if c == nil || c.listenHost == nil || !validAgentID(agentID) || !nodeHasAddr(node) {
+		return
+	}
+	if nodeHasAddr(c.listenHost.overrideNode(agentID)) || nodeHasAddr(c.listenHost.CatalogNode(ctx, agentID)) {
+		return
+	}
+	c.listenHost.setHint(agentID, node)
+}
+
+func (c *Controller) clearAgentNode(ctx context.Context, agentID string) {
+	if c == nil || c.listenHost == nil || !validAgentID(agentID) {
+		return
+	}
+	c.listenHost.clearOverride(agentID)
+	if c.listenState == nil {
+		return
+	}
+	_ = c.listenState.StoreNodes(ctx, c.listenHost.snapshotNodes())
+}
+
 func requestNode(body listenWriteRequest) NodeAddresses {
 	return NodeAddresses{DDNS: strings.TrimSpace(body.DDNS), IPv4: strings.TrimSpace(body.IPv4), IPv6: strings.TrimSpace(body.IPv6)}
 }
@@ -532,7 +611,7 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
 		return listenAPIView{}, err
 	}
-	c.rememberAgentNode(ctx, body.AgentID, requestNode(body))
+	c.rememberRequestNode(ctx, body.AgentID, requestNode(body))
 	spec := ListenSpec{AgentID: body.AgentID, Name: strings.TrimSpace(body.Name), Method: strings.TrimSpace(body.Method), Port: body.Port, Password: body.Password, ServerPSK: body.ServerPSK}
 	method, err := spec.resolveMethod()
 	if err != nil {
@@ -600,7 +679,7 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 	if err := c.requireMutableAgent(ctx, agentID); err != nil {
 		return listenAPIView{}, err
 	}
-	c.rememberAgentNode(ctx, agentID, requestNode(body))
+	c.rememberRequestNode(ctx, agentID, requestNode(body))
 	if !SS2022Method(listener.Method) {
 		return listenAPIView{}, ErrTraditionalMultiUser
 	}
@@ -822,14 +901,16 @@ func (c *Controller) projectListenView(ctx context.Context, listener ListenRule,
 	if c.listenHost != nil {
 		bound = c.listenHost.HasLiveListen(listener.AgentID, listener.ID)
 	}
+	endpoint := ProjectShareEndpoint(ListenBinding{Port: listener.Port, TCP: true, UDP: true}, node)
 	return listenAPIView{
-		ID:      listener.ID,
-		AgentID: listener.AgentID,
-		Port:    listener.Port,
-		Method:  listener.Method,
-		Family:  AccountFamilyOf(listener.Method),
-		Bound:   bound,
-		Users:   users,
+		ID:       listener.ID,
+		AgentID:  listener.AgentID,
+		Port:     listener.Port,
+		Method:   listener.Method,
+		Family:   AccountFamilyOf(listener.Method),
+		Bound:    bound,
+		HostPort: endpoint.HostPort,
+		Users:    users,
 	}
 }
 
@@ -878,6 +959,7 @@ func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, u
 	view.URI = share.URI
 	view.QRContent = share.QR.Content
 	view.QRPNGBase64 = base64.StdEncoding.EncodeToString(share.QR.PNG)
+	view.HostPort = endpoint.HostPort
 	return view
 }
 
@@ -885,13 +967,49 @@ func (c *Controller) shareNode(ctx context.Context, agentID string) NodeAddresse
 	if c.listenHost == nil || !validAgentID(agentID) {
 		return NodeAddresses{}
 	}
+	if stored := c.listenHost.overrideNode(agentID); nodeHasAddr(stored) {
+		return stored
+	}
+	return c.autoNode(ctx, agentID)
+}
+
+func (c *Controller) autoNode(ctx context.Context, agentID string) NodeAddresses {
+	if c.listenHost == nil || !validAgentID(agentID) {
+		return NodeAddresses{}
+	}
+	if node := c.listenHost.CatalogNode(ctx, agentID); nodeHasAddr(node) {
+		return node
+	}
+	if node := c.listenHost.hintNode(agentID); nodeHasAddr(node) {
+		return node
+	}
 	if report, err := c.ReportListen(ctx, agentID); err == nil {
 		if node := nodeFromReport(report); nodeHasAddr(node) {
-			c.rememberAgentNode(ctx, agentID, node)
 			return node
 		}
 	}
-	return c.listenHost.AgentNode(ctx, agentID)
+	return NodeAddresses{}
+}
+
+func (c *Controller) executionShare(ctx context.Context, view executionView) *executionView {
+	if c.listenHost != nil && validAgentID(view.AgentID) {
+		autoHost, autoSource, autoOK := c.autoNode(ctx, view.AgentID).SelectHost()
+		if stored := c.listenHost.overrideNode(view.AgentID); nodeHasAddr(stored) {
+			if host, _, ok := stored.SelectHost(); ok {
+				view.ShareHost = host
+				view.ShareHostSource = "override"
+				if autoOK {
+					view.ShareHostAuto = autoHost
+				}
+				return &view
+			}
+		}
+		if autoOK {
+			view.ShareHost = autoHost
+			view.ShareHostSource = autoSource
+		}
+	}
+	return &view
 }
 
 func (c *Controller) sharePassword(ctx context.Context, listener ListenRule, user User) (string, error) {

@@ -20,23 +20,30 @@ import (
 )
 
 type uiListenHost struct {
-	mu       sync.Mutex
-	online   bool
-	apply    []listenApplyRequest
-	applyErr error
-	node     NodeAddresses
+	mu             sync.Mutex
+	online         bool
+	apply          []listenApplyRequest
+	applyErr       error
+	node           NodeAddresses
+	hideReportNode bool
 }
 
 func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	if call.Operation == pluginNodeAddressesOp {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return copyHostResult(h.node, target)
+	}
 	request := decodePluginCallRequestFromCall(call)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch request.Name {
 	case pluginCallListenReport:
-		if !h.online {
-			return copyHostResult(ListenReport{AgentID: request.AgentID, Online: false, DDNS: h.node.DDNS, IPv4: h.node.IPv4, IPv6: h.node.IPv6}, target)
+		report := ListenReport{AgentID: request.AgentID, Online: h.online}
+		if !h.hideReportNode {
+			report.DDNS, report.IPv4, report.IPv6 = h.node.DDNS, h.node.IPv4, h.node.IPv6
 		}
-		return copyHostResult(ListenReport{AgentID: request.AgentID, Online: true, DDNS: h.node.DDNS, IPv4: h.node.IPv4, IPv6: h.node.IPv6}, target)
+		return copyHostResult(report, target)
 	case pluginCallListenApply:
 		if h.applyErr != nil {
 			return h.applyErr
@@ -200,6 +207,26 @@ func decodeListenAPI(t *testing.T, recorder *httptest.ResponseRecorder) listenAP
 	return payload
 }
 
+func TestControlAPIShareURIPercentEncodesChineseName(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := newUITestController(t, host, NodeAddresses{DDNS: "ss.example.com"})
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","name":"手机"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	listen := decodeListenAPI(t, created).Listen
+	if listen == nil || len(listen.Users) != 1 {
+		t.Fatalf("listen=%#v", listen)
+	}
+	user := listen.Users[0]
+	if user.Name != "手机" || !strings.HasSuffix(user.URI, "#%E6%89%8B%E6%9C%BA") || strings.Contains(user.URI, "手机") {
+		t.Fatalf("chinese share=%#v", user)
+	}
+	if user.QRContent != user.URI {
+		t.Fatalf("qr=%q uri=%q", user.QRContent, user.URI)
+	}
+}
+
 func TestControlAPIDefaultCreateAppendDisableDelete(t *testing.T) {
 	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
 	controller := newUITestController(t, host, NodeAddresses{DDNS: "ss.example.com"})
@@ -221,13 +248,16 @@ func TestControlAPIDefaultCreateAppendDisableDelete(t *testing.T) {
 	if !userA.ShareAvailable || userA.URI == "" || userA.QRContent != userA.URI || !strings.HasPrefix(userA.URI, "ss://") || strings.Contains(userA.URI, "ss2022://") || strings.Contains(userA.URI, "plugin=") {
 		t.Fatalf("share=%#v", userA)
 	}
+	if !strings.HasPrefix(userA.HostPort, "ss.example.com:") || first.HostPort != userA.HostPort {
+		t.Fatalf("host_port listen=%q user=%q", first.HostPort, userA.HostPort)
+	}
 
 	dup := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","port":`+strconv.Itoa(first.Port)+`}`)
 	if dup.Code != http.StatusConflict || !strings.Contains(dup.Body.String(), duplicatePortText) {
 		t.Fatalf("duplicate port=%d %s", dup.Code, dup.Body.String())
 	}
 
-	appended := uiJSON(t, controller, http.MethodPost, "/api/listens/"+first.ID+"/users", `{"agent_id":"agent-1"}`)
+	appended := uiJSON(t, controller, http.MethodPost, "/api/listens/"+first.ID+"/users", `{"agent_id":"agent-1","name":"手机"}`)
 	if appended.Code != http.StatusOK {
 		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
 	}
@@ -239,7 +269,7 @@ func TestControlAPIDefaultCreateAppendDisableDelete(t *testing.T) {
 	if userB.ID == userA.ID {
 		userB = two.Users[1]
 	}
-	if !userB.ShareAvailable || userB.URI == "" || userB.QRContent != userB.URI {
+	if userB.Name != "手机" || !userB.ShareAvailable || userB.URI == "" || userB.QRContent != userB.URI || !strings.HasSuffix(userB.URI, "#%E6%89%8B%E6%9C%BA") || strings.Contains(userB.URI, "手机") {
 		t.Fatalf("user B share=%#v", userB)
 	}
 
@@ -411,6 +441,54 @@ func TestControlAPIShareAvailableWithoutPublishedService(t *testing.T) {
 	}
 }
 
+func TestControlAPIShareHostOverrideUpdatesURIs(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := newUITestController(t, host, host.node)
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	original := decodeListenAPI(t, created).Listen
+	if original == nil || len(original.Users) != 1 || !strings.Contains(original.Users[0].URI, "ss.example.com") {
+		t.Fatalf("created=%#v", original)
+	}
+	updated := uiJSON(t, controller, http.MethodPost, "/api/share-host", `{"agent_id":"agent-1","host":"share.example.com"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("share-host=%d %s", updated.Code, updated.Body.String())
+	}
+	payload := decodeListenAPI(t, updated)
+	if payload.Execution == nil || payload.Execution.ShareHost != "share.example.com" || len(payload.Listens) != 1 {
+		t.Fatalf("payload=%#v", payload)
+	}
+	if payload.Execution.ShareHostSource != "override" || payload.Execution.ShareHostAuto != "ss.example.com" {
+		t.Fatalf("override source=%#v", payload.Execution)
+	}
+	if !strings.Contains(payload.Listens[0].Users[0].URI, "share.example.com") || strings.Contains(payload.Listens[0].Users[0].URI, "ss.example.com") {
+		t.Fatalf("uri=%q", payload.Listens[0].Users[0].URI)
+	}
+	listed := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || !strings.Contains(listed.Listens[0].Users[0].URI, "share.example.com") {
+		t.Fatalf("listed=%#v", listed.Listens)
+	}
+	bad := uiJSON(t, controller, http.MethodPost, "/api/share-host", `{"agent_id":"agent-1","host":"127.0.0.1"}`)
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), shareHostText) {
+		t.Fatalf("loopback=%d %s", bad.Code, bad.Body.String())
+	}
+	appended := uiJSON(t, controller, http.MethodPost, "/api/listens/"+original.ID+"/users", `{"agent_id":"agent-1","name":"bob"}`)
+	if appended.Code != http.StatusOK {
+		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
+	}
+	after := decodeListenAPI(t, appended).Listen
+	if after == nil || len(after.Users) != 2 {
+		t.Fatalf("append listen=%#v", after)
+	}
+	for _, user := range after.Users {
+		if !strings.Contains(user.URI, "share.example.com") || strings.Contains(user.URI, "ss.example.com") {
+			t.Fatalf("append overwrote share host=%#v", user)
+		}
+	}
+}
+
 func TestControlAPIShareUsesRequestCatalogIdentity(t *testing.T) {
 	host := &uiListenHost{online: true}
 	controller := startUITestController(t, uiTestSetup{host: host})
@@ -425,9 +503,8 @@ func TestControlAPIShareUsesRequestCatalogIdentity(t *testing.T) {
 }
 
 func TestControlAPIShareUsesCatalogNodeWhenReportOmitsIdentity(t *testing.T) {
-	host := &uiListenHost{online: true}
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "edge.example.com"}, hideReportNode: true}
 	controller := startUITestController(t, uiTestSetup{host: host})
-	controller.listenHost.SetAgentNode("agent-1", NodeAddresses{DDNS: "edge.example.com"})
 	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
@@ -435,6 +512,55 @@ func TestControlAPIShareUsesCatalogNodeWhenReportOmitsIdentity(t *testing.T) {
 	view := decodeListenAPI(t, created).Listen
 	if view == nil || len(view.Users) != 1 || !view.Users[0].ShareAvailable || !strings.Contains(view.Users[0].URI, "edge.example.com") || view.Users[0].QRContent != view.Users[0].URI {
 		t.Fatalf("catalog share=%#v", view)
+	}
+}
+
+func TestControlAPIShareFollowsCatalogUntilOverride(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "first.example.com"}}
+	controller := newUITestController(t, host, host.node)
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	first := decodeListenAPI(t, created)
+	if first.Listen == nil || !strings.Contains(first.Listen.Users[0].URI, "first.example.com") {
+		t.Fatalf("created=%#v", first.Listen)
+	}
+	execution := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/execution?agent_id=agent-1", ""))
+	if execution.Execution == nil || execution.Execution.ShareHost != "first.example.com" || execution.Execution.ShareHostSource != ShareHostSourceDDNS {
+		t.Fatalf("auto execution=%#v", execution.Execution)
+	}
+
+	host.mu.Lock()
+	host.node = NodeAddresses{DDNS: "second.example.com"}
+	host.mu.Unlock()
+	listed := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || !strings.Contains(listed.Listens[0].Users[0].URI, "second.example.com") || strings.Contains(listed.Listens[0].Users[0].URI, "first.example.com") {
+		t.Fatalf("catalog follow=%#v", listed.Listens)
+	}
+
+	overridden := uiJSON(t, controller, http.MethodPost, "/api/share-host", `{"agent_id":"agent-1","host":"fixed.example.com"}`)
+	if overridden.Code != http.StatusOK {
+		t.Fatalf("override=%d %s", overridden.Code, overridden.Body.String())
+	}
+	host.mu.Lock()
+	host.node = NodeAddresses{DDNS: "third.example.com"}
+	host.mu.Unlock()
+	frozen := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(frozen.Listens) != 1 || !strings.Contains(frozen.Listens[0].Users[0].URI, "fixed.example.com") || strings.Contains(frozen.Listens[0].Users[0].URI, "third.example.com") {
+		t.Fatalf("override froze=%#v", frozen.Listens)
+	}
+
+	restored := uiJSON(t, controller, http.MethodPost, "/api/share-host", `{"agent_id":"agent-1","host":""}`)
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restore=%d %s", restored.Code, restored.Body.String())
+	}
+	payload := decodeListenAPI(t, restored)
+	if payload.Execution == nil || payload.Execution.ShareHost != "third.example.com" || payload.Execution.ShareHostSource != ShareHostSourceDDNS {
+		t.Fatalf("restored execution=%#v", payload.Execution)
+	}
+	if len(payload.Listens) != 1 || !strings.Contains(payload.Listens[0].Users[0].URI, "third.example.com") {
+		t.Fatalf("restored uri=%#v", payload.Listens)
 	}
 }
 
@@ -466,24 +592,29 @@ func TestControlAPIRestoresPersistedListensAfterRestart(t *testing.T) {
 }
 
 func TestControlAPIRestoresShareFromPersistedCatalogNode(t *testing.T) {
-	host := &uiListenHost{online: true}
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "catalog.example.com"}}
 	state := &uiMemoryListenState{}
 	first := startUITestController(t, uiTestSetup{host: host, state: state})
-	created := uiJSON(t, first, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","ddns_domain":"persist.example.com"}`)
+	created := uiJSON(t, first, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
 	}
-	original := decodeListenAPI(t, created).Listen
-	if original == nil || len(original.Users) != 1 || !strings.Contains(original.Users[0].URI, "persist.example.com") {
-		t.Fatalf("created=%#v", original)
+	saved := uiJSON(t, first, http.MethodPost, "/api/share-host", `{"agent_id":"agent-1","host":"persist.example.com"}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("share-host=%d %s", saved.Code, saved.Body.String())
 	}
+	original := decodeListenAPI(t, saved)
+	if len(original.Listens) != 1 || !strings.Contains(original.Listens[0].Users[0].URI, "persist.example.com") {
+		t.Fatalf("saved=%#v", original.Listens)
+	}
+	host.node = NodeAddresses{DDNS: "other.example.com"}
 	restarted := startUITestController(t, uiTestSetup{host: host, state: state})
 	listed := decodeListenAPI(t, uiJSON(t, restarted, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
 	if len(listed.Listens) != 1 || len(listed.Listens[0].Users) != 1 {
 		t.Fatalf("restored list=%#v", listed.Listens)
 	}
 	user := listed.Listens[0].Users[0]
-	if !user.ShareAvailable || !strings.Contains(user.URI, "persist.example.com") || user.QRContent != user.URI {
-		t.Fatalf("restored catalog share=%#v", user)
+	if !user.ShareAvailable || !strings.Contains(user.URI, "persist.example.com") || strings.Contains(user.URI, "other.example.com") || user.QRContent != user.URI {
+		t.Fatalf("restored override share=%#v", user)
 	}
 }

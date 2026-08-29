@@ -3,6 +3,7 @@ package shadowsocksserver
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,41 @@ func TestIdentityPSKMapsNonCanonicalInputAndKeepsCanonical(t *testing.T) {
 			assertCanonicalPSK(t, method, keyLen, string(user))
 			if _, engineErr := NewProtocolEngine(method, []byte(password)); engineErr != nil {
 				t.Fatalf("mapped password rejected by engine: %v", engineErr)
+			}
+		})
+	}
+}
+
+func TestSIP002TagPercentEncodesUTF8Names(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		tag  string
+	}{
+		{name: "手机", tag: "%E6%89%8B%E6%9C%BA"},
+		{name: "家里 NAS", tag: "%E5%AE%B6%E9%87%8C%20NAS"},
+		{name: "端口#1", tag: "%E7%AB%AF%E5%8F%A3%231"},
+		{name: "alice", tag: "alice"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			share, err := BuildSIP002(SIP002Account{
+				Method: "aes-128-gcm", Password: "correct-horse-battery",
+				Host: "ss.example.com", Port: 8388, Name: test.name,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if share.QR.Content != share.URI {
+				t.Fatalf("qr=%q uri=%q", share.QR.Content, share.URI)
+			}
+			if !strings.HasSuffix(share.URI, "#"+test.tag) {
+				t.Fatalf("uri=%q want encoded tag %q", share.URI, test.tag)
+			}
+			if strings.Contains(share.URI, test.name) && test.name != test.tag {
+				t.Fatalf("uri still contains raw name %q: %q", test.name, share.URI)
+			}
+			got, err := url.QueryUnescape(test.tag)
+			if err != nil || got != test.name {
+				t.Fatalf("round-trip name=%q got=%q err=%v", test.name, got, err)
 			}
 		})
 	}

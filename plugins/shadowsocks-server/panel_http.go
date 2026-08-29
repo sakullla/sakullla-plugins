@@ -13,9 +13,9 @@ var panelUIAssets embed.FS
 const (
 	panelCSP          = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 	serviceNotReady   = "服务未就绪"
-	missingPublicHost = "缺少对外地址"
-	disabledNoShare   = "停用账号不提供可导入 URI"
-	shareUnavailable  = "分享不可用"
+	missingPublicHost = "缺少对外地址，暂时无法分享"
+	disabledNoShare   = "停用后无法导入"
+	shareUnavailable  = "暂时无法分享"
 )
 
 func (c *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

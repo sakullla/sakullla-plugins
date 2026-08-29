@@ -775,7 +775,7 @@ func (c *Controller) attachReportNode(ctx context.Context, raw []byte) ([]byte, 
 	if c == nil || c.listenHost == nil {
 		return raw, nil
 	}
-	node := c.listenHost.AgentNode(ctx, report.AgentID)
+	node := c.listenHost.CatalogNode(ctx, report.AgentID)
 	if !nodeHasAddr(node) {
 		return raw, nil
 	}
