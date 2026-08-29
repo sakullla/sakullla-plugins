@@ -1152,32 +1152,6 @@ func (observer *blockingImageObserver) ObserveImage(ctx context.Context, _ App) 
 	}
 }
 
-type delayedImageObserver struct {
-	mu              sync.Mutex
-	current, latest string
-	block           bool
-	started         chan struct{}
-	release         chan struct{}
-}
-
-func (observer *delayedImageObserver) ObserveImage(ctx context.Context, _ App) (UpdateObservation, error) {
-	observer.mu.Lock()
-	block := observer.block
-	observer.mu.Unlock()
-	if block {
-		select {
-		case observer.started <- struct{}{}:
-		default:
-		}
-		select {
-		case <-observer.release:
-		case <-ctx.Done():
-			return UpdateObservation{}, ctx.Err()
-		}
-	}
-	return UpdateObservation{CurrentDigest: observer.current, LatestDigest: observer.latest}, nil
-}
-
 func TestAppUIDeployDoesNotWaitForRegistryObservation(t *testing.T) {
 	observer := &blockingImageObserver{started: make(chan struct{}, 1), release: make(chan struct{})}
 	defer close(observer.release)
@@ -1347,16 +1321,13 @@ func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
 func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing.T) {
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
-	observer := &delayedImageObserver{
-		current: current, latest: latest,
-		started: make(chan struct{}, 2),
-		release: make(chan struct{}),
-	}
-	state := &uiMemoryAppState{}
+	newer := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	observer := &uiTestObserver{current: current, latest: latest}
+	store := newStallDeploymentStore(NewDeploymentStore())
 	controller := newUIControllerWithOptions(t, uiControllerOptions{
-		appState: state,
-		observer: observer,
-		rollout:  &uiTestRollout{},
+		observer:    observer,
+		rollout:     &uiTestRollout{},
+		deployments: store,
 	})
 	created := httptest.NewRecorder()
 	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
@@ -1372,13 +1343,12 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
 	}
 	got, ok := controllerDeployment(controller, "media")
-	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current {
+	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current || got.ImageDigest != latest {
 		t.Fatalf("precondition history=%#v ok=%v", got, ok)
 	}
 
-	observer.mu.Lock()
-	observer.block = true
-	observer.mu.Unlock()
+	observer.latest = newer
+	store.stallWrites()
 	controller.mu.Lock()
 	delete(controller.imageCache, "media")
 	delete(controller.imageRefresh, "media")
@@ -1389,9 +1359,9 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	select {
-	case <-observer.started:
+	case <-store.started:
 	case <-time.After(time.Second):
-		t.Fatal("in-flight observation did not start")
+		t.Fatal("in-flight Load/CAS did not start")
 	}
 
 	deleted := httptest.NewRecorder()
@@ -1400,7 +1370,12 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 		t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
 	if _, exists := controllerDeployment(controller, "media"); exists {
-		t.Fatal("delete left a rollout record")
+		t.Fatal("DeleteCAS did not win over in-flight write: rollout record still present")
+	}
+	store.releaseWrites()
+	waitForImageObservation(t, controller, "media")
+	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
+		t.Fatalf("in-flight CAS restored history after DeleteCAS: %#v", record)
 	}
 
 	recreated := httptest.NewRecorder()
@@ -1408,23 +1383,83 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	if recreated.Code != http.StatusOK {
 		t.Fatalf("redeploy status=%d body=%s", recreated.Code, recreated.Body.String())
 	}
-	close(observer.release)
-	waitForImageObservation(t, controller, "media")
-
-	record, exists := controllerDeployment(controller, "media")
-	if exists && len(record.History) > 0 {
-		t.Fatalf("in-flight observe restored history after delete/redeploy: %#v", record)
-	}
 	apps := decodeAppList(t, recreated.Body.Bytes())
 	if len(apps) != 1 || hasAppAction(apps[0], OpsActionRollback) {
-		t.Fatalf("redeploy offered rollback from restored history: %#v", apps)
+		t.Fatalf("same-id redeploy offered rollback: %#v", apps)
 	}
 	refreshed := httptest.NewRecorder()
 	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	listedApps := decodeAppList(t, refreshed.Body.Bytes())
 	if refreshed.Code != http.StatusOK || len(listedApps) != 1 || hasAppAction(listedApps[0], OpsActionRollback) {
-		t.Fatalf("list after in-flight observe offered rollback: %#v body=%s", listedApps, refreshed.Body.String())
+		t.Fatalf("list after same-id redeploy offered rollback: %#v body=%s", listedApps, refreshed.Body.String())
 	}
+	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
+		t.Fatalf("same-id redeploy restored history: %#v", record)
+	}
+}
+
+type stallDeploymentStore struct {
+	inner   DeploymentStateStore
+	mu      sync.Mutex
+	stall   bool
+	started chan struct{}
+	proceed chan struct{}
+}
+
+func newStallDeploymentStore(inner DeploymentStateStore) *stallDeploymentStore {
+	return &stallDeploymentStore{
+		inner:   inner,
+		started: make(chan struct{}, 1),
+		proceed: make(chan struct{}),
+	}
+}
+
+func (store *stallDeploymentStore) stallWrites() {
+	store.mu.Lock()
+	store.stall = true
+	store.mu.Unlock()
+}
+
+func (store *stallDeploymentStore) releaseWrites() {
+	store.mu.Lock()
+	if store.stall {
+		store.stall = false
+		close(store.proceed)
+	}
+	store.mu.Unlock()
+}
+
+func (store *stallDeploymentStore) gateWrite() {
+	store.mu.Lock()
+	stall := store.stall
+	proceed := store.proceed
+	store.mu.Unlock()
+	if !stall {
+		return
+	}
+	select {
+	case store.started <- struct{}{}:
+	default:
+	}
+	<-proceed
+}
+
+func (store *stallDeploymentStore) Load(ctx context.Context, id string) (DeploymentRecord, bool, error) {
+	return store.inner.Load(ctx, id)
+}
+
+func (store *stallDeploymentStore) AcquireLease(ctx context.Context, id string, version uint64, value Deployment, until time.Time) (DeploymentRecord, error) {
+	store.gateWrite()
+	return store.inner.AcquireLease(ctx, id, version, value, until)
+}
+
+func (store *stallDeploymentStore) CompareAndSwap(ctx context.Context, id string, version, fence uint64, value Deployment) (DeploymentRecord, error) {
+	store.gateWrite()
+	return store.inner.CompareAndSwap(ctx, id, version, fence, value)
+}
+
+func (store *stallDeploymentStore) DeleteCAS(ctx context.Context, id string, version, fence uint64) error {
+	return store.inner.DeleteCAS(ctx, id, version, fence)
 }
 
 func waitForImageObservation(t *testing.T, controller *Controller, appID string) {
