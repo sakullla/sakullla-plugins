@@ -3,8 +3,6 @@ package shadowsocksserver
 import (
 	"context"
 	"io"
-	"os"
-	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -27,7 +25,7 @@ func runtimeServices() pluginsdk.RPCServiceDeclaration {
 }
 
 func agentExecutionFace() bool {
-	return strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginHostEndpoint)) == ""
+	return pluginsdk.AgentExecutionFace()
 }
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {

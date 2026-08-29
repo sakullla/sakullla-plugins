@@ -30,7 +30,7 @@ func agentExecutionFace() bool {
 	if strings.TrimSpace(os.Getenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT")) != "" {
 		return true
 	}
-	return strings.TrimSpace(os.Getenv(pluginsdk.EnvPluginHostEndpoint)) == ""
+	return pluginsdk.AgentExecutionFace()
 }
 
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {

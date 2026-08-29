@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"gopkg.in/yaml.v3"
 )
 
 func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
@@ -50,6 +51,21 @@ func TestRunEntrypointHandshakeProbePrintsABI(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), pluginsdk.RPCABIV1) {
 		t.Fatalf("handshake probe output = %q", output.String())
+	}
+}
+
+func TestPluginYAMLDeclaresImplicitRemoteAgentExecution(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pluginsdk.Manifest
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !pluginsdk.RuntimeImplicitRemoteAgentExecution(manifest.Runtime) {
+		t.Fatalf("shadowsocks-server runtime = %+v, want implicit remote Agent execution", manifest.Runtime)
 	}
 }
 

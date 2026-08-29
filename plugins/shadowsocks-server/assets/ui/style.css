@@ -27,6 +27,7 @@
   --color-bg-canvas: #f8fafc;
   --color-bg-surface: #ffffff;
   --color-bg-sunken: #f8fafc;
+  --color-bg-subtle: rgba(15, 23, 42, 0.035);
   --color-bg-hover: rgba(15, 23, 42, 0.04);
   --color-border-subtle: rgba(15, 23, 42, 0.07);
   --color-border-default: rgba(15, 23, 42, 0.12);
@@ -54,6 +55,7 @@
   --color-bg-canvas: #0b1220;
   --color-bg-surface: #121a2b;
   --color-bg-sunken: #0b1220;
+  --color-bg-subtle: rgba(248, 250, 252, 0.04);
   --color-bg-hover: rgba(248, 250, 252, 0.05);
   --color-border-subtle: rgba(248, 250, 252, 0.07);
   --color-border-default: rgba(248, 250, 252, 0.12);
@@ -178,8 +180,77 @@ h3 { font-size: 1rem; }
   background: var(--color-bg-surface);
 }
 
+.state-panel .setup-hero { margin-bottom: 0; }
+
 .state-panel h2 { margin-bottom: var(--space-2); }
-.state-panel p { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.state-panel p { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); line-height: 1.65; }
+
+.setup-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.setup-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 1rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-primary) 18%, var(--color-bg-surface)), var(--color-bg-subtle));
+  box-shadow: inset 0 0 0 1px var(--color-primary-200);
+}
+
+.setup-mark::before {
+  content: "";
+  width: 1.15rem;
+  height: 0.72rem;
+  border: 2px solid var(--color-primary);
+  border-radius: 0.22rem;
+  box-shadow:
+    0 6px 0 -2px var(--color-primary),
+    0 11px 0 -4px color-mix(in srgb, var(--color-primary) 45%, transparent);
+}
+
+.setup-mark[data-kind="node"]::before {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+.setup-mark[data-kind="offline"] {
+  background: color-mix(in srgb, var(--color-warning) 16%, var(--color-bg-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 35%, transparent);
+}
+
+.setup-mark[data-kind="offline"]::before {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-color: var(--color-warning);
+  border-radius: 50%;
+  box-shadow: none;
+  background: radial-gradient(circle at 50% 50%, transparent 0 0.22rem, var(--color-warning) 0.22rem 0.32rem, transparent 0.32rem);
+}
+
+.setup-mark[data-kind="unavailable"] {
+  background: color-mix(in srgb, var(--color-warning) 14%, var(--color-bg-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 28%, transparent);
+}
+
+.setup-mark[data-kind="unavailable"]::before {
+  width: 0.22rem;
+  height: 0.72rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-warning);
+  box-shadow: 0 0.42rem 0 -0.04rem var(--color-warning);
+}
+
+.setup-hero h2 { margin: 0 0 0.35rem; }
+.setup-hero p { max-width: 40em; }
 
 #app-offline h2, #app-execution-unavailable h2 { color: var(--color-warning); }
 

@@ -50,6 +50,10 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"id=\"app-node-empty\"",
 		"id=\"app-offline\"",
 		"id=\"app-execution-unavailable\"",
+		"该节点暂时无法执行监听",
+		"还不能执行 Shadowsocks",
+		"shadowsocks-server 插件状态",
+		"class=\"setup-hero\"",
 	} {
 		if !strings.Contains(page, fragment) && !strings.Contains(script, fragment) {
 			t.Fatalf("panel missing %q", fragment)
@@ -63,7 +67,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 			t.Fatalf("panel still exposes excluded entry %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"/panel-api/agents", "api/listens", "api/execution", "api/share-host", "share_host_source", "mountAgentSearchSelect", "复制 ss://", "host_port", "二维码", "append-form", "已复制"} {
+	for _, fragment := range []string{"/panel-api/agents", "api/listens", "api/execution", "api/share-host", "share_host_source", "mountAgentSearchSelect", "复制 ss://", "host_port", "二维码", "append-form", "已复制", "暂时无法执行"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("panel script missing %q", fragment)
 		}
@@ -85,6 +89,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
 		".agent-search-select",
+		".setup-hero",
+		".setup-mark[data-kind=\"unavailable\"]",
 		"repeat(2, minmax(0, 1fr))",
 		"repeat(3, minmax(18rem, 1fr))",
 	} {
