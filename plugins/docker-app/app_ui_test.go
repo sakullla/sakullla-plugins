@@ -1484,7 +1484,111 @@ func TestPersistedDeploymentStoreWriteFailureKeepsPrior(t *testing.T) {
 	}
 }
 
-func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
+func TestAppUIHighRiskComposeRequiresMatchingConfirm(t *testing.T) {
+	t.Parallel()
+	controller := newUIController(t)
+	highRisk := "services:\n  web:\n    image: nginx:latest\n    privileged: true\n    cap_add:\n      - NET_ADMIN\n    volumes:\n      - /host:/data\n"
+	before := cloneApps(controller.Apps())
+
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(highRisk)+`}`))
+	if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), ErrInvalidPreview.Error()) {
+		t.Fatalf("unconfirmed high-risk status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	if len(controller.Apps()) != len(before) {
+		t.Fatalf("unconfirmed high-risk mutated apps=%#v", controller.Apps())
+	}
+	var deniedPayload struct {
+		Preview riskPreviewView `json:"preview"`
+	}
+	if err := json.Unmarshal(denied.Body.Bytes(), &deniedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if deniedPayload.Preview.Digest == "" || !previewHasRisk(deniedPayload.Preview, "privileged") || !previewHasRisk(deniedPayload.Preview, "host-mount") || !previewHasRisk(deniedPayload.Preview, "capability") {
+		t.Fatalf("unconfirmed high-risk preview=%#v", deniedPayload.Preview)
+	}
+
+	preview := httptest.NewRecorder()
+	controller.ServeHTTP(preview, uiJSONRequest(http.MethodPost, "/api/apps/preview", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(highRisk)+`}`))
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var previewPayload struct {
+		Preview riskPreviewView `json:"preview"`
+	}
+	if err := json.Unmarshal(preview.Body.Bytes(), &previewPayload); err != nil {
+		t.Fatal(err)
+	}
+	if previewPayload.Preview.Digest == "" || previewPayload.Preview.Digest != deniedPayload.Preview.Digest {
+		t.Fatalf("preview digest=%q denied=%q", previewPayload.Preview.Digest, deniedPayload.Preview.Digest)
+	}
+
+	mismatch := httptest.NewRecorder()
+	controller.ServeHTTP(mismatch, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(highRisk)+`,"confirm":"deadbeef"}`))
+	if mismatch.Code != http.StatusBadRequest || len(controller.Apps()) != len(before) {
+		t.Fatalf("mismatched digest status=%d apps=%#v body=%s", mismatch.Code, controller.Apps(), mismatch.Body.String())
+	}
+
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(highRisk)+`,"confirm":`+jsonString(previewPayload.Preview.Digest)+`}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("confirmed high-risk status=%d body=%s", created.Code, created.Body.String())
+	}
+	listed := decodeAppList(t, created.Body.Bytes())
+	if len(listed) != 1 || listed[0].ID != "media" || listed[0].Status != OpsStatusRunning {
+		t.Fatalf("confirmed high-risk view=%#v", listed)
+	}
+
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	updating := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	seeded := httptest.NewRecorder()
+	updating.ServeHTTP(seeded, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(highRisk)+`,"confirm":`+jsonString(previewPayload.Preview.Digest)+`}`))
+	if seeded.Code != http.StatusOK {
+		t.Fatalf("update seed status=%d body=%s", seeded.Code, seeded.Body.String())
+	}
+	waitForDeployment(t, updating, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	unconfirmedUpdate := httptest.NewRecorder()
+	updating.ServeHTTP(unconfirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if unconfirmedUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed update status=%d body=%s", unconfirmedUpdate.Code, unconfirmedUpdate.Body.String())
+	}
+	record, ok := controllerDeployment(updating, "media")
+	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
+		t.Fatalf("unconfirmed update mutated digest: %#v ok=%v", record, ok)
+	}
+	var updatePreview struct {
+		Preview riskPreviewView `json:"preview"`
+	}
+	if err := json.Unmarshal(unconfirmedUpdate.Body.Bytes(), &updatePreview); err != nil {
+		t.Fatal(err)
+	}
+	confirmedUpdate := httptest.NewRecorder()
+	updating.ServeHTTP(confirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"confirm":`+jsonString(updatePreview.Preview.Digest)+`}`))
+	if confirmedUpdate.Code != http.StatusOK {
+		t.Fatalf("confirmed update status=%d body=%s", confirmedUpdate.Code, confirmedUpdate.Body.String())
+	}
+	published, ok := controllerDeployment(updating, "media")
+	if !ok || published.ImageDigest != latest {
+		t.Fatalf("confirmed update digest=%#v ok=%v", published, ok)
+	}
+}
+
+func previewHasRisk(preview riskPreviewView, kind string) bool {
+	for _, item := range preview.Items {
+		if item.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAppUIAutoUpdateTrueObserveFollowsDigest(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
@@ -1494,6 +1598,34 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	})
 	created := httptest.NewRecorder()
 	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == latest
+	})
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if len(apps) != 1 || apps[0].Notice == OpsStatusUpdateAvailable || !strings.Contains(apps[0].Version, "sha256:fedcba987654") {
+		t.Fatalf("auto_update did not follow digest: %#v", apps)
+	}
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || got.ImageDigest != latest {
+		t.Fatalf("auto_update digest=%#v ok=%v", got, ok)
+	}
+}
+
+func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -1511,7 +1643,7 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	}
 	_, ok := controllerDeployment(controller, "media")
 	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
-		t.Fatalf("auto_update published without confirm: %#v ok=%v", record, ok)
+		t.Fatalf("digest drift published without confirm: %#v ok=%v", record, ok)
 	}
 
 	stopped := httptest.NewRecorder()
@@ -1647,6 +1779,12 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 		"有新版本",
 		"app.notice",
 		`className = "chip app-status-update"`,
+		"确认高风险配置",
+		"api/apps/preview",
+		"privileged",
+		"host-mount",
+		"capability",
+		`["start", "stop", "restart", "update"]`,
 	} {
 		if !strings.Contains(script, token) {
 			t.Fatalf("app.js missing %q", token)
@@ -1690,7 +1828,7 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	for _, want := range []string{
 		`data-app-name`, `data-app-status`, `data-action="open"`,
 		`data-action="start"`, `data-action="stop"`, `data-action="restart"`,
-		`data-action="detail"`, "打开", "详情",
+		`data-action="update"`, `data-action="detail"`, "打开", "详情", "更新",
 	} {
 		if !strings.Contains(cardTemplate, want) {
 			t.Fatalf("card template missing hook %q", want)
@@ -1733,13 +1871,13 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if !strings.Contains(listRender, "window.open") || !strings.Contains(listRender, `textContent = "打开"`) || !strings.Contains(listRender, `[data-action="open"]`) {
 		t.Fatal("cards cannot open an enabled HTTP entry")
 	}
-	for _, action := range []string{"start", "stop", "restart"} {
+	for _, action := range []string{"start", "stop", "restart", "update"} {
 		if !strings.Contains(listRender, `[data-action="${id}"]`) && !strings.Contains(listRender, `[data-action="`+action+`"]`) {
 			t.Fatalf("card renderer does not fill %s hook", action)
 		}
 	}
-	if !strings.Contains(listRender, `["start", "stop", "restart"]`) {
-		t.Fatal("card wall does not filter actions to start/stop/restart")
+	if !strings.Contains(listRender, `["start", "stop", "restart", "update"]`) {
+		t.Fatal("card wall does not expose start/stop/restart/update")
 	}
 	for _, forbidden := range []string{"删除", "日志", "mountAppFiles", "http-form", "openCreate("} {
 		if strings.Contains(listRender, forbidden) {
@@ -2584,7 +2722,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	for _, want := range []string{
 		`id="app-card-template"`, `data-app-name`, `data-app-status`,
 		`data-action="open"`, `data-action="start"`, `data-action="stop"`,
-		`data-action="restart"`, `data-action="detail"`, "详情",
+		`data-action="restart"`, `data-action="update"`, `data-action="detail"`, "详情",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("page missing card-wall hook %q", want)
@@ -2807,8 +2945,8 @@ func TestAppUIFilesListsRelativeWorkspaceAndRejectsAbsolutePath(t *testing.T) {
 		},
 	}}
 	controller := newUIControllerWithOptions(t, uiControllerOptions{files: files})
-	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/config.yaml\n      - /mnt/data/komga:/data\n"}`))
+	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/config.yaml\n      - /mnt/data/komga:/data\n"
+	created := uiDeployCompose(t, controller, "media", "agent-1", compose)
 	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"id":"media"`) {
 		t.Fatalf("compose deploy status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -2853,8 +2991,7 @@ func TestAppUIFilesListsRelativeWorkspaceAndRejectsAbsolutePath(t *testing.T) {
 		t.Fatalf("write files calls=%#v", files.calls)
 	}
 
-	again := httptest.NewRecorder()
-	controller.ServeHTTP(again, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/config.yaml\n      - /mnt/data/komga:/data\n"}`))
+	again := uiDeployCompose(t, controller, "media", "agent-1", compose)
 	if again.Code != http.StatusOK || !strings.Contains(again.Body.String(), `"id":"media"`) {
 		t.Fatalf("compose post after files status=%d body=%s", again.Code, again.Body.String())
 	}
@@ -3117,6 +3254,30 @@ func uiJSONRequest(method, path, body string) *http.Request {
 func jsonString(value string) string {
 	encoded, _ := jsonQuote(value)
 	return encoded
+}
+
+func uiDeployCompose(t *testing.T, controller *Controller, id, agentID, compose string) *httptest.ResponseRecorder {
+	t.Helper()
+	preview := httptest.NewRecorder()
+	controller.ServeHTTP(preview, uiJSONRequest(http.MethodPost, "/api/apps/preview", `{"id":`+jsonString(id)+`,"agent_id":`+jsonString(agentID)+`,"compose":`+jsonString(compose)+`}`))
+	confirm := ""
+	if preview.Code == http.StatusOK {
+		var payload struct {
+			Preview riskPreviewView `json:"preview"`
+		}
+		if err := json.Unmarshal(preview.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode preview: %v body=%s", err, preview.Body.String())
+		}
+		confirm = payload.Preview.Digest
+	}
+	body := `{"id":` + jsonString(id) + `,"agent_id":` + jsonString(agentID) + `,"compose":` + jsonString(compose)
+	if confirm != "" {
+		body += `,"confirm":` + jsonString(confirm)
+	}
+	body += `}`
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", body))
+	return created
 }
 
 func jsonQuote(value string) (string, error) {

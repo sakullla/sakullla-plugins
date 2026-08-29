@@ -7,7 +7,7 @@ import (
 )
 
 type ComposeDeploySpec struct {
-	AppID, Generation, Compose, RuleRef, WorkDirRoot, AgentID, Env string
+	AppID, Generation, Compose, RuleRef, WorkDirRoot, AgentID, Env, Confirm string
 }
 
 type AppApplyExecutor interface {
@@ -114,19 +114,20 @@ func DeployComposeApp(ctx context.Context, apps []App, spec ComposeDeploySpec, e
 	if auditor == nil {
 		return preserved, ErrAuditRequired
 	}
-	app, err := AppFromCompose(spec.AppID, spec.Generation, spec.Compose)
+	if spec.RuleRef != "" && !boundedText(spec.RuleRef, 128) {
+		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return preserved, ErrInvalidPreview
+	}
+	plan, app, err := ParseComposeDocument(spec.Compose, spec.AppID, spec.Generation, spec.RuleRef)
 	if err != nil {
 		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: deployDenial(err)})
 		return preserved, err
 	}
-	app.Env = spec.Env
-	if spec.RuleRef != "" {
-		if !boundedText(spec.RuleRef, 128) {
-			audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
-			return preserved, ErrInvalidPreview
-		}
-		app.RuleRef = spec.RuleRef
+	if _, err := ConfirmComposeRisk(plan, spec.Confirm); err != nil {
+		audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return preserved, err
 	}
+	app.Env = spec.Env
 	if spec.AgentID != "" {
 		if err := bindAppToAgent(&app, apps, spec.AgentID); err != nil {
 			audit(auditor, AuditRecord{Action: "compose.deploy", Outcome: "denied", Detail: err.Error()})

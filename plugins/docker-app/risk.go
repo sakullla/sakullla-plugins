@@ -101,6 +101,38 @@ func PreviewCompose(plan ComposePlan) (RiskPreview, error) {
 	return preview, nil
 }
 
+func RequiresRiskConfirmation(preview RiskPreview) bool {
+	for _, item := range preview.Items {
+		switch item.Kind {
+		case RiskPrivileged, RiskHostMount, RiskCapability:
+			return true
+		}
+	}
+	return false
+}
+
+func ConfirmComposeRisk(plan ComposePlan, confirm string) (RiskPreview, error) {
+	preview, err := PreviewCompose(plan)
+	if err != nil {
+		return RiskPreview{}, err
+	}
+	if !RequiresRiskConfirmation(preview) {
+		return preview, nil
+	}
+	if confirm != preview.Digest {
+		return preview, ErrInvalidPreview
+	}
+	return preview, nil
+}
+
+func PreviewComposeDocument(appID, generation, document, ruleRef string) (RiskPreview, error) {
+	plan, _, err := ParseComposeDocument(document, appID, generation, ruleRef)
+	if err != nil {
+		return RiskPreview{}, err
+	}
+	return PreviewCompose(plan)
+}
+
 func canonicalComposePlan(plan ComposePlan) (ComposePlan, error) {
 	if !validID(plan.AppID) || !boundedText(plan.Generation, 128) || !validID(plan.Project) || len(plan.Services) > MaxComposeServices || len(plan.RuleImpacts) > MaxCollectionItems {
 		return ComposePlan{}, ErrBoundExceeded

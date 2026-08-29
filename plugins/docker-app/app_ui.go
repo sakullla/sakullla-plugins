@@ -92,10 +92,21 @@ type appAPIResponse struct {
 	Content  string               `json:"content,omitempty"`
 	Entries  []workspaceFileEntry `json:"entries,omitempty"`
 	Accepted bool                 `json:"accepted,omitempty"`
+	Preview  *riskPreviewView     `json:"preview,omitempty"`
 	Access   struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
+}
+
+type riskPreviewView struct {
+	Digest string         `json:"digest,omitempty"`
+	Items  []riskItemView `json:"items,omitempty"`
+}
+
+type riskItemView struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target,omitempty"`
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -114,6 +125,10 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	if path == "/api/apps" {
 		controller.serveAppCollection(writer, request)
+		return
+	}
+	if path == "/api/apps/preview" {
+		controller.serveComposePreview(writer, request)
 		return
 	}
 	appID, action, ok := parseAppAPIPath(path)
@@ -220,8 +235,17 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			return
 		}
 		generation := controller.lifecycleGeneration()
+		preview, previewErr := PreviewComposeDocument(body.ID, generation, body.Compose, "")
+		if previewErr != nil {
+			writeAppJSON(writer, appStatus(previewErr), appAPIResponse{Error: publicAppActionError(previewErr, "deploy")})
+			return
+		}
+		if RequiresRiskConfirmation(preview) && body.Confirm != preview.Digest {
+			writeRiskDenied(writer, preview, ErrInvalidPreview, "deploy")
+			return
+		}
 		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
-			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: body.Env,
+			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: body.Env, Confirm: body.Confirm,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
@@ -353,6 +377,16 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "update":
+		body, _ := decodeAppWrite(request)
+		preview, previewErr := PreviewComposeDocument(app.ID, app.Generation, app.Compose, app.RuleRef)
+		if previewErr != nil {
+			writeAppJSON(writer, appStatus(previewErr), appAPIResponse{Error: publicAppActionError(previewErr, "update")})
+			return
+		}
+		if RequiresRiskConfirmation(preview) && body.Confirm != preview.Digest {
+			writeRiskDenied(writer, preview, ErrInvalidPreview, "update")
+			return
+		}
 		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return
@@ -795,20 +829,21 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.imageRefresh[app.ID] = false
-	if err != nil || controller.imageObserveToken[app.ID] != token || !controller.hasCurrentAppLocked(app) {
+	current, ok := controller.currentCatalogAppLocked(app)
+	if err != nil || controller.imageObserveToken[app.ID] != token || !ok {
 		return
 	}
-	controller.imageCache[app.ID] = cachedImageObservation{Image: app.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
-	_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
+	controller.imageCache[app.ID] = cachedImageObservation{Image: current.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+	_, _ = controller.uiRollout.AutoUpdate(ctx, current, current.AutoUpdate, observed)
 }
 
-func (controller *Controller) hasCurrentAppLocked(app App) bool {
+func (controller *Controller) currentCatalogAppLocked(app App) (App, bool) {
 	for _, current := range controller.apps {
-		if current.ID == app.ID {
-			return current.Image == app.Image && current.Generation == app.Generation
+		if current.ID == app.ID && current.Image == app.Image && current.Generation == app.Generation {
+			return current, true
 		}
 	}
-	return false
+	return App{}, false
 }
 
 func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {
@@ -955,6 +990,64 @@ func decodeAppWrite(request *http.Request) (appWriteRequest, error) {
 		return appWriteRequest{}, err
 	}
 	return body, nil
+}
+
+func (controller *Controller) serveComposePreview(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := controller.uiIdentity(request); err != nil {
+		writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
+		return
+	}
+	body, err := decodeAppWrite(request)
+	if err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrInvalidCompose.Error()})
+		return
+	}
+	compose := body.Compose
+	generation := controller.lifecycleGeneration()
+	if strings.TrimSpace(compose) == "" {
+		existing, ok := controller.appByID(body.ID)
+		if !ok {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrInvalidCompose.Error()})
+			return
+		}
+		compose = existing.Compose
+		generation = existing.Generation
+	}
+	preview, err := PreviewComposeDocument(body.ID, generation, compose, "")
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "preview")})
+		return
+	}
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Preview: projectRiskPreview(preview), Access: struct {
+		CanRead  bool `json:"can_read"`
+		CanWrite bool `json:"can_write"`
+	}{CanRead: true, CanWrite: true}})
+}
+
+func writeRiskDenied(writer http.ResponseWriter, preview RiskPreview, err error, action string) {
+	writeAppJSON(writer, appStatus(err), appAPIResponse{
+		Error:   publicAppActionError(err, action),
+		Preview: projectRiskPreview(preview),
+	})
+}
+
+func projectRiskPreview(preview RiskPreview) *riskPreviewView {
+	if preview.Digest == "" && len(preview.Items) == 0 {
+		return nil
+	}
+	items := make([]riskItemView, 0, len(preview.Items))
+	for _, item := range preview.Items {
+		items = append(items, riskItemView{Kind: string(item.Kind), Target: item.Target})
+	}
+	if len(items) == 0 {
+		items = nil
+	}
+	return &riskPreviewView{Digest: preview.Digest, Items: items}
 }
 
 func writeAppJSON(writer http.ResponseWriter, status int, payload appAPIResponse) {

@@ -218,9 +218,56 @@ const sendPluginJSON = async (path, body) => {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || payload.message || "保存失败");
+    throw Object.assign(new Error(payload.error || payload.message || "保存失败"), {
+      status: response.status,
+      preview: payload.preview,
+    });
   }
   return payload;
+};
+
+const requiresRiskConfirm = (preview) => {
+  const items = Array.isArray(preview && preview.items) ? preview.items : [];
+  return items.some((item) => item.kind === "privileged" || item.kind === "host-mount" || item.kind === "capability");
+};
+
+const riskConfirmBody = (preview) => {
+  const labels = {
+    privileged: "特权模式",
+    "host-mount": "宿主机挂载",
+    capability: "额外权限",
+    network: "网络",
+    volume: "数据卷",
+    rule: "规则",
+  };
+  const items = Array.isArray(preview && preview.items) ? preview.items : [];
+  if (!items.length) return "该配置包含高风险项。";
+  return items.map((item) => `${labels[item.kind] || item.kind}${item.target ? `：${item.target}` : ""}`).join("\n");
+};
+
+const confirmComposeRisk = async (preview) => {
+  if (!requiresRiskConfirm(preview)) return true;
+  const ok = await askConfirm({
+    title: "确认高风险配置",
+    body: riskConfirmBody(preview),
+    confirm: "继续",
+    cancel: "取消",
+    danger: true,
+  });
+  if (!ok) showStatus("已取消，应用未更改。", false);
+  return ok;
+};
+
+const deployComposePayload = async (payload) => {
+  const previewed = await sendPluginJSON("api/apps/preview", {
+    id: payload.id,
+    agent_id: payload.agent_id,
+    compose: payload.compose,
+  });
+  if (!(await confirmComposeRisk(previewed.preview))) return null;
+  const next = { ...payload };
+  if (previewed.preview && previewed.preview.digest) next.confirm = previewed.preview.digest;
+  return sendPluginJSON("api/apps", next);
 };
 
 const setBusy = (next) => {
@@ -974,6 +1021,18 @@ const postAppAction = async (app, action, body = {}) => {
   await renderWorkspace();
 };
 
+const postAppActionWithRisk = async (app, action, body = {}) => {
+  try {
+    await postAppAction(app, action, body);
+    return true;
+  } catch (error) {
+    if (action !== "update" || !requiresRiskConfirm(error.preview)) throw error;
+    if (!(await confirmComposeRisk(error.preview))) return false;
+    await postAppAction(app, action, { ...body, confirm: error.preview.digest });
+    return true;
+  }
+};
+
 const MAX_WORKSPACE_FILE_BYTES = 1048576;
 const workspacePathError = "只能使用应用工作区内的相对路径";
 
@@ -1590,8 +1649,12 @@ const runAppAction = async (app, action) => {
   }
   setBusy(true);
   try {
-    await postAppAction(app, action.id);
-    showStatus(action.id === "update" ? "已更新应用镜像。" : action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
+    if (action.id === "update") {
+      if (await postAppActionWithRisk(app, action.id)) showStatus("已更新应用镜像。", false);
+    } else {
+      await postAppAction(app, action.id);
+      showStatus(action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
+    }
   } catch (error) {
     showStatus(error.message, true);
   } finally {
@@ -1612,7 +1675,7 @@ const actionGroups = (app, options = {}) => {
   apiActions.forEach((action) => {
     if (action.id === "configure") return;
     if (action.id === "logs") return;
-    if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart") return;
+    if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart" && action.id !== "update") return;
     if (options.overview && (action.id === "start" || action.id === "stop" || action.id === "restart")) return;
     const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart";
     const isDelete = action.id === "delete";
@@ -1769,7 +1832,7 @@ const renderApp = (app) => {
     }
   }
   const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
-  ["start", "stop", "restart"].forEach((id) => {
+  ["start", "stop", "restart", "update"].forEach((id) => {
     const button = card.querySelector(`[data-action="${id}"]`);
     const action = actionsByID.get(id);
     if (!button) return;
@@ -2630,13 +2693,14 @@ if (composeForm) {
     setBusy(true);
     showStatus("正在更新应用…", false);
     try {
-      await sendPluginJSON("api/apps", {
+      const saved = await deployComposePayload({
         id: detailApp.id,
         agent_id: selectedAgentID,
         compose: detailComposeInput ? detailComposeInput.value : "",
         env: detailEnvInput ? String(detailEnvInput.value || "") : "",
         auto_update: detailAutoUpdateInput ? detailAutoUpdateInput.checked : false,
       });
+      if (!saved) return;
       composeFilledFor = "";
       showStatus("已更新应用。", false);
       try {
@@ -2680,7 +2744,8 @@ if (createForm) {
     setBusy(true);
     showStatus(updating ? "正在更新应用…" : "正在部署应用…", false);
     try {
-      await sendPluginJSON("api/apps", nextApp);
+      const saved = await deployComposePayload(nextApp);
+      if (!saved) return;
       closeCreate();
       showStatus(updating ? "已更新应用。" : "已部署应用。", false);
       try {

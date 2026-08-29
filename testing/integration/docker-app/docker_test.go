@@ -46,6 +46,26 @@ func TestComposeRiskPreviewAuthorizationAuditAndSecretRedaction(t *testing.T) {
 	if _, err := dockerapp.PreviewCompose(dockerapp.ComposePlan{AppID: "media", Generation: "generation-1", Project: "media", Services: make([]dockerapp.ComposeService, dockerapp.MaxComposeServices+1)}); !errors.Is(err, dockerapp.ErrBoundExceeded) {
 		t.Fatalf("compose service bound = %v", err)
 	}
+	if !dockerapp.RequiresRiskConfirmation(preview) {
+		t.Fatal("privileged host-mount capability preview did not require confirmation")
+	}
+	if _, err := dockerapp.ConfirmComposeRisk(plan, ""); !errors.Is(err, dockerapp.ErrInvalidPreview) {
+		t.Fatalf("missing confirm err=%v", err)
+	}
+	if _, err := dockerapp.ConfirmComposeRisk(plan, preview.Digest+"x"); !errors.Is(err, dockerapp.ErrInvalidPreview) {
+		t.Fatalf("mismatched confirm err=%v", err)
+	}
+	if got, err := dockerapp.ConfirmComposeRisk(plan, preview.Digest); err != nil || got.Digest != preview.Digest {
+		t.Fatalf("matching confirm preview=%#v err=%v", got, err)
+	}
+	safe := dockerapp.ComposePlan{AppID: "media", Generation: "generation-1", Project: "media", Services: []dockerapp.ComposeService{{Name: "web", Networks: []string{"front"}, Volumes: []string{"data"}}}}
+	safePreview, err := dockerapp.PreviewCompose(safe)
+	if err != nil || dockerapp.RequiresRiskConfirmation(safePreview) {
+		t.Fatalf("non-blocking risks required confirm: %#v err=%v", safePreview, err)
+	}
+	if _, err := dockerapp.ConfirmComposeRisk(safe, ""); err != nil {
+		t.Fatalf("non-blocking confirm err=%v", err)
+	}
 	calls := 0
 	var audits []dockerapp.AuditRecord
 	auditor := dockerapp.AuditorFunc(func(record dockerapp.AuditRecord) { audits = append(audits, record) })
