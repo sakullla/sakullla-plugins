@@ -680,7 +680,7 @@ const renderExecutionBadge = (execution) => {
   }
   executionStatus.hidden = false;
   executionStatus.dataset.ready = "false";
-  executionStatus.textContent = "暂时不能创建";
+  executionStatus.textContent = "暂时无法执行";
 };
 
 const syncListPanel = () => {

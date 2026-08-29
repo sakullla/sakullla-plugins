@@ -40,16 +40,31 @@
     <p id="app-status" role="status" hidden></p>
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel" id="app-node-empty" hidden>
-        <h2>先选一台节点</h2>
-        <p>账号开在节点上。选好后再新增监听。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <div>
+            <h2>未选择节点</h2>
+            <p>请先选择一台在线节点，再新增监听。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel" id="app-offline" hidden>
-        <h2>节点离线</h2>
-        <p>这台节点现在连不上，不能新增或改动。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="offline" aria-hidden="true"></span>
+          <div>
+            <h2>节点离线</h2>
+            <p>该节点离线，不能新增或改动监听。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel" id="app-execution-unavailable" hidden>
-        <h2>暂时不能创建</h2>
-        <p>节点在线，但 Shadowsocks 还没准备好。刷新本页，或检查该节点上的插件。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
+          <div>
+            <h2>该节点暂时无法执行监听</h2>
+            <p>该节点在线，但还不能执行 Shadowsocks。刷新本页，或检查该节点上的 shadowsocks-server 插件状态。</p>
+          </div>
+        </div>
       </section>
     </section>
     <section id="app-workspace" class="workspace-region" hidden>
