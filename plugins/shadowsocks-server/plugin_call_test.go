@@ -857,9 +857,6 @@ func TestPluginCallListenApplyCoalescedFirstFrameHandshake(t *testing.T) {
 		t.Fatal("coalesced handshake did not reach target")
 	}
 	first, response := readTCPClientResponse(t, conn, client, salt)
-	if string(first) != "world" {
-		t.Fatalf("tcp handshake response=%q", first)
-	}
 	select {
 	case payload := <-got:
 		if string(payload) != "next!" {
@@ -868,9 +865,16 @@ func TestPluginCallListenApplyCoalescedFirstFrameHandshake(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("coalesced follow chunk did not reach target")
 	}
-	follow, err := readOpenedTCPChunk(conn, response, max2022Payload)
-	if err != nil || string(follow) != "again" {
-		t.Fatalf("tcp follow response=%q err=%v", follow, err)
+	switch string(first) {
+	case "worldagain":
+		return
+	case "world":
+		follow, err := readOpenedTCPChunk(conn, response, max2022Payload)
+		if err != nil || string(follow) != "again" {
+			t.Fatalf("tcp follow response=%q err=%v", follow, err)
+		}
+	default:
+		t.Fatalf("tcp handshake response=%q", first)
 	}
 }
 
