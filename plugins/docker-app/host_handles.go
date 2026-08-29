@@ -214,6 +214,11 @@ type DiskCleanupReport struct {
 	BuilderCache string `json:"builder_cache,omitempty"`
 }
 
+type DiskCleanupHandle interface {
+	PreviewDiskCleanup(context.Context, string) (DiskCleanupReport, error)
+	ApplyDiskCleanup(context.Context, string, bool) (DiskCleanupReport, error)
+}
+
 func (runtime *hostCapabilityRuntime) PreviewDiskCleanup(ctx context.Context, agentID string) (DiskCleanupReport, error) {
 	return runtime.diskCleanup(ctx, agentID, "preview", false)
 }
@@ -589,6 +594,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UILogs = runtime
 	config.UIFiles = runtime
 	config.UIRemove = runtime
+	config.UIDiskCleanup = runtime
 	config.UIHTTPRule = runtime
 	config.UIHTTPRuleList = runtime
 	config.UIHTTPRuleDelete = runtime

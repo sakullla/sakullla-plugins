@@ -55,6 +55,7 @@ const createSubmit = document.querySelector("#create-submit");
 const createCancel = document.querySelector("#create-cancel");
 const createBack = document.querySelector("#create-back");
 const deployToggle = document.querySelector("#deploy-toggle");
+const diskCleanup = document.querySelector("#disk-cleanup");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
@@ -891,7 +892,9 @@ const syncListPanel = () => {
   if (listPanel) listPanel.hidden = inDetail || creating;
   if (detailPanel) detailPanel.hidden = !inDetail;
   if (workspaceHead) workspaceHead.hidden = inDetail || creating;
-  if (deployToggle) deployToggle.hidden = inDetail || creating || !(selectedAgentID && engineReady && agentOnline);
+  const canOperate = selectedAgentID && engineReady && agentOnline;
+  if (deployToggle) deployToggle.hidden = inDetail || creating || !canOperate;
+  if (diskCleanup) diskCleanup.hidden = inDetail || creating || !canOperate;
 };
 
 const parsePublishedPorts = (compose) => {
@@ -1647,6 +1650,29 @@ const runAppAction = async (app, action) => {
     }
     return;
   }
+  if (action.id === "rollback") {
+    if (!await askConfirm({
+      title: "回滚应用",
+      body: `确认回滚 ${app.id} 到上一版本？取消不会更改应用。`,
+      confirm: "回滚",
+      cancel: "取消",
+      danger: true,
+    })) {
+      showStatus("已取消，应用未更改。", false);
+      return;
+    }
+  }
+  if (action.id === "update") {
+    if (!await askConfirm({
+      title: "更新应用",
+      body: `确认更新 ${app.id}？取消不会换运行镜像。`,
+      confirm: "更新",
+      cancel: "取消",
+    })) {
+      showStatus("已取消，应用未更改。", false);
+      return;
+    }
+  }
   setBusy(true);
   try {
     if (action.id === "update") {
@@ -1677,7 +1703,7 @@ const actionGroups = (app, options = {}) => {
     if (action.id === "logs") return;
     if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart" && action.id !== "update") return;
     if (options.overview && (action.id === "start" || action.id === "stop" || action.id === "restart")) return;
-    const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart";
+    const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart" || action.id === "update";
     const isDelete = action.id === "delete";
     const button = actionButton(
       action,
@@ -2402,6 +2428,7 @@ const showUnreadyGuide = (engine) => {
   lastEngine = viewState;
   engineReady = false;
   if (deployToggle) deployToggle.hidden = true;
+  if (diskCleanup) diskCleanup.hidden = true;
   if (workspaceNode) workspaceNode.hidden = true;
   leaveDetail({ force: true });
   renderGuide(viewState);
@@ -2572,6 +2599,71 @@ if (deployToggle) {
       return;
     }
     openCreate();
+  });
+}
+
+const formatDiskCleanupBody = (cleanup) => {
+  if (!cleanup || cleanup.empty) {
+    return "没有可清理的闲置镜像或构建缓存。取消不会更改节点。";
+  }
+  const chunks = [];
+  if (cleanup.images) chunks.push(cleanup.images);
+  if (cleanup.builder_cache) chunks.push(cleanup.builder_cache);
+  const lead = "将清理闲置镜像和构建缓存，不会删除数据卷。取消不会更改节点。";
+  return chunks.length ? `${lead}\n\n${chunks.join("\n\n")}` : lead;
+};
+
+const runDiskCleanup = async () => {
+  if (busy || !selectedAgentID) return;
+  if (!agentOnline) {
+    showStatus("该节点离线，不能清理磁盘。", true);
+    return;
+  }
+  if (!engineReady) {
+    showStatus("引擎未就绪，不能清理磁盘。", true);
+    return;
+  }
+  setBusy(true);
+  let previewed = null;
+  try {
+    const payload = await panelJSON(`api/disk-cleanup?agent_id=${encodeURIComponent(selectedAgentID)}`);
+    previewed = payload.cleanup || null;
+  } catch (error) {
+    showStatus(error.message, true);
+    setBusy(false);
+    return;
+  }
+  setBusy(false);
+  const empty = !previewed || previewed.empty === true;
+  const ok = await askConfirm({
+    title: "清理节点磁盘",
+    body: formatDiskCleanupBody(previewed),
+    confirm: empty ? "知道了" : "清理",
+    cancel: "取消",
+    danger: !empty,
+  });
+  if (!ok || empty) {
+    showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false);
+    return;
+  }
+  setBusy(true);
+  try {
+    const payload = await sendPluginJSON("api/disk-cleanup", {
+      agent_id: selectedAgentID,
+      confirm: true,
+    });
+    const cleanup = payload.cleanup || {};
+    showStatus(cleanup.empty ? "没有可清理项。" : "已清理闲置镜像和构建缓存。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (diskCleanup) {
+  diskCleanup.addEventListener("click", () => {
+    runDiskCleanup();
   });
 }
 

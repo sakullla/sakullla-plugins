@@ -74,6 +74,7 @@ type ControllerConfig struct {
 	UILogs                                                     ServiceLogReader
 	UIFiles                                                    AppFilesHandle
 	UIRemove                                                   AppRemoveExecutor
+	UIDiskCleanup                                              DiskCleanupHandle
 	UIHTTPRule                                                 HTTPRuleCreateHandle
 	UIHTTPRuleList                                             HTTPRuleListHandle
 	UIHTTPRuleDelete                                           HTTPRuleDeleteHandle
@@ -106,6 +107,7 @@ type Controller struct {
 	uiLogs             ServiceLogReader
 	uiFiles            AppFilesHandle
 	uiRemove           AppRemoveExecutor
+	uiDiskCleanup      DiskCleanupHandle
 	uiHTTPRule         HTTPRuleCreateHandle
 	uiHTTPRuleList     HTTPRuleListHandle
 	uiHTTPRuleDelete   HTTPRuleDeleteHandle
@@ -163,7 +165,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	controller := &Controller{
 		admission: config.Admission, prepareGate: config.PrepareGate,
 		uiEngineSource: config.UIEngineSource, uiApply: config.UIApply, uiStart: config.UIStart, uiStop: config.UIStop,
-		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiFiles: config.UIFiles, uiRemove: config.UIRemove, uiHTTPRule: config.UIHTTPRule,
+		uiRestart: config.UIRestart, uiLogs: config.UILogs, uiFiles: config.UIFiles, uiRemove: config.UIRemove, uiDiskCleanup: config.UIDiskCleanup, uiHTTPRule: config.UIHTTPRule,
 		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,

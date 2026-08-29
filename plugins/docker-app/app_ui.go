@@ -93,6 +93,7 @@ type appAPIResponse struct {
 	Entries  []workspaceFileEntry `json:"entries,omitempty"`
 	Accepted bool                 `json:"accepted,omitempty"`
 	Preview  *riskPreviewView     `json:"preview,omitempty"`
+	Cleanup  *DiskCleanupReport   `json:"cleanup,omitempty"`
 	Access   struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
@@ -129,6 +130,10 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	if path == "/api/apps/preview" {
 		controller.serveComposePreview(writer, request)
+		return
+	}
+	if path == "/api/disk-cleanup" {
+		controller.serveDiskCleanup(writer, request)
 		return
 	}
 	appID, action, ok := parseAppAPIPath(path)
@@ -992,6 +997,82 @@ func decodeAppWrite(request *http.Request) (appWriteRequest, error) {
 	return body, nil
 }
 
+type diskCleanupWriteRequest struct {
+	AgentID string `json:"agent_id"`
+	Confirm bool   `json:"confirm"`
+}
+
+func decodeDiskCleanup(request *http.Request) (diskCleanupWriteRequest, error) {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, request.Body, MaxConfigBytes))
+	decoder.DisallowUnknownFields()
+	var body diskCleanupWriteRequest
+	if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return diskCleanupWriteRequest{}, err
+	}
+	return body, nil
+}
+
+func (controller *Controller) serveDiskCleanup(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost:
+	default:
+		writer.Header().Set("Allow", "GET, HEAD, POST")
+		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := controller.uiIdentity(request); err != nil {
+		writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
+		return
+	}
+	agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
+	confirm := false
+	if request.Method == http.MethodPost {
+		body, err := decodeDiskCleanup(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+			return
+		}
+		if agentID == "" {
+			agentID = strings.TrimSpace(body.AgentID)
+		}
+		confirm = body.Confirm
+	}
+	if !validAgentID(agentID) {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+		return
+	}
+	if err := controller.requireReadyAgent(request.Context(), agentID); err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "disk-cleanup")})
+		return
+	}
+	if controller.uiDiskCleanup == nil {
+		writeAppJSON(writer, appStatus(ErrTypedHandlesUnavailable), appAPIResponse{Error: publicAppActionError(ErrTypedHandlesUnavailable, "disk-cleanup")})
+		return
+	}
+	var (
+		report DiskCleanupReport
+		err    error
+	)
+	if request.Method == http.MethodPost {
+		report, err = controller.uiDiskCleanup.ApplyDiskCleanup(request.Context(), agentID, confirm)
+	} else {
+		report, err = controller.uiDiskCleanup.PreviewDiskCleanup(request.Context(), agentID)
+	}
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "disk-cleanup")})
+		return
+	}
+	view := report
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Cleanup: &view, Accepted: view.Accepted, Access: struct {
+		CanRead  bool `json:"can_read"`
+		CanWrite bool `json:"can_write"`
+	}{CanRead: true, CanWrite: true}})
+}
+
+func (controller *Controller) requireReadyAgent(ctx context.Context, agentID string) error {
+	return controller.requireMutableAgent(ctx, App{AgentID: agentID})
+}
+
 func (controller *Controller) serveComposePreview(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
@@ -1154,6 +1235,8 @@ func publicAppActionError(err error, action string) string {
 		staged = "读取 Docker Compose 日志失败，请检查服务名和目标 Agent 状态"
 	case "files":
 		staged = "工作区文件操作失败，请检查相对路径和目标 Agent 状态"
+	case "disk-cleanup":
+		staged = "清理节点磁盘失败，请检查目标 Agent 的 Docker 状态"
 	default:
 		return ErrOperationFailed.Error()
 	}

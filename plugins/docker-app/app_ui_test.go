@@ -707,6 +707,62 @@ func TestAppUIRejectsMissingActor(t *testing.T) {
 	if engine.Code != http.StatusForbidden {
 		t.Fatalf("engine status=%d body=%s", engine.Code, engine.Body.String())
 	}
+	cleanup := httptest.NewRecorder()
+	controller.ServeHTTP(cleanup, httptest.NewRequest(http.MethodPost, "/api/disk-cleanup", strings.NewReader(`{"agent_id":"agent-1","confirm":true}`)))
+	if cleanup.Code != http.StatusForbidden {
+		t.Fatalf("disk-cleanup status=%d body=%s", cleanup.Code, cleanup.Body.String())
+	}
+}
+
+func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOp(t *testing.T) {
+	t.Parallel()
+	handle := &recordingDiskCleanup{
+		preview: DiskCleanupReport{
+			Accepted: true, Preview: true, Empty: false,
+			Images: "untagged: nginx:old", BuilderCache: "Total: 4MB",
+		},
+		apply: DiskCleanupReport{
+			Accepted: true, Preview: false, Empty: false,
+			Images: "Deleted Images:\nuntagged: nginx:old", BuilderCache: "Total: 4MB",
+		},
+	}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+
+	missing := httptest.NewRecorder()
+	controller.ServeHTTP(missing, httptest.NewRequest(http.MethodPost, "/api/disk-cleanup", strings.NewReader(`{"agent_id":"agent-1","confirm":true}`)))
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("missing actor status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	preview := httptest.NewRecorder()
+	controller.ServeHTTP(preview, uiRequest(http.MethodGet, "/api/disk-cleanup?agent_id=agent-1", ""))
+	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), `"preview":true`) || !strings.Contains(preview.Body.String(), "untagged: nginx:old") {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+
+	canceled := httptest.NewRecorder()
+	controller.ServeHTTP(canceled, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1"}`))
+	if canceled.Code != http.StatusOK || !strings.Contains(canceled.Body.String(), `"unchanged":true`) {
+		t.Fatalf("unconfirmed status=%d body=%s", canceled.Code, canceled.Body.String())
+	}
+
+	applied := httptest.NewRecorder()
+	controller.ServeHTTP(applied, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1","confirm":true}`))
+	if applied.Code != http.StatusOK || !strings.Contains(applied.Body.String(), "Deleted Images") || strings.Contains(applied.Body.String(), `"unchanged":true`) {
+		t.Fatalf("confirmed status=%d body=%s", applied.Code, applied.Body.String())
+	}
+
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if len(handle.previews) != 1 || handle.previews[0] != "agent-1" {
+		t.Fatalf("previews=%#v", handle.previews)
+	}
+	if len(handle.applies) != 2 || handle.applies[0] != false || handle.applies[1] != true {
+		t.Fatalf("applies=%#v", handle.applies)
+	}
+	if strings.Contains(preview.Body.String(), "-v") || strings.Contains(preview.Body.String(), "--volumes") || strings.Contains(preview.Body.String(), "volume prune") {
+		t.Fatalf("preview leaked volume deletion: %s", preview.Body.String())
+	}
 }
 
 func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
@@ -2602,6 +2658,12 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if !strings.Contains(runFn, "确认删除 ${app.id}") {
 		t.Fatal("app delete is missing confirmation in detail")
 	}
+	if !strings.Contains(runFn, "确认回滚 ${app.id}") {
+		t.Fatal("rollback is missing confirmation")
+	}
+	if !strings.Contains(runFn, "确认更新 ${app.id}") {
+		t.Fatal("update is missing confirmation")
+	}
 	overviewStart := strings.Index(js, "const renderOverview = (app) => {")
 	overviewEnd := strings.Index(js, "const renderHTTP = (app) => {")
 	if overviewStart < 0 || overviewEnd <= overviewStart {
@@ -2847,6 +2909,34 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	}
 	if !strings.Contains(js, `await postAppAction(app, action.id)`) || !strings.Contains(js, `action.id === "rollback"`) {
 		t.Fatal("management page does not execute projected rollback")
+	}
+	if !strings.Contains(html, `id="disk-cleanup"`) || !strings.Contains(html, "清理磁盘") {
+		t.Fatal("workspace is missing the node disk cleanup entry")
+	}
+	cleanupStart := strings.Index(js, "const runDiskCleanup = async () => {")
+	cleanupEnd := strings.Index(js, "if (diskCleanup) {")
+	if cleanupStart < 0 || cleanupEnd <= cleanupStart {
+		t.Fatal("runDiskCleanup is missing")
+	}
+	cleanupFn := js[cleanupStart:cleanupEnd]
+	ask := strings.Index(cleanupFn, "askConfirm")
+	apply := strings.Index(cleanupFn, `confirm: true`)
+	if ask < 0 || apply < 0 || apply < ask {
+		t.Fatal("node cleanup does not require confirm before prune")
+	}
+	if strings.Contains(cleanupFn, "image prune") || strings.Contains(cleanupFn, "builder prune") || strings.Contains(cleanupFn, "--volumes") {
+		t.Fatal("management page still issues prune commands from the browser")
+	}
+	if !strings.Contains(cleanupFn, `api/disk-cleanup?agent_id=`) || !strings.Contains(cleanupFn, `sendPluginJSON("api/disk-cleanup"`) {
+		t.Fatal("node cleanup is not wired to PreviewDiskCleanup/ApplyDiskCleanup")
+	}
+	if !strings.Contains(cleanupFn, "if (!ok || empty)") {
+		t.Fatal("unconfirmed node cleanup still applies prune")
+	}
+	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec"} {
+		if strings.Contains(html, forbidden) || strings.Contains(js, forbidden) {
+			t.Fatalf("management page grew %q copy", forbidden)
+		}
 	}
 	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", ".files-breadcrumb", ".files-path", ".files-selection", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
 		if !strings.Contains(style, want) {
@@ -3152,6 +3242,7 @@ type uiControllerOptions struct {
 	deployments   DeploymentStateStore
 	files         AppFilesHandle
 	remove        AppRemoveExecutor
+	diskCleanup   DiskCleanupHandle
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -3209,6 +3300,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UILogs:             runtime,
 		UIFiles:            filesHandle,
 		UIRemove:           removeHandle,
+		UIDiskCleanup:      opts.diskCleanup,
 		UIHTTPRule:         opts.httpRule,
 		UIHTTPRuleList:     httpRuleList,
 		UIHTTPBackendOffer: opts.httpOffers,
@@ -3503,6 +3595,38 @@ func (runtime *uiTestRuntime) RemoveApp(_ context.Context, app App) error {
 	delete(runtime.running, app.ID)
 	delete(runtime.logs, app.ID+"/web")
 	return nil
+}
+
+type recordingDiskCleanup struct {
+	mu       sync.Mutex
+	preview  DiskCleanupReport
+	apply    DiskCleanupReport
+	previews []string
+	applies  []bool
+	err      error
+}
+
+func (handle *recordingDiskCleanup) PreviewDiskCleanup(_ context.Context, agentID string) (DiskCleanupReport, error) {
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	handle.previews = append(handle.previews, agentID)
+	if handle.err != nil {
+		return DiskCleanupReport{}, handle.err
+	}
+	return handle.preview, nil
+}
+
+func (handle *recordingDiskCleanup) ApplyDiskCleanup(_ context.Context, agentID string, confirm bool) (DiskCleanupReport, error) {
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	handle.applies = append(handle.applies, confirm)
+	if handle.err != nil {
+		return DiskCleanupReport{}, handle.err
+	}
+	if !confirm {
+		return DiskCleanupReport{Accepted: true, Unchanged: true, Empty: true}, nil
+	}
+	return handle.apply, nil
 }
 
 type uiTestObserver struct {

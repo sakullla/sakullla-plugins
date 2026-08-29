@@ -457,7 +457,7 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 	if _, isHost := config.UIEngineSource.(*hostCapabilityRuntime); isHost {
 		t.Fatal("missing host runtime still bound a compose/engine handle")
 	}
-	if config.UIApply != nil || config.UIStart != nil || config.UIStop != nil || config.UIRestart != nil || config.UILogs != nil || config.UIFiles != nil || config.UIRemove != nil {
+	if config.UIApply != nil || config.UIStart != nil || config.UIStop != nil || config.UIRestart != nil || config.UILogs != nil || config.UIFiles != nil || config.UIRemove != nil || config.UIDiskCleanup != nil {
 		t.Fatal("missing host runtime still bound compose executors")
 	}
 	if config.UIHTTPRule != nil || config.UIHTTPRuleList != nil || config.UIHTTPBackendOffer != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil || config.UIDeploymentState != nil {
@@ -511,7 +511,7 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	if !ok || runtime == nil || runtime.client == nil {
 		t.Fatalf("engine source = %#v", config.UIEngineSource)
 	}
-	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIFiles != runtime || config.UIRemove != runtime {
+	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIFiles != runtime || config.UIRemove != runtime || config.UIDiskCleanup != runtime {
 		t.Fatal("compose executors were not bound to the generic host handle")
 	}
 	if config.UIHTTPRule != runtime || config.UIHTTPRuleList != runtime || config.UIHTTPRuleDelete != runtime || config.UIHTTPBackendOffer != runtime || config.UIImageObserver != runtime {

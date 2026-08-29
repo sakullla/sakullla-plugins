@@ -31,16 +31,31 @@
     <p id="app-status" role="status" hidden></p>
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel" id="app-node-empty" hidden>
-        <h2>未选择节点</h2>
-        <p>请先选择一台在线节点，再照看这台上的应用。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <div>
+            <h2>未选择节点</h2>
+            <p>请先选择一台在线节点，再照看这台上的应用。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel" id="app-offline" hidden>
-        <h2>节点离线</h2>
-        <p>该节点离线，不能部署或改动 compose 应用。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="offline" aria-hidden="true"></span>
+          <div>
+            <h2>节点离线</h2>
+            <p>该节点离线，不能部署或改动 compose 应用。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel" id="app-execution-unavailable" hidden>
-        <h2>该节点暂时无法执行应用</h2>
-        <p>该节点在线，但还不能执行 compose。刷新本页，或检查该节点上的 docker-app 插件状态。不是本机缺 Docker。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
+          <div>
+            <h2>该节点暂时无法执行应用</h2>
+            <p>该节点在线，但还不能执行 compose。刷新本页，或检查该节点上的 docker-app 插件状态。不是本机缺 Docker。</p>
+          </div>
+        </div>
       </section>
     </section>
     <section class="state-panel engine-guide" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
@@ -81,7 +96,10 @@
           <h2 id="app-list-title">应用</h2>
           <p id="app-count" class="count" hidden></p>
         </div>
-        <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
+        <div class="workspace-head-actions">
+          <button id="disk-cleanup" class="btn-secondary" type="button">清理磁盘</button>
+          <button id="deploy-toggle" class="btn-primary" type="button">部署应用</button>
+        </div>
       </div>
       <section class="panel" id="app-create" aria-labelledby="app-create-title" hidden>
         <div class="section-head">
@@ -240,7 +258,7 @@
           <button type="button" class="btn-secondary" data-action="start" hidden>启动</button>
           <button type="button" class="btn-secondary" data-action="stop" hidden>停止</button>
           <button type="button" class="btn-secondary" data-action="restart" hidden>重启</button>
-          <button type="button" class="btn-secondary" data-action="update" hidden>更新</button>
+          <button type="button" class="btn-primary" data-action="update" hidden>更新</button>
           <button type="button" class="btn-secondary" data-action="detail">详情</button>
         </div>
       </article>
