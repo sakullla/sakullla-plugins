@@ -270,6 +270,10 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
+		if err := controller.clearAppDeployment(request.Context(), body.ID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), agentID))
 	default:
@@ -398,12 +402,22 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return
 		}
+		if err := controller.setAppRunning(request.Context(), appID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
+		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "rollback":
 		if err := controller.uiRollout.Rollback(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "rollback")})
 			return
 		}
+		if err := controller.setAppRunning(request.Context(), appID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
+		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "http-rule":
 		body, err := decodeAppWrite(request)
@@ -861,7 +875,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		_, allowed := controller.snapshotObservationLocked(app, token, epoch)
 		return allowed
 	})
-	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
+	view, autoErr := controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 	_, still := controller.snapshotObservationLocked(app, token, epoch)
@@ -872,6 +886,9 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	controller.mu.Unlock()
 	if !keepRecord {
 		_ = controller.clearAppDeployment(ctx, app.ID)
+	} else if autoErr == nil && view.Published {
+		_ = controller.setAppRunning(ctx, currentApp.ID, true)
+		controller.publishHTTPBackendOffers(ctx)
 	}
 }
 

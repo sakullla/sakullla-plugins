@@ -1351,6 +1351,138 @@ func TestAppUIRollbackRequiresHistoryAndRestoresPrior(t *testing.T) {
 	}
 }
 
+func TestAppUIComposeSaveDropsRollbackHistory(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	if published := decodeAppList(t, updated.Body.Bytes()); len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
+		t.Fatalf("confirmed update omitted rollback: %#v", published)
+	}
+
+	saved := httptest.NewRecorder()
+	controller.ServeHTTP(saved, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.28\n"}`))
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	apps := decodeAppList(t, saved.Body.Bytes())
+	if len(apps) != 1 || hasAppAction(apps[0], OpsActionRollback) {
+		t.Fatalf("compose save still offered rollback: %#v", apps)
+	}
+	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
+		t.Fatalf("compose save kept history: %#v", record)
+	}
+}
+
+func TestAppUIConfirmUpdateAndRollbackMarkRunningAfterStop(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	stopped := httptest.NewRecorder()
+	controller.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
+	if stopped.Code != http.StatusOK || decodeAppList(t, stopped.Body.Bytes())[0].Status != OpsStatusStopped {
+		t.Fatalf("stop status=%d body=%s", stopped.Code, stopped.Body.String())
+	}
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	published := decodeAppList(t, updated.Body.Bytes())
+	if len(published) != 1 || published[0].Status != OpsStatusRunning || !controller.appIsRunning("media") {
+		t.Fatalf("confirm left stopped: %#v running=%v", published, controller.appIsRunning("media"))
+	}
+
+	controller.ServeHTTP(httptest.NewRecorder(), uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
+	restored := httptest.NewRecorder()
+	controller.ServeHTTP(restored, uiJSONRequest(http.MethodPost, "/api/apps/media/rollback", `{}`))
+	if restored.Code != http.StatusOK {
+		t.Fatalf("rollback status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	rolled := decodeAppList(t, restored.Body.Bytes())
+	if len(rolled) != 1 || rolled[0].Status != OpsStatusRunning || !controller.appIsRunning("media") {
+		t.Fatalf("rollback left stopped: %#v running=%v", rolled, controller.appIsRunning("media"))
+	}
+}
+
+func TestAppUIAutoUpdatePublishMarksRunningAfterStop(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	newer := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	observer := &delayedImageObserver{current: current, latest: latest}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: observer,
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == latest
+	})
+	stopped := httptest.NewRecorder()
+	controller.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
+	if stopped.Code != http.StatusOK || decodeAppList(t, stopped.Body.Bytes())[0].Status != OpsStatusStopped {
+		t.Fatalf("stop status=%d body=%s", stopped.Code, stopped.Body.String())
+	}
+	observer.mu.Lock()
+	observer.current = latest
+	observer.latest = newer
+	observer.mu.Unlock()
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	controller.imageRefresh["media"] = false
+	controller.mu.Unlock()
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == newer
+	})
+	if !controller.appIsRunning("media") {
+		t.Fatal("auto_update publish left app stopped")
+	}
+	refreshed := httptest.NewRecorder()
+	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, refreshed.Body.Bytes())
+	if len(apps) != 1 || apps[0].Status != OpsStatusRunning {
+		t.Fatalf("auto_update publish status=%#v", apps)
+	}
+}
+
 func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
