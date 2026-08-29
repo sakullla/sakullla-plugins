@@ -1556,7 +1556,7 @@ func TestAppUIDeleteOverlappingAutoUpdatePersistDoesNotRestoreHistory(t *testing
 	}
 }
 
-func TestAppUIDeleteDropsCatalogBeforeRemoveAppSkipsStart(t *testing.T) {
+func TestAppUIDeleteInvalidatesObserveBeforeRemoveAppSkipsStart(t *testing.T) {
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
 	pullStarted := make(chan struct{}, 1)
@@ -1579,6 +1579,9 @@ func TestAppUIDeleteDropsCatalogBeforeRemoveAppSkipsStart(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("auto_update pull did not start")
 	}
+	controller.mu.Lock()
+	observeToken := controller.imageObserveToken["media"]
+	controller.mu.Unlock()
 	deleted := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
@@ -1590,8 +1593,14 @@ func TestAppUIDeleteDropsCatalogBeforeRemoveAppSkipsStart(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("RemoveApp did not start")
 	}
-	if len(controller.Apps()) != 0 {
-		t.Fatalf("catalog still present during compose down: %#v", controller.Apps())
+	if apps := controller.Apps(); len(apps) != 1 || apps[0].ID != "media" {
+		t.Fatalf("live catalog dropped before replaceApps: %#v", apps)
+	}
+	controller.mu.Lock()
+	token := controller.imageObserveToken["media"]
+	controller.mu.Unlock()
+	if token <= observeToken {
+		t.Fatalf("observe token not bumped before RemoveApp: before=%d during=%d", observeToken, token)
 	}
 	close(pullRelease)
 	waitForImageObservation(t, controller, "media")
