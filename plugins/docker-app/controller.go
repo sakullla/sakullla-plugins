@@ -85,6 +85,7 @@ type ControllerConfig struct {
 	CommandRunner                                              CommandRunner
 	CallImages                                                 ImageUpdateObserver
 	UIAppState                                                 AppStateStore
+	UIDeploymentState                                          DeploymentStateStore
 }
 
 type Controller struct {
@@ -142,6 +143,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	if auditor == nil {
 		auditor = AuditorFunc(func(AuditRecord) {})
 	}
+	deployments := config.UIDeploymentState
+	if deployments == nil {
+		deployments = NewDeploymentStore()
+	}
 	httpRuleList := config.UIHTTPRuleList
 	if httpRuleList == nil {
 		if lister, ok := config.UIHTTPRule.(HTTPRuleListHandle); ok {
@@ -163,7 +168,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
 		appRuntime: map[string]bool{},
 		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageSlots: make(chan struct{}, 2),
-		uiRollout: Rollout{Store: NewDeploymentStore(), Executor: config.UIRolloutExecutor, Auditor: auditor},
+		uiRollout: Rollout{Store: deployments, Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,

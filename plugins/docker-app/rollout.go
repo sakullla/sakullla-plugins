@@ -901,7 +901,7 @@ func rolloutBusy(value Deployment, existed bool, now time.Time) bool {
 }
 
 func publishedHistory(value Deployment) []DeploymentRevision {
-	if value.PriorAbsent || (value.PriorInstance == "" && value.PriorImage == "") {
+	if value.PriorInstance == "" && value.PriorImage == "" && value.PriorDigest == "" {
 		return cloneRevisions(value.History)
 	}
 	return []DeploymentRevision{{

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -156,6 +157,71 @@ func TestHostCapabilityRuntimePersistsAppsThroughHostState(t *testing.T) {
 	}
 	if len(calls) != 4 || calls[0].Operation != "state.put" || calls[1].Operation != "state.get" || calls[2].Operation != "state.put" || calls[3].Operation != "state.get" {
 		t.Fatalf("state calls=%#v", calls)
+	}
+}
+
+func TestHostCapabilityRuntimePersistsDeploymentStoreThroughHostState(t *testing.T) {
+	t.Parallel()
+	stored := map[string]json.RawMessage{}
+	var calls []pluginsdk.HostRuntimeCall
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		calls = append(calls, call)
+		var payload struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			return err
+		}
+		if payload.Key != pluginDeploymentsStateKey {
+			t.Fatalf("state key=%q", payload.Key)
+		}
+		switch call.Operation {
+		case "state.put":
+			stored[payload.Key] = append(json.RawMessage(nil), payload.Value...)
+			return copyHostResult(map[string]any{"stored": true}, target)
+		case "state.get":
+			value, found := stored[payload.Key]
+			return copyHostResult(map[string]any{"found": found, "value": value}, target)
+		default:
+			t.Fatalf("state operation=%q", call.Operation)
+			return nil
+		}
+	})
+	store := newPersistedDeploymentStore(newHostCapabilityRuntime(client))
+	ctx := context.Background()
+	seed := Deployment{
+		AppID: "media", AgentID: "agent-1", Image: "nginx:latest", Generation: "generation-1",
+		Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest",
+		History: []DeploymentRevision{{Image: "nginx:latest", ImageDigest: "sha256:prior"}},
+	}
+	leased, err := store.AcquireLease(ctx, "media", 0, seed, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := leased.Value
+	active.Lease, active.LeaseUntil = "", time.Time{}
+	if _, err := store.CompareAndSwap(ctx, "media", leased.Version, leased.Value.FencingToken, active); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newPersistedDeploymentStore(newHostCapabilityRuntime(client))
+	got, ok, err := reloaded.Load(ctx, "media")
+	if err != nil || !ok || got.Value.ImageDigest != "sha256:current" || got.Value.AvailableDigest != "sha256:latest" || len(got.Value.History) != 1 || got.Value.History[0].ImageDigest != "sha256:prior" {
+		t.Fatalf("reloaded deployment=%#v ok=%v err=%v", got, ok, err)
+	}
+	if err := reloaded.DeleteCAS(ctx, "media", got.Version, got.Value.FencingToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Load(ctx, "media"); err != nil || ok {
+		t.Fatalf("deleted deployment still present ok=%v err=%v", ok, err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("deployment store did not use host state.get/put")
+	}
+	for _, call := range calls {
+		if call.Operation != "state.get" && call.Operation != "state.put" {
+			t.Fatalf("unexpected host operation %q", call.Operation)
+		}
 	}
 }
 
@@ -394,7 +460,7 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 	if config.UIApply != nil || config.UIStart != nil || config.UIStop != nil || config.UIRestart != nil || config.UILogs != nil || config.UIFiles != nil || config.UIRemove != nil {
 		t.Fatal("missing host runtime still bound compose executors")
 	}
-	if config.UIHTTPRule != nil || config.UIHTTPRuleList != nil || config.UIHTTPBackendOffer != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil {
+	if config.UIHTTPRule != nil || config.UIHTTPRuleList != nil || config.UIHTTPBackendOffer != nil || config.UIImageObserver != nil || config.UIRolloutExecutor != nil || config.UIDeploymentState != nil {
 		t.Fatal("missing host runtime still bound http/image/rollout handles")
 	}
 	if config.Admission == nil {
@@ -453,6 +519,10 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	}
 	if rollout, ok := config.UIRolloutExecutor.(hostRolloutRuntime); !ok || rollout.runtime != runtime {
 		t.Fatalf("rollout executor = %#v", config.UIRolloutExecutor)
+	}
+	store, ok := config.UIDeploymentState.(*persistedDeploymentStore)
+	if !ok || store == nil || store.backend != runtime {
+		t.Fatalf("deployment store = %#v", config.UIDeploymentState)
 	}
 }
 

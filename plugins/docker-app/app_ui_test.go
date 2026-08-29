@@ -157,10 +157,14 @@ func TestAppUIRejectsMissingRequiredComposeEnvironmentBeforeDeploy(t *testing.T)
 }
 
 type uiMemoryAppState struct {
-	apps    []App
-	runtime map[string]bool
-	found   bool
-	stores  int
+	apps         []App
+	runtime      map[string]bool
+	deployments  deploymentSnapshot
+	found        bool
+	deployFound  bool
+	stores       int
+	deployStores int
+	deployErr    error
 }
 
 func (state *uiMemoryAppState) LoadApps(context.Context) ([]App, bool, error) {
@@ -181,6 +185,23 @@ func (state *uiMemoryAppState) LoadRuntime(context.Context) (map[string]bool, bo
 func (state *uiMemoryAppState) StoreRuntime(_ context.Context, values map[string]bool) error {
 	state.runtime = cloneAppRuntime(values)
 	state.found = true
+	return nil
+}
+
+func (state *uiMemoryAppState) LoadDeployments(context.Context) (deploymentSnapshot, bool, error) {
+	if state.deployErr != nil {
+		return deploymentSnapshot{}, false, state.deployErr
+	}
+	return cloneDeploymentSnapshot(state.deployments), state.deployFound, nil
+}
+
+func (state *uiMemoryAppState) StoreDeployments(_ context.Context, snapshot deploymentSnapshot) error {
+	if state.deployErr != nil {
+		return state.deployErr
+	}
+	state.deployments = cloneDeploymentSnapshot(snapshot)
+	state.deployFound = true
+	state.deployStores++
 	return nil
 }
 
@@ -1089,7 +1110,7 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	if unchanged[0].Version != apps[0].Version || unchanged[0].Notice != OpsStatusUpdateAvailable || unchanged[0].Status != OpsStatusRunning {
 		t.Fatalf("list without update changed image: %#v", unchanged)
 	}
-	record, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	record, ok := controllerDeployment(controller, "media")
 	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
 		t.Fatalf("digest mutated without confirm: %#v ok=%v", record, ok)
 	}
@@ -1103,12 +1124,12 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	if published[0].Notice == OpsStatusUpdateAvailable || published[0].Status != OpsStatusRunning || !strings.Contains(published[0].Version, "sha256:fedcba987654") {
 		t.Fatalf("confirm did not switch digest: %#v", published)
 	}
-	if hasAppAction(published[0], OpsActionRollback) {
-		t.Fatalf("confirmed update offered rollback: %#v", published)
+	if !hasAppAction(published[0], OpsActionRollback) {
+		t.Fatalf("confirmed update omitted rollback: %#v", published)
 	}
-	got, _ := controller.uiRollout.Store.(*DeploymentStore).Get("media")
-	if got.ImageDigest != latest {
-		t.Fatalf("confirm digest=%#v", got)
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || got.ImageDigest != latest || len(got.History) == 0 || got.History[0].ImageDigest != current {
+		t.Fatalf("confirm digest=%#v ok=%v", got, ok)
 	}
 }
 
@@ -1173,6 +1194,161 @@ func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
 	}
 }
 
+func TestAppUIRollbackRequiresHistoryAndRestoresPrior(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	compose := "services:\n  web:\n    image: nginx:latest\n"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	observed := httptest.NewRecorder()
+	controller.ServeHTTP(observed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	listed := decodeAppList(t, observed.Body.Bytes())
+	if observed.Code != http.StatusOK || len(listed) != 1 || hasAppAction(listed[0], OpsActionRollback) {
+		t.Fatalf("unconfirmed view offered rollback: %#v body=%s", listed, observed.Body.String())
+	}
+
+	before := controller.Apps()[0]
+	running := controller.appIsRunning("media")
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps/media/rollback", `{}`))
+	if denied.Code != http.StatusBadRequest {
+		t.Fatalf("missing history rollback status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	after := controller.Apps()[0]
+	if after.Compose != before.Compose || after.Image != before.Image || controller.appIsRunning("media") != running {
+		t.Fatalf("rejected rollback mutated app: before=%#v after=%#v running=%v", before, after, controller.appIsRunning("media"))
+	}
+	record, ok := controllerDeployment(controller, "media")
+	if !ok || record.ImageDigest != current || record.AvailableDigest != latest || len(record.History) != 0 {
+		t.Fatalf("rejected rollback mutated deployment: %#v ok=%v", record, ok)
+	}
+
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	published := decodeAppList(t, updated.Body.Bytes())
+	if len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
+		t.Fatalf("confirmed update omitted rollback: %#v", published)
+	}
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || got.ImageDigest != latest || len(got.History) == 0 || got.History[0].ImageDigest != current {
+		t.Fatalf("confirm history=%#v ok=%v", got, ok)
+	}
+
+	restored := httptest.NewRecorder()
+	controller.ServeHTTP(restored, uiJSONRequest(http.MethodPost, "/api/apps/media/rollback", `{}`))
+	if restored.Code != http.StatusOK {
+		t.Fatalf("rollback status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	rolled := decodeAppList(t, restored.Body.Bytes())
+	if len(rolled) != 1 || rolled[0].Status != OpsStatusRunning {
+		t.Fatalf("rollback view=%#v", rolled)
+	}
+	afterRoll, ok := controllerDeployment(controller, "media")
+	if !ok || afterRoll.ImageDigest != current {
+		t.Fatalf("rollback digest=%#v ok=%v", afterRoll, ok)
+	}
+	if controller.Apps()[0].Compose != before.Compose || controller.Apps()[0].Image != before.Image || !controller.appIsRunning("media") {
+		t.Fatalf("rollback changed compose or running state: app=%#v running=%v", controller.Apps()[0], controller.appIsRunning("media"))
+	}
+}
+
+func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	state := &uiMemoryAppState{}
+	first := newUIControllerWithOptions(t, uiControllerOptions{
+		appState: state,
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	first.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, first, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	updated := httptest.NewRecorder()
+	first.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	got, ok := controllerDeployment(first, "media")
+	if !ok || got.ImageDigest != latest || len(got.History) == 0 || got.History[0].ImageDigest != current {
+		t.Fatalf("first confirm history=%#v ok=%v", got, ok)
+	}
+	if state.deployStores == 0 || !state.deployFound {
+		t.Fatalf("confirm did not persist deployment snapshot: stores=%d found=%v", state.deployStores, state.deployFound)
+	}
+
+	restarted := newUIControllerWithOptions(t, uiControllerOptions{
+		appState: state,
+		rollout:  &uiTestRollout{},
+	})
+	listed := httptest.NewRecorder()
+	restarted.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if listed.Code != http.StatusOK || len(apps) != 1 || !hasAppAction(apps[0], OpsActionRollback) {
+		t.Fatalf("restored rollback action missing: %#v body=%s", apps, listed.Body.String())
+	}
+	restored := httptest.NewRecorder()
+	restarted.ServeHTTP(restored, uiJSONRequest(http.MethodPost, "/api/apps/media/rollback", `{}`))
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restarted rollback status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	rolled, ok := controllerDeployment(restarted, "media")
+	if !ok || rolled.ImageDigest != current {
+		t.Fatalf("restarted rollback digest=%#v ok=%v", rolled, ok)
+	}
+}
+
+func TestPersistedDeploymentStoreWriteFailureKeepsPrior(t *testing.T) {
+	t.Parallel()
+	state := &uiMemoryAppState{}
+	store := newPersistedDeploymentStore(state)
+	ctx := context.Background()
+	seed := Deployment{
+		AppID: "media", AgentID: "agent-1", Image: "nginx:latest", Generation: "generation-1",
+		Phase: PhaseActive, ImageDigest: "sha256:current",
+		History: []DeploymentRevision{{Image: "nginx:latest", ImageDigest: "sha256:prior"}},
+	}
+	leased, err := store.AcquireLease(ctx, "media", 0, seed, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := leased.Value
+	active.Lease, active.LeaseUntil = "", time.Time{}
+	if _, err := store.CompareAndSwap(ctx, "media", leased.Version, leased.Value.FencingToken, active); err != nil {
+		t.Fatal(err)
+	}
+	state.deployErr = errors.New("storage.write failed")
+	mutated := active
+	mutated.ImageDigest = "sha256:latest"
+	if _, err := store.CompareAndSwap(ctx, "media", leased.Version+1, leased.Value.FencingToken, mutated); err == nil {
+		t.Fatal("write failure still swapped deployment")
+	}
+	state.deployErr = nil
+	got, ok, err := store.Load(ctx, "media")
+	if err != nil || !ok || got.Value.ImageDigest != "sha256:current" || len(got.Value.History) != 1 || got.Value.History[0].ImageDigest != "sha256:prior" {
+		t.Fatalf("failed write mutated history: %#v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
@@ -1198,7 +1374,7 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	if len(refreshedApps) != 1 || refreshedApps[0].Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("background observation did not publish update notice: %#v", refreshedApps)
 	}
-	_, ok := controller.uiRollout.Store.(*DeploymentStore).Get("media")
+	_, ok := controllerDeployment(controller, "media")
 	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
 		t.Fatalf("auto_update published without confirm: %#v ok=%v", record, ok)
 	}
@@ -1251,14 +1427,25 @@ func waitForDeployment(t *testing.T, controller *Controller, appID string, ready
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if record, ok := controller.uiRollout.Store.(*DeploymentStore).Get(appID); ok && ready(record) {
+		if record, ok := controllerDeployment(controller, appID); ok && ready(record) {
 			return record
 		}
 		time.Sleep(time.Millisecond)
 	}
-	record, _ := controller.uiRollout.Store.(*DeploymentStore).Get(appID)
+	record, _ := controllerDeployment(controller, appID)
 	t.Fatalf("deployment observation did not reach expected state: %#v", record)
 	return Deployment{}
+}
+
+func controllerDeployment(controller *Controller, appID string) (Deployment, bool) {
+	if controller == nil || controller.uiRollout.Store == nil {
+		return Deployment{}, false
+	}
+	record, ok, err := controller.uiRollout.Store.Load(context.Background(), appID)
+	if err != nil || !ok {
+		return Deployment{}, false
+	}
+	return record.Value, true
 }
 
 func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
@@ -1276,8 +1463,8 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	if !hasOpsAction(running.Actions, OpsActionUpdate) || !hasOpsAction(running.Actions, OpsActionStop) || !hasOpsAction(running.Actions, OpsActionRestart) || !hasOpsAction(running.Actions, OpsActionDelete) {
 		t.Fatalf("running update dropped ops: %#v", running.Actions)
 	}
-	if hasOpsAction(running.Actions, OpsActionRollback) {
-		t.Fatalf("running update offered rollback: %#v", running.Actions)
+	if !hasOpsAction(running.Actions, OpsActionRollback) {
+		t.Fatalf("running update omitted rollback: %#v", running.Actions)
 	}
 
 	stopped := projectAppView(app, false, deployment, "sha256:latest")
@@ -1287,8 +1474,13 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	if !hasOpsAction(stopped.Actions, OpsActionStart) || !hasOpsAction(stopped.Actions, OpsActionDelete) || !hasOpsAction(stopped.Actions, OpsActionUpdate) {
 		t.Fatalf("stopped update dropped start/delete/update: %#v", stopped.Actions)
 	}
-	if hasOpsAction(stopped.Actions, OpsActionRollback) {
-		t.Fatalf("stopped update offered rollback: %#v", stopped.Actions)
+	if !hasOpsAction(stopped.Actions, OpsActionRollback) {
+		t.Fatalf("stopped update omitted rollback: %#v", stopped.Actions)
+	}
+
+	withoutHistory := projectAppView(app, true, Deployment{Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest"}, "sha256:latest")
+	if hasOpsAction(withoutHistory.Actions, OpsActionRollback) {
+		t.Fatalf("view without history offered rollback: %#v", withoutHistory.Actions)
 	}
 
 	enabled := true
@@ -2377,8 +2569,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if strings.Contains(js, "from \"react") || strings.Contains(js, "from 'vue") || strings.Contains(html, "react") && strings.Contains(html, "createRoot") {
 		t.Fatal("management page imported a UI framework")
 	}
-	if !strings.Contains(js, `if (action.id === "rollback") return;`) {
-		t.Fatal("management page no longer skips rollback")
+	if strings.Contains(js, `if (action.id === "rollback") return;`) {
+		t.Fatal("management page still skips rollback")
+	}
+	if !strings.Contains(js, `await postAppAction(app, action.id)`) || !strings.Contains(js, `action.id === "rollback"`) {
+		t.Fatal("management page does not execute projected rollback")
 	}
 	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", ".files-breadcrumb", ".files-path", ".files-selection", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
 		if !strings.Contains(style, want) {
@@ -2682,6 +2877,7 @@ type uiControllerOptions struct {
 	httpRuleList  HTTPRuleListHandle
 	httpOffers    HTTPBackendOfferReplaceHandle
 	appState      AppStateStore
+	deployments   DeploymentStateStore
 	files         AppFilesHandle
 	remove        AppRemoveExecutor
 }
@@ -2722,6 +2918,12 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 			httpRuleList = lister
 		}
 	}
+	deployments := opts.deployments
+	if deployments == nil {
+		if backend, ok := opts.appState.(deploymentSnapshotStore); ok {
+			deployments = newPersistedDeploymentStore(backend)
+		}
+	}
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		Admission: TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, []App) (PreparedAdmission, error) {
@@ -2742,6 +2944,7 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIImageObserver:    opts.observer,
 		UIRolloutExecutor:  opts.rollout,
 		UIAppState:         opts.appState,
+		UIDeploymentState:  deployments,
 	})
 	if err != nil {
 		t.Fatal(err)

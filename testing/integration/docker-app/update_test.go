@@ -173,6 +173,44 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	if !runtime.running["media"] || !runtime.containerExists("media") {
 		t.Fatalf("compose runtime was torn down: %#v", runtime)
 	}
+	if len(published.History) == 0 || published.History[0].ImageDigest != "sha256:current" {
+		t.Fatalf("compose confirm did not keep rollback prior: %#v", published)
+	}
+}
+
+func TestDockerRollbackAfterComposeConfirmRestoresPriorDigest(t *testing.T) {
+	engine := dockerapp.EngineObservation{Installed: true, Version: "27.1.1"}
+	auditor := dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})
+	runtime := newLifecycleRuntime()
+	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: testComposeYAML("nginx:latest")}
+	apps, err := dockerapp.DeployComposeApp(context.Background(), nil, spec, engine, runtime, auditor)
+	if err != nil || len(apps) != 1 {
+		t.Fatalf("compose deploy apps=%#v err=%v", apps, err)
+	}
+	store := dockerapp.NewDeploymentStore()
+	fake := &rolloutFake{}
+	rollout := dockerapp.Rollout{Store: store, Executor: fake, Auditor: auditor}
+	if _, err := rollout.AutoUpdate(context.Background(), apps[0], nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollout.ConfirmUpdate(context.Background(), apps[0]); err != nil {
+		t.Fatal(err)
+	}
+	published, _ := store.Get(apps[0].ID)
+	if published.ImageDigest != "sha256:latest" || len(published.History) == 0 || published.History[0].ImageDigest != "sha256:current" {
+		t.Fatalf("confirm history=%#v", published)
+	}
+	composeBefore := apps[0].Compose
+	if err := rollout.Rollback(context.Background(), apps[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := store.Get(apps[0].ID)
+	if restored.ImageDigest != "sha256:current" || restored.Phase != dockerapp.PhaseActive {
+		t.Fatalf("rollback digest=%#v", restored)
+	}
+	if apps[0].Compose != composeBefore || !runtime.running["media"] {
+		t.Fatalf("rollback mutated compose/runtime: app=%#v running=%v", apps[0], runtime.running)
+	}
 }
 
 func TestDockerComposeOnlyConfirmUpdateRecoversDrainingIntent(t *testing.T) {

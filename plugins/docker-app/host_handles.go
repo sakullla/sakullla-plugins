@@ -22,6 +22,7 @@ const (
 	hostHTTPRuleActionDelete      = "delete"
 	pluginAppsStateKey            = "apps"
 	pluginRuntimeStateKey         = "app-runtime"
+	pluginDeploymentsStateKey     = "deployments"
 )
 
 type hostRuntimeCaller interface {
@@ -549,6 +550,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIHTTPBackendOffer = runtime
 	config.UIImageObserver = runtime
 	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
+	config.UIDeploymentState = newPersistedDeploymentStore(runtime)
 	return config
 }
 

@@ -313,6 +313,10 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
+		if err := controller.clearAppDeployment(request.Context(), appID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return
+		}
 		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "start":
@@ -351,6 +355,12 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 	case "update":
 		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return
+		}
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
+	case "rollback":
+		if err := controller.uiRollout.Rollback(request.Context(), appID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "rollback")})
 			return
 		}
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
@@ -593,6 +603,20 @@ func (controller *Controller) clearAppRuntime(ctx context.Context, appID string)
 	return nil
 }
 
+func (controller *Controller) clearAppDeployment(ctx context.Context, appID string) error {
+	if controller.uiRollout.Store == nil {
+		return nil
+	}
+	record, ok, err := controller.uiRollout.Store.Load(ctx, appID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return controller.uiRollout.Store.DeleteCAS(ctx, appID, record.Version, record.Value.FencingToken)
+}
+
 func (controller *Controller) appIsRunning(appID string) bool {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
@@ -800,7 +824,7 @@ func projectAppView(app App, running bool, deployment Deployment, latestDigest s
 		Version: displayImageVersion(app.Image, deployment.ImageDigest),
 		Compose: app.Compose, AutoUpdate: AutoUpdateEnabled(app.AutoUpdate),
 		Ports: ports, Services: composeServiceNames(app.Compose),
-		Actions: appViewActions(status, notice),
+		Actions: appViewActions(status, notice, deployment),
 	}
 }
 
@@ -825,7 +849,7 @@ func appImageUpdateAvailable(deployment Deployment, latestDigest string) bool {
 	return digest != "" && deployment.ImageDigest != "" && digest != deployment.ImageDigest
 }
 
-func appViewActions(status, notice string) []OpsAction {
+func appViewActions(status, notice string, deployment Deployment) []OpsAction {
 	configure := OpsAction{ID: OpsActionConfigure, Label: OpsConfigEntry}
 	var actions []OpsAction
 	switch status {
@@ -842,6 +866,9 @@ func appViewActions(status, notice string) []OpsAction {
 	}
 	if notice == OpsStatusUpdateAvailable && !hasOpsAction(actions, OpsActionUpdate) {
 		actions = append([]OpsAction{{ID: OpsActionUpdate, Label: "更新"}}, actions...)
+	}
+	if status != OpsStatusPublishing && len(deployment.History) > 0 && !hasOpsAction(actions, OpsActionRollback) {
+		actions = append(actions, OpsAction{ID: OpsActionRollback, Label: "回滚"})
 	}
 	if status != OpsStatusPublishing {
 		actions = appendDeleteAction(actions)
@@ -900,7 +927,7 @@ func parseAppAPIPath(path string) (appID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "delete", "start", "stop", "restart", "update", "http-rule", "http-rule-delete", "logs", "files":
+	case "delete", "start", "stop", "restart", "update", "rollback", "http-rule", "http-rule-delete", "logs", "files":
 		return decoded, action, true
 	default:
 		return "", "", false
@@ -1019,6 +1046,8 @@ func publicAppActionError(err error, action string) string {
 		staged = "入口规则已按宿主结果删除，但应用仍在。请刷新后重试删除应用"
 	case "update":
 		staged = "更新应用失败，请检查镜像拉取结果和目标 Agent 的 Docker 状态"
+	case "rollback":
+		staged = "回滚应用失败，请检查上一版本是否仍可用和目标 Agent 的 Docker 状态"
 	case "http-rule":
 		staged = "HTTP 规则创建失败，请检查域名冲突、发布端口和目标 Agent 状态"
 	case "http-rule-delete":

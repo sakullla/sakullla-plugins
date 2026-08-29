@@ -1591,7 +1591,7 @@ const runAppAction = async (app, action) => {
   setBusy(true);
   try {
     await postAppAction(app, action.id);
-    showStatus(action.id === "update" ? "已更新应用镜像。" : "已执行操作。", false);
+    showStatus(action.id === "update" ? "已更新应用镜像。" : action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
@@ -1610,7 +1610,6 @@ const actionGroups = (app, options = {}) => {
   const danger = document.createElement("div");
   danger.className = "app-actions app-actions-danger";
   apiActions.forEach((action) => {
-    if (action.id === "rollback") return;
     if (action.id === "configure") return;
     if (action.id === "logs") return;
     if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart") return;
