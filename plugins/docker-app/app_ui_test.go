@@ -1556,6 +1556,71 @@ func TestAppUIDeleteOverlappingAutoUpdatePersistDoesNotRestoreHistory(t *testing
 	}
 }
 
+func TestAppUIDeleteDropsCatalogBeforeRemoveAppSkipsStart(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	pullStarted := make(chan struct{}, 1)
+	pullRelease := make(chan struct{})
+	removeStarted := make(chan struct{}, 1)
+	removeRelease := make(chan struct{})
+	rollout := &blockingUIRollout{started: pullStarted, release: pullRelease}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  rollout,
+		remove:   &blockingAppRemove{started: removeStarted, release: removeRelease},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	select {
+	case <-pullStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto_update pull did not start")
+	}
+	deleted := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+		close(done)
+	}()
+	select {
+	case <-removeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RemoveApp did not start")
+	}
+	if len(controller.Apps()) != 0 {
+		t.Fatalf("catalog still present during compose down: %#v", controller.Apps())
+	}
+	close(pullRelease)
+	waitForImageObservation(t, controller, "media")
+	if rolloutCallHas(rollout.calls, "start") {
+		t.Fatalf("Start ran during compose down: %v", rollout.calls)
+	}
+	close(removeRelease)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not finish")
+	}
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+	if rolloutCallHas(rollout.calls, "start") {
+		t.Fatalf("Start ran after delete: %v", rollout.calls)
+	}
+}
+
+func rolloutCallHas(calls []string, want string) bool {
+	for _, call := range calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
+}
+
 func waitForImageObservation(t *testing.T, controller *Controller, appID string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -3604,6 +3669,24 @@ type failingAppRemove struct {
 
 func (executor failingAppRemove) RemoveApp(context.Context, App) error {
 	return executor.err
+}
+
+type blockingAppRemove struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (executor *blockingAppRemove) RemoveApp(ctx context.Context, _ App) error {
+	select {
+	case executor.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-executor.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type recordingHTTPBackendOffers struct {

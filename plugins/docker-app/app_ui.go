@@ -323,8 +323,11 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), response)
 			return
 		}
-		next, err := DeleteManagedApp(request.Context(), controller.Apps(), appID, true, controller.uiRemove, controller.uiAuditor)
+		previous := controller.Apps()
+		controller.dropCatalogAndInvalidateObservation(appID, RemoveManaged(previous, appID))
+		next, err := DeleteManagedApp(request.Context(), previous, appID, true, controller.uiRemove, controller.uiAuditor)
 		if err != nil {
+			controller.restoreCatalog(previous)
 			stage := "delete"
 			if droppedRules {
 				stage = "delete-after-rules"
@@ -603,6 +606,21 @@ func (controller *Controller) replaceApps(ctx context.Context, apps []App) error
 	defer controller.mu.Unlock()
 	controller.apps = cloneApps(apps)
 	return nil
+}
+
+func (controller *Controller) dropCatalogAndInvalidateObservation(appID string, next []App) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.apps = cloneApps(next)
+	delete(controller.imageCache, appID)
+	delete(controller.imageRefresh, appID)
+	controller.imageObserveToken[appID]++
+}
+
+func (controller *Controller) restoreCatalog(apps []App) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.apps = cloneApps(apps)
 }
 
 func (controller *Controller) setAppRunning(ctx context.Context, appID string, running bool) error {

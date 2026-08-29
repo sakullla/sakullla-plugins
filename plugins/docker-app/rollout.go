@@ -618,6 +618,9 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhaseStarting)
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return r.abandonStalePublish(ctx, record)
+	}
 	pending, startErr := r.Executor.Start(ctx, record.Value.FencingToken, runtimeApp)
 	if startErr != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, startErr)
