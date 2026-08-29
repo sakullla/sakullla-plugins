@@ -837,7 +837,7 @@ func (controller *Controller) scheduleImageObservation(app App) {
 		go controller.observeImageInBackground(app, token, epoch)
 	default:
 		controller.mu.Lock()
-		controller.imageRefresh[app.ID] = false
+		controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 		controller.mu.Unlock()
 	}
 }
@@ -850,9 +850,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	controller.mu.Lock()
 	currentApp, ok := controller.snapshotObservationLocked(app, token, epoch)
 	if err != nil || !ok {
-		if controller.imageDeleteEpoch[app.ID] == epoch {
-			controller.imageRefresh[app.ID] = false
-		}
+		controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 		controller.mu.Unlock()
 		return
 	}
@@ -865,9 +863,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	})
 	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
 	controller.mu.Lock()
-	if controller.imageDeleteEpoch[app.ID] == epoch {
-		controller.imageRefresh[app.ID] = false
-	}
+	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 	_, still := controller.snapshotObservationLocked(app, token, epoch)
 	keepRecord := still || controller.catalogHasAppIDLocked(app.ID)
 	if still {
@@ -884,6 +880,12 @@ func (controller *Controller) snapshotObservationLocked(app App, token, epoch ui
 		return App{}, false
 	}
 	return controller.currentCatalogAppLocked(app)
+}
+
+func (controller *Controller) clearImageRefreshIfCurrentLocked(appID string, token, epoch uint64) {
+	if controller.imageObserveToken[appID] == token && controller.imageDeleteEpoch[appID] == epoch {
+		controller.imageRefresh[appID] = false
+	}
 }
 
 func (controller *Controller) currentCatalogAppLocked(app App) (App, bool) {

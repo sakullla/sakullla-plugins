@@ -1633,6 +1633,48 @@ func TestAppUIDeleteInvalidatesObserveBeforeRemoveAppSkipsStart(t *testing.T) {
 	}
 }
 
+func TestAppUIFullSlotClearsRefreshOnlyWhenScheduleStillCurrent(t *testing.T) {
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: "sha256:0123456789abcdef0123456789abcdef", latest: "sha256:fedcba9876543210fedcba9876543210"},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
+	controller.imageSlots <- struct{}{}
+	controller.imageSlots <- struct{}{}
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	controller.imageRefresh["media"] = false
+	controller.mu.Unlock()
+	controller.scheduleImageObservation(controller.Apps()[0])
+	controller.mu.Lock()
+	if controller.imageRefresh["media"] {
+		controller.mu.Unlock()
+		t.Fatal("matching full-slot schedule left refresh pinned")
+	}
+	controller.mu.Unlock()
+
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	controller.imageRefresh["media"] = false
+	controller.mu.Unlock()
+	controller.invalidateObservation("media")
+	controller.mu.Lock()
+	token := controller.imageObserveToken["media"]
+	epoch := controller.imageDeleteEpoch["media"]
+	controller.imageObserveToken["media"]++
+	controller.imageDeleteEpoch["media"]++
+	controller.clearImageRefreshIfCurrentLocked("media", token, epoch)
+	if !controller.imageRefresh["media"] {
+		controller.mu.Unlock()
+		t.Fatal("full-slot path cleared refresh after delete epoch")
+	}
+	controller.mu.Unlock()
+}
+
 func rolloutCallHas(calls []string, want string) bool {
 	for _, call := range calls {
 		if call == want {
