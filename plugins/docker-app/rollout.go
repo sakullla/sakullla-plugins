@@ -238,29 +238,49 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 
 type observationPersistKey struct{}
 
-func withObservationPersistGuard(ctx context.Context, allowed func() bool) context.Context {
-	if ctx == nil || allowed == nil {
+func withObservationPersistGuard(ctx context.Context, live func() (App, bool)) context.Context {
+	if ctx == nil || live == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, observationPersistKey{}, allowed)
+	return context.WithValue(ctx, observationPersistKey{}, live)
 }
 
-func observationPersistAllowed(ctx context.Context) bool {
+func observationPersistLive(ctx context.Context) (App, bool, bool) {
 	if ctx == nil {
-		return true
+		return App{}, true, false
 	}
-	allowed, _ := ctx.Value(observationPersistKey{}).(func() bool)
-	if allowed == nil {
-		return true
+	live, _ := ctx.Value(observationPersistKey{}).(func() (App, bool))
+	if live == nil {
+		return App{}, true, false
 	}
-	return allowed()
+	app, ok := live()
+	return app, ok, true
 }
 
 func (r Rollout) requireObservationPersist(ctx context.Context) error {
-	if observationPersistAllowed(ctx) {
+	_, ok, bound := observationPersistLive(ctx)
+	if !bound || ok {
 		return nil
 	}
 	return ErrReconcilePending
+}
+
+func (r Rollout) bindLiveCatalogApp(ctx context.Context, app App) (App, error) {
+	live, ok, bound := observationPersistLive(ctx)
+	if !bound {
+		return app, nil
+	}
+	if !ok {
+		return App{}, ErrReconcilePending
+	}
+	app.Compose = live.Compose
+	app.Image = live.Image
+	app.Generation = live.Generation
+	app.AutoUpdate = live.AutoUpdate
+	if live.AgentID != "" {
+		app.AgentID = live.AgentID
+	}
+	return app, nil
 }
 
 func (r Rollout) abandonStalePublish(ctx context.Context, record DeploymentRecord) error {
@@ -606,6 +626,10 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if err = r.requireObservationPersist(ctx); err != nil {
 		return r.abandonStalePublish(ctx, record)
 	}
+	app, err = r.bindLiveCatalogApp(ctx, app)
+	if err != nil {
+		return r.abandonStalePublish(ctx, record)
+	}
 	r.progress(app, PhasePulling)
 	runtimeApp := pinnedRuntimeApp(app, digest)
 	if err = r.Executor.Pull(ctx, record.Value.FencingToken, runtimeApp); err != nil {
@@ -621,6 +645,11 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if err = r.requireObservationPersist(ctx); err != nil {
 		return r.abandonStalePublish(ctx, record)
 	}
+	app, err = r.bindLiveCatalogApp(ctx, app)
+	if err != nil {
+		return r.abandonStalePublish(ctx, record)
+	}
+	runtimeApp = pinnedRuntimeApp(app, digest)
 	pending, startErr := r.Executor.Start(ctx, record.Value.FencingToken, runtimeApp)
 	if startErr != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, startErr)

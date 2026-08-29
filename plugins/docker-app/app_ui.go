@@ -249,10 +249,12 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeRiskDenied(writer, preview, ErrInvalidPreview, "deploy")
 			return
 		}
+		controller.pinComposeSaveObservation(body.ID)
 		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
 			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: body.Env, Confirm: body.Confirm,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
+			controller.allowImageObservation(body.ID)
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
 			return
 		}
@@ -263,10 +265,11 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			next[index].Env = ""
 		}
 		if err := controller.replaceApps(request.Context(), next); err != nil {
+			controller.allowImageObservation(body.ID)
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
-		controller.bumpImageDeleteEpoch(body.ID)
+		controller.allowImageObservation(body.ID)
 		if err := controller.setAppRunning(request.Context(), body.ID, true); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
@@ -637,12 +640,12 @@ func (controller *Controller) allowImageObservation(appID string) {
 	controller.imageRefresh[appID] = false
 }
 
-func (controller *Controller) bumpImageDeleteEpoch(appID string) {
+func (controller *Controller) pinComposeSaveObservation(appID string) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	delete(controller.imageCache, appID)
 	controller.imageDeleteEpoch[appID]++
-	controller.imageRefresh[appID] = false
+	controller.imageRefresh[appID] = true
 }
 
 func (controller *Controller) setAppRunning(ctx context.Context, appID string, running bool) error {
@@ -878,11 +881,10 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		return
 	}
 	controller.mu.Unlock()
-	ctx = withObservationPersistGuard(ctx, func() bool {
+	ctx = withObservationPersistGuard(ctx, func() (App, bool) {
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
-		_, allowed := controller.snapshotObservationLocked(app, token, epoch)
-		return allowed
+		return controller.snapshotObservationLocked(app, token, epoch)
 	})
 	controller.mu.Lock()
 	live, ok := controller.snapshotObservationLocked(app, token, epoch)

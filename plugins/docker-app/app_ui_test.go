@@ -1414,19 +1414,29 @@ func TestAppUIComposeSaveBumpsEpochSkipsOverlappingStart(t *testing.T) {
 	controller.mu.Lock()
 	epochBefore := controller.imageDeleteEpoch["media"]
 	controller.mu.Unlock()
+	applyStarted := make(chan struct{}, 1)
+	applyRelease := make(chan struct{})
+	controller.uiApply = &blockingAppApply{inner: controller.uiApply, started: applyStarted, release: applyRelease}
 	saved := httptest.NewRecorder()
-	controller.ServeHTTP(saved, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.28\n","auto_update":true}`))
-	if saved.Code != http.StatusOK {
-		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
-	}
-	if !strings.Contains(controller.Apps()[0].Compose, "nginx:1.28") {
-		t.Fatalf("catalog compose not saved: %q", controller.Apps()[0].Compose)
+	done := make(chan struct{})
+	go func() {
+		controller.ServeHTTP(saved, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.28\n","auto_update":true}`))
+		close(done)
+	}()
+	select {
+	case <-applyStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ApplyApp did not start")
 	}
 	controller.mu.Lock()
-	epochAfter := controller.imageDeleteEpoch["media"]
+	epochDuring := controller.imageDeleteEpoch["media"]
+	refreshDuring := controller.imageRefresh["media"]
 	controller.mu.Unlock()
-	if epochAfter <= epochBefore {
-		t.Fatalf("compose save did not bump delete epoch: before=%d after=%d", epochBefore, epochAfter)
+	if epochDuring <= epochBefore {
+		t.Fatalf("compose save did not bump delete epoch before ApplyApp: before=%d during=%d", epochBefore, epochDuring)
+	}
+	if !refreshDuring {
+		t.Fatal("compose save did not pin imageRefresh before ApplyApp")
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -1434,6 +1444,18 @@ func TestAppUIComposeSaveBumpsEpochSkipsOverlappingStart(t *testing.T) {
 			t.Fatalf("overlapping AutoUpdate restaged previous YAML: %v", rollout.calls)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	close(applyRelease)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compose save did not finish")
+	}
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if !strings.Contains(controller.Apps()[0].Compose, "nginx:1.28") {
+		t.Fatalf("catalog compose not saved: %q", controller.Apps()[0].Compose)
 	}
 }
 
@@ -3919,6 +3941,28 @@ func (executor failingAppRemove) RemoveApp(context.Context, App) error {
 type blockingAppRemove struct {
 	started chan struct{}
 	release chan struct{}
+}
+
+type blockingAppApply struct {
+	inner   AppApplyExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (executor *blockingAppApply) ApplyApp(ctx context.Context, app App) error {
+	select {
+	case executor.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-executor.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if executor.inner != nil {
+		return executor.inner.ApplyApp(ctx, app)
+	}
+	return nil
 }
 
 func (executor *blockingAppRemove) RemoveApp(ctx context.Context, _ App) error {
