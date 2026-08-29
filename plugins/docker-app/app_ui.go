@@ -837,14 +837,24 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 		return
 	}
 	controller.mu.Unlock()
+	ctx = withObservationPersistGuard(ctx, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		_, allowed := controller.snapshotObservationLocked(app, token)
+		return allowed
+	})
 	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
 	controller.mu.Lock()
-	defer controller.mu.Unlock()
 	controller.imageRefresh[app.ID] = false
-	if _, still := controller.snapshotObservationLocked(app, token); !still {
-		return
+	_, still := controller.snapshotObservationLocked(app, token)
+	keepRecord := still || controller.catalogHasAppIDLocked(app.ID)
+	if still {
+		controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
 	}
-	controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+	controller.mu.Unlock()
+	if !keepRecord {
+		_ = controller.clearAppDeployment(ctx, app.ID)
+	}
 }
 
 func (controller *Controller) snapshotObservationLocked(app App, token uint64) (App, bool) {
@@ -861,6 +871,15 @@ func (controller *Controller) currentCatalogAppLocked(app App) (App, bool) {
 		}
 	}
 	return App{}, false
+}
+
+func (controller *Controller) catalogHasAppIDLocked(appID string) bool {
+	for _, current := range controller.apps {
+		if current.ID == appID {
+			return true
+		}
+	}
+	return false
 }
 
 func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {

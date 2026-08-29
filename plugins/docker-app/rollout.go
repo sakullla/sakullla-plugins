@@ -236,8 +236,45 @@ func (r Rollout) Update(ctx context.Context, app App) error {
 	return r.publish(ctx, app, "")
 }
 
+type observationPersistKey struct{}
+
+func withObservationPersistGuard(ctx context.Context, allowed func() bool) context.Context {
+	if ctx == nil || allowed == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, observationPersistKey{}, allowed)
+}
+
+func observationPersistAllowed(ctx context.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	allowed, _ := ctx.Value(observationPersistKey{}).(func() bool)
+	if allowed == nil {
+		return true
+	}
+	return allowed()
+}
+
+func (r Rollout) requireObservationPersist(ctx context.Context) error {
+	if observationPersistAllowed(ctx) {
+		return nil
+	}
+	return ErrReconcilePending
+}
+
+func (r Rollout) abandonStalePublish(ctx context.Context, record DeploymentRecord) error {
+	if record.Value.AppID != "" && record.Value.FencingToken != 0 {
+		_ = r.Store.DeleteCAS(ctx, record.Value.AppID, record.Version, record.Value.FencingToken)
+	}
+	return ErrReconcilePending
+}
+
 func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed UpdateObservation) (UpdateView, error) {
 	if err := r.readyStore(&app); err != nil {
+		return UpdateView{}, err
+	}
+	if err := r.requireObservationPersist(ctx); err != nil {
 		return UpdateView{}, err
 	}
 	view := UpdateView{AutoUpdate: AutoUpdateEnabled(flag)}
@@ -534,6 +571,9 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if existed && ((prior.Value.Phase != "" && prior.Value.Phase != PhaseActive) || (prior.Value.Lease != "" && prior.Value.LeaseUntil.After(r.now()))) {
 		return ErrReconcilePending
 	}
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return err
+	}
 	// Acquiring the lease is also the first durable intent. A successful or
 	// outcome-unknown AcquireLease must never leave a record that still looks
 	// active while carrying the new desired metadata. Build this value from
@@ -563,10 +603,16 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if err != nil {
 		return ErrReconcilePending
 	}
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return r.abandonStalePublish(ctx, record)
+	}
 	r.progress(app, PhasePulling)
 	runtimeApp := pinnedRuntimeApp(app, digest)
 	if err = r.Executor.Pull(ctx, record.Value.FencingToken, runtimeApp); err != nil {
 		return r.rollback(record, prior.Value, existed, "", false, err)
+	}
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return r.abandonStalePublish(ctx, record)
 	}
 	if record, err = r.intent(ctx, record, PhaseStarting, "", prior.Value.RuleTarget, ""); err != nil {
 		return ErrReconcilePending
@@ -595,11 +641,17 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if record, err = r.intent(ctx, record, PhaseDraining, pending, pending, pending); err != nil {
 		return ErrReconcilePending
 	}
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return r.abandonStalePublish(ctx, record)
+	}
 	if existed {
 		r.progress(app, PhaseDraining)
 		if err = r.Executor.Drain(ctx, record.Value.FencingToken, runtimeApp, prior.Value.InstanceID); err != nil {
 			return r.rollback(record, prior.Value, existed, pending, true, err)
 		}
+	}
+	if err = r.requireObservationPersist(ctx); err != nil {
+		return r.abandonStalePublish(ctx, record)
 	}
 	active := Deployment{AppID: app.ID, AgentID: app.AgentID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken, ImageDigest: digest, History: publishedHistory(record.Value)}
 	if _, err = r.Store.CompareAndSwap(ctx, app.ID, record.Version, record.Value.FencingToken, active); err != nil {
@@ -866,6 +918,9 @@ func (r Rollout) ready(app *App) error {
 }
 
 func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, app App, current, available string, existed bool) error {
+	if err := r.requireObservationPersist(ctx); err != nil {
+		return err
+	}
 	v := record.Value
 	if existed && v.ImageDigest == current && v.AvailableDigest == available {
 		return nil
@@ -879,6 +934,10 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 		if err != nil {
 			return ErrReconcilePending
 		}
+		if err := r.requireObservationPersist(ctx); err != nil {
+			_ = r.Store.DeleteCAS(ctx, app.ID, leased.Version, leased.Value.FencingToken)
+			return err
+		}
 		seeded := leased.Value
 		seeded.Lease, seeded.LeaseUntil = "", time.Time{}
 		if _, err := r.Store.CompareAndSwap(ctx, app.ID, leased.Version, leased.Value.FencingToken, seeded); err != nil {
@@ -887,6 +946,9 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 		return nil
 	}
 	v.ImageDigest, v.AvailableDigest = current, available
+	if err := r.requireObservationPersist(ctx); err != nil {
+		return err
+	}
 	if _, err := r.Store.CompareAndSwap(ctx, app.ID, record.Version, v.FencingToken, v); err != nil {
 		return ErrReconcilePending
 	}

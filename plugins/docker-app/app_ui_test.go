@@ -1490,6 +1490,72 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	}
 }
 
+func TestAppUIDeleteOverlappingAutoUpdatePersistDoesNotRestoreHistory(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	newer := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	observer := &delayedImageObserver{current: current, latest: latest}
+	store := &delayedDeploymentStore{
+		base:    NewDeploymentStore(),
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer:    observer,
+		rollout:     &uiTestRollout{},
+		deployments: store,
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current {
+		t.Fatalf("precondition history=%#v ok=%v", got, ok)
+	}
+
+	observer.mu.Lock()
+	observer.latest = newer
+	observer.mu.Unlock()
+	store.mu.Lock()
+	store.block = true
+	store.mu.Unlock()
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	delete(controller.imageRefresh, "media")
+	controller.mu.Unlock()
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AutoUpdate persist did not start")
+	}
+
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+	close(store.release)
+	waitForImageObservation(t, controller, "media")
+	if record, exists := controllerDeployment(controller, "media"); exists {
+		t.Fatalf("overlapping AutoUpdate persist restored deployments: %#v", record)
+	}
+}
+
 func waitForImageObservation(t *testing.T, controller *Controller, appID string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -3728,4 +3794,44 @@ func (fake *blockingUIRollout) Pull(ctx context.Context, _ uint64, _ App) error 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+type delayedDeploymentStore struct {
+	base    DeploymentStateStore
+	mu      sync.Mutex
+	block   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (store *delayedDeploymentStore) wait() {
+	store.mu.Lock()
+	block := store.block
+	store.mu.Unlock()
+	if !block {
+		return
+	}
+	select {
+	case store.started <- struct{}{}:
+	default:
+	}
+	<-store.release
+}
+
+func (store *delayedDeploymentStore) Load(ctx context.Context, id string) (DeploymentRecord, bool, error) {
+	return store.base.Load(ctx, id)
+}
+
+func (store *delayedDeploymentStore) AcquireLease(ctx context.Context, id string, version uint64, value Deployment, until time.Time) (DeploymentRecord, error) {
+	store.wait()
+	return store.base.AcquireLease(ctx, id, version, value, until)
+}
+
+func (store *delayedDeploymentStore) CompareAndSwap(ctx context.Context, id string, version, fence uint64, value Deployment) (DeploymentRecord, error) {
+	store.wait()
+	return store.base.CompareAndSwap(ctx, id, version, fence, value)
+}
+
+func (store *delayedDeploymentStore) DeleteCAS(ctx context.Context, id string, version, fence uint64) error {
+	return store.base.DeleteCAS(ctx, id, version, fence)
 }
