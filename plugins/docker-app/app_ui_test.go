@@ -1401,20 +1401,17 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
 		t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
+
+	close(observer.release)
+	waitForImageObservation(t, controller, "media")
 	if _, exists := controllerDeployment(controller, "media"); exists {
-		t.Fatal("delete left a rollout record while observe still ran")
+		t.Fatal("stale observe persisted a deployments record after delete")
 	}
 
 	recreated := httptest.NewRecorder()
 	controller.ServeHTTP(recreated, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
 	if recreated.Code != http.StatusOK {
 		t.Fatalf("redeploy status=%d body=%s", recreated.Code, recreated.Body.String())
-	}
-	close(observer.release)
-	waitForImageObservation(t, controller, "media")
-
-	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
-		t.Fatalf("stale observe persisted history after delete/redeploy: %#v", record)
 	}
 	apps := decodeAppList(t, recreated.Body.Bytes())
 	if len(apps) != 1 || hasAppAction(apps[0], OpsActionRollback) {
@@ -1424,7 +1421,10 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	listedApps := decodeAppList(t, refreshed.Body.Bytes())
 	if refreshed.Code != http.StatusOK || len(listedApps) != 1 || hasAppAction(listedApps[0], OpsActionRollback) {
-		t.Fatalf("list after stale observe offered rollback: %#v body=%s", listedApps, refreshed.Body.String())
+		t.Fatalf("list after same-id redeploy offered rollback: %#v body=%s", listedApps, refreshed.Body.String())
+	}
+	if record, exists := controllerDeployment(controller, "media"); exists && len(record.History) > 0 {
+		t.Fatalf("same-id redeploy restored history: %#v", record)
 	}
 }
 
