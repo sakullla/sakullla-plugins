@@ -415,7 +415,7 @@ func (controller *Controller) callDiskPrune(ctx context.Context, preview, confir
 	}
 	imageText := sanitizePruneReport(normalizeCommandOutput(imageOut))
 	builderText := sanitizePruneReport(normalizeCommandOutput(builderOut))
-	empty := pruneOutputEmpty(imageText, builderText)
+	empty := pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
 	return json.Marshal(map[string]any{
 		"accepted":      true,
 		"preview":       preview,
@@ -441,18 +441,18 @@ func builderPruneArgs(dryRun bool) []string {
 	return append(args, "-f")
 }
 
-func pruneOutputEmpty(texts ...string) bool {
-	combined := strings.ToLower(strings.TrimSpace(strings.Join(texts, "\n")))
-	if combined == "" || combined == "ok" {
+func pruneOutputEmpty(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || lower == "ok" {
 		return true
 	}
-	if strings.Contains(combined, "untagged:") || strings.Contains(combined, "deleted:") {
+	if strings.Contains(lower, "untagged:") || strings.Contains(lower, "deleted:") {
 		return false
 	}
-	if strings.Contains(combined, "nothing to") {
+	if strings.Contains(lower, "nothing to") {
 		return true
 	}
-	return pruneOutputZeroTotal(combined)
+	return pruneOutputZeroTotal(lower)
 }
 
 func pruneOutputZeroTotal(lower string) bool {

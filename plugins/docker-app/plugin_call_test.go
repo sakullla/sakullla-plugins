@@ -640,6 +640,56 @@ func TestControllerCallImagePreviewPruneKeepsMultilineReport(t *testing.T) {
 	}
 }
 
+func TestControllerCallImagePreviewPruneMixedZeroImageAndBuilderCacheNotEmpty(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if strings.Contains(command, "image prune") {
+			return []byte("WARNING! This will remove all images without at least one container associated to them.\nTotal reclaimed space: 0B\n"), nil
+		}
+		return []byte("ID\tRECLAIMABLE\ncache\t4MB\nTotal:  4MB\n"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	builder, _ := decoded["builder_cache"].(string)
+	if decoded["empty"] == true {
+		t.Fatalf("0B images plus reclaimable builder cache reported empty: %#v", decoded)
+	}
+	if !strings.Contains(builder, "Total:  4MB") {
+		t.Fatalf("builder cache report missing: %#v", decoded)
+	}
+}
+
+func TestPruneOutputEmptyClassifiesEachFullReport(t *testing.T) {
+	t.Parallel()
+	if !pruneOutputEmpty("Total reclaimed space: 0B") || !pruneOutputEmpty("Total:  0B") {
+		t.Fatal("zero image or builder totals should be empty")
+	}
+	if pruneOutputEmpty("Total:  4MB") || pruneOutputEmpty("untagged: nginx:old\nTotal reclaimed space: 0B") {
+		t.Fatal("reclaimable builder cache or untagged images should not be empty")
+	}
+	if !(pruneOutputEmpty("Total reclaimed space: 0B") && pruneOutputEmpty("Total:  0B")) {
+		t.Fatal("both zero reports should AND to empty")
+	}
+	if pruneOutputEmpty("Total reclaimed space: 0B") && pruneOutputEmpty("Total:  4MB") {
+		t.Fatal("zero images AND reclaimable builder cache should not be empty")
+	}
+}
+
 func TestControllerCallImagePreviewPruneFailsOnCommandError(t *testing.T) {
 	t.Parallel()
 	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
