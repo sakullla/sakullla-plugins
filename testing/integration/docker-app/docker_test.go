@@ -1299,6 +1299,7 @@ type rolloutFake struct {
 	maxFence                             uint64
 	mu                                   sync.Mutex
 	inspectRefs, cutoverRefs             []string
+	pulled, started                      []dockerapp.App
 }
 
 func (fake *rolloutFake) acceptFence(fence uint64) error {
@@ -1326,16 +1327,18 @@ func (fake *rolloutFake) step(name string) error {
 	}
 	return nil
 }
-func (fake *rolloutFake) Pull(_ context.Context, fence uint64, _ dockerapp.App) error {
+func (fake *rolloutFake) Pull(_ context.Context, fence uint64, app dockerapp.App) error {
 	if err := fake.acceptFence(fence); err != nil {
 		return err
 	}
+	fake.pulled = append(fake.pulled, app)
 	return fake.step("pull")
 }
-func (fake *rolloutFake) Start(_ context.Context, fence uint64, _ dockerapp.App) (string, error) {
+func (fake *rolloutFake) Start(_ context.Context, fence uint64, app dockerapp.App) (string, error) {
 	if err := fake.acceptFence(fence); err != nil {
 		return "", err
 	}
+	fake.started = append(fake.started, app)
 	if err := fake.step("start"); err != nil {
 		return "", err
 	}

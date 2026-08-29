@@ -166,7 +166,9 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		controller.reclaimUnusedImages(ctx, root, "", staleImageRefs(previous, current), append(append([]string{}, current...), request.KeepImages...))
 		rewriteUsedImages(root, request.AppID, current)
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
-	case "start", "stop", "restart", "remove", "pull", "ready", "drain", "remove-instance":
+	case "drain":
+		return controller.callComposeDrain(ctx, root, request)
+	case "start", "stop", "restart", "remove", "pull", "ready", "remove-instance":
 		dir, err := controller.composeActionWorkspace(root, request)
 		if err != nil {
 			return nil, err
@@ -176,7 +178,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			return nil, err
 		}
 		var reclaimCandidates []string
-		if action == "remove" || action == "drain" {
+		if action == "remove" {
 			reclaimCandidates = request.reclaimImageRefs(root, dir)
 		}
 		if output, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
@@ -186,16 +188,6 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			_ = removeAppWorkspace(dir)
 			removeUsedImagesFile(root, request.AppID)
 			controller.reclaimUnusedImages(ctx, root, request.AppID, reclaimCandidates, request.KeepImages)
-		}
-		if action == "drain" {
-			current := request.currentImageRefs(dir)
-			keep := append(append([]string{}, current...), request.KeepImages...)
-			if len(keep) > 0 {
-				controller.reclaimUnusedImages(ctx, root, "", reclaimCandidates, keep)
-				if len(current) > 0 {
-					rewriteUsedImages(root, request.AppID, current)
-				}
-			}
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
@@ -255,14 +247,32 @@ func (controller *Controller) composeActionWorkspace(root string, request compos
 
 func composeRestageAction(action string) bool {
 	switch strings.TrimSpace(action) {
-	case "apply", "start-instance", "inspect", "remove":
+	case "apply", "pull", "start-instance", "inspect", "remove":
 		return true
 	default:
 		return false
 	}
 }
 
+func (controller *Controller) callComposeDrain(ctx context.Context, root string, request composeCallRequest) ([]byte, error) {
+	dir, err := AppWorkDir(root, request.AppID)
+	if err != nil {
+		return nil, err
+	}
+	reclaimCandidates := request.reclaimImageRefs(root, dir)
+	current := request.currentImageRefs(dir)
+	keep := append(append([]string{}, current...), request.KeepImages...)
+	if len(keep) > 0 {
+		controller.reclaimUnusedImages(ctx, root, "", reclaimCandidates, keep)
+		if len(current) > 0 {
+			rewriteUsedImages(root, request.AppID, current)
+		}
+	}
+	return json.Marshal(map[string]any{"accepted": true})
+}
+
 func (controller *Controller) prepareComposeCallWorkspace(root string, request composeCallRequest) (string, error) {
+	request.Compose = request.composeForWorkspace(root)
 	previous := existingWorkspaceImages(root, request.AppID)
 	if strings.TrimSpace(request.Compose) == "" {
 		recordUsedImages(root, request.AppID, previous)
@@ -316,13 +326,27 @@ func composeCommandArgs(action string) ([]string, error) {
 		return []string{"compose", "pull"}, nil
 	case "ready":
 		return []string{"compose", "ps"}, nil
-	case "drain":
-		return []string{"compose", "stop"}, nil
 	case "remove-instance":
 		return []string{"compose", "rm", "-f"}, nil
 	default:
 		return nil, fmt.Errorf("compose action %q is unknown", action)
 	}
+}
+
+func (request composeCallRequest) composeForWorkspace(root string) string {
+	compose := request.Compose
+	digest := imageDigestSuffix(request.Image)
+	if digest == "" {
+		return compose
+	}
+	if strings.TrimSpace(compose) == "" {
+		if dir, err := AppWorkDir(root, request.AppID); err == nil {
+			if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+				compose = string(payload)
+			}
+		}
+	}
+	return pinComposeImages(compose, digest)
 }
 
 func (request composeCallRequest) reclaimImageRefs(root, dir string) []string {
@@ -331,8 +355,10 @@ func (request composeCallRequest) reclaimImageRefs(root, dir string) []string {
 		images = append(images, request.Image)
 	}
 	images = append(images, composeImageRefs(request.Compose)...)
-	if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
-		images = append(images, composeImageRefs(string(payload))...)
+	if dir != "" {
+		if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+			images = append(images, composeImageRefs(string(payload))...)
+		}
 	}
 	images = append(images, existingWorkspaceImages(root, request.AppID)...)
 	return uniqueImageRefs(images)
@@ -340,8 +366,10 @@ func (request composeCallRequest) reclaimImageRefs(root, dir string) []string {
 
 func (request composeCallRequest) currentImageRefs(dir string) []string {
 	images := composeImageRefs(request.Compose)
-	if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
-		images = append(images, composeImageRefs(string(payload))...)
+	if dir != "" {
+		if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+			images = append(images, composeImageRefs(string(payload))...)
+		}
 	}
 	if strings.TrimSpace(request.Image) != "" {
 		images = append(images, request.Image)

@@ -775,6 +775,38 @@ func TestHostRolloutRuntimeRemoveKeepsCurrentImages(t *testing.T) {
 	}
 }
 
+func TestHostRolloutRuntimePullAndStartSendCompose(t *testing.T) {
+	t.Parallel()
+	var payloads []map[string]any
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		payload := decodePluginCallInner(t, request)
+		payloads = append(payloads, payload)
+		if payload["action"] == "start-instance" {
+			return copyHostResult(map[string]any{"accepted": true, "instance_id": "new"}, target)
+		}
+		return copyHostResult(map[string]any{"accepted": true}, target)
+	})
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest@sha256:current", Compose: "services:\n  web:\n    image: nginx:latest@sha256:current\n"}
+	rollout := hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}
+	if err := rollout.Pull(context.Background(), 1, app); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := rollout.Start(context.Background(), 1, app)
+	if err != nil || instance != "new" {
+		t.Fatalf("start instance=%q err=%v", instance, err)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("payloads=%#v", payloads)
+	}
+	if payloads[0]["action"] != "pull" || payloads[0]["compose"] != app.Compose || payloads[0]["image"] != app.Image {
+		t.Fatalf("pull payload=%#v", payloads[0])
+	}
+	if payloads[1]["action"] != "start-instance" || payloads[1]["compose"] != app.Compose || payloads[1]["image"] != app.Image {
+		t.Fatalf("start payload=%#v", payloads[1])
+	}
+}
+
 func TestHostRolloutRuntimeDrainPassesKeepImagesForReclaim(t *testing.T) {
 	t.Parallel()
 	var payload map[string]any

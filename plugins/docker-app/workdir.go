@@ -598,6 +598,55 @@ type workspaceFileEntry struct {
 	Size int64  `json:"size,omitempty"`
 }
 
+func pinComposeImages(document, digest string) string {
+	if strings.TrimSpace(document) == "" || strings.TrimSpace(digest) == "" {
+		return document
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(document), &raw); err != nil || raw == nil {
+		return document
+	}
+	services, _ := raw["services"].(map[string]any)
+	if len(services) == 0 {
+		return document
+	}
+	changed := false
+	for _, service := range services {
+		body, ok := service.(map[string]any)
+		if !ok {
+			continue
+		}
+		image, _ := body["image"].(string)
+		image = strings.TrimSpace(image)
+		if image == "" {
+			continue
+		}
+		pinned := pinImageDigest(image, digest)
+		if pinned == image {
+			continue
+		}
+		body["image"] = pinned
+		changed = true
+	}
+	if !changed {
+		return document
+	}
+	encoded, err := yaml.Marshal(raw)
+	if err != nil {
+		return document
+	}
+	return string(encoded)
+}
+
+func imageDigestSuffix(image string) string {
+	image = strings.TrimSpace(image)
+	at := strings.LastIndex(image, "@")
+	if at < 0 {
+		return ""
+	}
+	return strings.TrimSpace(image[at+1:])
+}
+
 func composeImageRefs(document string) []string {
 	if strings.TrimSpace(document) == "" {
 		return nil

@@ -1672,6 +1672,42 @@ func TestAppUIAutoUpdateTrueObserveFollowsDigest(t *testing.T) {
 	}
 }
 
+func TestAppUIAutoUpdateObserveDoesNotBlockManagementPage(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &blockingUIRollout{started: started, release: release},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto_update observe did not start")
+	}
+	listed := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("management page blocked by auto_update observe")
+	}
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
 func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
@@ -3667,4 +3703,23 @@ func (fake *uiTestRollout) Remove(_ context.Context, _ uint64, _ App, target str
 }
 func (fake *uiTestRollout) Inspect(context.Context, uint64, App, string) (RuntimeState, error) {
 	return RuntimeState{Instances: map[string]bool{"new": true}}, nil
+}
+
+type blockingUIRollout struct {
+	uiTestRollout
+	started chan struct{}
+	release chan struct{}
+}
+
+func (fake *blockingUIRollout) Pull(ctx context.Context, _ uint64, _ App) error {
+	select {
+	case fake.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-fake.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

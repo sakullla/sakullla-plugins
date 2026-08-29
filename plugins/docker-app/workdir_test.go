@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestPinComposeImagesPinsServiceDigest(t *testing.T) {
+	t.Parallel()
+	document := "services:\n  web:\n    image: nginx:latest\n"
+	got := pinComposeImages(document, "sha256:0123456789abcdef0123456789abcdef")
+	refs := composeImageRefs(got)
+	if len(refs) != 1 || refs[0] != "nginx:latest@sha256:0123456789abcdef0123456789abcdef" {
+		t.Fatalf("pinned refs=%v document=%q", refs, got)
+	}
+	replaced := pinComposeImages(got, "sha256:fedcba9876543210fedcba9876543210")
+	replacedRefs := composeImageRefs(replaced)
+	if len(replacedRefs) != 1 || replacedRefs[0] != "nginx:latest@sha256:fedcba9876543210fedcba9876543210" {
+		t.Fatalf("re-pin refs=%v document=%q", replacedRefs, replaced)
+	}
+}
+
 func TestPrepareAppWorkspaceCreatesFileBindsNotDirectories(t *testing.T) {
 	root := t.TempDir()
 	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./config.yaml:/CLIProxyAPI/config.yaml\n      - ./data/auth-dir:/root/.cli-proxy-api\n"

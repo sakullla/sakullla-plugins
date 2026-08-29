@@ -110,7 +110,7 @@ func TestDockerManualUpdateDefaultProjectsUntilConfirm(t *testing.T) {
 		if strings.Join(fake.calls, ",") != "pull,start,ready,cutover:new,drain:old" {
 			t.Fatalf("explicit true calls=%v", fake.calls)
 		}
-		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+		if err := rollout.Rollback(context.Background(), app); err != nil {
 			t.Fatal(err)
 		}
 		restored, _ := store.Get(app.ID)
@@ -164,7 +164,7 @@ func TestDockerManualUpdateConfirmAfterComposeDeployWithoutRolloutRecord(t *test
 	if published.RuleRef != "" {
 		t.Fatalf("compose confirm invented rule_ref: %#v", published)
 	}
-	if strings.Join(fake.calls, ",") != "pull,start,ready" {
+	if strings.Join(fake.calls, ",") != "pull,start,ready,drain:" {
 		t.Fatalf("compose confirm calls=%v", fake.calls)
 	}
 	if len(fake.cutoverRefs) != 0 {
@@ -201,7 +201,7 @@ func TestDockerRollbackAfterComposeConfirmRestoresPriorDigest(t *testing.T) {
 		t.Fatalf("confirm history=%#v", published)
 	}
 	composeBefore := apps[0].Compose
-	if err := rollout.Rollback(context.Background(), apps[0].ID); err != nil {
+	if err := rollout.Rollback(context.Background(), apps[0]); err != nil {
 		t.Fatal(err)
 	}
 	restored, _ := store.Get(apps[0].ID)
@@ -210,6 +210,16 @@ func TestDockerRollbackAfterComposeConfirmRestoresPriorDigest(t *testing.T) {
 	}
 	if apps[0].Compose != composeBefore || !runtime.running["media"] {
 		t.Fatalf("rollback mutated compose/runtime: app=%#v running=%v", apps[0], runtime.running)
+	}
+	if len(fake.started) == 0 {
+		t.Fatal("rollback republish did not start an instance")
+	}
+	republished := fake.started[len(fake.started)-1]
+	if !strings.Contains(republished.Compose, "sha256:current") || !strings.Contains(republished.Image, "sha256:current") {
+		t.Fatalf("rollback republish was not pinned: %#v", republished)
+	}
+	if !strings.Contains(republished.Compose, "nginx:latest") {
+		t.Fatalf("rollback republish omitted current compose: %#v", republished)
 	}
 }
 
@@ -377,7 +387,7 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		store, fake, rollout, app, published := publishUpdate(t)
 		historyID := publishedHistoryInstance(t, published)
 		fake.failRestore = true
-		err := rollout.Rollback(context.Background(), app.ID)
+		err := rollout.Rollback(context.Background(), app)
 		got, _ := store.Get(app.ID)
 		if err == nil || !errors.Is(err, dockerapp.ErrOperationFailed) || strings.Contains(err.Error(), "update-secret") {
 			t.Fatalf("rollback cutover err=%v", err)
@@ -394,7 +404,7 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		assertHistoryInstance(t, got, historyID)
 		fake.failRestore = false
 		fake.calls = nil
-		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+		if err := rollout.Rollback(context.Background(), app); err != nil {
 			t.Fatal(err)
 		}
 		restored, _ := store.Get(app.ID)
@@ -407,7 +417,7 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		store, fake, rollout, app, published := publishUpdate(t)
 		historyID := publishedHistoryInstance(t, published)
 		fake.fail = "drain"
-		err := rollout.Rollback(context.Background(), app.ID)
+		err := rollout.Rollback(context.Background(), app)
 		got, _ := store.Get(app.ID)
 		if err == nil || !errors.Is(err, dockerapp.ErrOperationFailed) || strings.Contains(err.Error(), "update-secret") {
 			t.Fatalf("rollback drain err=%v", err)
@@ -427,7 +437,7 @@ func TestDockerRollbackPreservesCurrentOnEffectFailure(t *testing.T) {
 		assertHistoryInstance(t, got, historyID)
 		fake.fail = ""
 		fake.calls = nil
-		if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+		if err := rollout.Rollback(context.Background(), app); err != nil {
 			t.Fatal(err)
 		}
 		restored, _ := store.Get(app.ID)
@@ -473,7 +483,7 @@ func TestDockerRollbackLeaseExpireReconcilePreservesHistoryInstance(t *testing.T
 	assertHistoryInstance(t, got, historyID)
 
 	fake.calls = nil
-	if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+	if err := rollout.Rollback(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
 	restored, _ := store.Get(app.ID)
@@ -491,7 +501,7 @@ func TestDockerRollbackMissingHistoryInstanceRepublishes(t *testing.T) {
 	delete(fake.state.Instances, historyID)
 	fake.calls = nil
 
-	if err := rollout.Rollback(context.Background(), app.ID); err != nil {
+	if err := rollout.Rollback(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := store.Get(app.ID)

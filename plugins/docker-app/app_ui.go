@@ -398,7 +398,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		}
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "rollback":
-		if err := controller.uiRollout.Rollback(request.Context(), appID); err != nil {
+		if err := controller.uiRollout.Rollback(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "rollback")})
 			return
 		}
@@ -832,14 +832,25 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
 	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	controller.imageRefresh[app.ID] = false
 	current, ok := controller.currentCatalogAppLocked(app)
 	if err != nil || controller.imageObserveToken[app.ID] != token || !ok {
+		controller.imageRefresh[app.ID] = false
+		controller.mu.Unlock()
 		return
 	}
-	controller.imageCache[app.ID] = cachedImageObservation{Image: current.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
-	_, _ = controller.uiRollout.AutoUpdate(ctx, current, current.AutoUpdate, observed)
+	currentApp := current
+	controller.mu.Unlock()
+	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.imageRefresh[app.ID] = false
+	if controller.imageObserveToken[app.ID] != token {
+		return
+	}
+	if _, still := controller.currentCatalogAppLocked(app); !still {
+		return
+	}
+	controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
 }
 
 func (controller *Controller) currentCatalogAppLocked(app App) (App, bool) {

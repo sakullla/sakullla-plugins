@@ -439,6 +439,46 @@ func TestControllerCallComposeRemoveKeepsContainerReferencedImage(t *testing.T) 
 	}
 }
 
+func TestControllerCallComposeStartInstancePinsDigestBeforeUp(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var commands []string
+	controller := newCallController(t, root, CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(args, " "))
+		return []byte("ok"), nil
+	}), nil)
+	applyPayload, err := json.Marshal(map[string]any{
+		"action": "apply", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:latest\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:0123456789abcdef0123456789abcdef"
+	startPayload, err := json.Marshal(map[string]any{
+		"action": "start-instance", "app_id": "media", "instance_id": "new",
+		"image": "nginx:latest@" + digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, startPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCommand(commands, "compose up -d") {
+		t.Fatalf("start-instance commands=%q", commands)
+	}
+	payload, err := os.ReadFile(filepath.Join(root, "media", ComposeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), digest) {
+		t.Fatalf("workdir compose was not pinned before up: %s", payload)
+	}
+}
+
 func TestControllerCallComposeDrainReclaimsOldImageAfterCommit(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -494,8 +534,8 @@ func TestControllerCallComposeDrainReclaimsOldImageAfterCommit(t *testing.T) {
 	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, drainPayload); err != nil {
 		t.Fatal(err)
 	}
-	if !containsCommand(commands, "compose stop") {
-		t.Fatalf("drain commands=%q", commands)
+	if containsCommand(commands, "compose stop") {
+		t.Fatalf("drain stopped the current project: %q", commands)
 	}
 	if !removed["nginx:1.27"] {
 		t.Fatalf("old image was not reclaimed after commit: %q", commands)

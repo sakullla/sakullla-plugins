@@ -299,9 +299,14 @@ func (r Rollout) ConfirmUpdate(ctx context.Context, app App) error {
 	return r.publish(ctx, app, record.Value.AvailableDigest)
 }
 
-func (r Rollout) Rollback(ctx context.Context, appID string) error {
+func (r Rollout) Rollback(ctx context.Context, app App) error {
 	if err := r.ready(nil); err != nil {
 		return err
+	}
+	appID := strings.TrimSpace(app.ID)
+	if appID == "" {
+		audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
+		return ErrInvalidPreview
 	}
 	record, ok, err := r.Store.Load(ctx, appID)
 	if err != nil {
@@ -327,12 +332,12 @@ func (r Rollout) Rollback(ctx context.Context, appID string) error {
 		}
 	}
 	if rev.InstanceID == "" || rev.Image == "" || rev.RuleRef == "" {
-		app := App{ID: appID, AgentID: current.AgentID, Image: pinImageDigest(rev.Image, rev.ImageDigest), RuleRef: rev.RuleRef, Generation: rev.Generation}
-		if err := app.Validate(); err != nil {
+		target := rollbackRepublishApp(app, current, rev)
+		if err := target.Validate(); err != nil {
 			audit(r.Auditor, AuditRecord{Action: "rollout", Outcome: "denied", Detail: ErrInvalidPreview.Error()})
 			return safeFailure(ErrInvalidPreview, err)
 		}
-		return r.publish(ctx, app, rev.ImageDigest)
+		return r.publish(ctx, target, rev.ImageDigest)
 	}
 	// PendingInstance names the history instance so Reconcile cannot treat the
 	// still-serving instance as disposable or Remove the rollback target.
@@ -559,14 +564,15 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhasePulling)
-	if err = r.Executor.Pull(ctx, record.Value.FencingToken, app); err != nil {
+	runtimeApp := pinnedRuntimeApp(app, digest)
+	if err = r.Executor.Pull(ctx, record.Value.FencingToken, runtimeApp); err != nil {
 		return r.rollback(record, prior.Value, existed, "", false, err)
 	}
 	if record, err = r.intent(ctx, record, PhaseStarting, "", prior.Value.RuleTarget, ""); err != nil {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhaseStarting)
-	pending, startErr := r.Executor.Start(ctx, record.Value.FencingToken, app)
+	pending, startErr := r.Executor.Start(ctx, record.Value.FencingToken, runtimeApp)
 	if startErr != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, startErr)
 	}
@@ -574,7 +580,7 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 		return ErrReconcilePending
 	}
 	r.progress(app, PhaseReadiness)
-	if err = r.Executor.Ready(ctx, record.Value.FencingToken, app, pending); err != nil {
+	if err = r.Executor.Ready(ctx, record.Value.FencingToken, runtimeApp, pending); err != nil {
 		return r.rollback(record, prior.Value, existed, pending, false, err)
 	}
 	if app.RuleRef != "" {
@@ -589,10 +595,10 @@ func (r Rollout) publish(ctx context.Context, app App, digest string) error {
 	if record, err = r.intent(ctx, record, PhaseDraining, pending, pending, pending); err != nil {
 		return ErrReconcilePending
 	}
-	if existed && prior.Value.InstanceID != "" {
+	if existed {
 		r.progress(app, PhaseDraining)
-		if err = r.Executor.Drain(ctx, record.Value.FencingToken, app, prior.Value.InstanceID); err != nil {
-			return r.rollback(record, prior.Value, true, pending, true, err)
+		if err = r.Executor.Drain(ctx, record.Value.FencingToken, runtimeApp, prior.Value.InstanceID); err != nil {
+			return r.rollback(record, prior.Value, existed, pending, true, err)
 		}
 	}
 	active := Deployment{AppID: app.ID, AgentID: app.AgentID, InstanceID: pending, Image: app.Image, RuleRef: app.RuleRef, RuleTarget: pending, Generation: app.Generation, Phase: PhaseActive, FencingToken: record.Value.FencingToken, ImageDigest: digest, History: publishedHistory(record.Value)}
@@ -921,8 +927,50 @@ func cloneRevisions(history []DeploymentRevision) []DeploymentRevision {
 	return append([]DeploymentRevision(nil), history...)
 }
 
+func rollbackRepublishApp(app App, current Deployment, rev DeploymentRevision) App {
+	target := app
+	target.ID = current.AppID
+	if target.ID == "" {
+		target.ID = app.ID
+	}
+	if target.AgentID == "" {
+		target.AgentID = current.AgentID
+	}
+	image := rev.Image
+	if image == "" {
+		image = current.Image
+	}
+	if image == "" {
+		image = app.Image
+	}
+	target.Image = pinImageDigest(image, rev.ImageDigest)
+	if target.Compose != "" {
+		target.Compose = pinComposeImages(target.Compose, rev.ImageDigest)
+	}
+	target.RuleRef = rev.RuleRef
+	if rev.Generation != "" {
+		target.Generation = rev.Generation
+	}
+	return target
+}
+
+func pinnedRuntimeApp(app App, digest string) App {
+	if digest == "" {
+		return app
+	}
+	app.Image = pinImageDigest(app.Image, digest)
+	app.Compose = pinComposeImages(app.Compose, digest)
+	return app
+}
+
 func pinImageDigest(image, digest string) string {
-	if digest == "" || image == "" || strings.Contains(image, "@") {
+	if digest == "" || image == "" {
+		return image
+	}
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		image = image[:at]
+	}
+	if image == "" {
 		return image
 	}
 	pinned := image + "@" + digest
