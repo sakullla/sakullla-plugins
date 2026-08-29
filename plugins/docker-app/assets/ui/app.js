@@ -846,8 +846,11 @@ const applyCreateTemplate = (name) => {
   composeInput.focus();
 };
 
+const dockerMissing = (engine) => agentOnline && engine && engine.online === true && engine.ready !== true;
+const canSaveOnAgent = () => selectedAgentID && agentOnline && !dockerMissing(lastEngine);
+
 const openCreate = async () => {
-  if (!engineReady || !agentOnline) return;
+  if (!canSaveOnAgent()) return;
   if (view === "detail" && !(await leaveDetail())) return;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
@@ -888,11 +891,11 @@ const syncListPanel = () => {
   const hasApps = listNode && listNode.children.length > 0;
   const creating = createPanel && createPanel.hidden === false;
   const inDetail = view === "detail";
-  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps || creating;
+  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !agentOnline || dockerMissing(lastEngine) || hasApps || creating;
   if (listPanel) listPanel.hidden = inDetail || creating;
   if (detailPanel) detailPanel.hidden = !inDetail;
   if (workspaceHead) workspaceHead.hidden = inDetail || creating;
-  const canOperate = selectedAgentID && engineReady && agentOnline;
+  const canOperate = canSaveOnAgent();
   if (deployToggle) deployToggle.hidden = inDetail || creating || !canOperate;
   if (diskCleanup) diskCleanup.hidden = inDetail || creating || !canOperate;
 };
@@ -2527,10 +2530,10 @@ const renderWorkspace = async () => {
   lastEngine = engine;
   engineReady = engine?.ready === true;
   renderEngineBadge(engine);
-  if (!engineReady) {
+  if (dockerMissing(engine)) {
     leaveDetail({ force: true });
     renderGuide(engine);
-    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : "unready");
+    showContext("unready");
     return;
   }
   showContext("");
@@ -2593,7 +2596,7 @@ if (deployToggle) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (!engineReady) {
+    if (dockerMissing(lastEngine)) {
       showUnreadyGuide(lastEngine);
       showStatus("引擎未就绪，请先在该节点本机安装 Docker。", true);
       return;
@@ -2777,7 +2780,7 @@ if (composeForm) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (!engineReady) {
+    if (dockerMissing(lastEngine)) {
       showStatus("引擎未就绪，不能部署。", true);
       return;
     }
@@ -2820,7 +2823,7 @@ if (createForm) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (!engineReady) {
+    if (dockerMissing(lastEngine)) {
       showStatus("引擎未就绪，不能部署。", true);
       return;
     }

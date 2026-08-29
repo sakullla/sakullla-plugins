@@ -204,7 +204,7 @@ const sendPluginJSON = async (path, body) => {
 };
 
 const syncSelectionActions = () => {
-  const blocked = busy || !selectedAgentID || !executionReady || !agentOnline;
+  const blocked = busy || !selectedAgentID || !agentOnline;
   if (createToggle) createToggle.disabled = blocked;
   if (emptyCreate) emptyCreate.disabled = blocked;
   if (shareHostSave) shareHostSave.disabled = blocked;
@@ -685,10 +685,10 @@ const renderExecutionBadge = (execution) => {
 
 const syncListPanel = () => {
   const hasListens = listNode && listNode.children.length > 0;
-  if (emptyNode) emptyNode.hidden = !selectedAgentID || !executionReady || hasListens;
+  if (emptyNode) emptyNode.hidden = !selectedAgentID || !agentOnline || hasListens;
   if (listPanel) listPanel.hidden = false;
   if (workspaceHead) workspaceHead.hidden = false;
-  if (createToggle) createToggle.hidden = !(selectedAgentID && executionReady && agentOnline);
+  if (createToggle) createToggle.hidden = !(selectedAgentID && agentOnline);
 };
 
 const closeCreate = () => {
@@ -717,7 +717,7 @@ const fillDefaults = (defaults) => {
 };
 
 const openCreate = async () => {
-  if (!executionReady || !agentOnline) return;
+  if (!agentOnline) return;
   try {
     const payload = await panelJSON(`api/defaults?agent_id=${encodeURIComponent(selectedAgentID)}`);
     fillDefaults(payload.defaults);
@@ -1074,10 +1074,6 @@ const canMutate = () => {
     showStatus("该节点离线，不能新增或改动监听。", true);
     return false;
   }
-  if (!executionReady) {
-    showStatus("该节点暂时无法执行监听。", true);
-    return false;
-  }
   return true;
 };
 
@@ -1176,10 +1172,6 @@ const renderWorkspace = async () => {
   lastExecution = execution;
   executionReady = execution?.ready === true;
   renderExecutionBadge(execution);
-  if (!executionReady) {
-    clearWorkspace("execution-unavailable");
-    return;
-  }
   workspaceNode.hidden = false;
   const payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
   if (seq !== workspaceSeq) return;
