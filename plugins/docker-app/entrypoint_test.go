@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDockerHandshakeDoesNotAdvertiseUngrantedCapabilities(t *testing.T) {
@@ -58,6 +60,21 @@ func TestRunEntrypointProductionWiresReportedEngineSource(t *testing.T) {
 	config := productionControllerConfig()
 	if config.UIEngineSource == nil {
 		t.Fatal("production entrypoint still pins a zero UIEngine as the only observation path")
+	}
+}
+
+func TestPluginYAMLDeclaresImplicitRemoteAgentExecution(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pluginsdk.Manifest
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !pluginsdk.RuntimeImplicitRemoteAgentExecution(manifest.Runtime) {
+		t.Fatalf("docker-app runtime = %+v, want implicit remote Agent execution", manifest.Runtime)
 	}
 }
 

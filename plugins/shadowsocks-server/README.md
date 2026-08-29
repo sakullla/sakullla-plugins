@@ -18,9 +18,13 @@ generating and sharing do not require opening the L4 rules page or filling a
 backend. There is no subscription URL and no SIP003 plugin parameter.
 
 The host may mount this page because `plugin.yaml` declares `ui.route` and
-`resource.group` with id `shadowsocks-server`. Control-plane `ServeHTTP` serves
-canonical files from `assets/ui/`; the Agent face does not serve the management
-page. This plugin does not declare `ui.schema.json`, `tunnel.provider`, or
+`resource.group` with id `shadowsocks-server`. `host_scope: control-plane` plus
+`host_scopes: [agent]` is the SDK `RuntimeImplicitRemoteAgentExecution`
+contract: empty instance targets deliver the Agent execution face to every
+remote Agent; this plugin does not list Agents in TargetJSON or configure
+itself onto a selected node. Control-plane `ServeHTTP` serves canonical files
+from `assets/ui/`; the Agent face does not serve the management page. This
+plugin does not declare `ui.schema.json`, `tunnel.provider`, or
 `http.backend-provider`.
 
 Production startup uses the canonical SDK runtime lifecycle. Missing Host

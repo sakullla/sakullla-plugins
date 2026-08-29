@@ -37,7 +37,7 @@
     {
       "SPDXID": "SPDXRef-Package-plugin-sdk",
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "versionInfo": "v0.7.15",
+      "versionInfo": "v0.7.16",
       "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
       "filesAnalyzed": false,
       "licenseConcluded": "GPL-3.0-only",

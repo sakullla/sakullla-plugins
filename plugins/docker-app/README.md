@@ -14,7 +14,10 @@ generation revoke or deadline failure.
 
 The plugin declares `ui.route` and `resource.group` in `plugin.yaml`, with
 `host_scope: control-plane` for the management face and `host_scopes`
-including `agent` for the execution face. The host mounts the page at
+including `agent` for the execution face. That dual-face runtime is the SDK
+`RuntimeImplicitRemoteAgentExecution` contract: empty instance targets deliver
+the Agent execution face to every remote Agent; the plugin does not list
+Agents in TargetJSON or configure itself onto a selected node. The host mounts the page at
 `/panel-api/plugins/<ui_route_id>/` and lists the resource group from
 `resource_group_id` plus `resource.group.*` metadata. Instance
 `resource_group_ref` is host-injected and must match `resource.group.ref`.

@@ -538,28 +538,11 @@ func (runtime *hostCapabilityRuntime) pluginCall(ctx context.Context, agentID, n
 	if !validAgentID(agentID) {
 		return ErrAgentOffline
 	}
-	payload, err := marshalPluginCallPayload(inner)
+	request, err := pluginsdk.NewPluginCallRequest(agentID, name, inner)
 	if err != nil {
 		return ErrTypedHandlesUnavailable
 	}
-	request := pluginsdk.PluginCallRequest{AgentID: agentID, Name: name, Payload: payload}
-	if err := request.Validate(); err != nil {
-		return ErrTypedHandlesUnavailable
-	}
 	return callHost(ctx, runtime.client, pluginsdk.HostRuntimePluginCall, request, result)
-}
-
-func marshalPluginCallPayload(inner any) (json.RawMessage, error) {
-	switch typed := inner.(type) {
-	case nil:
-		return nil, nil
-	case json.RawMessage:
-		return typed, nil
-	case []byte:
-		return typed, nil
-	default:
-		return json.Marshal(typed)
-	}
 }
 
 func bindProductionHostCapabilities(config ControllerConfig) ControllerConfig {
