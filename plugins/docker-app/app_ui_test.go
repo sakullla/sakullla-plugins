@@ -1449,7 +1449,7 @@ func TestAppUIAutoUpdatePublishMarksRunningAfterStop(t *testing.T) {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
 	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
-		return deployment.ImageDigest == latest
+		return deployment.ImageDigest == latest && deployment.Phase == PhaseActive && controller.appIsRunning("media")
 	})
 	stopped := httptest.NewRecorder()
 	controller.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/media/stop", `{}`))
@@ -1469,18 +1469,21 @@ func TestAppUIAutoUpdatePublishMarksRunningAfterStop(t *testing.T) {
 	if listed.Code != http.StatusOK {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
-	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
-		return deployment.ImageDigest == newer
-	})
-	if !controller.appIsRunning("media") {
-		t.Fatal("auto_update publish left app stopped")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		record, ok := controllerDeployment(controller, "media")
+		if ok && record.ImageDigest == newer && record.Phase == PhaseActive && controller.appIsRunning("media") {
+			refreshed := httptest.NewRecorder()
+			controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+			apps := decodeAppList(t, refreshed.Body.Bytes())
+			if refreshed.Code == http.StatusOK && len(apps) == 1 && apps[0].Status == OpsStatusRunning {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
 	}
-	refreshed := httptest.NewRecorder()
-	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
-	apps := decodeAppList(t, refreshed.Body.Bytes())
-	if len(apps) != 1 || apps[0].Status != OpsStatusRunning {
-		t.Fatalf("auto_update publish status=%#v", apps)
-	}
+	record, _ := controllerDeployment(controller, "media")
+	t.Fatalf("auto_update publish did not return to running: deployment=%#v running=%v", record, controller.appIsRunning("media"))
 }
 
 func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
