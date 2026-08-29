@@ -793,22 +793,13 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
 	controller.mu.Lock()
+	defer controller.mu.Unlock()
 	controller.imageRefresh[app.ID] = false
-	live := err == nil && controller.imageObserveToken[app.ID] == token && controller.hasCurrentAppLocked(app)
-	if live {
-		controller.imageCache[app.ID] = cachedImageObservation{Image: app.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
-	}
-	controller.mu.Unlock()
-	if !live {
+	if err != nil || controller.imageObserveToken[app.ID] != token || !controller.hasCurrentAppLocked(app) {
 		return
 	}
+	controller.imageCache[app.ID] = cachedImageObservation{Image: app.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
 	_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
-	controller.mu.Lock()
-	stale := controller.imageObserveToken[app.ID] != token || !controller.hasCurrentAppLocked(app)
-	controller.mu.Unlock()
-	if stale {
-		_ = controller.clearAppDeployment(ctx, app.ID)
-	}
 }
 
 func (controller *Controller) hasCurrentAppLocked(app App) bool {
