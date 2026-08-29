@@ -176,7 +176,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			return nil, err
 		}
 		var reclaimCandidates []string
-		if action == "remove" || action == "remove-instance" {
+		if action == "remove" || action == "drain" {
 			reclaimCandidates = request.reclaimImageRefs(root, dir)
 		}
 		if output, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
@@ -187,10 +187,15 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			removeUsedImagesFile(root, request.AppID)
 			controller.reclaimUnusedImages(ctx, root, request.AppID, reclaimCandidates, request.KeepImages)
 		}
-		if action == "remove-instance" {
+		if action == "drain" {
 			current := request.currentImageRefs(dir)
-			controller.reclaimUnusedImages(ctx, root, "", reclaimCandidates, append(append([]string{}, current...), request.KeepImages...))
-			rewriteUsedImages(root, request.AppID, current)
+			keep := append(append([]string{}, current...), request.KeepImages...)
+			if len(keep) > 0 {
+				controller.reclaimUnusedImages(ctx, root, "", reclaimCandidates, keep)
+				if len(current) > 0 {
+					rewriteUsedImages(root, request.AppID, current)
+				}
+			}
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
@@ -405,12 +410,12 @@ func (controller *Controller) callDiskPrune(ctx context.Context, preview, confir
 	}
 	imageOut, imageErr := controller.runCommand(ctx, "", "docker", imagePruneArgs(preview)...)
 	builderOut, builderErr := controller.runCommand(ctx, "", "docker", builderPruneArgs(preview)...)
-	if !preview && (imageErr != nil || builderErr != nil) {
+	if imageErr != nil || builderErr != nil {
 		return nil, pruneCallFailure(imageOut, builderOut, imageErr, builderErr)
 	}
-	imageText := sanitizePublicText(normalizeCommandOutput(imageOut))
-	builderText := sanitizePublicText(normalizeCommandOutput(builderOut))
-	empty := pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
+	imageText := sanitizePruneReport(normalizeCommandOutput(imageOut))
+	builderText := sanitizePruneReport(normalizeCommandOutput(builderOut))
+	empty := pruneOutputEmpty(imageText, builderText)
 	return json.Marshal(map[string]any{
 		"accepted":      true,
 		"preview":       preview,
@@ -436,22 +441,67 @@ func builderPruneArgs(dryRun bool) []string {
 	return append(args, "-f")
 }
 
-func pruneOutputEmpty(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "" || lower == "ok" {
+func pruneOutputEmpty(texts ...string) bool {
+	combined := strings.ToLower(strings.TrimSpace(strings.Join(texts, "\n")))
+	if combined == "" || combined == "ok" {
 		return true
 	}
+	if strings.Contains(combined, "untagged:") || strings.Contains(combined, "deleted:") {
+		return false
+	}
+	if strings.Contains(combined, "nothing to") {
+		return true
+	}
+	return pruneOutputZeroTotal(combined)
+}
+
+func pruneOutputZeroTotal(lower string) bool {
 	if strings.Contains(lower, "total reclaimed space: 0") {
 		return true
 	}
-	if strings.Contains(lower, "nothing to") {
-		return true
+	for _, line := range strings.Split(lower, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "total:" {
+			continue
+		}
+		for index, field := range fields[1:] {
+			if field == "0b" || field == "0ib" {
+				return true
+			}
+			if field == "0" && index+2 < len(fields) {
+				unit := fields[index+2]
+				if unit == "b" || strings.HasPrefix(unit, "b") {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
 
+func sanitizePruneReport(text string) string {
+	text = secretAssignmentPattern.ReplaceAllString(strings.TrimSpace(text), "${1}***")
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		if line == "" {
+			continue
+		}
+		if containsLocalDockerMarker(strings.ToLower(line)) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	report := strings.Join(kept, "\n")
+	if len(report) > 4096 {
+		report = strings.TrimSpace(report[:4096])
+	}
+	return report
+}
+
 func pruneCallFailure(imageOut, builderOut []byte, imageErr, builderErr error) error {
-	cause := sanitizePublicText(strings.TrimSpace(string(imageOut) + "\n" + string(builderOut)))
+	cause := sanitizePruneReport(strings.TrimSpace(string(imageOut) + "\n" + string(builderOut)))
 	if cause == "" {
 		if imageErr != nil {
 			cause = publicCause(imageErr)
@@ -461,6 +511,9 @@ func pruneCallFailure(imageOut, builderOut []byte, imageErr, builderErr error) e
 	}
 	if cause == "" {
 		return errors.New("disk prune failed")
+	}
+	if strings.Contains(cause, "\n") {
+		cause = strings.SplitN(cause, "\n", 2)[0]
 	}
 	return fmt.Errorf("disk prune failed: %s", cause)
 }

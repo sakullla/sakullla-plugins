@@ -439,7 +439,7 @@ func TestControllerCallComposeRemoveKeepsContainerReferencedImage(t *testing.T) 
 	}
 }
 
-func TestControllerCallComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
+func TestControllerCallComposeDrainReclaimsOldImageAfterCommit(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	controller := newCallController(t, root, CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
@@ -484,8 +484,70 @@ func TestControllerCallComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
 
 	commands = nil
 	removed = map[string]bool{}
+	drainPayload, err := json.Marshal(map[string]any{
+		"action": "drain", "app_id": "media", "instance_id": "old",
+		"keep_images": []string{"nginx:1.28"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, drainPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCommand(commands, "compose stop") {
+		t.Fatalf("drain commands=%q", commands)
+	}
+	if !removed["nginx:1.27"] {
+		t.Fatalf("old image was not reclaimed after commit: %q", commands)
+	}
+	if removed["nginx:1.28"] {
+		t.Fatalf("current image was reclaimed: %q", commands)
+	}
+	if _, err := os.Stat(filepath.Join(root, "media", ComposeFileName)); err != nil {
+		t.Fatalf("update removed workdir: %v", err)
+	}
+}
+
+func TestControllerCallComposeRemoveInstanceKeepsPriorImage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	controller := newCallController(t, root, CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}), nil)
+	applyPayload, err := json.Marshal(map[string]any{
+		"action": "apply", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	startPayload, err := json.Marshal(map[string]any{
+		"action": "start-instance", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.28\n",
+		"instance_id": "new",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, startPayload); err != nil {
+		t.Fatal(err)
+	}
+
+	var commands []string
+	controller.commandRunner = CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if len(args) >= 3 && args[0] == "image" && args[1] == "rm" && args[2] == "nginx:1.27" {
+			t.Fatalf("failed pending remove deleted prior image: %q", commands)
+		}
+		return []byte("ok"), nil
+	})
 	removePayload, err := json.Marshal(map[string]any{
-		"action": "remove-instance", "app_id": "media", "instance_id": "old",
+		"action": "remove-instance", "app_id": "media", "instance_id": "new",
 		"keep_images": []string{"nginx:1.28"},
 	})
 	if err != nil {
@@ -497,14 +559,8 @@ func TestControllerCallComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
 	if !containsCommand(commands, "compose rm -f") {
 		t.Fatalf("remove-instance commands=%q", commands)
 	}
-	if !removed["nginx:1.27"] {
-		t.Fatalf("old image was not reclaimed: %q", commands)
-	}
-	if removed["nginx:1.28"] {
-		t.Fatalf("current image was reclaimed: %q", commands)
-	}
-	if _, err := os.Stat(filepath.Join(root, "media", ComposeFileName)); err != nil {
-		t.Fatalf("update removed workdir: %v", err)
+	if containsCommand(commands, "image rm nginx:1.27") {
+		t.Fatalf("prior image rm issued while removing pending instance: %q", commands)
 	}
 }
 
@@ -519,6 +575,9 @@ func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
 		}
 		if !strings.Contains(command, "--dry-run") {
 			t.Fatalf("preview prune mutated: %q", command)
+		}
+		if strings.Contains(command, "builder prune") {
+			return []byte("Total:  0B"), nil
 		}
 		return []byte("Total reclaimed space: 0B"), nil
 	})
@@ -540,6 +599,65 @@ func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
 	}
 	if !containsCommand(commands, "image prune -a --dry-run") || !containsCommand(commands, "builder prune --dry-run") {
 		t.Fatalf("preview commands=%q", commands)
+	}
+}
+
+func TestControllerCallImagePreviewPruneKeepsMultilineReport(t *testing.T) {
+	t.Parallel()
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if strings.Contains(command, "image prune") {
+			return []byte("WARNING! This will remove unused images.\nDeleted Images:\nuntagged: nginx:old\nTotal reclaimed space: 12MB\npassword=fixture-value\nunix:///var/run/docker.sock\n"), nil
+		}
+		return []byte("ID\tRECLAIMABLE\ncache\t4MB\nTotal:  4MB\n"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	images, _ := decoded["images"].(string)
+	builder, _ := decoded["builder_cache"].(string)
+	if decoded["empty"] == true || !strings.Contains(images, "untagged: nginx:old") || !strings.Contains(images, "Total reclaimed space: 12MB") {
+		t.Fatalf("preview dropped reclaimable image lines: %#v", decoded)
+	}
+	if !strings.Contains(builder, "Total:  4MB") {
+		t.Fatalf("preview dropped builder cache lines: %#v", decoded)
+	}
+	if strings.Contains(images, "fixture-value") || strings.Contains(images, "docker.sock") || strings.Contains(builder, "docker.sock") {
+		t.Fatalf("preview leaked secret or socket: %#v", decoded)
+	}
+}
+
+func TestControllerCallImagePreviewPruneFailsOnCommandError(t *testing.T) {
+	t.Parallel()
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == "image prune -a --dry-run" {
+			return []byte("Cannot connect to the Docker daemon"), errors.New("exit status 1")
+		}
+		return []byte("Total:  0B"), nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err == nil {
+		t.Fatalf("preview succeeded after prune error: %s", raw)
+	}
+	if !strings.Contains(err.Error(), "disk prune failed") {
+		t.Fatalf("preview err=%v", err)
 	}
 }
 

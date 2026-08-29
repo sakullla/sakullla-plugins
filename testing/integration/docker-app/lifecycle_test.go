@@ -215,11 +215,26 @@ func TestComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
 	}
 
 	callComposeAction(t, controller, map[string]any{
-		"action": "remove-instance", "app_id": "media", "instance_id": "old",
+		"action": "remove-instance", "app_id": "media", "instance_id": "new",
+		"keep_images": []string{"nginx:1.28"},
+	})
+	if !node.hasImage("nginx:1.27") {
+		t.Fatal("prior image was removed while deleting a failed pending instance")
+	}
+	if containsCommand(node.commands, "image rm nginx:1.27") {
+		t.Fatalf("prior image rm issued for pending remove: %q", node.commands)
+	}
+
+	callComposeAction(t, controller, map[string]any{
+		"action": "start-instance", "app_id": "media", "instance_id": "new",
+		"compose": testComposeYAML("nginx:1.28"),
+	})
+	callComposeAction(t, controller, map[string]any{
+		"action": "drain", "app_id": "media", "instance_id": "old",
 		"keep_images": []string{"nginx:1.28"},
 	})
 	if node.hasImage("nginx:1.27") {
-		t.Fatal("old image still present after successful update cleanup")
+		t.Fatal("old image still present after successful update commit")
 	}
 	if !node.hasImage("nginx:1.28") {
 		t.Fatal("current image was reclaimed")

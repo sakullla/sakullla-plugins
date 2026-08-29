@@ -775,6 +775,27 @@ func TestHostRolloutRuntimeRemoveKeepsCurrentImages(t *testing.T) {
 	}
 }
 
+func TestHostRolloutRuntimeDrainPassesKeepImagesForReclaim(t *testing.T) {
+	t.Parallel()
+	var payload map[string]any
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		payload = decodePluginCallInner(t, request)
+		return copyHostResult(map[string]any{"accepted": true}, target)
+	})
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:1.28", Compose: "services:\n  web:\n    image: nginx:1.28\n"}
+	if err := (hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}).Drain(context.Background(), 1, app, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if payload["action"] != "drain" || payload["instance_id"] != "old" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	keep, _ := payload["keep_images"].([]any)
+	if len(keep) != 1 || keep[0] != "nginx:1.28" {
+		t.Fatalf("keep_images=%#v", payload["keep_images"])
+	}
+}
+
 func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 	t.Parallel()
 	var payloads []map[string]any

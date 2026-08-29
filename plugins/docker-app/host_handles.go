@@ -417,7 +417,11 @@ func (rollout hostRolloutRuntime) Cutover(ctx context.Context, fence uint64, rul
 }
 
 func (rollout hostRolloutRuntime) Drain(ctx context.Context, fence uint64, app App, instanceID string) error {
-	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "drain", "fence": fence, "instance_id": instanceID}, nil)
+	payload := map[string]any{"action": "drain", "fence": fence, "instance_id": instanceID}
+	if keep := appImageRefs(app); len(keep) > 0 {
+		payload["keep_images"] = keep
+	}
+	return rollout.runtime.composeApp(ctx, app, payload, nil)
 }
 
 func (rollout hostRolloutRuntime) Remove(ctx context.Context, fence uint64, app App, instanceID string) error {
