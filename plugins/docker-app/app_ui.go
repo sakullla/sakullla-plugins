@@ -266,6 +266,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
 		}
+		controller.bumpImageDeleteEpoch(body.ID)
 		if err := controller.setAppRunning(request.Context(), body.ID, true); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return
@@ -636,6 +637,14 @@ func (controller *Controller) allowImageObservation(appID string) {
 	controller.imageRefresh[appID] = false
 }
 
+func (controller *Controller) bumpImageDeleteEpoch(appID string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	delete(controller.imageCache, appID)
+	controller.imageDeleteEpoch[appID]++
+	controller.imageRefresh[appID] = false
+}
+
 func (controller *Controller) setAppRunning(ctx context.Context, appID string, running bool) error {
 	controller.mu.Lock()
 	if controller.appRuntime == nil {
@@ -862,7 +871,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
 	controller.mu.Lock()
-	currentApp, ok := controller.snapshotObservationLocked(app, token, epoch)
+	_, ok := controller.snapshotObservationLocked(app, token, epoch)
 	if err != nil || !ok {
 		controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 		controller.mu.Unlock()
@@ -875,19 +884,28 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		_, allowed := controller.snapshotObservationLocked(app, token, epoch)
 		return allowed
 	})
-	view, autoErr := controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
+	controller.mu.Lock()
+	live, ok := controller.snapshotObservationLocked(app, token, epoch)
+	controller.mu.Unlock()
+	if !ok {
+		controller.mu.Lock()
+		controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
+		controller.mu.Unlock()
+		return
+	}
+	view, autoErr := controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 	_, still := controller.snapshotObservationLocked(app, token, epoch)
 	keepRecord := still || controller.catalogHasAppIDLocked(app.ID)
 	if still {
-		controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+		controller.imageCache[app.ID] = cachedImageObservation{Image: live.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
 	}
 	controller.mu.Unlock()
 	if !keepRecord {
 		_ = controller.clearAppDeployment(ctx, app.ID)
 	} else if autoErr == nil && view.Published {
-		_ = controller.setAppRunning(ctx, currentApp.ID, true)
+		_ = controller.setAppRunning(ctx, live.ID, true)
 		controller.publishHTTPBackendOffers(ctx)
 	}
 }

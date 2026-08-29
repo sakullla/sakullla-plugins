@@ -1390,6 +1390,53 @@ func TestAppUIComposeSaveDropsRollbackHistory(t *testing.T) {
 	}
 }
 
+func TestAppUIComposeSaveBumpsEpochSkipsOverlappingStart(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	pullStarted := make(chan struct{}, 1)
+	pullRelease := make(chan struct{})
+	defer close(pullRelease)
+	rollout := &blockingUIRollout{started: pullStarted, release: pullRelease}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  rollout,
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	select {
+	case <-pullStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto_update pull did not start")
+	}
+	controller.mu.Lock()
+	epochBefore := controller.imageDeleteEpoch["media"]
+	controller.mu.Unlock()
+	saved := httptest.NewRecorder()
+	controller.ServeHTTP(saved, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.28\n","auto_update":true}`))
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if !strings.Contains(controller.Apps()[0].Compose, "nginx:1.28") {
+		t.Fatalf("catalog compose not saved: %q", controller.Apps()[0].Compose)
+	}
+	controller.mu.Lock()
+	epochAfter := controller.imageDeleteEpoch["media"]
+	controller.mu.Unlock()
+	if epochAfter <= epochBefore {
+		t.Fatalf("compose save did not bump delete epoch: before=%d after=%d", epochBefore, epochAfter)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if rolloutCallHas(rollout.calls, "start") {
+			t.Fatalf("overlapping AutoUpdate restaged previous YAML: %v", rollout.calls)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestAppUIConfirmUpdateAndRollbackMarkRunningAfterStop(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
