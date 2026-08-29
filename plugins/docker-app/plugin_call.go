@@ -45,17 +45,19 @@ func (execCommandRunner) Run(ctx context.Context, dir, name string, args ...stri
 }
 
 type composeCallRequest struct {
-	Action     string `json:"action"`
-	AgentID    string `json:"agent_id"`
-	AppID      string `json:"app_id"`
-	Compose    string `json:"compose"`
-	Env        string `json:"env"`
-	WorkDir    string `json:"workdir"`
-	Service    string `json:"service"`
-	Fence      uint64 `json:"fence"`
-	Image      string `json:"image"`
-	InstanceID string `json:"instance_id"`
-	RuleRef    string `json:"rule_ref"`
+	Action     string   `json:"action"`
+	AgentID    string   `json:"agent_id"`
+	AppID      string   `json:"app_id"`
+	Compose    string   `json:"compose"`
+	Env        string   `json:"env"`
+	WorkDir    string   `json:"workdir"`
+	Service    string   `json:"service"`
+	Fence      uint64   `json:"fence"`
+	Image      string   `json:"image"`
+	Images     []string `json:"images"`
+	KeepImages []string `json:"keep_images"`
+	InstanceID string   `json:"instance_id"`
+	RuleRef    string   `json:"rule_ref"`
 }
 
 type imageCallRequest struct {
@@ -63,6 +65,7 @@ type imageCallRequest struct {
 	AgentID string `json:"agent_id"`
 	AppID   string `json:"app_id"`
 	Image   string `json:"image"`
+	Confirm bool   `json:"confirm"`
 }
 
 type filesCallRequest struct {
@@ -145,6 +148,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if strings.TrimSpace(request.Compose) == "" {
 			return nil, ErrInvalidCompose
 		}
+		previous := existingWorkspaceImages(root, request.AppID)
 		workspace, err := PrepareAppWorkspace(root, request.AppID, request.Compose)
 		if err != nil {
 			return nil, err
@@ -154,9 +158,13 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 				return nil, err
 			}
 		}
+		current := composeImageRefs(request.Compose)
+		recordUsedImages(root, request.AppID, append(previous, current...))
 		if output, err := controller.runCommand(ctx, workspace.Dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, composeCallFailure("apply", output, err)
 		}
+		controller.reclaimUnusedImages(ctx, root, "", staleImageRefs(previous, current), append(append([]string{}, current...), request.KeepImages...))
+		rewriteUsedImages(root, request.AppID, current)
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
 	case "start", "stop", "restart", "remove", "pull", "ready", "drain", "remove-instance":
 		dir, err := controller.composeActionWorkspace(root, request)
@@ -167,11 +175,22 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
+		var reclaimCandidates []string
+		if action == "remove" || action == "remove-instance" {
+			reclaimCandidates = request.reclaimImageRefs(root, dir)
+		}
 		if output, err := controller.runCommand(ctx, dir, "docker", args...); err != nil {
 			return nil, composeCallFailure(action, output, err)
 		}
 		if action == "remove" {
 			_ = removeAppWorkspace(dir)
+			removeUsedImagesFile(root, request.AppID)
+			controller.reclaimUnusedImages(ctx, root, request.AppID, reclaimCandidates, request.KeepImages)
+		}
+		if action == "remove-instance" {
+			current := request.currentImageRefs(dir)
+			controller.reclaimUnusedImages(ctx, root, "", reclaimCandidates, append(append([]string{}, current...), request.KeepImages...))
+			rewriteUsedImages(root, request.AppID, current)
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "logs":
@@ -239,13 +258,16 @@ func composeRestageAction(action string) bool {
 }
 
 func (controller *Controller) prepareComposeCallWorkspace(root string, request composeCallRequest) (string, error) {
+	previous := existingWorkspaceImages(root, request.AppID)
 	if strings.TrimSpace(request.Compose) == "" {
+		recordUsedImages(root, request.AppID, previous)
 		return AppWorkDir(root, request.AppID)
 	}
 	workspace, err := PrepareAppWorkspace(root, request.AppID, request.Compose)
 	if err != nil {
 		if strings.TrimSpace(request.Action) == "remove" {
 			if dir, dirErr := existingComposeWorkDir(root, request.AppID); dirErr == nil {
+				recordUsedImages(root, request.AppID, previous)
 				return dir, nil
 			}
 		}
@@ -254,11 +276,13 @@ func (controller *Controller) prepareComposeCallWorkspace(root string, request c
 	if strings.TrimSpace(request.Env) != "" {
 		if err := writeAppEnvironment(workspace.Dir, request.Env); err != nil {
 			if strings.TrimSpace(request.Action) == "remove" {
+				recordUsedImages(root, request.AppID, append(previous, composeImageRefs(request.Compose)...))
 				return workspace.Dir, nil
 			}
 			return "", err
 		}
 	}
+	recordUsedImages(root, request.AppID, append(previous, composeImageRefs(request.Compose)...))
 	return workspace.Dir, nil
 }
 
@@ -296,6 +320,164 @@ func composeCommandArgs(action string) ([]string, error) {
 	}
 }
 
+func (request composeCallRequest) reclaimImageRefs(root, dir string) []string {
+	images := append([]string{}, request.Images...)
+	if strings.TrimSpace(request.Image) != "" {
+		images = append(images, request.Image)
+	}
+	images = append(images, composeImageRefs(request.Compose)...)
+	if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+		images = append(images, composeImageRefs(string(payload))...)
+	}
+	images = append(images, existingWorkspaceImages(root, request.AppID)...)
+	return uniqueImageRefs(images)
+}
+
+func (request composeCallRequest) currentImageRefs(dir string) []string {
+	images := composeImageRefs(request.Compose)
+	if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+		images = append(images, composeImageRefs(string(payload))...)
+	}
+	if strings.TrimSpace(request.Image) != "" {
+		images = append(images, request.Image)
+	}
+	return uniqueImageRefs(images)
+}
+
+func (controller *Controller) reclaimUnusedImages(ctx context.Context, root, excludeAppID string, candidates, keep []string) {
+	candidates = uniqueImageRefs(candidates)
+	if len(candidates) == 0 {
+		return
+	}
+	keepSet := make(map[string]struct{})
+	for _, image := range uniqueImageRefs(append(append([]string{}, keep...), siblingComposeImages(root, excludeAppID)...)) {
+		keepSet[image] = struct{}{}
+	}
+	for _, image := range candidates {
+		if _, kept := keepSet[image]; kept {
+			continue
+		}
+		if controller.imageReferencedByContainer(ctx, image) {
+			continue
+		}
+		_, _ = controller.runCommand(ctx, "", "docker", "image", "rm", image)
+	}
+}
+
+func (controller *Controller) imageReferencedByContainer(ctx context.Context, image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return true
+	}
+	output, err := controller.runCommand(ctx, "", "docker", "ps", "-a", "--filter", "ancestor="+image, "--format", "{{.ID}}")
+	if err != nil {
+		return true
+	}
+	for _, line := range strings.Split(normalizeCommandOutput(output), "\n") {
+		if containerReferenceLine(strings.TrimSpace(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containerReferenceLine(line string) bool {
+	if line == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(line), "sha256:") {
+		return digestCore(line) != ""
+	}
+	if len(line) < 12 {
+		return false
+	}
+	return isHexDigest(line)
+}
+
+func (controller *Controller) callDiskPrune(ctx context.Context, preview, confirm bool) ([]byte, error) {
+	if !preview && !confirm {
+		return json.Marshal(map[string]any{
+			"accepted":  true,
+			"unchanged": true,
+			"empty":     true,
+			"preview":   false,
+		})
+	}
+	imageOut, imageErr := controller.runCommand(ctx, "", "docker", imagePruneArgs(preview)...)
+	builderOut, builderErr := controller.runCommand(ctx, "", "docker", builderPruneArgs(preview)...)
+	if !preview && (imageErr != nil || builderErr != nil) {
+		return nil, pruneCallFailure(imageOut, builderOut, imageErr, builderErr)
+	}
+	imageText := sanitizePublicText(normalizeCommandOutput(imageOut))
+	builderText := sanitizePublicText(normalizeCommandOutput(builderOut))
+	empty := pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
+	return json.Marshal(map[string]any{
+		"accepted":      true,
+		"preview":       preview,
+		"empty":         empty,
+		"images":        imageText,
+		"builder_cache": builderText,
+	})
+}
+
+func imagePruneArgs(dryRun bool) []string {
+	args := []string{"image", "prune", "-a"}
+	if dryRun {
+		return append(args, "--dry-run")
+	}
+	return append(args, "-f")
+}
+
+func builderPruneArgs(dryRun bool) []string {
+	args := []string{"builder", "prune"}
+	if dryRun {
+		return append(args, "--dry-run")
+	}
+	return append(args, "-f")
+}
+
+func pruneOutputEmpty(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || lower == "ok" {
+		return true
+	}
+	if strings.Contains(lower, "total reclaimed space: 0") {
+		return true
+	}
+	if strings.Contains(lower, "nothing to") {
+		return true
+	}
+	return false
+}
+
+func pruneCallFailure(imageOut, builderOut []byte, imageErr, builderErr error) error {
+	cause := sanitizePublicText(strings.TrimSpace(string(imageOut) + "\n" + string(builderOut)))
+	if cause == "" {
+		if imageErr != nil {
+			cause = publicCause(imageErr)
+		} else if builderErr != nil {
+			cause = publicCause(builderErr)
+		}
+	}
+	if cause == "" {
+		return errors.New("disk prune failed")
+	}
+	return fmt.Errorf("disk prune failed: %s", cause)
+}
+
+func commandHasVolumeDeletion(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if strings.Contains(lower, "volume prune") || strings.Contains(lower, "--volumes") {
+		return true
+	}
+	for _, field := range strings.Fields(lower) {
+		if field == "-v" {
+			return true
+		}
+	}
+	return false
+}
+
 func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]byte, error) {
 	var request imageCallRequest
 	if len(payload) > 0 {
@@ -303,10 +485,19 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 			return nil, errors.New("image payload is invalid")
 		}
 	}
-	action := strings.TrimSpace(request.Action)
-	if action != "" && action != "observe" {
-		return nil, fmt.Errorf("image action %q is unknown", action)
+	switch strings.TrimSpace(request.Action) {
+	case "", "observe":
+		return controller.callImageObserve(ctx, request)
+	case "preview", "preview-prune":
+		return controller.callDiskPrune(ctx, true, false)
+	case "prune":
+		return controller.callDiskPrune(ctx, false, request.Confirm)
+	default:
+		return nil, fmt.Errorf("image action %q is unknown", request.Action)
 	}
+}
+
+func (controller *Controller) callImageObserve(ctx context.Context, request imageCallRequest) ([]byte, error) {
 	if controller.callImages != nil {
 		observed, err := controller.callImages.ObserveImage(ctx, App{
 			ID: request.AppID, AgentID: request.AgentID, Image: request.Image,

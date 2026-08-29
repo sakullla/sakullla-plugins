@@ -730,6 +730,111 @@ func TestHostRolloutRuntimeSkipsHTTPRuleCutoverWithoutRuleRef(t *testing.T) {
 	}
 }
 
+func TestHostCapabilityRuntimeRemoveAppSendsImagesForReclaim(t *testing.T) {
+	t.Parallel()
+	var payload map[string]any
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		if request.Name != pluginCallComposeName {
+			t.Fatalf("plugin.call = %#v", request)
+		}
+		payload = decodePluginCallInner(t, request)
+		return copyHostResult(map[string]any{"accepted": true}, target)
+	})
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:1.27", Compose: "services:\n  web:\n    image: nginx:1.27\n"}
+	if err := newHostCapabilityRuntime(client).RemoveApp(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	if payload["action"] != "remove" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	images, _ := payload["images"].([]any)
+	if len(images) != 1 || images[0] != "nginx:1.27" {
+		t.Fatalf("remove images=%#v", payload["images"])
+	}
+}
+
+func TestHostRolloutRuntimeRemoveKeepsCurrentImages(t *testing.T) {
+	t.Parallel()
+	var payload map[string]any
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		payload = decodePluginCallInner(t, request)
+		return copyHostResult(map[string]any{"accepted": true}, target)
+	})
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:1.28", Compose: "services:\n  web:\n    image: nginx:1.28\n"}
+	if err := (hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}).Remove(context.Background(), 1, app, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if payload["action"] != "remove-instance" || payload["instance_id"] != "old" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	keep, _ := payload["keep_images"].([]any)
+	if len(keep) != 1 || keep[0] != "nginx:1.28" {
+		t.Fatalf("keep_images=%#v", payload["keep_images"])
+	}
+}
+
+func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
+	t.Parallel()
+	var payloads []map[string]any
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		request := decodePluginCallRequest(t, call)
+		if request.Name != pluginCallImageName {
+			t.Fatalf("plugin.call = %#v", request)
+		}
+		payload := decodePluginCallInner(t, request)
+		payloads = append(payloads, payload)
+		action, _ := payload["action"].(string)
+		confirm, _ := payload["confirm"].(bool)
+		if action == "preview" {
+			return copyHostResult(map[string]any{
+				"accepted": true, "preview": true, "empty": false,
+				"images": "untagged: nginx:old", "builder_cache": "Total: 4MB",
+			}, target)
+		}
+		if action == "prune" && !confirm {
+			return copyHostResult(map[string]any{"accepted": true, "unchanged": true, "empty": true}, target)
+		}
+		if action == "prune" && confirm {
+			return copyHostResult(map[string]any{
+				"accepted": true, "preview": false, "empty": false,
+				"images": "Deleted Images:\nuntagged: nginx:old", "builder_cache": "Total: 4MB",
+			}, target)
+		}
+		t.Fatalf("unexpected disk cleanup payload %#v", payload)
+		return nil
+	})
+	runtime := newHostCapabilityRuntime(client)
+	preview, err := runtime.PreviewDiskCleanup(context.Background(), "agent-1")
+	if err != nil || !preview.Preview || preview.Empty || preview.Images == "" || preview.BuilderCache == "" {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	canceled, err := runtime.ApplyDiskCleanup(context.Background(), "agent-1", false)
+	if err != nil || !canceled.Unchanged || canceled.Preview {
+		t.Fatalf("cancel=%#v err=%v", canceled, err)
+	}
+	applied, err := runtime.ApplyDiskCleanup(context.Background(), "agent-1", true)
+	if err != nil || applied.Unchanged || applied.Empty || applied.Images == "" {
+		t.Fatalf("confirm=%#v err=%v", applied, err)
+	}
+	if len(payloads) != 3 {
+		t.Fatalf("payloads=%#v", payloads)
+	}
+	if payloads[0]["action"] != "preview" {
+		t.Fatalf("preview payload=%#v", payloads[0])
+	}
+	if payloads[1]["action"] != "prune" || payloads[1]["confirm"] != false {
+		t.Fatalf("cancel payload=%#v", payloads[1])
+	}
+	if payloads[2]["action"] != "prune" || payloads[2]["confirm"] != true {
+		t.Fatalf("confirm payload=%#v", payloads[2])
+	}
+	if _, err := runtime.PreviewDiskCleanup(context.Background(), ""); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("missing agent err=%v", err)
+	}
+}
+
 func decodePluginCallRequest(t *testing.T, call pluginsdk.HostRuntimeCall) pluginsdk.PluginCallRequest {
 	t.Helper()
 	if call.Operation != pluginsdk.HostRuntimePluginCall {

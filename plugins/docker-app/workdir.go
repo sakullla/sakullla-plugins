@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,10 @@ var (
 	chmodPath  = os.Chmod
 )
 
-const ComposeFileName = "compose.yaml"
+const (
+	ComposeFileName   = "compose.yaml"
+	usedImagesDirName = ".nre-used-images"
+)
 
 type bindClass int
 
@@ -592,4 +596,153 @@ type workspaceFileEntry struct {
 	Path string `json:"path"`
 	Dir  bool   `json:"dir"`
 	Size int64  `json:"size,omitempty"`
+}
+
+func composeImageRefs(document string) []string {
+	if strings.TrimSpace(document) == "" {
+		return nil
+	}
+	var file struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(document), &file); err != nil {
+		return nil
+	}
+	images := make([]string, 0, len(file.Services))
+	for _, service := range file.Services {
+		image := strings.TrimSpace(service.Image)
+		if image == "" {
+			continue
+		}
+		images = append(images, image)
+	}
+	return uniqueImageRefs(images)
+}
+
+func uniqueImageRefs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func appImageRefs(app App) []string {
+	images := composeImageRefs(app.Compose)
+	if strings.TrimSpace(app.Image) != "" {
+		images = append(images, app.Image)
+	}
+	return uniqueImageRefs(images)
+}
+
+func siblingComposeImages(root, excludeAppID string) []string {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var images []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == excludeAppID || !validID(name) {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(root, name, ComposeFileName))
+		if err != nil {
+			continue
+		}
+		images = append(images, composeImageRefs(string(payload))...)
+	}
+	return uniqueImageRefs(images)
+}
+
+func usedImagesFile(root, appID string) string {
+	return filepath.Join(root, usedImagesDirName, appID)
+}
+
+func loadUsedImages(root, appID string) []string {
+	payload, err := os.ReadFile(usedImagesFile(root, appID))
+	if err != nil {
+		return nil
+	}
+	var images []string
+	for _, line := range strings.Split(string(payload), "\n") {
+		if image := strings.TrimSpace(line); image != "" {
+			images = append(images, image)
+		}
+	}
+	return uniqueImageRefs(images)
+}
+
+func existingWorkspaceImages(root, appID string) []string {
+	var images []string
+	if dir, err := AppWorkDir(root, appID); err == nil {
+		if payload, err := os.ReadFile(filepath.Join(dir, ComposeFileName)); err == nil {
+			images = append(images, composeImageRefs(string(payload))...)
+		}
+	}
+	images = append(images, loadUsedImages(root, appID)...)
+	return uniqueImageRefs(images)
+}
+
+func recordUsedImages(root, appID string, images []string) {
+	merged := uniqueImageRefs(append(loadUsedImages(root, appID), images...))
+	if len(merged) == 0 || !validID(appID) {
+		return
+	}
+	dir := filepath.Join(root, usedImagesDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(usedImagesFile(root, appID), []byte(strings.Join(merged, "\n")+"\n"), 0o644)
+}
+
+func rewriteUsedImages(root, appID string, images []string) {
+	images = uniqueImageRefs(images)
+	path := usedImagesFile(root, appID)
+	if len(images) == 0 || !validID(appID) {
+		_ = os.Remove(path)
+		return
+	}
+	dir := filepath.Join(root, usedImagesDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(images, "\n")+"\n"), 0o644)
+}
+
+func removeUsedImagesFile(root, appID string) {
+	_ = os.Remove(usedImagesFile(root, appID))
+}
+
+func staleImageRefs(previous, current []string) []string {
+	keep := make(map[string]struct{}, len(current))
+	for _, image := range current {
+		keep[image] = struct{}{}
+	}
+	var stale []string
+	for _, image := range previous {
+		if _, kept := keep[image]; kept {
+			continue
+		}
+		stale = append(stale, image)
+	}
+	return uniqueImageRefs(stale)
 }

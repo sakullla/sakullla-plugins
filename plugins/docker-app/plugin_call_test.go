@@ -203,10 +203,13 @@ func TestControllerCallComposeRemoveCleansWorkspaceAfterDown(t *testing.T) {
 	compose := "services:\n  web:\n    image: nginx:1.27\n"
 	var commands []string
 	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
-		if dir != filepath.Join(root, "media") || name != "docker" {
-			t.Fatalf("command dir=%q name=%q", dir, name)
+		if name != "docker" {
+			t.Fatalf("command name=%q", name)
 		}
 		command := strings.Join(args, " ")
+		if command == "compose down" && dir != filepath.Join(root, "media") {
+			t.Fatalf("compose down dir=%q", dir)
+		}
 		commands = append(commands, command)
 		return []byte("ok"), nil
 	})
@@ -218,8 +221,9 @@ func TestControllerCallComposeRemoveCleansWorkspaceAfterDown(t *testing.T) {
 	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 1 || commands[0] != "compose down" {
-		t.Fatalf("remove commands=%q want [compose down]", commands)
+	assertComposeDownWithoutVolumes(t, commands)
+	if !containsCommand(commands, "image rm nginx:1.27") {
+		t.Fatalf("exclusive image was not reclaimed: %q", commands)
 	}
 	if _, err := os.Stat(filepath.Join(root, "media")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remove left workspace: %v", err)
@@ -276,9 +280,7 @@ func TestControllerCallComposeRemoveSucceedsWhenWorkspaceCleanupFails(t *testing
 	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
 		t.Fatalf("remove failed after workspace cleanup error: %v", err)
 	}
-	if len(commands) != 1 || commands[0] != "compose down" {
-		t.Fatalf("remove commands=%q want [compose down]", commands)
-	}
+	assertComposeDownWithoutVolumes(t, commands)
 }
 
 func TestControllerCallComposeRemoveUsesExistingWorkDirWhenRestageFails(t *testing.T) {
@@ -293,10 +295,16 @@ func TestControllerCallComposeRemoveUsesExistingWorkDirWhenRestageFails(t *testi
 	}
 	var dirs []string
 	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
-		if name != "docker" || strings.Join(args, " ") != "compose down" {
+		command := strings.Join(args, " ")
+		if name != "docker" {
 			t.Fatalf("command name=%s %q", name, args)
 		}
-		dirs = append(dirs, dir)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %s %q", name, args)
+		}
+		if command == "compose down" {
+			dirs = append(dirs, dir)
+		}
 		return []byte("ok"), nil
 	})
 	controller := newCallController(t, root, runner, nil)
@@ -311,6 +319,312 @@ func TestControllerCallComposeRemoveUsesExistingWorkDirWhenRestageFails(t *testi
 	}
 	if len(dirs) != 1 || filepath.Clean(dirs[0]) != filepath.Clean(workdir) {
 		t.Fatalf("compose down dir=%q want %q", dirs, workdir)
+	}
+}
+
+func TestControllerCallComposeRemoveReclaimsExclusiveImage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var commands []string
+	removed := map[string]bool{}
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("command name=%s %q", name, args)
+		}
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if len(args) >= 3 && args[0] == "image" && args[1] == "rm" {
+			removed[args[2]] = true
+		}
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "remove", "app_id": "media",
+		"compose": "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - media-data:/data\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
+	}
+	assertComposeDownWithoutVolumes(t, commands)
+	if !removed["nginx:1.27"] {
+		t.Fatalf("exclusive image not removed: commands=%q", commands)
+	}
+	if _, err := os.Stat(filepath.Join(root, "media")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove left workspace: %v", err)
+	}
+}
+
+func TestControllerCallComposeRemoveKeepsSharedImage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	other, err := AppWorkDir(root, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, ComposeFileName), []byte("services:\n  web:\n    image: nginx:1.27\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if name == "docker" && len(args) >= 3 && args[0] == "image" && args[1] == "rm" && args[2] == "nginx:1.27" {
+			t.Fatalf("shared image was deleted: %q", command)
+		}
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "remove", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
+	}
+	assertComposeDownWithoutVolumes(t, commands)
+	if containsCommand(commands, "image rm nginx:1.27") {
+		t.Fatalf("shared image rm issued: %q", commands)
+	}
+	if _, err := os.Stat(filepath.Join(other, ComposeFileName)); err != nil {
+		t.Fatalf("shared app workspace changed: %v", err)
+	}
+}
+
+func TestControllerCallComposeRemoveKeepsContainerReferencedImage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var commands []string
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if len(args) >= 2 && args[0] == "ps" {
+			return []byte("a1b2c3d4e5f6\n"), nil
+		}
+		if len(args) >= 3 && args[0] == "image" && args[1] == "rm" {
+			t.Fatalf("referenced image was deleted: %q", command)
+		}
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "remove", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
+	}
+	assertComposeDownWithoutVolumes(t, commands)
+	if containsCommand(commands, "image rm nginx:1.27") {
+		t.Fatalf("container-referenced image rm issued: %q", commands)
+	}
+}
+
+func TestControllerCallComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	controller := newCallController(t, root, CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}), nil)
+	applyPayload, err := json.Marshal(map[string]any{
+		"action": "apply", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallComposeName, applyPayload); err != nil {
+		t.Fatal(err)
+	}
+
+	var commands []string
+	removed := map[string]bool{}
+	controller.commandRunner = CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if len(args) >= 3 && args[0] == "image" && args[1] == "rm" {
+			removed[args[2]] = true
+		}
+		return []byte("ok"), nil
+	})
+	startPayload, err := json.Marshal(map[string]any{
+		"action": "start-instance", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.28\n",
+		"instance_id": "new",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, startPayload); err != nil {
+		t.Fatal(err)
+	}
+	if removed["nginx:1.27"] {
+		t.Fatalf("old image reclaimed before update finished: %q", commands)
+	}
+
+	commands = nil
+	removed = map[string]bool{}
+	removePayload, err := json.Marshal(map[string]any{
+		"action": "remove-instance", "app_id": "media", "instance_id": "old",
+		"keep_images": []string{"nginx:1.28"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, removePayload); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCommand(commands, "compose rm -f") {
+		t.Fatalf("remove-instance commands=%q", commands)
+	}
+	if !removed["nginx:1.27"] {
+		t.Fatalf("old image was not reclaimed: %q", commands)
+	}
+	if removed["nginx:1.28"] {
+		t.Fatalf("current image was reclaimed: %q", commands)
+	}
+	if _, err := os.Stat(filepath.Join(root, "media", ComposeFileName)); err != nil {
+		t.Fatalf("update removed workdir: %v", err)
+	}
+}
+
+func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
+	t.Parallel()
+	var commands []string
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		command := strings.Join(append([]string{name}, args...), " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if !strings.Contains(command, "--dry-run") {
+			t.Fatalf("preview prune mutated: %q", command)
+		}
+		return []byte("Total reclaimed space: 0B"), nil
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["preview"] != true || decoded["empty"] != true {
+		t.Fatalf("preview result=%#v", decoded)
+	}
+	if !containsCommand(commands, "image prune -a --dry-run") || !containsCommand(commands, "builder prune --dry-run") {
+		t.Fatalf("preview commands=%q", commands)
+	}
+}
+
+func TestControllerCallImagePruneUnconfirmedLeavesImagesUnchanged(t *testing.T) {
+	t.Parallel()
+	var called bool
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		called = true
+		t.Fatal("unconfirmed prune invoked docker CLI")
+		return nil, nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{"action": "prune", "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("unconfirmed prune invoked docker CLI")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["unchanged"] != true || decoded["accepted"] != true {
+		t.Fatalf("unconfirmed prune result=%#v", decoded)
+	}
+}
+
+func TestControllerCallImagePruneCleansUnusedImagesAndBuilderCache(t *testing.T) {
+	t.Parallel()
+	var commands []string
+	runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		command := strings.Join(append([]string{name}, args...), " ")
+		commands = append(commands, command)
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+		if strings.Contains(command, "--dry-run") {
+			t.Fatalf("confirmed prune used dry-run: %q", command)
+		}
+		switch strings.Join(args, " ") {
+		case "image prune -a -f":
+			return []byte("Deleted Images:\nuntagged: nginx:old\nTotal reclaimed space: 12MB\n"), nil
+		case "builder prune -f":
+			return []byte("Total:  4MB\n"), nil
+		default:
+			t.Fatalf("unexpected prune command %q", command)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "prune", "confirm": true, "agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["empty"] == true || decoded["preview"] == true || decoded["accepted"] != true {
+		t.Fatalf("confirmed prune result=%#v", decoded)
+	}
+	if !containsCommand(commands, "image prune -a -f") || !containsCommand(commands, "builder prune -f") {
+		t.Fatalf("confirmed prune commands=%q", commands)
+	}
+}
+
+func TestDiskPruneAndComposeRemoveArgsOmitVolumes(t *testing.T) {
+	t.Parallel()
+	remove, err := composeCommandArgs("remove")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{remove, imagePruneArgs(true), imagePruneArgs(false), builderPruneArgs(true), builderPruneArgs(false)} {
+		joined := strings.Join(args, " ")
+		if commandHasVolumeDeletion(joined) {
+			t.Fatalf("volume deletion args %q", joined)
+		}
 	}
 }
 
@@ -723,6 +1037,27 @@ func unusedDockerRunner(t *testing.T) CommandRunner {
 		t.Fatal("files must not invoke docker CLI")
 		return nil, nil
 	})
+}
+
+func assertComposeDownWithoutVolumes(t *testing.T, commands []string) {
+	t.Helper()
+	if len(commands) == 0 || commands[0] != "compose down" {
+		t.Fatalf("first command=%q want compose down", commands)
+	}
+	for _, command := range commands {
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+	}
+}
+
+func containsCommand(commands []string, want string) bool {
+	for _, command := range commands {
+		if command == want || strings.HasSuffix(command, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func callFiles(t *testing.T, controller *Controller, payload map[string]any) ([]byte, error) {

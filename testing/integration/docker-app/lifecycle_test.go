@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -154,6 +156,114 @@ func TestComposeAppLifecycleFailClosedWithoutExecutorOrAuditor(t *testing.T) {
 	if _, err := dockerapp.DeleteManagedApp(context.Background(), apps, app.ID, true, runtime, nil); !errors.Is(err, dockerapp.ErrAuditRequired) {
 		t.Fatalf("missing delete auditor err=%v", err)
 	}
+}
+
+func TestComposeRemoveReclaimsExclusiveImageAndKeepsShared(t *testing.T) {
+	root := t.TempDir()
+	node := newFakeDockerNode()
+	controller := newExecutionController(t, root, node)
+
+	applyApp(t, controller, "media", "nginx:1.27")
+	applyApp(t, controller, "other", "nginx:1.27")
+	if !node.hasImage("nginx:1.27") {
+		t.Fatal("shared image missing after apply")
+	}
+
+	callComposeAction(t, controller, map[string]any{
+		"action": "remove", "app_id": "media", "compose": testComposeYAML("nginx:1.27"),
+	})
+	if !node.hasImage("nginx:1.27") {
+		t.Fatal("shared image was removed after deleting one app")
+	}
+	if containsCommand(node.commands, "image rm nginx:1.27") {
+		t.Fatalf("shared image rm issued: %q", node.commands)
+	}
+	if _, err := os.Stat(filepath.Join(root, "media")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted app workdir remains: %v", err)
+	}
+
+	callComposeAction(t, controller, map[string]any{
+		"action": "remove", "app_id": "other", "compose": testComposeYAML("nginx:1.27"),
+	})
+	if node.hasImage("nginx:1.27") {
+		t.Fatal("exclusive image still referenced after last app delete")
+	}
+	if !containsCommand(node.commands, "image rm nginx:1.27") {
+		t.Fatalf("exclusive image was not reclaimed: %q", node.commands)
+	}
+	assertNoVolumeDeletion(t, node.commands)
+	if _, err := os.Stat(filepath.Join(root, "other")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("last app workdir remains: %v", err)
+	}
+}
+
+func TestComposeRemoveInstanceReclaimsOldImage(t *testing.T) {
+	root := t.TempDir()
+	node := newFakeDockerNode()
+	controller := newExecutionController(t, root, node)
+
+	applyApp(t, controller, "media", "nginx:1.27")
+	callComposeAction(t, controller, map[string]any{
+		"action": "start-instance", "app_id": "media", "instance_id": "new",
+		"compose": testComposeYAML("nginx:1.28"),
+	})
+	if !node.hasImage("nginx:1.27") || !node.hasImage("nginx:1.28") {
+		t.Fatalf("update images=%v", node.imageList())
+	}
+	if containsCommand(node.commands, "image rm nginx:1.27") {
+		t.Fatalf("old image reclaimed before cleanup: %q", node.commands)
+	}
+
+	callComposeAction(t, controller, map[string]any{
+		"action": "remove-instance", "app_id": "media", "instance_id": "old",
+		"keep_images": []string{"nginx:1.28"},
+	})
+	if node.hasImage("nginx:1.27") {
+		t.Fatal("old image still present after successful update cleanup")
+	}
+	if !node.hasImage("nginx:1.28") {
+		t.Fatal("current image was reclaimed")
+	}
+	assertNoVolumeDeletion(t, node.commands)
+}
+
+func TestNodePrunePreviewCancelAndConfirm(t *testing.T) {
+	root := t.TempDir()
+	node := newFakeDockerNode()
+	node.addImage("nginx:old")
+	node.builderCache = true
+	controller := newExecutionController(t, root, node)
+
+	preview := callImageAction(t, controller, map[string]any{"action": "preview", "agent_id": "agent-1"})
+	if preview["preview"] != true {
+		t.Fatalf("preview result=%#v", preview)
+	}
+	if !node.hasImage("nginx:old") || !node.builderCache {
+		t.Fatal("preview prune mutated images or builder cache")
+	}
+	if !containsCommand(node.commands, "image prune -a --dry-run") || !containsCommand(node.commands, "builder prune --dry-run") {
+		t.Fatalf("preview commands=%q", node.commands)
+	}
+
+	canceled := callImageAction(t, controller, map[string]any{"action": "prune", "agent_id": "agent-1"})
+	if canceled["unchanged"] != true {
+		t.Fatalf("unconfirmed prune result=%#v", canceled)
+	}
+	if !node.hasImage("nginx:old") || !node.builderCache {
+		t.Fatal("unconfirmed prune mutated images or builder cache")
+	}
+
+	confirmed := callImageAction(t, controller, map[string]any{"action": "prune", "confirm": true, "agent_id": "agent-1"})
+	if confirmed["accepted"] != true || confirmed["empty"] == true {
+		t.Fatalf("confirmed prune result=%#v", confirmed)
+	}
+	if node.hasImage("nginx:old") || node.builderCache {
+		t.Fatal("confirmed prune left unused image or builder cache")
+	}
+	if !containsCommand(node.commands, "image prune -a -f") || !containsCommand(node.commands, "builder prune -f") {
+		t.Fatalf("confirmed prune commands=%q", node.commands)
+	}
+	assertNoVolumeDeletion(t, node.commands)
 }
 
 func TestComposeOverlayPrepareProjectsManagedApps(t *testing.T) {
@@ -348,4 +458,233 @@ func sameIDs(apps []dockerapp.App, ids []string) bool {
 		}
 	}
 	return true
+}
+
+type fakeDockerNode struct {
+	mu           sync.Mutex
+	images       map[string]struct{}
+	containers   map[string]string
+	builderCache bool
+	commands     []string
+}
+
+func newFakeDockerNode() *fakeDockerNode {
+	return &fakeDockerNode{
+		images:     map[string]struct{}{},
+		containers: map[string]string{},
+	}
+}
+
+func (node *fakeDockerNode) addImage(image string) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.images[image] = struct{}{}
+}
+
+func (node *fakeDockerNode) hasImage(image string) bool {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	_, ok := node.images[image]
+	return ok
+}
+
+func (node *fakeDockerNode) imageList() []string {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	images := make([]string, 0, len(node.images))
+	for image := range node.images {
+		images = append(images, image)
+	}
+	return images
+}
+
+func (node *fakeDockerNode) Run(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	command := strings.Join(args, " ")
+	node.commands = append(node.commands, command)
+	if name != "docker" {
+		return nil, errors.New("unexpected command")
+	}
+	if commandHasVolumeDeletion(command) {
+		return nil, errors.New("volume prune is forbidden")
+	}
+	switch {
+	case command == "compose up -d":
+		image := composeImageFromDir(dir)
+		if image != "" {
+			node.images[image] = struct{}{}
+			node.containers[dir] = image
+		}
+		return []byte("ok"), nil
+	case command == "compose down":
+		delete(node.containers, dir)
+		return []byte("ok"), nil
+	case command == "compose rm -f":
+		delete(node.containers, dir)
+		return []byte("ok"), nil
+	case strings.HasPrefix(command, "ps -a --filter ancestor="):
+		image := strings.TrimPrefix(command, "ps -a --filter ancestor=")
+		image = strings.TrimSuffix(image, " --format {{.ID}}")
+		var ids []string
+		for containerDir, used := range node.containers {
+			if used == image && containerDir != dir {
+				ids = append(ids, "a1b2c3d4e5f67890")
+			}
+		}
+		return []byte(strings.Join(ids, "\n")), nil
+	case strings.HasPrefix(command, "image rm "):
+		image := strings.TrimPrefix(command, "image rm ")
+		for _, used := range node.containers {
+			if used == image {
+				return nil, errors.New("image is in use")
+			}
+		}
+		delete(node.images, image)
+		return []byte("untagged: " + image), nil
+	case command == "image prune -a --dry-run":
+		return []byte(node.prunePreviewLocked()), nil
+	case command == "image prune -a -f":
+		deleted := node.pruneUnusedLocked()
+		if deleted == "" {
+			return []byte("Total reclaimed space: 0B"), nil
+		}
+		return []byte("Deleted Images:\n" + deleted + "Total reclaimed space: 12MB\n"), nil
+	case command == "builder prune --dry-run":
+		if node.builderCache {
+			return []byte("Total:  4MB"), nil
+		}
+		return []byte("Total reclaimed space: 0B"), nil
+	case command == "builder prune -f":
+		if !node.builderCache {
+			return []byte("Total reclaimed space: 0B"), nil
+		}
+		node.builderCache = false
+		return []byte("Total:  4MB"), nil
+	default:
+		return []byte("ok"), nil
+	}
+}
+
+func (node *fakeDockerNode) prunePreviewLocked() string {
+	for image := range node.images {
+		if !node.imageInUseLocked(image) {
+			return "untagged: " + image + "\nTotal reclaimed space: 12MB\n"
+		}
+	}
+	return "Total reclaimed space: 0B"
+}
+
+func (node *fakeDockerNode) pruneUnusedLocked() string {
+	var deleted strings.Builder
+	for image := range node.images {
+		if node.imageInUseLocked(image) {
+			continue
+		}
+		delete(node.images, image)
+		deleted.WriteString("untagged: " + image + "\n")
+	}
+	return deleted.String()
+}
+
+func (node *fakeDockerNode) imageInUseLocked(image string) bool {
+	for _, used := range node.containers {
+		if used == image {
+			return true
+		}
+	}
+	return false
+}
+
+func composeImageFromDir(dir string) string {
+	payload, err := os.ReadFile(filepath.Join(dir, dockerapp.ComposeFileName))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(payload), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "image:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "image:"))
+		}
+	}
+	return ""
+}
+
+func newExecutionController(t *testing.T, root string, node *fakeDockerNode) *dockerapp.Controller {
+	t.Helper()
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		UIWorkDirRoot: root,
+		CommandRunner: node,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
+func applyApp(t *testing.T, controller *dockerapp.Controller, appID, image string) {
+	t.Helper()
+	callComposeAction(t, controller, map[string]any{
+		"action": "apply", "app_id": appID, "compose": testComposeYAML(image),
+	})
+}
+
+func callComposeAction(t *testing.T, controller *dockerapp.Controller, payload map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "compose", raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func callImageAction(t *testing.T, controller *dockerapp.Controller, payload map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := controller.Call(context.Background(), "generation-1", "image", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+func containsCommand(commands []string, want string) bool {
+	for _, command := range commands {
+		if command == want || strings.HasSuffix(command, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandHasVolumeDeletion(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if strings.Contains(lower, "volume prune") || strings.Contains(lower, "--volumes") {
+		return true
+	}
+	for _, field := range strings.Fields(lower) {
+		if field == "-v" {
+			return true
+		}
+	}
+	return false
+}
+
+func assertNoVolumeDeletion(t *testing.T, commands []string) {
+	t.Helper()
+	for _, command := range commands {
+		if commandHasVolumeDeletion(command) {
+			t.Fatalf("volume deletion command %q", command)
+		}
+	}
 }

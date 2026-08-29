@@ -198,7 +198,44 @@ func (runtime *hostCapabilityRuntime) ReadLogs(ctx context.Context, app App, ser
 }
 
 func (runtime *hostCapabilityRuntime) RemoveApp(ctx context.Context, app App) error {
-	return runtime.composeApp(ctx, app, map[string]any{"action": "remove"}, nil)
+	payload := map[string]any{"action": "remove"}
+	if images := appImageRefs(app); len(images) > 0 {
+		payload["images"] = images
+	}
+	return runtime.composeApp(ctx, app, payload, nil)
+}
+
+type DiskCleanupReport struct {
+	Accepted     bool   `json:"accepted"`
+	Preview      bool   `json:"preview"`
+	Empty        bool   `json:"empty"`
+	Unchanged    bool   `json:"unchanged,omitempty"`
+	Images       string `json:"images,omitempty"`
+	BuilderCache string `json:"builder_cache,omitempty"`
+}
+
+func (runtime *hostCapabilityRuntime) PreviewDiskCleanup(ctx context.Context, agentID string) (DiskCleanupReport, error) {
+	return runtime.diskCleanup(ctx, agentID, "preview", false)
+}
+
+func (runtime *hostCapabilityRuntime) ApplyDiskCleanup(ctx context.Context, agentID string, confirm bool) (DiskCleanupReport, error) {
+	return runtime.diskCleanup(ctx, agentID, "prune", confirm)
+}
+
+func (runtime *hostCapabilityRuntime) diskCleanup(ctx context.Context, agentID, action string, confirm bool) (DiskCleanupReport, error) {
+	if runtime == nil || runtime.client == nil {
+		return DiskCleanupReport{}, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(agentID) {
+		return DiskCleanupReport{}, ErrAgentOffline
+	}
+	var result DiskCleanupReport
+	if err := runtime.pluginCall(ctx, agentID, pluginCallImageName, map[string]any{
+		"action": action, "agent_id": agentID, "confirm": confirm,
+	}, &result); err != nil {
+		return DiskCleanupReport{}, err
+	}
+	return result, nil
 }
 
 func (runtime *hostCapabilityRuntime) Create(ctx context.Context, spec HTTPRuleSpec) (HostHTTPRule, error) {
@@ -384,7 +421,11 @@ func (rollout hostRolloutRuntime) Drain(ctx context.Context, fence uint64, app A
 }
 
 func (rollout hostRolloutRuntime) Remove(ctx context.Context, fence uint64, app App, instanceID string) error {
-	return rollout.runtime.composeApp(ctx, app, map[string]any{"action": "remove-instance", "fence": fence, "instance_id": instanceID}, nil)
+	payload := map[string]any{"action": "remove-instance", "fence": fence, "instance_id": instanceID}
+	if keep := appImageRefs(app); len(keep) > 0 {
+		payload["keep_images"] = keep
+	}
+	return rollout.runtime.composeApp(ctx, app, payload, nil)
 }
 
 func (rollout hostRolloutRuntime) Inspect(ctx context.Context, fence uint64, app App, ruleRef string) (RuntimeState, error) {
@@ -648,7 +689,7 @@ func decodePluginCallPayload(node any) any {
 
 func skipLocalDockerValueKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "compose", "content", "path", "name", "entries":
+	case "compose", "content", "path", "name", "entries", "images", "keep_images", "builder_cache":
 		return true
 	default:
 		return false
