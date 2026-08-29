@@ -599,6 +599,7 @@ func (controller *Controller) clearAppRuntime(ctx context.Context, appID string)
 	controller.appRuntime = next
 	delete(controller.imageCache, appID)
 	delete(controller.imageRefresh, appID)
+	controller.imageObserveToken[appID]++
 	controller.mu.Unlock()
 	return nil
 }
@@ -607,6 +608,8 @@ func (controller *Controller) clearAppDeployment(ctx context.Context, appID stri
 	if controller.uiRollout.Store == nil {
 		return nil
 	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
 	record, ok, err := controller.uiRollout.Store.Load(ctx, appID)
 	if err != nil {
 		return err
@@ -771,10 +774,12 @@ func (controller *Controller) scheduleImageObservation(app App) {
 		return
 	}
 	controller.imageRefresh[app.ID] = true
+	controller.imageObserveToken[app.ID]++
+	token := controller.imageObserveToken[app.ID]
 	controller.mu.Unlock()
 	select {
 	case controller.imageSlots <- struct{}{}:
-		go controller.observeImageInBackground(app)
+		go controller.observeImageInBackground(app, token)
 	default:
 		controller.mu.Lock()
 		controller.imageRefresh[app.ID] = false
@@ -782,21 +787,19 @@ func (controller *Controller) scheduleImageObservation(app App) {
 	}
 }
 
-func (controller *Controller) observeImageInBackground(app App) {
+func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	defer func() { <-controller.imageSlots }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
-	if err == nil {
-		_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
-	}
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.imageRefresh[app.ID] = false
-	if err != nil || !controller.hasCurrentAppLocked(app) {
+	if err != nil || controller.imageObserveToken[app.ID] != token || !controller.hasCurrentAppLocked(app) {
 		return
 	}
 	controller.imageCache[app.ID] = cachedImageObservation{Image: app.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+	_, _ = controller.uiRollout.AutoUpdate(ctx, app, nil, observed)
 }
 
 func (controller *Controller) hasCurrentAppLocked(app App) bool {

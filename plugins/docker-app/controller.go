@@ -120,6 +120,7 @@ type Controller struct {
 	appRuntime         map[string]bool
 	imageCache         map[string]cachedImageObservation
 	imageRefresh       map[string]bool
+	imageObserveToken  map[string]uint64
 	imageSlots         chan struct{}
 }
 
@@ -167,8 +168,9 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
 		appRuntime: map[string]bool{},
-		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageSlots: make(chan struct{}, 2),
-		uiRollout: Rollout{Store: deployments, Executor: config.UIRolloutExecutor, Auditor: auditor},
+		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{},
+		imageSlots: make(chan struct{}, 2),
+		uiRollout:  Rollout{Store: deployments, Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1151,6 +1152,32 @@ func (observer *blockingImageObserver) ObserveImage(ctx context.Context, _ App) 
 	}
 }
 
+type delayedImageObserver struct {
+	mu              sync.Mutex
+	current, latest string
+	block           bool
+	started         chan struct{}
+	release         chan struct{}
+}
+
+func (observer *delayedImageObserver) ObserveImage(ctx context.Context, _ App) (UpdateObservation, error) {
+	observer.mu.Lock()
+	block := observer.block
+	observer.mu.Unlock()
+	if block {
+		select {
+		case observer.started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-observer.release:
+		case <-ctx.Done():
+			return UpdateObservation{}, ctx.Err()
+		}
+	}
+	return UpdateObservation{CurrentDigest: observer.current, LatestDigest: observer.latest}, nil
+}
+
 func TestAppUIDeployDoesNotWaitForRegistryObservation(t *testing.T) {
 	observer := &blockingImageObserver{started: make(chan struct{}, 1), release: make(chan struct{})}
 	defer close(observer.release)
@@ -1315,6 +1342,113 @@ func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
 	if !ok || rolled.ImageDigest != current {
 		t.Fatalf("restarted rollback digest=%#v ok=%v", rolled, ok)
 	}
+}
+
+func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing.T) {
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	observer := &delayedImageObserver{
+		current: current, latest: latest,
+		started: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	state := &uiMemoryAppState{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		appState: state,
+		observer: observer,
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current {
+		t.Fatalf("precondition history=%#v ok=%v", got, ok)
+	}
+
+	observer.mu.Lock()
+	observer.block = true
+	observer.mu.Unlock()
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	delete(controller.imageRefresh, "media")
+	controller.mu.Unlock()
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	select {
+	case <-observer.started:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight observation did not start")
+	}
+
+	deleted := httptest.NewRecorder()
+	controller.ServeHTTP(deleted, uiJSONRequest(http.MethodPost, "/api/apps/media/delete", `{"confirm":"media"}`))
+	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
+		t.Fatalf("delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
+	}
+	if _, exists := controllerDeployment(controller, "media"); exists {
+		t.Fatal("delete left a rollout record")
+	}
+
+	recreated := httptest.NewRecorder()
+	controller.ServeHTTP(recreated, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if recreated.Code != http.StatusOK {
+		t.Fatalf("redeploy status=%d body=%s", recreated.Code, recreated.Body.String())
+	}
+	close(observer.release)
+	waitForImageObservation(t, controller, "media")
+
+	record, exists := controllerDeployment(controller, "media")
+	if exists && len(record.History) > 0 {
+		t.Fatalf("in-flight observe restored history after delete/redeploy: %#v", record)
+	}
+	apps := decodeAppList(t, recreated.Body.Bytes())
+	if len(apps) != 1 || hasAppAction(apps[0], OpsActionRollback) {
+		t.Fatalf("redeploy offered rollback from restored history: %#v", apps)
+	}
+	refreshed := httptest.NewRecorder()
+	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	listedApps := decodeAppList(t, refreshed.Body.Bytes())
+	if refreshed.Code != http.StatusOK || len(listedApps) != 1 || hasAppAction(listedApps[0], OpsActionRollback) {
+		t.Fatalf("list after in-flight observe offered rollback: %#v body=%s", listedApps, refreshed.Body.String())
+	}
+}
+
+func waitForImageObservation(t *testing.T, controller *Controller, appID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	idleSince := time.Time{}
+	for time.Now().Before(deadline) {
+		controller.mu.Lock()
+		refreshing := controller.imageRefresh[appID]
+		controller.mu.Unlock()
+		if refreshing {
+			idleSince = time.Time{}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if idleSince.IsZero() {
+			idleSince = time.Now()
+		}
+		if time.Since(idleSince) > 20*time.Millisecond {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("in-flight observation did not finish")
 }
 
 func TestPersistedDeploymentStoreWriteFailureKeepsPrior(t *testing.T) {
