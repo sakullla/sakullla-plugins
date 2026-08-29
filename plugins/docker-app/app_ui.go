@@ -647,8 +647,6 @@ func (controller *Controller) clearAppDeployment(ctx context.Context, appID stri
 	if controller.uiRollout.Store == nil {
 		return nil
 	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
 	record, ok, err := controller.uiRollout.Store.Load(ctx, appID)
 	if err != nil {
 		return err
@@ -832,25 +830,28 @@ func (controller *Controller) observeImageInBackground(app App, token uint64) {
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
 	controller.mu.Lock()
-	current, ok := controller.currentCatalogAppLocked(app)
-	if err != nil || controller.imageObserveToken[app.ID] != token || !ok {
+	currentApp, ok := controller.snapshotObservationLocked(app, token)
+	if err != nil || !ok {
 		controller.imageRefresh[app.ID] = false
 		controller.mu.Unlock()
 		return
 	}
-	currentApp := current
 	controller.mu.Unlock()
 	_, _ = controller.uiRollout.AutoUpdate(ctx, currentApp, currentApp.AutoUpdate, observed)
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.imageRefresh[app.ID] = false
-	if controller.imageObserveToken[app.ID] != token {
-		return
-	}
-	if _, still := controller.currentCatalogAppLocked(app); !still {
+	if _, still := controller.snapshotObservationLocked(app, token); !still {
 		return
 	}
 	controller.imageCache[app.ID] = cachedImageObservation{Image: currentApp.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+}
+
+func (controller *Controller) snapshotObservationLocked(app App, token uint64) (App, bool) {
+	if controller.imageObserveToken[app.ID] != token {
+		return App{}, false
+	}
+	return controller.currentCatalogAppLocked(app)
 }
 
 func (controller *Controller) currentCatalogAppLocked(app App) (App, bool) {

@@ -301,6 +301,29 @@ func TestDockerComposeOnlyConfirmUpdateRestoresPriorWithoutHTTPRule(t *testing.T
 	}
 }
 
+func TestDockerAutoUpdateDoesNotReseedDeletedDeployment(t *testing.T) {
+	app := dockerapp.App{ID: "media", Image: "nginx:latest", Generation: "generation-1", Compose: testComposeYAML("nginx:latest")}
+	store := dockerapp.NewDeploymentStore()
+	rollout := dockerapp.Rollout{Store: store, Auditor: dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {})}
+	if _, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"}); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := store.Load(context.Background(), app.ID)
+	if err != nil || !ok || record.Value.ImageDigest != "sha256:current" {
+		t.Fatalf("seeded=%#v ok=%v err=%v", record, ok, err)
+	}
+	if err := store.DeleteCAS(context.Background(), app.ID, record.Version, record.Value.FencingToken); err != nil {
+		t.Fatal(err)
+	}
+	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{CurrentDigest: "sha256:current", LatestDigest: "sha256:latest"})
+	if err == nil || !errors.Is(err, dockerapp.ErrReconcilePending) {
+		t.Fatalf("deleted reseed err=%v view=%#v", err, view)
+	}
+	if _, exists, err := store.Load(context.Background(), app.ID); err != nil || exists {
+		t.Fatalf("deleted deployment was reseeded exists=%v err=%v", exists, err)
+	}
+}
+
 func TestDockerObserveUpdateWithoutExecutorDoesNotPublish(t *testing.T) {
 	app := testApp("update-secret")
 	store := dockerapp.NewDeploymentStore()
