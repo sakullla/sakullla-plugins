@@ -845,8 +845,11 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 
 			denied := httptest.NewRecorder()
 			controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n"}`))
-			if strings.Contains(denied.Body.String(), sdkText) {
-				t.Fatalf("probe failure deploy leaked SDK text: %s", denied.Body.String())
+			if denied.Code == http.StatusOK || strings.Contains(denied.Body.String(), sdkText) {
+				t.Fatalf("probe failure deploy status=%d body=%s", denied.Code, denied.Body.String())
+			}
+			if len(controller.Apps()) != 0 {
+				t.Fatalf("probe failure deploy mutated apps: %#v", controller.Apps())
 			}
 		})
 	}
@@ -953,12 +956,10 @@ func TestAppUIDoesNotConfigurePluginOntoAgentOrOfferRemoteInstall(t *testing.T) 
 	if !strings.Contains(html, `id="engine-guide"`) || !strings.Contains(html, "复制命令") || !strings.Contains(script, "api/engine") || !strings.Contains(script, "api/apps") {
 		t.Fatalf("install guide or plugin-local deploy path missing: html=%s", html)
 	}
-	if strings.Contains(script, "targets") && strings.Contains(script, "selectedAgentID") && strings.Contains(script, "configure") {
+	if strings.Contains(script, "/panel-api/plugins/docker-app/configure") || strings.Contains(script, "/configure") {
 		t.Fatal("plugin page still configures docker-app onto the selected Agent")
 	}
-	if !strings.Contains(script, `agent.is_local !== true`) || !strings.Contains(script, `agent.mode !== "local"`) {
-		t.Fatal("plugin page does not exclude the embedded local management Agent from execution targets")
-	}
+	assertLoadAgentsKeepsDeployedInstanceTargets(t, html, script)
 }
 
 func TestAppUIRejectsInvalidComposeWithoutMutatingExisting(t *testing.T) {
@@ -2338,6 +2339,9 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if !strings.Contains(page, `id="app-node-empty"`) || !strings.Contains(page, `id="app-offline"`) || !strings.Contains(page, `id="engine-guide"`) {
 		t.Fatal("dedicated UI omits node-first empty/offline/unready guides")
 	}
+	if !strings.Contains(page, `id="app-undeployed"`) || !strings.Contains(page, "请先到插件详情页部署执行面") {
+		t.Fatal("empty copy does not tell the operator to deploy the execution face on the plugin detail page first")
+	}
 	if !strings.Contains(js, "api/apps?agent_id=") {
 		t.Fatal("list load is not node-scoped")
 	}
@@ -2481,6 +2485,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		`id="app-context"`,
 		`class="context-region"`,
 		`class="state-panel"`,
+		`id="app-undeployed"`,
 		`id="app-node-empty"`,
 		`id="app-offline"`,
 		`id="app-execution-unavailable"`,
@@ -2497,6 +2502,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		"搜索节点",
 		"最近活跃",
 		"/panel-api/agents",
+		"/panel-api/plugins/docker-app",
 		"agentPicker.onChange",
 		"引擎就绪",
 		"引擎未就绪",
@@ -2589,6 +2595,45 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	}
 	if !strings.Contains(loadCatch[:endCatch], `showContext("execution-unavailable")`) {
 		t.Fatal("loadEngine failure does not surface execution-face unavailability")
+	}
+	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, js)
+}
+
+func assertLoadAgentsKeepsDeployedInstanceTargets(t *testing.T, page, script string) {
+	t.Helper()
+	start := strings.Index(script, "const loadAgents = async () => {")
+	end := strings.Index(script, "agentPicker.onChange")
+	if start < 0 || end <= start {
+		t.Fatal("loadAgents is missing")
+	}
+	load := script[start:end]
+	for _, want := range []string{
+		"/panel-api/agents",
+		"/panel-api/plugins/docker-app",
+		"plugin.instances",
+		"instance.targets",
+		`agent.is_local !== true`,
+		`agent.mode !== "local"`,
+		"agentsCache = remotes.filter((agent) => deployed.has(agent.id))",
+	} {
+		if !strings.Contains(load, want) {
+			t.Fatalf("loadAgents missing %q", want)
+		}
+	}
+	if strings.Contains(load, "configure") {
+		t.Fatal("loadAgents still configures docker-app onto agents")
+	}
+	if strings.Contains(load, "? remotes") || strings.Contains(load, ": remotes") || strings.Contains(load, "|| remotes") {
+		t.Fatal("loadAgents treats all remotes as operable when the deployed list is empty")
+	}
+	if !strings.Contains(script, `showContext(agentsCache.length ? "empty" : "undeployed")`) {
+		t.Fatal("empty deployed list does not lock the picker and workspace")
+	}
+	if !strings.Contains(page, `id="app-undeployed"`) || !strings.Contains(page, "请先到插件详情页部署执行面") || !strings.Contains(page, "再回到本页部署或改动 Compose") {
+		t.Fatal("empty copy does not tell the operator to deploy the execution face on the plugin detail page first")
+	}
+	if !strings.Contains(script, "请先在插件详情页部署执行面") {
+		t.Fatal("empty picker copy does not point at the plugin detail page")
 	}
 }
 

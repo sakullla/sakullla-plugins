@@ -236,11 +236,14 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		report, err := controller.observeAgent(request.Context(), agentID)
 		if err != nil {
-			report = AgentEngineReport{AgentID: agentID, Online: true, Installed: true}
-		} else if !report.Online {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "engine")})
+			return
+		}
+		if !report.Online {
 			writeAppJSON(writer, appStatus(ErrAgentOffline), appAPIResponse{Error: publicAppActionError(ErrAgentOffline, "engine")})
 			return
-		} else if !ProjectEngine(ObservationFromReport(report)).Ready {
+		}
+		if !ProjectEngine(ObservationFromReport(report)).Ready {
 			writeAppJSON(writer, appStatus(ErrEngineNotReady), appAPIResponse{Error: publicAppActionError(ErrEngineNotReady, "engine")})
 			return
 		}

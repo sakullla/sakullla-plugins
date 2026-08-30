@@ -59,6 +59,7 @@ const diskCleanup = document.querySelector("#disk-cleanup");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
+const undeployedNode = document.querySelector("#app-undeployed");
 const offlineNode = document.querySelector("#app-offline");
 const executionUnavailableNode = document.querySelector("#app-execution-unavailable");
 const engineGuide = document.querySelector("#engine-guide");
@@ -572,7 +573,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     if (!items.length) {
       const empty = document.createElement("div");
       empty.className = "agent-search-select__empty";
-      empty.textContent = agentsCache.length ? "没有匹配的节点" : "暂无可用节点";
+      empty.textContent = agentsCache.length ? "没有匹配的节点" : "请先在插件详情页部署执行面";
       list.append(empty);
       return;
     }
@@ -846,11 +847,8 @@ const applyCreateTemplate = (name) => {
   composeInput.focus();
 };
 
-const dockerMissing = (engine) => agentOnline && engine && engine.online === true && engine.ready !== true;
-const canSaveOnAgent = () => selectedAgentID && agentOnline && !dockerMissing(lastEngine);
-
 const openCreate = async () => {
-  if (!canSaveOnAgent()) return;
+  if (!engineReady || !agentOnline) return;
   if (view === "detail" && !(await leaveDetail())) return;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
@@ -891,11 +889,11 @@ const syncListPanel = () => {
   const hasApps = listNode && listNode.children.length > 0;
   const creating = createPanel && createPanel.hidden === false;
   const inDetail = view === "detail";
-  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !agentOnline || dockerMissing(lastEngine) || hasApps || creating;
+  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps || creating;
   if (listPanel) listPanel.hidden = inDetail || creating;
   if (detailPanel) detailPanel.hidden = !inDetail;
   if (workspaceHead) workspaceHead.hidden = inDetail || creating;
-  const canOperate = canSaveOnAgent();
+  const canOperate = selectedAgentID && engineReady && agentOnline;
   if (deployToggle) deployToggle.hidden = inDetail || creating || !canOperate;
   if (diskCleanup) diskCleanup.hidden = inDetail || creating || !canOperate;
 };
@@ -2443,10 +2441,11 @@ const executionFaceUnavailable = (engine) => agentOnline && engine && engine.onl
 
 const showContext = (which) => {
   if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
+  if (undeployedNode) undeployedNode.hidden = which !== "undeployed";
   if (offlineNode) offlineNode.hidden = which !== "offline";
   if (executionUnavailableNode) executionUnavailableNode.hidden = which !== "execution-unavailable";
   if (engineGuide) engineGuide.hidden = which !== "unready";
-  if (contextNode) contextNode.hidden = which !== "empty" && which !== "offline" && which !== "execution-unavailable";
+  if (contextNode) contextNode.hidden = which !== "empty" && which !== "undeployed" && which !== "offline" && which !== "execution-unavailable";
 };
 
 const renderApps = (apps) => {
@@ -2503,7 +2502,7 @@ const renderWorkspace = async () => {
   if (!selectedAgentID) {
     leaveDetail({ force: true });
     renderEngineBadge(null);
-    showContext("empty");
+    showContext(agentsCache.length ? "empty" : "undeployed");
     return;
   }
   if (!agentOnline) {
@@ -2530,10 +2529,10 @@ const renderWorkspace = async () => {
   lastEngine = engine;
   engineReady = engine?.ready === true;
   renderEngineBadge(engine);
-  if (dockerMissing(engine)) {
+  if (!engineReady) {
     leaveDetail({ force: true });
     renderGuide(engine);
-    showContext("unready");
+    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : "unready");
     return;
   }
   showContext("");
@@ -2557,9 +2556,20 @@ const renderWorkspace = async () => {
 
 const loadAgents = async () => {
   const payload = await panelJSON("/panel-api/agents");
-  agentsCache = Array.isArray(payload.agents)
+  const remotes = Array.isArray(payload.agents)
     ? payload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local")
     : [];
+  const plugin = await panelJSON("/panel-api/plugins/docker-app");
+  const deployed = new Set();
+  const instances = Array.isArray(plugin.instances) ? plugin.instances : [];
+  instances.forEach((instance) => {
+    const targets = Array.isArray(instance && instance.targets) ? instance.targets : [];
+    targets.forEach((target) => {
+      const id = String(target || "").trim();
+      if (id) deployed.add(id);
+    });
+  });
+  agentsCache = remotes.filter((agent) => deployed.has(agent.id));
   const requested = new URLSearchParams(window.location.search).get("agent_id") || "";
   selectedAgentID = agentsCache.some((agent) => agent.id === requested)
     ? requested
@@ -2596,7 +2606,7 @@ if (deployToggle) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (dockerMissing(lastEngine)) {
+    if (!engineReady) {
       showUnreadyGuide(lastEngine);
       showStatus("引擎未就绪，请先在该节点本机安装 Docker。", true);
       return;
@@ -2780,7 +2790,7 @@ if (composeForm) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (dockerMissing(lastEngine)) {
+    if (!engineReady) {
       showStatus("引擎未就绪，不能部署。", true);
       return;
     }
@@ -2823,7 +2833,7 @@ if (createForm) {
       showStatus("该节点离线，不能部署。", true);
       return;
     }
-    if (dockerMissing(lastEngine)) {
+    if (!engineReady) {
       showStatus("引擎未就绪，不能部署。", true);
       return;
     }
