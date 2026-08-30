@@ -39,6 +39,15 @@
     <p id="app-denied" role="alert" hidden>无权管理 Shadowsocks 服务。</p>
     <p id="app-status" role="status" hidden></p>
     <section id="app-context" class="context-region" hidden>
+      <section class="state-panel" id="app-undeployed" hidden>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <div>
+            <h2>还没有可操作的节点</h2>
+            <p>请先到插件详情页部署执行面，再回到本页新增或改动监听。</p>
+          </div>
+        </div>
+      </section>
       <section class="state-panel" id="app-node-empty" hidden>
         <div class="setup-hero">
           <span class="setup-mark" data-kind="node" aria-hidden="true"></span>

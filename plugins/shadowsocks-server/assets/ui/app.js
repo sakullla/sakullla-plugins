@@ -46,6 +46,7 @@ const detailActions = document.querySelector("#detail-actions");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
+const undeployedNode = document.querySelector("#app-undeployed");
 const offlineNode = document.querySelector("#app-offline");
 const executionUnavailableNode = document.querySelector("#app-execution-unavailable");
 const executionStatus = document.querySelector("#execution-status");
@@ -511,7 +512,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     if (!items.length) {
       const empty = document.createElement("div");
       empty.className = "agent-search-select__empty";
-      empty.textContent = agentsCache.length ? "没有匹配的节点" : "暂无可用节点";
+      empty.textContent = agentsCache.length ? "没有匹配的节点" : "请先在插件详情页部署执行面";
       list.append(empty);
       return;
     }
@@ -647,6 +648,7 @@ const showContext = (kind) => {
   if (!contextNode) return;
   contextNode.hidden = !kind;
   if (nodeEmpty) nodeEmpty.hidden = kind !== "empty";
+  if (undeployedNode) undeployedNode.hidden = kind !== "undeployed";
   if (offlineNode) offlineNode.hidden = kind !== "offline";
   if (executionUnavailableNode) executionUnavailableNode.hidden = kind !== "execution-unavailable";
 };
@@ -1142,7 +1144,7 @@ const renderWorkspace = async () => {
   agentOnline = isAgentOnline(agent);
   closeCreate();
   if (!selectedAgentID) {
-    clearWorkspace("empty");
+    clearWorkspace(agentsCache.length ? "empty" : "undeployed");
     return;
   }
   if (!agentOnline) {
@@ -1183,9 +1185,20 @@ const renderWorkspace = async () => {
 
 const loadAgents = async () => {
   const payload = await panelJSON("/panel-api/agents");
-  agentsCache = Array.isArray(payload.agents)
+  const remotes = Array.isArray(payload.agents)
     ? payload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local")
     : [];
+  const plugin = await panelJSON("/panel-api/plugins/shadowsocks-server");
+  const deployed = new Set();
+  const instances = Array.isArray(plugin.instances) ? plugin.instances : [];
+  instances.forEach((instance) => {
+    const targets = Array.isArray(instance && instance.targets) ? instance.targets : [];
+    targets.forEach((target) => {
+      const id = String(target || "").trim();
+      if (id) deployed.add(id);
+    });
+  });
+  agentsCache = remotes.filter((agent) => deployed.has(agent.id));
   const requested = new URLSearchParams(window.location.search).get("agent_id") || "";
   selectedAgentID = agentsCache.some((agent) => agent.id === requested)
     ? requested
