@@ -766,23 +766,98 @@ func TestPruneOutputEmptyClassifiesEachFullReport(t *testing.T) {
 
 func TestControllerCallImagePreviewPruneFailsOnCommandError(t *testing.T) {
 	t.Parallel()
-	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
-		if strings.Join(args, " ") == "system df" {
-			return []byte("Cannot connect to the Docker daemon"), errors.New("exit status 1")
+
+	t.Run("docker-unavailable", func(t *testing.T) {
+		t.Parallel()
+		controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+			if strings.Join(args, " ") == "system df" {
+				return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), errors.New("exit status 1")
+			}
+			t.Fatalf("preview invoked %q", strings.Join(args, " "))
+			return nil, errors.New("unexpected command")
+		}), nil)
+		decoded := callPreviewDiskCleanup(t, controller)
+		if decoded["status"] != diskCleanupStatusFailed || decoded["failure_kind"] != diskCleanupFailureDockerUnavailable {
+			t.Fatalf("docker-unavailable preview=%#v", decoded)
 		}
-		t.Fatalf("preview invoked %q", strings.Join(args, " "))
-		return nil, errors.New("unexpected command")
-	}), nil)
+		if decoded["images_status"] != diskCleanupStatusFailed || decoded["builder_cache_status"] != diskCleanupStatusFailed {
+			t.Fatalf("docker-unavailable step status=%#v", decoded)
+		}
+		images, _ := decoded["images"].(string)
+		if !strings.Contains(images, "Cannot connect to the Docker daemon") {
+			t.Fatalf("docker-unavailable dropped public reason: %#v", decoded)
+		}
+		if strings.Contains(images, "unix://") || strings.Contains(images, "docker.sock") || strings.Contains(images, "npipe:") {
+			t.Fatalf("docker-unavailable leaked socket: %#v", decoded)
+		}
+		assertDiskCleanupPreviewNotTypedHandleLoss(t, decoded)
+	})
+
+	t.Run("readonly-stats", func(t *testing.T) {
+		t.Parallel()
+		controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+			if strings.Join(args, " ") == "system df" {
+				return []byte("permission denied while reading disk usage"), errors.New("exit status 1")
+			}
+			t.Fatalf("preview invoked %q", strings.Join(args, " "))
+			return nil, errors.New("unexpected command")
+		}), nil)
+		decoded := callPreviewDiskCleanup(t, controller)
+		if decoded["status"] != diskCleanupStatusFailed || decoded["failure_kind"] != diskCleanupFailureReadonlyStats {
+			t.Fatalf("readonly-stats preview=%#v", decoded)
+		}
+		images, _ := decoded["images"].(string)
+		if !strings.Contains(images, "permission denied") {
+			t.Fatalf("readonly-stats dropped public reason: %#v", decoded)
+		}
+		assertDiskCleanupPreviewNotTypedHandleLoss(t, decoded)
+		if decoded["failure_kind"] == diskCleanupFailureDockerUnavailable {
+			t.Fatal("readonly-stats reused docker-unavailable")
+		}
+	})
+
+	t.Run("one-line-socket-error-keeps-public-reason", func(t *testing.T) {
+		t.Parallel()
+		got := sanitizePruneReport("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\nnpipe:////./pipe/docker_engine\npassword=fixture-value")
+		if !strings.Contains(got, "Cannot connect to the Docker daemon") {
+			t.Fatalf("sanitize dropped public docker reason: %q", got)
+		}
+		if strings.Contains(got, "unix://") || strings.Contains(got, "docker.sock") || strings.Contains(got, "npipe:") || strings.Contains(got, "fixture-value") {
+			t.Fatalf("sanitize leaked socket or secret: %q", got)
+		}
+	})
+}
+
+func callPreviewDiskCleanup(t *testing.T, controller *Controller) map[string]any {
+	t.Helper()
 	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
-	if err == nil {
-		t.Fatalf("preview succeeded after prune error: %s", raw)
+	if err != nil {
+		t.Fatalf("preview df failure returned Go error: %v raw=%s", err, raw)
 	}
-	if !strings.Contains(err.Error(), "disk prune failed") {
-		t.Fatalf("preview err=%v", err)
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+func assertDiskCleanupPreviewNotTypedHandleLoss(t *testing.T, decoded map[string]any) {
+	t.Helper()
+	kind, _ := decoded["failure_kind"].(string)
+	if kind == "" || kind == diskCleanupUnavailableMessage || kind == ErrTypedHandlesUnavailable.Error() {
+		t.Fatalf("preview failure_kind collapsed to typed-handle loss: %#v", decoded)
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+	if strings.Contains(body, diskCleanupUnavailableMessage) || strings.Contains(body, ErrTypedHandlesUnavailable.Error()) {
+		t.Fatalf("preview payload reused typed-handle unavailable: %s", body)
 	}
 }
 
@@ -875,7 +950,7 @@ func TestControllerCallImagePruneCleansUnusedImagesAndBuilderCache(t *testing.T)
 			}
 			switch strings.Join(args, " ") {
 			case "image prune -f":
-				return []byte("Cannot connect to the Docker daemon\nunix:///var/run/docker.sock\npassword=fixture-value\n"), errors.New("exit status 1")
+				return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\npassword=fixture-value\n"), errors.New("exit status 1")
 			case "builder prune -f --keep-storage 2GB":
 				return []byte("Total:  4MB\n"), nil
 			default:

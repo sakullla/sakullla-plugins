@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -205,12 +206,18 @@ func (runtime *hostCapabilityRuntime) RemoveApp(ctx context.Context, app App) er
 	return runtime.composeApp(ctx, app, payload, nil)
 }
 
+const (
+	diskCleanupFailureDockerUnavailable = "docker-unavailable"
+	diskCleanupFailureReadonlyStats     = "readonly-stats"
+)
+
 type DiskCleanupReport struct {
 	Accepted           bool   `json:"accepted"`
 	Preview            bool   `json:"preview"`
 	Empty              bool   `json:"empty"`
 	Unchanged          bool   `json:"unchanged,omitempty"`
 	Status             string `json:"status,omitempty"`
+	FailureKind        string `json:"failure_kind,omitempty"`
 	Images             string `json:"images,omitempty"`
 	ImagesStatus       string `json:"images_status,omitempty"`
 	BuilderCache       string `json:"builder_cache,omitempty"`
@@ -708,4 +715,13 @@ func containsLocalDockerMarker(lower string) bool {
 		}
 	}
 	return false
+}
+
+var localDockerTokenPattern = regexp.MustCompile(`(?i)(?:npipe:[^\s,;]+|unix://[^\s,;]+|//\./pipe/[^\s,;]+|[^\s,;]*docker\.socket|[^\s,;]*docker\.sock)`)
+
+func redactLocalDockerMarkers(text string) string {
+	if text == "" {
+		return ""
+	}
+	return strings.TrimSpace(localDockerTokenPattern.ReplaceAllString(text, "***"))
 }

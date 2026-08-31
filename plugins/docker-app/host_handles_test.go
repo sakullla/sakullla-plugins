@@ -895,6 +895,72 @@ func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 	if _, err := runtime.PreviewDiskCleanup(context.Background(), ""); !errors.Is(err, ErrAgentOffline) {
 		t.Fatalf("missing agent err=%v", err)
 	}
+
+	t.Run("preview-docker-unavailable-is-not-typed-handle-loss", func(t *testing.T) {
+		t.Parallel()
+		client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+			request := decodePluginCallRequest(t, call)
+			if request.Name != pluginCallImageName {
+				t.Fatalf("plugin.call = %#v", request)
+			}
+			return copyHostResult(map[string]any{
+				"accepted": true, "preview": true, "empty": false, "status": "failed",
+				"failure_kind": diskCleanupFailureDockerUnavailable,
+				"images":       "Cannot connect to the Docker daemon", "images_status": "failed",
+				"builder_cache": "Cannot connect to the Docker daemon", "builder_cache_status": "failed",
+			}, target)
+		})
+		report, err := newHostCapabilityRuntime(client).PreviewDiskCleanup(context.Background(), "agent-1")
+		if err != nil {
+			t.Fatalf("docker-unavailable wrapped as %v", err)
+		}
+		if errors.Is(err, ErrTypedHandlesUnavailable) || report.FailureKind != diskCleanupFailureDockerUnavailable || report.Status != diskCleanupStatusFailed {
+			t.Fatalf("docker-unavailable report=%#v err=%v", report, err)
+		}
+		if report.FailureKind == diskCleanupUnavailableMessage {
+			t.Fatal("docker-unavailable reused diskCleanupUnavailableMessage")
+		}
+	})
+
+	t.Run("preview-readonly-stats-is-not-typed-handle-loss", func(t *testing.T) {
+		t.Parallel()
+		client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+			request := decodePluginCallRequest(t, call)
+			if request.Name != pluginCallImageName {
+				t.Fatalf("plugin.call = %#v", request)
+			}
+			return copyHostResult(map[string]any{
+				"accepted": true, "preview": true, "empty": false, "status": "failed",
+				"failure_kind": diskCleanupFailureReadonlyStats,
+				"images":       "permission denied", "images_status": "failed",
+				"builder_cache": "permission denied", "builder_cache_status": "failed",
+			}, target)
+		})
+		report, err := newHostCapabilityRuntime(client).PreviewDiskCleanup(context.Background(), "agent-1")
+		if err != nil {
+			t.Fatalf("readonly-stats wrapped as %v", err)
+		}
+		if errors.Is(err, ErrTypedHandlesUnavailable) || report.FailureKind != diskCleanupFailureReadonlyStats || report.Status != diskCleanupStatusFailed {
+			t.Fatalf("readonly-stats report=%#v err=%v", report, err)
+		}
+		if report.FailureKind == diskCleanupFailureDockerUnavailable || report.FailureKind == diskCleanupUnavailableMessage {
+			t.Fatal("readonly-stats reused another public failure class")
+		}
+	})
+
+	t.Run("preview-transport-error-is-typed-handle-unavailable", func(t *testing.T) {
+		t.Parallel()
+		client := hostCallFunc(func(context.Context, pluginsdk.HostRuntimeCall, any) error {
+			return errors.New("plugin.call transport lost")
+		})
+		_, err := newHostCapabilityRuntime(client).PreviewDiskCleanup(context.Background(), "agent-1")
+		if !errors.Is(err, ErrTypedHandlesUnavailable) {
+			t.Fatalf("transport err=%v", err)
+		}
+		if publicAppActionError(err, "disk-cleanup") != diskCleanupUnavailableMessage {
+			t.Fatalf("transport public=%q", publicAppActionError(err, "disk-cleanup"))
+		}
+	})
 }
 
 func decodePluginCallRequest(t *testing.T, call pluginsdk.HostRuntimeCall) pluginsdk.PluginCallRequest {

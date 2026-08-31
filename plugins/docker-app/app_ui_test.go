@@ -875,6 +875,59 @@ func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOpEligibility(t *testing.
 		if strings.Contains(rec.Body.String(), sdkText) || strings.Contains(rec.Body.String(), generic) || strings.Contains(rec.Body.String(), ErrEngineNotReady.Error()) {
 			t.Fatalf("typed-handle unavailable reused another public error: %s", rec.Body.String())
 		}
+		if strings.Contains(rec.Body.String(), diskCleanupDockerUnavailableMessage) || strings.Contains(rec.Body.String(), diskCleanupReadonlyStatsMessage) {
+			t.Fatalf("typed-handle unavailable reused a df-failure public error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("preview-docker-unavailable", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{
+			preview: DiskCleanupReport{
+				Accepted: true, Preview: true, Empty: false,
+				Status: diskCleanupStatusFailed, FailureKind: diskCleanupFailureDockerUnavailable,
+				Images: "Cannot connect to the Docker daemon", ImagesStatus: diskCleanupStatusFailed,
+				BuilderCache: "Cannot connect to the Docker daemon", BuilderCacheStatus: diskCleanupStatusFailed,
+			},
+		}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiRequest(http.MethodGet, "/api/disk-cleanup?agent_id=agent-1", ""))
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK || !strings.Contains(body, `"failure_kind":"docker-unavailable"`) {
+			t.Fatalf("docker-unavailable preview status=%d body=%s", rec.Code, body)
+		}
+		if strings.Contains(body, diskCleanupUnavailableMessage) || strings.Contains(body, diskCleanupReadonlyStatsMessage) {
+			t.Fatalf("docker-unavailable reused another public error: %s", body)
+		}
+		if diskCleanupFailurePublicMessage(diskCleanupFailureDockerUnavailable) == diskCleanupUnavailableMessage {
+			t.Fatal("docker-unavailable public message collided with typed-handle loss")
+		}
+	})
+
+	t.Run("preview-readonly-stats", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{
+			preview: DiskCleanupReport{
+				Accepted: true, Preview: true, Empty: false,
+				Status: diskCleanupStatusFailed, FailureKind: diskCleanupFailureReadonlyStats,
+				Images: "permission denied", ImagesStatus: diskCleanupStatusFailed,
+				BuilderCache: "permission denied", BuilderCacheStatus: diskCleanupStatusFailed,
+			},
+		}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiRequest(http.MethodGet, "/api/disk-cleanup?agent_id=agent-1", ""))
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK || !strings.Contains(body, `"failure_kind":"readonly-stats"`) {
+			t.Fatalf("readonly-stats preview status=%d body=%s", rec.Code, body)
+		}
+		if strings.Contains(body, diskCleanupUnavailableMessage) || strings.Contains(body, diskCleanupDockerUnavailableMessage) {
+			t.Fatalf("readonly-stats reused another public error: %s", body)
+		}
+		if diskCleanupFailurePublicMessage(diskCleanupFailureReadonlyStats) == diskCleanupFailurePublicMessage(diskCleanupFailureDockerUnavailable) {
+			t.Fatal("readonly-stats public message collided with docker-unavailable")
+		}
 	})
 
 	t.Run("empty-preview", func(t *testing.T) {
@@ -928,6 +981,8 @@ func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOpEligibility(t *testing.
 			ErrAgentOffline.Error(),
 			ErrEngineNotReady.Error(),
 			diskCleanupUnavailableMessage,
+			diskCleanupDockerUnavailableMessage,
+			diskCleanupReadonlyStatsMessage,
 		}
 		seen := map[string]string{}
 		for _, msg := range want {
@@ -938,6 +993,9 @@ func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOpEligibility(t *testing.
 		}
 		if generic == diskCleanupUnavailableMessage {
 			t.Fatal("typed-handle unavailable reused the generic disk-cleanup failure")
+		}
+		if diskCleanupDockerUnavailableMessage == diskCleanupUnavailableMessage || diskCleanupReadonlyStatsMessage == diskCleanupUnavailableMessage {
+			t.Fatal("preview df failures reused diskCleanupUnavailableMessage")
 		}
 	})
 }
@@ -3591,10 +3649,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(html, `id="disk-cleanup"`) || !strings.Contains(html, "清理磁盘") {
 		t.Fatal("workspace is missing the node disk cleanup entry")
 	}
-	cleanupStart := strings.Index(js, "const formatDiskCleanupBody = (cleanup) => {")
+	cleanupStart := strings.Index(js, "const diskCleanupFailureKindLabel = (kind) => {")
+	bodyStart := strings.Index(js, "const formatDiskCleanupBody = (cleanup) => {")
 	diskRunStart := strings.Index(js, "const runDiskCleanup = async () => {")
 	cleanupEnd := strings.Index(js, "if (diskCleanup) {")
-	if cleanupStart < 0 || diskRunStart < cleanupStart || cleanupEnd <= diskRunStart {
+	if cleanupStart < 0 || bodyStart < cleanupStart || diskRunStart < bodyStart || cleanupEnd <= diskRunStart {
 		t.Fatal("runDiskCleanup is missing")
 	}
 	cleanupFn := js[diskRunStart:cleanupEnd]
@@ -3619,6 +3678,16 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	}
 	if !strings.Contains(cleanupFn, "hideConfirm: empty") {
 		t.Fatal("empty preview still shows a deleting confirm action")
+	}
+	failedPreview := strings.Index(cleanupFn, "diskCleanupPreviewFailed")
+	askAfterFail := strings.Index(cleanupFn, "askConfirm")
+	if failedPreview < 0 || askAfterFail < 0 || askAfterFail < failedPreview {
+		t.Fatal("failed df preview still opens a prune confirm")
+	}
+	for _, want := range []string{"failure_kind", "docker-unavailable", "readonly-stats"} {
+		if !strings.Contains(copyFn, want) {
+			t.Fatalf("cleanup preview missing %q", want)
+		}
 	}
 	for _, want := range []string{"估算值", "dangling", "keep-storage", "2GB", "数据卷"} {
 		if !strings.Contains(copyFn, want) {

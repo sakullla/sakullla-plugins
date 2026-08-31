@@ -19,13 +19,26 @@ import (
 var appUIAssets embed.FS
 
 const (
-	appActorHeader                  = pluginsdk.HeaderPluginActor
-	appOperationHeader              = pluginsdk.HeaderPluginOperationKey
-	appUnavailableMessage           = "暂时无法管理 Docker 应用。"
-	diskCleanupUnavailableMessage   = "磁盘清理执行面不可用，请确认目标 Agent 在线后重试"
-	diskCleanupAgentIDRequiredError = "agent_id is required"
-	diskCleanupAgentIDInvalidError  = "agent_id is invalid"
+	appActorHeader                      = pluginsdk.HeaderPluginActor
+	appOperationHeader                  = pluginsdk.HeaderPluginOperationKey
+	appUnavailableMessage               = "暂时无法管理 Docker 应用。"
+	diskCleanupUnavailableMessage       = "磁盘清理执行面不可用，请确认目标 Agent 在线后重试"
+	diskCleanupDockerUnavailableMessage = "无法连接目标节点的 Docker，请确认 Docker 已启动后重试"
+	diskCleanupReadonlyStatsMessage     = "读取节点磁盘占用失败，请稍后重试"
+	diskCleanupAgentIDRequiredError     = "agent_id is required"
+	diskCleanupAgentIDInvalidError      = "agent_id is invalid"
 )
+
+func diskCleanupFailurePublicMessage(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case diskCleanupFailureDockerUnavailable:
+		return diskCleanupDockerUnavailableMessage
+	case diskCleanupFailureReadonlyStats:
+		return diskCleanupReadonlyStatsMessage
+	default:
+		return ""
+	}
+}
 
 type appView struct {
 	ID         string            `json:"id"`

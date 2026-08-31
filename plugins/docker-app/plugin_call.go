@@ -462,7 +462,19 @@ func (controller *Controller) callDiskPrune(ctx context.Context, preview, confir
 func (controller *Controller) previewDiskCleanup(ctx context.Context) ([]byte, error) {
 	output, err := controller.runCommand(ctx, "", "docker", systemDfArgs()...)
 	if err != nil {
-		return nil, pruneCallFailure(output, nil, err, nil)
+		text, _ := diskCleanupStepReport(output, err)
+		kind := classifyDiskCleanupPreviewFailure(output, err)
+		return json.Marshal(DiskCleanupReport{
+			Accepted:           true,
+			Preview:            true,
+			Empty:              false,
+			Status:             diskCleanupStatusFailed,
+			FailureKind:        kind,
+			Images:             text,
+			ImagesStatus:       diskCleanupStatusFailed,
+			BuilderCache:       text,
+			BuilderCacheStatus: diskCleanupStatusFailed,
+		})
 	}
 	images, cache := parseSystemDf(normalizeCommandOutput(output))
 	imageText := sanitizePruneReport(formatDfEstimate(images))
@@ -654,7 +666,8 @@ func sanitizePruneReport(text string) string {
 		if line == "" {
 			continue
 		}
-		if containsLocalDockerMarker(strings.ToLower(line)) {
+		line = redactLocalDockerMarkers(line)
+		if line == "" || line == "***" {
 			continue
 		}
 		kept = append(kept, line)
@@ -666,22 +679,28 @@ func sanitizePruneReport(text string) string {
 	return report
 }
 
-func pruneCallFailure(imageOut, builderOut []byte, imageErr, builderErr error) error {
-	cause := sanitizePruneReport(strings.TrimSpace(string(imageOut) + "\n" + string(builderOut)))
-	if cause == "" {
-		if imageErr != nil {
-			cause = publicCause(imageErr)
-		} else if builderErr != nil {
-			cause = publicCause(builderErr)
-		}
+func classifyDiskCleanupPreviewFailure(output []byte, err error) string {
+	lower := strings.ToLower(strings.TrimSpace(string(output)))
+	if err != nil {
+		lower += "\n" + strings.ToLower(err.Error())
 	}
-	if cause == "" {
-		return errors.New("disk prune failed")
+	if diskCleanupDockerUnavailable(lower) {
+		return diskCleanupFailureDockerUnavailable
 	}
-	if strings.Contains(cause, "\n") {
-		cause = strings.SplitN(cause, "\n", 2)[0]
+	return diskCleanupFailureReadonlyStats
+}
+
+func diskCleanupDockerUnavailable(lower string) bool {
+	switch {
+	case strings.Contains(lower, "cannot connect"):
+		return true
+	case strings.Contains(lower, "error during connect"):
+		return true
+	case strings.Contains(lower, "docker daemon") && (strings.Contains(lower, "connect") || strings.Contains(lower, "not running") || strings.Contains(lower, "is the docker daemon")):
+		return true
+	default:
+		return false
 	}
-	return fmt.Errorf("disk prune failed: %s", cause)
 }
 
 func commandHasVolumeDeletion(command string) bool {

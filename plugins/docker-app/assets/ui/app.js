@@ -2639,7 +2639,34 @@ const diskCleanupStatusLabel = (status) => {
   }
 };
 
+const diskCleanupFailureKindLabel = (kind) => {
+  switch (String(kind || "").trim()) {
+    case "docker-unavailable":
+      return "无法连接目标节点的 Docker，请确认 Docker 已启动后重试";
+    case "readonly-stats":
+      return "读取节点磁盘占用失败，请稍后重试";
+    default:
+      return "";
+  }
+};
+
+const diskCleanupPreviewFailed = (cleanup) => {
+  if (!cleanup) return false;
+  const kind = String(cleanup.failure_kind || "").trim();
+  return cleanup.status === "failed" || kind === "docker-unavailable" || kind === "readonly-stats";
+};
+
+const formatDiskCleanupPreviewFailure = (cleanup) => {
+  const kind = diskCleanupFailureKindLabel(cleanup && cleanup.failure_kind);
+  const detail = String((cleanup && (cleanup.images || cleanup.builder_cache)) || "").trim();
+  if (kind && detail && detail !== kind) return `${kind}\n${detail}`;
+  return kind || "读取节点磁盘占用失败，请稍后重试";
+};
+
 const formatDiskCleanupBody = (cleanup) => {
+  if (diskCleanupPreviewFailed(cleanup)) {
+    return formatDiskCleanupPreviewFailure(cleanup);
+  }
   const policy = "以下为估算值。将只删除 dangling 镜像（无标签且未被容器引用），构建缓存按 keep-storage 保留 2GB，数据卷不受影响。";
   if (!cleanup || cleanup.empty) {
     return `${policy}\n\n没有可清理的闲置镜像或构建缓存。关闭不会更改节点。`;
@@ -2698,6 +2725,10 @@ const runDiskCleanup = async () => {
     return;
   }
   setBusy(false);
+  if (diskCleanupPreviewFailed(previewed)) {
+    showStatus(formatDiskCleanupPreviewFailure(previewed), true);
+    return;
+  }
   const empty = !previewed || previewed.empty === true;
   const ok = await askConfirm({
     title: "清理节点磁盘",
