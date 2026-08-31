@@ -206,12 +206,15 @@ func (runtime *hostCapabilityRuntime) RemoveApp(ctx context.Context, app App) er
 }
 
 type DiskCleanupReport struct {
-	Accepted     bool   `json:"accepted"`
-	Preview      bool   `json:"preview"`
-	Empty        bool   `json:"empty"`
-	Unchanged    bool   `json:"unchanged,omitempty"`
-	Images       string `json:"images,omitempty"`
-	BuilderCache string `json:"builder_cache,omitempty"`
+	Accepted           bool   `json:"accepted"`
+	Preview            bool   `json:"preview"`
+	Empty              bool   `json:"empty"`
+	Unchanged          bool   `json:"unchanged,omitempty"`
+	Status             string `json:"status,omitempty"`
+	Images             string `json:"images,omitempty"`
+	ImagesStatus       string `json:"images_status,omitempty"`
+	BuilderCache       string `json:"builder_cache,omitempty"`
+	BuilderCacheStatus string `json:"builder_cache_status,omitempty"`
 }
 
 type DiskCleanupHandle interface {

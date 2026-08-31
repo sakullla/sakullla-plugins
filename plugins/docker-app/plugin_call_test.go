@@ -639,13 +639,13 @@ func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
 		if commandHasVolumeDeletion(command) {
 			t.Fatalf("volume deletion command %q", command)
 		}
-		if !strings.Contains(command, "--dry-run") {
+		if strings.Contains(command, "prune") || strings.Contains(command, "--dry-run") {
 			t.Fatalf("preview prune mutated: %q", command)
 		}
-		if strings.Contains(command, "builder prune") {
-			return []byte("Total:  0B"), nil
+		if strings.Join(args, " ") != "system df" {
+			t.Fatalf("preview command %q", command)
 		}
-		return []byte("Total reclaimed space: 0B"), nil
+		return []byte("TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE\nImages          2         2         1.2GB     0B (0%)\nContainers      1         1         12B       0B (0%)\nLocal Volumes   1         1         500MB     0B (0%)\nBuild Cache     4         0         2.1GB     0B\n"), nil
 	})
 	controller := newCallController(t, t.TempDir(), runner, nil)
 	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
@@ -663,7 +663,15 @@ func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
 	if decoded["preview"] != true || decoded["empty"] != true {
 		t.Fatalf("preview result=%#v", decoded)
 	}
-	if !containsCommand(commands, "image prune -a --dry-run") || !containsCommand(commands, "builder prune --dry-run") {
+	images, _ := decoded["images"].(string)
+	builder, _ := decoded["builder_cache"].(string)
+	if !strings.Contains(images, "SIZE 1.2GB") || !strings.Contains(images, "RECLAIMABLE 0B (0%)") {
+		t.Fatalf("preview missing image estimates: %#v", decoded)
+	}
+	if !strings.Contains(builder, "SIZE 2.1GB") || !strings.Contains(builder, "RECLAIMABLE 0B") {
+		t.Fatalf("preview missing builder estimates: %#v", decoded)
+	}
+	if !containsCommand(commands, "system df") {
 		t.Fatalf("preview commands=%q", commands)
 	}
 }
@@ -675,10 +683,10 @@ func TestControllerCallImagePreviewPruneKeepsMultilineReport(t *testing.T) {
 		if commandHasVolumeDeletion(command) {
 			t.Fatalf("volume deletion command %q", command)
 		}
-		if strings.Contains(command, "image prune") {
-			return []byte("WARNING! This will remove unused images.\nDeleted Images:\nuntagged: nginx:old\nTotal reclaimed space: 12MB\npassword=fixture-value\nunix:///var/run/docker.sock\n"), nil
+		if command != "system df" {
+			t.Fatalf("preview command %q", command)
 		}
-		return []byte("ID\tRECLAIMABLE\ncache\t4MB\nTotal:  4MB\n"), nil
+		return []byte("TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE\nImages          3         1         1.2GB     12MB (1%)\npassword=fixture-value\nunix:///var/run/docker.sock\nBuild Cache     8         0         4MB       4MB\n"), nil
 	})
 	controller := newCallController(t, t.TempDir(), runner, nil)
 	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
@@ -695,11 +703,11 @@ func TestControllerCallImagePreviewPruneKeepsMultilineReport(t *testing.T) {
 	}
 	images, _ := decoded["images"].(string)
 	builder, _ := decoded["builder_cache"].(string)
-	if decoded["empty"] == true || !strings.Contains(images, "untagged: nginx:old") || !strings.Contains(images, "Total reclaimed space: 12MB") {
-		t.Fatalf("preview dropped reclaimable image lines: %#v", decoded)
+	if decoded["empty"] == true || !strings.Contains(images, "SIZE 1.2GB") || !strings.Contains(images, "RECLAIMABLE 12MB (1%)") {
+		t.Fatalf("preview dropped reclaimable image estimates: %#v", decoded)
 	}
-	if !strings.Contains(builder, "Total:  4MB") {
-		t.Fatalf("preview dropped builder cache lines: %#v", decoded)
+	if !strings.Contains(builder, "SIZE 4MB") || !strings.Contains(builder, "RECLAIMABLE 4MB") {
+		t.Fatalf("preview dropped builder cache estimates: %#v", decoded)
 	}
 	if strings.Contains(images, "fixture-value") || strings.Contains(images, "docker.sock") || strings.Contains(builder, "docker.sock") {
 		t.Fatalf("preview leaked secret or socket: %#v", decoded)
@@ -713,10 +721,10 @@ func TestControllerCallImagePreviewPruneMixedZeroImageAndBuilderCacheNotEmpty(t 
 		if commandHasVolumeDeletion(command) {
 			t.Fatalf("volume deletion command %q", command)
 		}
-		if strings.Contains(command, "image prune") {
-			return []byte("WARNING! This will remove all images without at least one container associated to them.\nTotal reclaimed space: 0B\n"), nil
+		if command != "system df" {
+			t.Fatalf("preview command %q", command)
 		}
-		return []byte("ID\tRECLAIMABLE\ncache\t4MB\nTotal:  4MB\n"), nil
+		return []byte("TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE\nImages          2         2         1.2GB     0B (0%)\nBuild Cache     8         0         4MB       4MB\n"), nil
 	})
 	controller := newCallController(t, t.TempDir(), runner, nil)
 	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
@@ -735,7 +743,7 @@ func TestControllerCallImagePreviewPruneMixedZeroImageAndBuilderCacheNotEmpty(t 
 	if decoded["empty"] == true {
 		t.Fatalf("0B images plus reclaimable builder cache reported empty: %#v", decoded)
 	}
-	if !strings.Contains(builder, "Total:  4MB") {
+	if !strings.Contains(builder, "RECLAIMABLE 4MB") {
 		t.Fatalf("builder cache report missing: %#v", decoded)
 	}
 }
@@ -759,10 +767,11 @@ func TestPruneOutputEmptyClassifiesEachFullReport(t *testing.T) {
 func TestControllerCallImagePreviewPruneFailsOnCommandError(t *testing.T) {
 	t.Parallel()
 	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
-		if strings.Join(args, " ") == "image prune -a --dry-run" {
+		if strings.Join(args, " ") == "system df" {
 			return []byte("Cannot connect to the Docker daemon"), errors.New("exit status 1")
 		}
-		return []byte("Total:  0B"), nil
+		t.Fatalf("preview invoked %q", strings.Join(args, " "))
+		return nil, errors.New("unexpected command")
 	}), nil)
 	payload, err := json.Marshal(map[string]any{"action": "preview", "agent_id": "agent-1"})
 	if err != nil {
@@ -807,45 +816,104 @@ func TestControllerCallImagePruneUnconfirmedLeavesImagesUnchanged(t *testing.T) 
 
 func TestControllerCallImagePruneCleansUnusedImagesAndBuilderCache(t *testing.T) {
 	t.Parallel()
-	var commands []string
-	runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
-		command := strings.Join(append([]string{name}, args...), " ")
-		commands = append(commands, command)
-		if commandHasVolumeDeletion(command) {
-			t.Fatalf("volume deletion command %q", command)
+
+	t.Run("both-steps-succeed", func(t *testing.T) {
+		t.Parallel()
+		var commands []string
+		runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+			command := strings.Join(append([]string{name}, args...), " ")
+			commands = append(commands, command)
+			if commandHasVolumeDeletion(command) {
+				t.Fatalf("volume deletion command %q", command)
+			}
+			if strings.Contains(command, "--dry-run") {
+				t.Fatalf("confirmed prune used dry-run: %q", command)
+			}
+			switch strings.Join(args, " ") {
+			case "image prune -f":
+				return []byte("Deleted Images:\nuntagged: nginx:old\nTotal reclaimed space: 12MB\n"), nil
+			case "builder prune -f --keep-storage 2GB":
+				return []byte("Total:  4MB\n"), nil
+			default:
+				t.Fatalf("unexpected prune command %q", command)
+				return nil, errors.New("unexpected command")
+			}
+		})
+		controller := newCallController(t, t.TempDir(), runner, nil)
+		payload, err := json.Marshal(map[string]any{"action": "prune", "confirm": true, "agent_id": "agent-1"})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if strings.Contains(command, "--dry-run") {
-			t.Fatalf("confirmed prune used dry-run: %q", command)
+		raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+		if err != nil {
+			t.Fatal(err)
 		}
-		switch strings.Join(args, " ") {
-		case "image prune -a -f":
-			return []byte("Deleted Images:\nuntagged: nginx:old\nTotal reclaimed space: 12MB\n"), nil
-		case "builder prune -f":
-			return []byte("Total:  4MB\n"), nil
-		default:
-			t.Fatalf("unexpected prune command %q", command)
-			return nil, errors.New("unexpected command")
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["empty"] == true || decoded["preview"] == true || decoded["accepted"] != true {
+			t.Fatalf("confirmed prune result=%#v", decoded)
+		}
+		if decoded["status"] != "success" || decoded["images_status"] != "success" || decoded["builder_cache_status"] != "success" {
+			t.Fatalf("confirmed prune status=%#v", decoded)
+		}
+		if !containsCommand(commands, "image prune -f") || !containsCommand(commands, "builder prune -f --keep-storage 2GB") {
+			t.Fatalf("confirmed prune commands=%q", commands)
+		}
+		assertDiskCleanupArgsSafe(t, commands)
+	})
+
+	t.Run("image-step-failure-still-runs-builder", func(t *testing.T) {
+		t.Parallel()
+		var commands []string
+		runner := CommandRunnerFunc(func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+			command := strings.Join(append([]string{name}, args...), " ")
+			commands = append(commands, command)
+			if commandHasVolumeDeletion(command) {
+				t.Fatalf("volume deletion command %q", command)
+			}
+			switch strings.Join(args, " ") {
+			case "image prune -f":
+				return []byte("Cannot connect to the Docker daemon\nunix:///var/run/docker.sock\npassword=fixture-value\n"), errors.New("exit status 1")
+			case "builder prune -f --keep-storage 2GB":
+				return []byte("Total:  4MB\n"), nil
+			default:
+				t.Fatalf("unexpected prune command %q", command)
+				return nil, errors.New("unexpected command")
+			}
+		})
+		controller := newCallController(t, t.TempDir(), runner, nil)
+		payload, err := json.Marshal(map[string]any{"action": "prune", "confirm": true, "agent_id": "agent-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+		if err != nil {
+			t.Fatalf("partial prune collapsed to error: %v raw=%s", err, raw)
+		}
+		if !containsCommand(commands, "image prune -f") || !containsCommand(commands, "builder prune -f --keep-storage 2GB") {
+			t.Fatalf("partial prune commands=%q", commands)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["status"] != "partial" || decoded["images_status"] != "failed" || decoded["builder_cache_status"] != "success" {
+			t.Fatalf("partial prune result=%#v", decoded)
+		}
+		images, _ := decoded["images"].(string)
+		builder, _ := decoded["builder_cache"].(string)
+		if !strings.Contains(images, "Cannot connect to the Docker daemon") {
+			t.Fatalf("missing failed image step: %#v", decoded)
+		}
+		if !strings.Contains(builder, "Total:  4MB") {
+			t.Fatalf("missing builder step: %#v", decoded)
+		}
+		if strings.Contains(images, "docker.sock") || strings.Contains(images, "fixture-value") || strings.Contains(builder, "docker.sock") {
+			t.Fatalf("partial prune leaked secret or socket: %#v", decoded)
 		}
 	})
-	controller := newCallController(t, t.TempDir(), runner, nil)
-	payload, err := json.Marshal(map[string]any{"action": "prune", "confirm": true, "agent_id": "agent-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["empty"] == true || decoded["preview"] == true || decoded["accepted"] != true {
-		t.Fatalf("confirmed prune result=%#v", decoded)
-	}
-	if !containsCommand(commands, "image prune -a -f") || !containsCommand(commands, "builder prune -f") {
-		t.Fatalf("confirmed prune commands=%q", commands)
-	}
 }
 
 func TestDiskPruneAndComposeRemoveArgsOmitVolumes(t *testing.T) {
@@ -854,11 +922,26 @@ func TestDiskPruneAndComposeRemoveArgsOmitVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{remove, imagePruneArgs(true), imagePruneArgs(false), builderPruneArgs(true), builderPruneArgs(false)} {
+	if got := strings.Join(systemDfArgs(), " "); got != "system df" {
+		t.Fatalf("system df args=%q", got)
+	}
+	if got := strings.Join(imagePruneArgs(), " "); got != "image prune -f" {
+		t.Fatalf("image prune args=%q", got)
+	}
+	if got := strings.Join(builderPruneArgs(), " "); got != "builder prune -f --keep-storage 2GB" {
+		t.Fatalf("builder prune args=%q", got)
+	}
+	for _, field := range imagePruneArgs() {
+		if field == "-a" || field == "--all" {
+			t.Fatalf("image prune still uses all: %q", imagePruneArgs())
+		}
+	}
+	for _, args := range [][]string{remove, systemDfArgs(), imagePruneArgs(), builderPruneArgs()} {
 		joined := strings.Join(args, " ")
 		if commandHasVolumeDeletion(joined) {
 			t.Fatalf("volume deletion args %q", joined)
 		}
+		assertDiskCleanupArgsSafe(t, []string{joined})
 	}
 }
 
@@ -1292,6 +1375,24 @@ func containsCommand(commands []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertDiskCleanupArgsSafe(t *testing.T, commands []string) {
+	t.Helper()
+	for _, command := range commands {
+		lower := strings.ToLower(command)
+		if strings.Contains(lower, "--dry-run") || strings.Contains(lower, "--volumes") {
+			t.Fatalf("forbidden cleanup arg in %q", command)
+		}
+		if strings.Contains(lower, "volume prune") || strings.Contains(lower, "container prune") || strings.Contains(lower, "network prune") || strings.Contains(lower, "system prune") {
+			t.Fatalf("forbidden prune in %q", command)
+		}
+		for _, field := range strings.Fields(lower) {
+			if field == "-a" || field == "--all" {
+				t.Fatalf("forbidden all-images prune in %q", command)
+			}
+		}
+	}
 }
 
 func callFiles(t *testing.T, controller *Controller, payload map[string]any) ([]byte, error) {

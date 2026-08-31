@@ -437,46 +437,174 @@ func containerReferenceLine(line string) bool {
 	return isHexDigest(line)
 }
 
+const (
+	diskCleanupStatusSuccess = "success"
+	diskCleanupStatusPartial = "partial"
+	diskCleanupStatusFailed  = "failed"
+	builderPruneKeepStorage  = "2GB"
+)
+
 func (controller *Controller) callDiskPrune(ctx context.Context, preview, confirm bool) ([]byte, error) {
 	if !preview && !confirm {
-		return json.Marshal(map[string]any{
-			"accepted":  true,
-			"unchanged": true,
-			"empty":     true,
-			"preview":   false,
+		return json.Marshal(DiskCleanupReport{
+			Accepted:  true,
+			Unchanged: true,
+			Empty:     true,
+			Preview:   false,
 		})
 	}
-	imageOut, imageErr := controller.runCommand(ctx, "", "docker", imagePruneArgs(preview)...)
-	builderOut, builderErr := controller.runCommand(ctx, "", "docker", builderPruneArgs(preview)...)
-	if imageErr != nil || builderErr != nil {
-		return nil, pruneCallFailure(imageOut, builderOut, imageErr, builderErr)
+	if preview {
+		return controller.previewDiskCleanup(ctx)
 	}
-	imageText := sanitizePruneReport(normalizeCommandOutput(imageOut))
-	builderText := sanitizePruneReport(normalizeCommandOutput(builderOut))
-	empty := pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
-	return json.Marshal(map[string]any{
-		"accepted":      true,
-		"preview":       preview,
-		"empty":         empty,
-		"images":        imageText,
-		"builder_cache": builderText,
+	return controller.applyDiskCleanup(ctx)
+}
+
+func (controller *Controller) previewDiskCleanup(ctx context.Context) ([]byte, error) {
+	output, err := controller.runCommand(ctx, "", "docker", systemDfArgs()...)
+	if err != nil {
+		return nil, pruneCallFailure(output, nil, err, nil)
+	}
+	images, cache := parseSystemDf(normalizeCommandOutput(output))
+	imageText := sanitizePruneReport(formatDfEstimate(images))
+	builderText := sanitizePruneReport(formatDfEstimate(cache))
+	return json.Marshal(DiskCleanupReport{
+		Accepted:           true,
+		Preview:            true,
+		Empty:              dfReclaimableZero(images.reclaimable) && dfReclaimableZero(cache.reclaimable),
+		Status:             diskCleanupStatusSuccess,
+		Images:             imageText,
+		ImagesStatus:       diskCleanupStatusSuccess,
+		BuilderCache:       builderText,
+		BuilderCacheStatus: diskCleanupStatusSuccess,
 	})
 }
 
-func imagePruneArgs(dryRun bool) []string {
-	args := []string{"image", "prune", "-a"}
-	if dryRun {
-		return append(args, "--dry-run")
-	}
-	return append(args, "-f")
+func (controller *Controller) applyDiskCleanup(ctx context.Context) ([]byte, error) {
+	imageOut, imageErr := controller.runCommand(ctx, "", "docker", imagePruneArgs()...)
+	builderOut, builderErr := controller.runCommand(ctx, "", "docker", builderPruneArgs()...)
+	imageText, imageStatus := diskCleanupStepReport(imageOut, imageErr)
+	builderText, builderStatus := diskCleanupStepReport(builderOut, builderErr)
+	status := diskCleanupOverallStatus(imageStatus, builderStatus)
+	empty := status == diskCleanupStatusSuccess && pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
+	return json.Marshal(DiskCleanupReport{
+		Accepted:           true,
+		Preview:            false,
+		Empty:              empty,
+		Status:             status,
+		Images:             imageText,
+		ImagesStatus:       imageStatus,
+		BuilderCache:       builderText,
+		BuilderCacheStatus: builderStatus,
+	})
 }
 
-func builderPruneArgs(dryRun bool) []string {
-	args := []string{"builder", "prune"}
-	if dryRun {
-		return append(args, "--dry-run")
+func systemDfArgs() []string {
+	return []string{"system", "df"}
+}
+
+func imagePruneArgs() []string {
+	return []string{"image", "prune", "-f"}
+}
+
+func builderPruneArgs() []string {
+	return []string{"builder", "prune", "-f", "--keep-storage", builderPruneKeepStorage}
+}
+
+type systemDfUsage struct {
+	size        string
+	reclaimable string
+}
+
+func parseSystemDf(text string) (images, cache systemDfUsage) {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		upper := strings.ToUpper(line)
+		if strings.HasPrefix(upper, "TYPE") && strings.Contains(upper, "RECLAIMABLE") {
+			continue
+		}
+		switch {
+		case dfRowHasType(line, "Images"):
+			images = parseDfUsage(strings.TrimSpace(line[len("Images"):]))
+		case dfRowHasType(line, "Build Cache"):
+			cache = parseDfUsage(strings.TrimSpace(line[len("Build Cache"):]))
+		}
 	}
-	return append(args, "-f")
+	return images, cache
+}
+
+func dfRowHasType(line, typeName string) bool {
+	if len(line) < len(typeName) || !strings.EqualFold(line[:len(typeName)], typeName) {
+		return false
+	}
+	if len(line) == len(typeName) {
+		return true
+	}
+	switch line[len(typeName)] {
+	case ' ', '\t':
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDfUsage(rest string) systemDfUsage {
+	fields := strings.Fields(rest)
+	if len(fields) < 3 {
+		return systemDfUsage{}
+	}
+	usage := systemDfUsage{size: fields[2]}
+	if len(fields) > 3 {
+		usage.reclaimable = strings.Join(fields[3:], " ")
+	}
+	return usage
+}
+
+func formatDfEstimate(usage systemDfUsage) string {
+	var lines []string
+	if usage.size != "" {
+		lines = append(lines, "SIZE "+usage.size)
+	}
+	if usage.reclaimable != "" {
+		lines = append(lines, "RECLAIMABLE "+usage.reclaimable)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func dfReclaimableZero(reclaimable string) bool {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(reclaimable)))
+	if len(fields) == 0 {
+		return true
+	}
+	switch fields[0] {
+	case "0", "0b", "0ib":
+		return true
+	default:
+		return false
+	}
+}
+
+func diskCleanupStepReport(output []byte, err error) (string, string) {
+	text := sanitizePruneReport(normalizeCommandOutput(output))
+	if err == nil {
+		return text, diskCleanupStatusSuccess
+	}
+	if text == "" {
+		text = sanitizePruneReport(publicCause(err))
+	}
+	return text, diskCleanupStatusFailed
+}
+
+func diskCleanupOverallStatus(imageStatus, builderStatus string) string {
+	if imageStatus == diskCleanupStatusSuccess && builderStatus == diskCleanupStatusSuccess {
+		return diskCleanupStatusSuccess
+	}
+	if imageStatus == diskCleanupStatusFailed && builderStatus == diskCleanupStatusFailed {
+		return diskCleanupStatusFailed
+	}
+	return diskCleanupStatusPartial
 }
 
 func pruneOutputEmpty(text string) bool {

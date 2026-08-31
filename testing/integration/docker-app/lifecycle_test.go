@@ -250,14 +250,24 @@ func TestNodePrunePreviewCancelAndConfirm(t *testing.T) {
 	controller := newExecutionController(t, root, node)
 
 	preview := callImageAction(t, controller, map[string]any{"action": "preview", "agent_id": "agent-1"})
-	if preview["preview"] != true {
+	if preview["preview"] != true || preview["empty"] == true {
 		t.Fatalf("preview result=%#v", preview)
 	}
 	if !node.hasImage("nginx:old") || !node.builderCache {
 		t.Fatal("preview prune mutated images or builder cache")
 	}
-	if !containsCommand(node.commands, "image prune -a --dry-run") || !containsCommand(node.commands, "builder prune --dry-run") {
+	if !containsCommand(node.commands, "system df") {
 		t.Fatalf("preview commands=%q", node.commands)
+	}
+	for _, command := range node.commands {
+		if strings.Contains(command, "prune") || strings.Contains(command, "--dry-run") {
+			t.Fatalf("preview prune mutated: %q", node.commands)
+		}
+	}
+	images, _ := preview["images"].(string)
+	builder, _ := preview["builder_cache"].(string)
+	if !strings.Contains(images, "RECLAIMABLE 12MB") || !strings.Contains(builder, "RECLAIMABLE 4MB") {
+		t.Fatalf("preview missing estimates: %#v", preview)
 	}
 
 	canceled := callImageAction(t, controller, map[string]any{"action": "prune", "agent_id": "agent-1"})
@@ -275,10 +285,21 @@ func TestNodePrunePreviewCancelAndConfirm(t *testing.T) {
 	if node.hasImage("nginx:old") || node.builderCache {
 		t.Fatal("confirmed prune left unused image or builder cache")
 	}
-	if !containsCommand(node.commands, "image prune -a -f") || !containsCommand(node.commands, "builder prune -f") {
+	if !containsCommand(node.commands, "image prune -f") || !containsCommand(node.commands, "builder prune -f --keep-storage 2GB") {
 		t.Fatalf("confirmed prune commands=%q", node.commands)
 	}
 	assertNoVolumeDeletion(t, node.commands)
+	for _, command := range node.commands {
+		lower := strings.ToLower(command)
+		if strings.Contains(lower, "--dry-run") || strings.Contains(lower, "system prune") || strings.Contains(lower, "volume prune") || strings.Contains(lower, "container prune") || strings.Contains(lower, "network prune") {
+			t.Fatalf("forbidden prune command %q", command)
+		}
+		for _, field := range strings.Fields(lower) {
+			if field == "-a" || field == "--all" {
+				t.Fatalf("forbidden all-images prune %q", command)
+			}
+		}
+	}
 }
 
 func TestComposeOverlayPrepareProjectsManagedApps(t *testing.T) {
@@ -557,20 +578,15 @@ func (node *fakeDockerNode) Run(_ context.Context, dir, name string, args ...str
 		}
 		delete(node.images, image)
 		return []byte("untagged: " + image), nil
-	case command == "image prune -a --dry-run":
-		return []byte(node.prunePreviewLocked()), nil
-	case command == "image prune -a -f":
+	case command == "system df":
+		return []byte(node.systemDfLocked()), nil
+	case command == "image prune -f":
 		deleted := node.pruneUnusedLocked()
 		if deleted == "" {
 			return []byte("Total reclaimed space: 0B"), nil
 		}
 		return []byte("Deleted Images:\n" + deleted + "Total reclaimed space: 12MB\n"), nil
-	case command == "builder prune --dry-run":
-		if node.builderCache {
-			return []byte("Total:  4MB"), nil
-		}
-		return []byte("Total reclaimed space: 0B"), nil
-	case command == "builder prune -f":
+	case command == "builder prune -f --keep-storage 2GB":
 		if !node.builderCache {
 			return []byte("Total reclaimed space: 0B"), nil
 		}
@@ -581,13 +597,27 @@ func (node *fakeDockerNode) Run(_ context.Context, dir, name string, args ...str
 	}
 }
 
-func (node *fakeDockerNode) prunePreviewLocked() string {
+func (node *fakeDockerNode) systemDfLocked() string {
+	imageSize, imageReclaim := "0B", "0B"
 	for image := range node.images {
 		if !node.imageInUseLocked(image) {
-			return "untagged: " + image + "\nTotal reclaimed space: 12MB\n"
+			imageSize = "12MB"
+			imageReclaim = "12MB"
+			break
 		}
 	}
-	return "Total reclaimed space: 0B"
+	cacheSize, cacheReclaim := "0B", "0B"
+	if node.builderCache {
+		cacheSize = "4MB"
+		cacheReclaim = "4MB"
+	}
+	return strings.Join([]string{
+		"TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE",
+		"Images          1         0         " + imageSize + "     " + imageReclaim,
+		"Containers      0         0         0B        0B",
+		"Local Volumes   0         0         0B        0B",
+		"Build Cache     1         0         " + cacheSize + "       " + cacheReclaim,
+	}, "\n")
 }
 
 func (node *fakeDockerNode) pruneUnusedLocked() string {

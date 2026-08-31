@@ -849,8 +849,9 @@ func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 		confirm, _ := payload["confirm"].(bool)
 		if action == "preview" {
 			return copyHostResult(map[string]any{
-				"accepted": true, "preview": true, "empty": false,
-				"images": "untagged: nginx:old", "builder_cache": "Total: 4MB",
+				"accepted": true, "preview": true, "empty": false, "status": "success",
+				"images": "SIZE 1.2GB\nRECLAIMABLE 12MB", "images_status": "success",
+				"builder_cache": "SIZE 4MB\nRECLAIMABLE 4MB", "builder_cache_status": "success",
 			}, target)
 		}
 		if action == "prune" && !confirm {
@@ -858,8 +859,9 @@ func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 		}
 		if action == "prune" && confirm {
 			return copyHostResult(map[string]any{
-				"accepted": true, "preview": false, "empty": false,
-				"images": "Deleted Images:\nuntagged: nginx:old", "builder_cache": "Total: 4MB",
+				"accepted": true, "preview": false, "empty": false, "status": "success",
+				"images": "Deleted Images:\nuntagged: nginx:old", "images_status": "success",
+				"builder_cache": "Total: 4MB", "builder_cache_status": "success",
 			}, target)
 		}
 		t.Fatalf("unexpected disk cleanup payload %#v", payload)
@@ -867,7 +869,7 @@ func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 	})
 	runtime := newHostCapabilityRuntime(client)
 	preview, err := runtime.PreviewDiskCleanup(context.Background(), "agent-1")
-	if err != nil || !preview.Preview || preview.Empty || preview.Images == "" || preview.BuilderCache == "" {
+	if err != nil || !preview.Preview || preview.Empty || preview.Images == "" || preview.BuilderCache == "" || preview.Status != "success" {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
 	canceled, err := runtime.ApplyDiskCleanup(context.Background(), "agent-1", false)
@@ -875,7 +877,7 @@ func TestHostCapabilityRuntimeDiskCleanupPreviewCancelAndPrune(t *testing.T) {
 		t.Fatalf("cancel=%#v err=%v", canceled, err)
 	}
 	applied, err := runtime.ApplyDiskCleanup(context.Background(), "agent-1", true)
-	if err != nil || applied.Unchanged || applied.Empty || applied.Images == "" {
+	if err != nil || applied.Unchanged || applied.Empty || applied.Images == "" || applied.Status != "success" || applied.ImagesStatus != "success" || applied.BuilderCacheStatus != "success" {
 		t.Fatalf("confirm=%#v err=%v", applied, err)
 	}
 	if len(payloads) != 3 {
