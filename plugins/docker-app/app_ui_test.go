@@ -1942,6 +1942,25 @@ func TestPersistedDeploymentStoreWriteFailureKeepsPrior(t *testing.T) {
 	}
 }
 
+func TestAppUIUpdateReconcilesExpiredCleanupPendingDeployment(t *testing.T) {
+	store := NewDeploymentStore()
+	store.Put(Deployment{
+		AppID: "media", AgentID: "agent-1", InstanceID: "new", Image: "nginx:latest",
+		Phase: PhaseCleanupPending, FencingToken: 1, Lease: "expired", LeaseUntil: time.Now().Add(-time.Minute),
+		PriorInstance: "new", PriorImage: "nginx:latest", PriorDigest: "sha256:current", ImageDigest: "sha256:latest",
+	})
+	controller := &Controller{uiRollout: Rollout{
+		Store: store, Executor: &uiTestRollout{}, Auditor: AuditorFunc(func(AuditRecord) {}),
+	}}
+	if err := controller.reconcileAppUpdate(t.Context(), "media"); err != nil {
+		t.Fatalf("reconcileAppUpdate() error = %v", err)
+	}
+	got, ok := store.Get("media")
+	if !ok || got.Phase != PhaseActive || got.ImageDigest != "sha256:current" || got.Lease != "" {
+		t.Fatalf("reconciled deployment = %+v, exists=%t", got, ok)
+	}
+}
+
 func TestAppUIHighRiskComposeRequiresMatchingConfirm(t *testing.T) {
 	t.Parallel()
 	controller := newUIController(t)

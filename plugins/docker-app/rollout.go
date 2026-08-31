@@ -1058,6 +1058,9 @@ func pinnedRuntimeApp(app App, digest string) App {
 }
 
 func pinImageDigest(image, digest string) string {
+	if strings.Contains(digest, "@") {
+		digest = digestCore(digest)
+	}
 	if digest == "" || image == "" {
 		return image
 	}

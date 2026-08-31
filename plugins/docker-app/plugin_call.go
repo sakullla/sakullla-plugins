@@ -168,7 +168,20 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
 	case "drain":
 		return controller.callComposeDrain(ctx, root, request)
-	case "start", "stop", "restart", "remove", "pull", "ready", "remove-instance":
+	case "start":
+		dir, err := controller.composeActionWorkspace(root, request)
+		if err != nil {
+			return nil, err
+		}
+		// Restart existing containers first, then reconcile the declared
+		// project. A missing container makes restart fail, but up recreates it;
+		// an unchanged running container is still explicitly restarted.
+		_, _ = controller.runCommand(ctx, dir, "docker", "compose", "restart")
+		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
+			return nil, composeCallFailure("start", output, err)
+		}
+		return json.Marshal(map[string]any{"accepted": true})
+	case "stop", "restart", "remove", "pull", "ready", "remove-instance":
 		dir, err := controller.composeActionWorkspace(root, request)
 		if err != nil {
 			return nil, err
@@ -314,8 +327,6 @@ func existingComposeWorkDir(root, appID string) (string, error) {
 
 func composeCommandArgs(action string) ([]string, error) {
 	switch action {
-	case "start":
-		return []string{"compose", "start"}, nil
 	case "stop":
 		return []string{"compose", "stop"}, nil
 	case "restart":

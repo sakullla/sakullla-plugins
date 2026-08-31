@@ -21,6 +21,11 @@ func TestPinComposeImagesPinsServiceDigest(t *testing.T) {
 	if len(replacedRefs) != 1 || replacedRefs[0] != "nginx:latest@sha256:fedcba9876543210fedcba9876543210" {
 		t.Fatalf("re-pin refs=%v document=%q", replacedRefs, replaced)
 	}
+	fullReference := pinComposeImages(document, "nginx@sha256:abcdef0123456789abcdef0123456789")
+	fullReferenceRefs := composeImageRefs(fullReference)
+	if len(fullReferenceRefs) != 1 || fullReferenceRefs[0] != "nginx:latest@sha256:abcdef0123456789abcdef0123456789" {
+		t.Fatalf("full-reference digest refs=%v document=%q", fullReferenceRefs, fullReference)
+	}
 }
 
 func TestPrepareAppWorkspaceCreatesFileBindsNotDirectories(t *testing.T) {

@@ -410,6 +410,10 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeRiskDenied(writer, preview, ErrInvalidPreview, "update")
 			return
 		}
+		if err := controller.reconcileAppUpdate(request.Context(), appID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return
+		}
 		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return
@@ -484,6 +488,20 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 	default:
 		http.Error(writer, "Docker 应用页未找到", http.StatusNotFound)
 	}
+}
+
+func (controller *Controller) reconcileAppUpdate(ctx context.Context, appID string) error {
+	if controller.uiRollout.Store == nil {
+		return nil
+	}
+	record, found, err := controller.uiRollout.Store.Load(ctx, appID)
+	if err != nil || !found || record.Value.Phase == "" || record.Value.Phase == PhaseActive {
+		return err
+	}
+	if record.Value.Lease != "" && record.Value.LeaseUntil.After(controller.uiRollout.now()) {
+		return ErrReconcilePending
+	}
+	return controller.uiRollout.Reconcile(ctx, appID)
 }
 
 func (controller *Controller) serveAppFiles(writer http.ResponseWriter, request *http.Request, app App) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -194,6 +195,44 @@ func TestControllerCallComposeRestartUsesExistingWorkspace(t *testing.T) {
 	}
 	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, payload); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestControllerCallComposeStartReconcilesMissingContainer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workdir := filepath.Join(root, "media")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, ComposeFileName), []byte("services:\n  web:\n    image: nginx:1.27\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+		if dir != workdir || name != "docker" {
+			t.Fatalf("command dir=%q name=%s %q", dir, name, args)
+		}
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if command == "compose restart" {
+			return []byte("service has no container to restart"), errors.New("exit status 1")
+		}
+		if command != "compose up -d" {
+			t.Fatalf("unexpected start command %q", command)
+		}
+		return []byte("ok"), nil
+	})
+	controller := newCallController(t, root, runner, nil)
+	payload, err := json.Marshal(map[string]any{"action": "start", "app_id": "media"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(commands, []string{"compose restart", "compose up -d"}) {
+		t.Fatalf("start commands = %q", commands)
 	}
 }
 
