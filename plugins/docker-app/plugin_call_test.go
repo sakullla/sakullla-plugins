@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1577,41 +1578,68 @@ func TestControllerCallUnknownNameFailsClosed(t *testing.T) {
 
 func TestControllerCallEngineReportMissingDocker(t *testing.T) {
 	t.Parallel()
-	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
-		return nil, errors.New("executable file not found")
-	})
-	controller := newCallController(t, t.TempDir(), runner, nil)
-	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "err-not-found", err: exec.ErrNotFound},
+		{name: "wrapped-exec-error", err: &exec.Error{Name: "docker", Err: exec.ErrNotFound}},
 	}
-	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := DecodeAgentEngineReport(raw)
-	if err != nil || report.AgentID != "agent-1" || !report.Online || report.Installed || report.Version != "" {
-		t.Fatalf("missing docker report=%#v err=%v", report, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+				return nil, tc.err
+			})
+			controller := newCallController(t, t.TempDir(), runner, nil)
+			payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := DecodeAgentEngineReport(raw)
+			if err != nil || report.AgentID != "agent-1" || !report.Online || report.Installed || report.Version != "" {
+				t.Fatalf("missing docker report=%#v err=%v", report, err)
+			}
+		})
 	}
 }
 
-func TestControllerCallEngineReportRejectsDaemonErrorText(t *testing.T) {
+func TestControllerCallEngineReportProbeErrorsAreUnavailable(t *testing.T) {
 	t.Parallel()
-	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
-		return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"), nil
-	})
-	controller := newCallController(t, t.TempDir(), runner, nil)
-	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name   string
+		output []byte
+		err    error
+	}{
+		{name: "deadline", err: context.DeadlineExceeded},
+		{name: "busy-exit", err: errors.New("exit status 1")},
+		{name: "rpc-text", err: errors.New("engine probe rpc failed")},
+		{name: "daemon-stdout", output: []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")},
+		{name: "string-not-found", err: errors.New("executable file not found")},
 	}
-	raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := DecodeAgentEngineReport(raw)
-	if err != nil || report.Installed || report.Version != "" {
-		t.Fatalf("daemon error text still marked installed: %#v err=%v", report, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+				return tc.output, tc.err
+			})
+			controller := newCallController(t, t.TempDir(), runner, nil)
+			payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := controller.Call(context.Background(), "generation-1", pluginCallEngineName, payload)
+			if !errors.Is(err, ErrTypedHandlesUnavailable) {
+				t.Fatalf("probe err=%v raw=%s", err, raw)
+			}
+			if len(raw) != 0 && strings.Contains(string(raw), `"installed"`) {
+				t.Fatalf("unavailable probe still encoded installed: %s", raw)
+			}
+		})
 	}
 }
 

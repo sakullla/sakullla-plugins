@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -59,7 +60,7 @@ func TestExecutionFaceEngineReportMissingDockerIsNotInstalled(t *testing.T) {
 	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		CommandRunner: dockerapp.CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
-			return nil, errors.New("executable file not found")
+			return nil, exec.ErrNotFound
 		}),
 	})
 	if err != nil {
@@ -76,5 +77,25 @@ func TestExecutionFaceEngineReportMissingDockerIsNotInstalled(t *testing.T) {
 	report, err := dockerapp.DecodeAgentEngineReport(raw)
 	if err != nil || !report.Online || report.Installed || report.Version != "" {
 		t.Fatalf("missing docker report=%#v err=%v", report, err)
+	}
+}
+
+func TestExecutionFaceEngineReportTransientProbeIsUnavailable(t *testing.T) {
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		CommandRunner: dockerapp.CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+			return nil, context.DeadlineExceeded
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"agent_id": "agent-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", "engine.report", payload)
+	if !errors.Is(err, dockerapp.ErrTypedHandlesUnavailable) {
+		t.Fatalf("transient probe err=%v raw=%s", err, raw)
 	}
 }

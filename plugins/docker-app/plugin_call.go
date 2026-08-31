@@ -119,10 +119,18 @@ func (controller *Controller) callEngineReport(ctx context.Context, payload []by
 	}
 	report := AgentEngineReport{AgentID: agentID, Online: true}
 	version, err := controller.dockerServerVersion(ctx)
-	if err == nil {
-		report.Installed = true
-		report.Version = version
+	if err != nil {
+		if dockerExecutableMissing(err) {
+			return marshalEngineReport(report)
+		}
+		return nil, fmt.Errorf("%w: docker engine probe failed", ErrTypedHandlesUnavailable)
 	}
+	report.Installed = true
+	report.Version = version
+	return marshalEngineReport(report)
+}
+
+func marshalEngineReport(report AgentEngineReport) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"agent_id": report.AgentID,
 		"online":   report.Online,
@@ -131,6 +139,10 @@ func (controller *Controller) callEngineReport(ctx context.Context, payload []by
 			"version":   report.Version,
 		},
 	})
+}
+
+func dockerExecutableMissing(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
 }
 
 func (controller *Controller) callCompose(ctx context.Context, payload []byte) ([]byte, error) {
