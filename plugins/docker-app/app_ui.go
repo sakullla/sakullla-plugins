@@ -19,9 +19,12 @@ import (
 var appUIAssets embed.FS
 
 const (
-	appActorHeader        = pluginsdk.HeaderPluginActor
-	appOperationHeader    = pluginsdk.HeaderPluginOperationKey
-	appUnavailableMessage = "暂时无法管理 Docker 应用。"
+	appActorHeader                  = pluginsdk.HeaderPluginActor
+	appOperationHeader              = pluginsdk.HeaderPluginOperationKey
+	appUnavailableMessage           = "暂时无法管理 Docker 应用。"
+	diskCleanupUnavailableMessage   = "磁盘清理执行面不可用，请确认目标 Agent 在线后重试"
+	diskCleanupAgentIDRequiredError = "agent_id is required"
+	diskCleanupAgentIDInvalidError  = "agent_id is invalid"
 )
 
 type appView struct {
@@ -1147,7 +1150,7 @@ func (controller *Controller) serveDiskCleanup(writer http.ResponseWriter, reque
 	if request.Method == http.MethodPost {
 		body, err := decodeDiskCleanup(request)
 		if err != nil {
-			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: diskCleanupAgentIDRequiredError})
 			return
 		}
 		if agentID == "" {
@@ -1155,8 +1158,12 @@ func (controller *Controller) serveDiskCleanup(writer http.ResponseWriter, reque
 		}
 		confirm = body.Confirm
 	}
+	if agentID == "" {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: diskCleanupAgentIDRequiredError})
+		return
+	}
 	if !validAgentID(agentID) {
-		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: diskCleanupAgentIDInvalidError})
 		return
 	}
 	if err := controller.requireReadyAgent(request.Context(), agentID); err != nil {
@@ -1317,6 +1324,9 @@ func publicAppActionError(err error, action string) string {
 		if msg := filesPublicMessage(err); msg != "" {
 			return msg
 		}
+	}
+	if action == "disk-cleanup" && errors.Is(err, ErrTypedHandlesUnavailable) {
+		return diskCleanupUnavailableMessage
 	}
 	if !errors.Is(err, ErrOperationFailed) && !errors.Is(err, ErrTypedHandlesUnavailable) {
 		return publicAppError(err)

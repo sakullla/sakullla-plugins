@@ -82,9 +82,14 @@ const confirmBody = document.querySelector("#confirm-body");
 const confirmOk = document.querySelector("#confirm-ok");
 const confirmCancel = document.querySelector("#confirm-cancel");
 
-const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false } = {}) => {
+const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
   if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
-    return Promise.resolve(window.confirm([title, body].filter(Boolean).join("\n")));
+    const text = [title, body].filter(Boolean).join("\n");
+    if (hideConfirm) {
+      window.alert(text);
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(window.confirm(text));
   }
   if (confirmDialog.open) confirmDialog.close("cancel");
   if (confirmTitle) confirmTitle.textContent = title || "确认";
@@ -95,8 +100,12 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
   if (confirmOk) {
     confirmOk.textContent = confirm;
     confirmOk.dataset.danger = danger ? "true" : "false";
+    confirmOk.hidden = !!hideConfirm;
   }
-  if (confirmCancel) confirmCancel.textContent = cancel;
+  if (confirmCancel) {
+    confirmCancel.textContent = cancel;
+    confirmCancel.hidden = false;
+  }
   return new Promise((resolve) => {
     const onClose = () => resolve(confirmDialog.returnValue === "ok");
     confirmDialog.addEventListener("close", onClose, { once: true });
@@ -2615,15 +2624,57 @@ if (deployToggle) {
   });
 }
 
+const diskCleanupStatusLabel = (status) => {
+  switch (String(status || "").trim()) {
+    case "success":
+      return "完成";
+    case "partial":
+      return "部分成功";
+    case "failed":
+      return "失败";
+    case "skipped":
+      return "未执行";
+    default:
+      return String(status || "").trim();
+  }
+};
+
 const formatDiskCleanupBody = (cleanup) => {
+  const policy = "以下为估算值。将只删除 dangling 镜像（无标签且未被容器引用），构建缓存按 keep-storage 保留 2GB，数据卷不受影响。";
   if (!cleanup || cleanup.empty) {
-    return "没有可清理的闲置镜像或构建缓存。取消不会更改节点。";
+    return `${policy}\n\n没有可清理的闲置镜像或构建缓存。关闭不会更改节点。`;
   }
   const chunks = [];
-  if (cleanup.images) chunks.push(cleanup.images);
-  if (cleanup.builder_cache) chunks.push(cleanup.builder_cache);
-  const lead = "将清理闲置镜像和构建缓存，不会删除数据卷。取消不会更改节点。";
+  if (cleanup.images) chunks.push(`镜像（估算值）\n${cleanup.images}`);
+  if (cleanup.builder_cache) chunks.push(`构建缓存（估算值）\n${cleanup.builder_cache}`);
+  const lead = `${policy} 取消不会更改节点。`;
   return chunks.length ? `${lead}\n\n${chunks.join("\n\n")}` : lead;
+};
+
+const formatDiskCleanupResult = (cleanup) => {
+  if (!cleanup) return "已执行磁盘清理。";
+  if (cleanup.unchanged) return "已取消，未清理节点磁盘。";
+  const overall = diskCleanupStatusLabel(cleanup.status) || "未知";
+  const imageState = diskCleanupStatusLabel(cleanup.images_status) || "未知";
+  const builderState = diskCleanupStatusLabel(cleanup.builder_cache_status) || "未知";
+  const lines = [];
+  if (cleanup.empty) lines.push("没有可清理项。");
+  lines.push(`总体状态：${overall}`);
+  lines.push(cleanup.images ? `镜像：${imageState}\n${cleanup.images}` : `镜像：${imageState}`);
+  lines.push(cleanup.builder_cache ? `构建缓存：${builderState}\n${cleanup.builder_cache}` : `构建缓存：${builderState}`);
+  if (cleanup.status === "partial") {
+    const failed = [];
+    const completed = [];
+    if (cleanup.images_status === "failed") failed.push("镜像");
+    else if (cleanup.images_status === "success") completed.push("镜像");
+    if (cleanup.builder_cache_status === "failed") failed.push("构建缓存");
+    else if (cleanup.builder_cache_status === "success") completed.push("构建缓存");
+    if (failed.length) {
+      const other = completed.length ? `${completed.join("、")}已完成。` : "另一步未完成。";
+      lines.push(`失败阶段：${failed.join("、")}。${other}`);
+    }
+  }
+  return lines.join("\n\n");
 };
 
 const runDiskCleanup = async () => {
@@ -2652,8 +2703,9 @@ const runDiskCleanup = async () => {
     title: "清理节点磁盘",
     body: formatDiskCleanupBody(previewed),
     confirm: empty ? "知道了" : "清理",
-    cancel: "取消",
+    cancel: empty ? "知道了" : "取消",
     danger: !empty,
+    hideConfirm: empty,
   });
   if (!ok || empty) {
     showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false);
@@ -2666,7 +2718,8 @@ const runDiskCleanup = async () => {
       confirm: true,
     });
     const cleanup = payload.cleanup || {};
-    showStatus(cleanup.empty ? "没有可清理项。" : "已清理闲置镜像和构建缓存。", false);
+    const failed = cleanup.status === "failed" || cleanup.status === "partial";
+    showStatus(formatDiskCleanupResult(cleanup), failed);
   } catch (error) {
     showStatus(error.message, true);
   } finally {

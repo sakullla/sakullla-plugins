@@ -695,7 +695,11 @@ func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
 
 func TestAppUIRejectsMissingActor(t *testing.T) {
 	t.Parallel()
-	controller := newUIController(t)
+	handle := &recordingDiskCleanup{
+		preview: DiskCleanupReport{Accepted: true, Preview: true, Empty: false, Images: "untagged: nginx:old"},
+		apply:   DiskCleanupReport{Accepted: true, Images: "Deleted Images:\nuntagged: nginx:old"},
+	}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/apps", nil)
 	controller.ServeHTTP(rec, req)
@@ -707,22 +711,34 @@ func TestAppUIRejectsMissingActor(t *testing.T) {
 	if engine.Code != http.StatusForbidden {
 		t.Fatalf("engine status=%d body=%s", engine.Code, engine.Body.String())
 	}
+	preview := httptest.NewRecorder()
+	controller.ServeHTTP(preview, httptest.NewRequest(http.MethodGet, "/api/disk-cleanup?agent_id=agent-1", nil))
+	if preview.Code != http.StatusForbidden || !strings.Contains(preview.Body.String(), ErrUnauthorized.Error()) {
+		t.Fatalf("disk-cleanup preview missing actor status=%d body=%s", preview.Code, preview.Body.String())
+	}
 	cleanup := httptest.NewRecorder()
 	controller.ServeHTTP(cleanup, httptest.NewRequest(http.MethodPost, "/api/disk-cleanup", strings.NewReader(`{"agent_id":"agent-1","confirm":true}`)))
-	if cleanup.Code != http.StatusForbidden {
+	if cleanup.Code != http.StatusForbidden || !strings.Contains(cleanup.Body.String(), ErrUnauthorized.Error()) {
 		t.Fatalf("disk-cleanup status=%d body=%s", cleanup.Code, cleanup.Body.String())
 	}
+	if strings.Contains(preview.Body.String(), diskCleanupUnavailableMessage) || strings.Contains(cleanup.Body.String(), "清理节点磁盘失败") {
+		t.Fatalf("missing actor reused another disk-cleanup public error: preview=%s apply=%s", preview.Body.String(), cleanup.Body.String())
+	}
+	assertDiskCleanupHandleIdle(t, handle)
 }
 
 func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOp(t *testing.T) {
 	t.Parallel()
+	assertDetailWorkspacePage(t)
 	handle := &recordingDiskCleanup{
 		preview: DiskCleanupReport{
 			Accepted: true, Preview: true, Empty: false,
+			Status: "success", ImagesStatus: "success", BuilderCacheStatus: "success",
 			Images: "untagged: nginx:old", BuilderCache: "Total: 4MB",
 		},
 		apply: DiskCleanupReport{
 			Accepted: true, Preview: false, Empty: false,
+			Status: "success", ImagesStatus: "success", BuilderCacheStatus: "success",
 			Images: "Deleted Images:\nuntagged: nginx:old", BuilderCache: "Total: 4MB",
 		},
 	}
@@ -751,6 +767,11 @@ func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOp(t *testing.T) {
 	if applied.Code != http.StatusOK || !strings.Contains(applied.Body.String(), "Deleted Images") || strings.Contains(applied.Body.String(), `"unchanged":true`) {
 		t.Fatalf("confirmed status=%d body=%s", applied.Code, applied.Body.String())
 	}
+	for _, want := range []string{`"status":"success"`, `"images_status":"success"`, `"builder_cache_status":"success"`} {
+		if !strings.Contains(applied.Body.String(), want) {
+			t.Fatalf("confirmed missing %s: %s", want, applied.Body.String())
+		}
+	}
 
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
@@ -763,6 +784,162 @@ func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOp(t *testing.T) {
 	if strings.Contains(preview.Body.String(), "-v") || strings.Contains(preview.Body.String(), "--volumes") || strings.Contains(preview.Body.String(), "volume prune") {
 		t.Fatalf("preview leaked volume deletion: %s", preview.Body.String())
 	}
+}
+
+func TestAppUIDiskCleanupPreviewConfirmAndUnconfirmedNoOpEligibility(t *testing.T) {
+	t.Parallel()
+	generic := "清理节点磁盘失败，请检查目标 Agent 的 Docker 状态"
+	sdkText := ErrTypedHandlesUnavailable.Error()
+
+	t.Run("empty-agent-id", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{apply: DiskCleanupReport{Accepted: true, Images: "Deleted Images"}}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		get := httptest.NewRecorder()
+		controller.ServeHTTP(get, uiRequest(http.MethodGet, "/api/disk-cleanup", ""))
+		post := httptest.NewRecorder()
+		controller.ServeHTTP(post, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"confirm":true}`))
+		for _, rec := range []*httptest.ResponseRecorder{get, post} {
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), diskCleanupAgentIDRequiredError) {
+				t.Fatalf("empty agent_id status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), diskCleanupAgentIDInvalidError) || strings.Contains(rec.Body.String(), generic) {
+				t.Fatalf("empty agent_id reused another public error: %s", rec.Body.String())
+			}
+		}
+		assertDiskCleanupHandleIdle(t, handle)
+	})
+
+	t.Run("invalid-agent-id", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{apply: DiskCleanupReport{Accepted: true, Images: "Deleted Images"}}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		invalidID := strings.Repeat("a", 129)
+		get := httptest.NewRecorder()
+		controller.ServeHTTP(get, uiRequest(http.MethodGet, "/api/disk-cleanup?agent_id="+invalidID, ""))
+		post := httptest.NewRecorder()
+		controller.ServeHTTP(post, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"`+invalidID+`","confirm":true}`))
+		for _, rec := range []*httptest.ResponseRecorder{get, post} {
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), diskCleanupAgentIDInvalidError) {
+				t.Fatalf("invalid agent_id status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), diskCleanupAgentIDRequiredError) || strings.Contains(rec.Body.String(), generic) {
+				t.Fatalf("invalid agent_id reused another public error: %s", rec.Body.String())
+			}
+		}
+		assertDiskCleanupHandleIdle(t, handle)
+	})
+
+	t.Run("offline", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{apply: DiskCleanupReport{Accepted: true, Images: "Deleted Images"}}
+		catalog := NewReportedEngineCatalog()
+		catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: false, Installed: true, Version: "27.1.1"})
+		controller := newUIControllerWithOptions(t, uiControllerOptions{source: catalog, diskCleanup: handle})
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1","confirm":true}`))
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), ErrAgentOffline.Error()) {
+			t.Fatalf("offline status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), generic) || strings.Contains(rec.Body.String(), ErrEngineNotReady.Error()) {
+			t.Fatalf("offline reused another public error: %s", rec.Body.String())
+		}
+		assertDiskCleanupHandleIdle(t, handle)
+	})
+
+	t.Run("engine-not-ready", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{apply: DiskCleanupReport{Accepted: true, Images: "Deleted Images"}}
+		catalog := NewReportedEngineCatalog()
+		catalog.Replace(AgentEngineReport{AgentID: "agent-1", Online: true, Installed: false})
+		controller := newUIControllerWithOptions(t, uiControllerOptions{source: catalog, diskCleanup: handle})
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1","confirm":true}`))
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), ErrEngineNotReady.Error()) {
+			t.Fatalf("engine-not-ready status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), generic) || strings.Contains(rec.Body.String(), ErrAgentOffline.Error()) {
+			t.Fatalf("engine-not-ready reused another public error: %s", rec.Body.String())
+		}
+		assertDiskCleanupHandleIdle(t, handle)
+	})
+
+	t.Run("typed-handle-unavailable", func(t *testing.T) {
+		t.Parallel()
+		controller := newUIControllerWithOptions(t, uiControllerOptions{})
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1","confirm":true}`))
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), diskCleanupUnavailableMessage) {
+			t.Fatalf("typed-handle unavailable status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), sdkText) || strings.Contains(rec.Body.String(), generic) || strings.Contains(rec.Body.String(), ErrEngineNotReady.Error()) {
+			t.Fatalf("typed-handle unavailable reused another public error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("empty-preview", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{
+			preview: DiskCleanupReport{Accepted: true, Preview: true, Empty: true, Status: "success", ImagesStatus: "success", BuilderCacheStatus: "success"},
+			apply:   DiskCleanupReport{Accepted: true, Images: "Deleted Images"},
+		}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		preview := httptest.NewRecorder()
+		controller.ServeHTTP(preview, uiRequest(http.MethodGet, "/api/disk-cleanup?agent_id=agent-1", ""))
+		if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), `"empty":true`) || !strings.Contains(preview.Body.String(), `"preview":true`) {
+			t.Fatalf("empty preview status=%d body=%s", preview.Code, preview.Body.String())
+		}
+		handle.mu.Lock()
+		defer handle.mu.Unlock()
+		if len(handle.previews) != 1 || len(handle.applies) != 0 {
+			t.Fatalf("empty preview mutated disk: previews=%#v applies=%#v", handle.previews, handle.applies)
+		}
+	})
+
+	t.Run("partial-status", func(t *testing.T) {
+		t.Parallel()
+		handle := &recordingDiskCleanup{
+			preview: DiskCleanupReport{Accepted: true, Preview: true, Empty: false, Status: "success"},
+			apply: DiskCleanupReport{
+				Accepted: true, Preview: false, Empty: false,
+				Status: "partial", Images: "permission denied", ImagesStatus: "failed",
+				BuilderCache: "Total: 4MB", BuilderCacheStatus: "success",
+			},
+		}
+		controller := newUIControllerWithOptions(t, uiControllerOptions{diskCleanup: handle})
+		applied := httptest.NewRecorder()
+		controller.ServeHTTP(applied, uiJSONRequest(http.MethodPost, "/api/disk-cleanup", `{"agent_id":"agent-1","confirm":true}`))
+		body := applied.Body.String()
+		if applied.Code != http.StatusOK {
+			t.Fatalf("partial status=%d body=%s", applied.Code, body)
+		}
+		for _, want := range []string{`"status":"partial"`, `"images_status":"failed"`, `"builder_cache_status":"success"`, "permission denied", "Total: 4MB"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("partial missing %s: %s", want, body)
+			}
+		}
+	})
+
+	t.Run("public-errors-are-distinct", func(t *testing.T) {
+		want := []string{
+			diskCleanupAgentIDRequiredError,
+			diskCleanupAgentIDInvalidError,
+			ErrUnauthorized.Error(),
+			ErrAgentOffline.Error(),
+			ErrEngineNotReady.Error(),
+			diskCleanupUnavailableMessage,
+		}
+		seen := map[string]string{}
+		for _, msg := range want {
+			if other, ok := seen[msg]; ok {
+				t.Fatalf("public errors collide: %q also used by %s", msg, other)
+			}
+			seen[msg] = msg
+		}
+		if generic == diskCleanupUnavailableMessage {
+			t.Fatal("typed-handle unavailable reused the generic disk-cleanup failure")
+		}
+	})
 }
 
 func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
@@ -3414,12 +3591,14 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(html, `id="disk-cleanup"`) || !strings.Contains(html, "清理磁盘") {
 		t.Fatal("workspace is missing the node disk cleanup entry")
 	}
-	cleanupStart := strings.Index(js, "const runDiskCleanup = async () => {")
+	cleanupStart := strings.Index(js, "const formatDiskCleanupBody = (cleanup) => {")
+	diskRunStart := strings.Index(js, "const runDiskCleanup = async () => {")
 	cleanupEnd := strings.Index(js, "if (diskCleanup) {")
-	if cleanupStart < 0 || cleanupEnd <= cleanupStart {
+	if cleanupStart < 0 || diskRunStart < cleanupStart || cleanupEnd <= diskRunStart {
 		t.Fatal("runDiskCleanup is missing")
 	}
-	cleanupFn := js[cleanupStart:cleanupEnd]
+	cleanupFn := js[diskRunStart:cleanupEnd]
+	copyFn := js[cleanupStart:cleanupEnd]
 	ask := strings.Index(cleanupFn, "askConfirm")
 	apply := strings.Index(cleanupFn, `confirm: true`)
 	if ask < 0 || apply < 0 || apply < ask {
@@ -3433,6 +3612,23 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	}
 	if !strings.Contains(cleanupFn, "if (!ok || empty)") {
 		t.Fatal("unconfirmed node cleanup still applies prune")
+	}
+	emptyReturn := strings.Index(cleanupFn, "if (!ok || empty)")
+	if emptyReturn < 0 || apply < emptyReturn {
+		t.Fatal("empty preview still POSTs a deleting confirm")
+	}
+	if !strings.Contains(cleanupFn, "hideConfirm: empty") {
+		t.Fatal("empty preview still shows a deleting confirm action")
+	}
+	for _, want := range []string{"估算值", "dangling", "keep-storage", "2GB", "数据卷"} {
+		if !strings.Contains(copyFn, want) {
+			t.Fatalf("cleanup confirm copy missing %q", want)
+		}
+	}
+	for _, want := range []string{"formatDiskCleanupResult", "总体状态", "images_status", "builder_cache_status", "失败阶段", "已完成"} {
+		if !strings.Contains(copyFn, want) {
+			t.Fatalf("cleanup result copy missing %q", want)
+		}
 	}
 	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec"} {
 		if strings.Contains(html, forbidden) || strings.Contains(js, forbidden) {
@@ -4168,6 +4364,15 @@ func (handle *recordingDiskCleanup) ApplyDiskCleanup(_ context.Context, agentID 
 		return DiskCleanupReport{Accepted: true, Unchanged: true, Empty: true}, nil
 	}
 	return handle.apply, nil
+}
+
+func assertDiskCleanupHandleIdle(t *testing.T, handle *recordingDiskCleanup) {
+	t.Helper()
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if len(handle.previews) != 0 || len(handle.applies) != 0 {
+		t.Fatalf("eligibility failure mutated disk cleanup: previews=%#v applies=%#v", handle.previews, handle.applies)
+	}
 }
 
 type uiTestObserver struct {
