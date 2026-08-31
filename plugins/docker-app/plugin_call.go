@@ -173,10 +173,9 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if err != nil {
 			return nil, err
 		}
-		// Restart existing containers first, then reconcile the declared
-		// project. A missing container makes restart fail, but up recreates it;
-		// an unchanged running container is still explicitly restarted.
-		_, _ = controller.runCommand(ctx, dir, "docker", "compose", "restart")
+		// Compose up creates missing containers, starts stopped containers, and
+		// recreates services whose image or configuration changed. Unlike
+		// restart, it also applies the current Compose declaration.
 		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, composeCallFailure("start", output, err)
 		}

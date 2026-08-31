@@ -8,7 +8,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -208,18 +207,9 @@ func TestControllerCallComposeStartReconcilesMissingContainer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workdir, ComposeFileName), []byte("services:\n  web:\n    image: nginx:1.27\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var commands []string
 	runner := CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
-		if dir != workdir || name != "docker" {
+		if dir != workdir || name != "docker" || strings.Join(args, " ") != "compose up -d" {
 			t.Fatalf("command dir=%q name=%s %q", dir, name, args)
-		}
-		command := strings.Join(args, " ")
-		commands = append(commands, command)
-		if command == "compose restart" {
-			return []byte("service has no container to restart"), errors.New("exit status 1")
-		}
-		if command != "compose up -d" {
-			t.Fatalf("unexpected start command %q", command)
 		}
 		return []byte("ok"), nil
 	})
@@ -230,9 +220,6 @@ func TestControllerCallComposeStartReconcilesMissingContainer(t *testing.T) {
 	}
 	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, payload); err != nil {
 		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(commands, []string{"compose restart", "compose up -d"}) {
-		t.Fatalf("start commands = %q", commands)
 	}
 }
 
