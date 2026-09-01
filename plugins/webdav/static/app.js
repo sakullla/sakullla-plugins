@@ -18,6 +18,9 @@ const applyHostTheme = () => {
 
 applyHostTheme();
 
+const credentialUsernameKey = "webdav.username";
+const credentialPasswordKey = "webdav.password";
+
 const origin = window.location.origin.replace(/\/$/, "");
 const davUrl = origin + "/dav/";
 const davNode = document.querySelector("#dav-url");
@@ -25,6 +28,14 @@ if (davNode) {
   davNode.textContent = davUrl;
 }
 
+const loginView = document.querySelector("#login-view");
+const managerView = document.querySelector("#manager-view");
+const loginForm = document.querySelector("#login-form");
+const loginUsername = document.querySelector("#login-username");
+const loginPassword = document.querySelector("#login-password");
+const loginError = document.querySelector("#login-error");
+const logoutButton = document.querySelector("#logout-button");
+const currentUsername = document.querySelector("#current-username");
 const listing = document.querySelector("#listing");
 const empty = document.querySelector("#empty");
 const crumbs = document.querySelector("#crumbs");
@@ -38,6 +49,72 @@ const mkdirCancel = document.querySelector("#mkdir-cancel");
 const mkdirError = document.querySelector("#mkdir-error");
 
 let currentPath = "/";
+
+const encodeBasic = (username, password) => {
+  const bytes = new TextEncoder().encode(username + ":" + password);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return "Basic " + btoa(binary);
+};
+
+const readCredentials = () => {
+  const username = sessionStorage.getItem(credentialUsernameKey) || "";
+  const password = sessionStorage.getItem(credentialPasswordKey) || "";
+  if (!username || !password) {
+    return null;
+  }
+  return { username, password };
+};
+
+const saveCredentials = (username, password) => {
+  sessionStorage.setItem(credentialUsernameKey, username);
+  sessionStorage.setItem(credentialPasswordKey, password);
+};
+
+const clearCredentials = () => {
+  sessionStorage.removeItem(credentialUsernameKey);
+  sessionStorage.removeItem(credentialPasswordKey);
+};
+
+const withAuthHeaders = (headers) => {
+  const next = headers ? Object.assign({}, headers) : {};
+  const credentials = readCredentials();
+  if (credentials) {
+    next.Authorization = encodeBasic(credentials.username, credentials.password);
+  }
+  return next;
+};
+
+const showLogin = () => {
+  if (loginView) {
+    loginView.hidden = false;
+  }
+  if (managerView) {
+    managerView.hidden = true;
+  }
+};
+
+const showManager = (username) => {
+  if (loginView) {
+    loginView.hidden = true;
+  }
+  if (managerView) {
+    managerView.hidden = false;
+  }
+  if (currentUsername) {
+    currentUsername.textContent = username || "";
+  }
+};
+
+const setLoginError = (message) => {
+  if (!loginError) {
+    return;
+  }
+  loginError.hidden = !message;
+  loginError.textContent = message || "";
+};
 
 const showStatus = (message, isError) => {
   if (!statusNode) {
@@ -70,7 +147,7 @@ const parentPath = (dir) => {
 const sendJSON = async (path, body) => {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: withAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (response.status === 204) {
@@ -85,13 +162,35 @@ const sendJSON = async (path, body) => {
 
 const loadList = async (dir) => {
   currentPath = dir || "/";
-  const response = await fetch("/api/list?path=" + encodeURIComponent(currentPath));
+  const response = await fetch("/api/list?path=" + encodeURIComponent(currentPath), {
+    headers: withAuthHeaders(),
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload.error || "无法列出目录");
   }
   renderCrumbs(payload.path || currentPath);
   renderListing(payload.entries || []);
+};
+
+const downloadFile = async (name) => {
+  const response = await fetch("/api/download?path=" + encodeURIComponent(joinPath(currentPath, name)), {
+    headers: withAuthHeaders(),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "下载失败");
+  }
+  const blob = await response.blob();
+  const objectURL = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectURL;
+  link.download = name;
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectURL);
 };
 
 const renderCrumbs = (dir) => {
@@ -144,21 +243,21 @@ const renderListing = (entries) => {
         sizeCell.setAttribute("aria-label", sizeText + "，精确大小 " + sizeExact + " 字节");
       }
     }
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = entry.name;
     if (entry.dir) {
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = entry.name;
       open.addEventListener("click", () => {
         showStatus("", false);
         loadList(joinPath(currentPath, entry.name)).catch((error) => showStatus(error.message, true));
       });
-      nameCell.append(open);
     } else {
-      const link = document.createElement("a");
-      link.href = "/api/download?path=" + encodeURIComponent(joinPath(currentPath, entry.name));
-      link.textContent = entry.name;
-      nameCell.append(link);
+      open.addEventListener("click", () => {
+        showStatus("", false);
+        downloadFile(entry.name).catch((error) => showStatus(error.message, true));
+      });
     }
+    nameCell.append(open);
     const rename = document.createElement("button");
     rename.type = "button";
     rename.className = "ghost";
@@ -212,7 +311,7 @@ if (uploadInput) {
     body.set("path", currentPath);
     body.set("file", file, file.name);
     try {
-      const response = await fetch("/api/upload", { method: "POST", body });
+      const response = await fetch("/api/upload", { method: "POST", headers: withAuthHeaders(), body });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload.error || "上传失败");
@@ -265,4 +364,67 @@ if (mkdirButton && mkdirDialog && mkdirForm && mkdirName) {
   });
 }
 
-loadList("/").catch((error) => showStatus(error.message, true));
+if (loginForm && loginUsername && loginPassword) {
+  loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = loginUsername.value.trim();
+    const password = loginPassword.value;
+    if (!username || !password) {
+      setLoginError("请填写用户名和共享口令。");
+      return;
+    }
+    try {
+      setLoginError("");
+      const response = await fetch("/api/list?path=/", {
+        headers: { Authorization: encodeBasic(username, password) },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "登录失败");
+      }
+      saveCredentials(username, password);
+      loginPassword.value = "";
+      showManager(username);
+      showStatus("", false);
+      await loadList("/");
+    } catch (error) {
+      setLoginError(error.message);
+    }
+  });
+}
+
+if (logoutButton) {
+  logoutButton.addEventListener("click", () => {
+    clearCredentials();
+    currentPath = "/";
+    if (listing) {
+      listing.replaceChildren();
+    }
+    if (empty) {
+      empty.hidden = true;
+    }
+    showStatus("", false);
+    setLoginError("");
+    if (loginPassword) {
+      loginPassword.value = "";
+    }
+    showLogin();
+  });
+}
+
+const restoreSession = () => {
+  const credentials = readCredentials();
+  if (!credentials) {
+    showLogin();
+    return;
+  }
+  showManager(credentials.username);
+  loadList("/").catch((error) => {
+    clearCredentials();
+    showStatus("", false);
+    setLoginError(error.message);
+    showLogin();
+  });
+};
+
+restoreSession();

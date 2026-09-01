@@ -186,7 +186,6 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 	} {
 		t.Run(auth.name, func(t *testing.T) {
 			requests := []*http.Request{
-				httptest.NewRequest(http.MethodGet, "http://share.test/", nil),
 				httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil),
 				httptest.NewRequest(http.MethodPut, "http://share.test/dav/"+auth.name+".txt", strings.NewReader(auth.name)),
 			}
@@ -213,19 +212,47 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 
 	wrongBasic := httptest.NewRequest(http.MethodGet, "http://share.test/", nil)
 	wrongBasic.SetBasicAuth("mallory", "wrong")
-	for _, path := range []string{"/", "/api/list?path=/", "/dav/missing.txt"} {
-		for _, header := range []string{"", "Basic !!!", wrongBasic.Header.Get("Authorization"), "Bearer", "Bearer wrong", "Bearer " + testSharePassword + " extra", "Bearer\t" + testSharePassword, "Bearer  " + testSharePassword, "Bearer " + testSharePassword + " ", "Digest token"} {
-			request := httptest.NewRequest(http.MethodGet, "http://share.test"+path, nil)
-			request.Header.Set("Authorization", header)
-			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, request)
-			if recorder.Code != http.StatusUnauthorized {
-				t.Fatalf("path=%q header=%q status=%d", path, header, recorder.Code)
-			}
-			if got := recorder.Header().Values("WWW-Authenticate"); len(got) != 2 || got[0] != basicChallenge || got[1] != bearerChallenge {
-				t.Fatalf("path=%q header=%q challenges=%q", path, header, got)
+	badHeaders := []string{"", "Basic !!!", wrongBasic.Header.Get("Authorization"), "Bearer", "Bearer wrong", "Bearer " + testSharePassword + " extra", "Bearer\t" + testSharePassword, "Bearer  " + testSharePassword, "Bearer " + testSharePassword + " ", "Digest token"}
+	for _, path := range []string{"/", "/index.html", "/static/app.js", "/static/style.css"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			for _, header := range badHeaders {
+				request := httptest.NewRequest(method, "http://share.test"+path, nil)
+				request.Header.Set("Authorization", header)
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, request)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("%s %s header=%q status=%d body=%q", method, path, header, recorder.Code, recorder.Body.String())
+				}
+				assertNoBasicChallenge(t, recorder)
 			}
 		}
+	}
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "http://share.test/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("public page status=%d body=%q", page.Code, page.Body.String())
+	}
+	for _, fragment := range []string{"用户名可自定", "隔离", "共享口令", `id="login-username"`, `id="login-password"`, `id="logout-button"`} {
+		if !strings.Contains(page.Body.String(), fragment) {
+			t.Fatalf("public page missing %q", fragment)
+		}
+	}
+	for _, header := range badHeaders {
+		request := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
+		request.Header.Set("Authorization", header)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("api header=%q status=%d body=%q", header, recorder.Code, recorder.Body.String())
+		}
+		assertNoBasicChallenge(t, recorder)
+	}
+	for _, header := range badHeaders {
+		request := httptest.NewRequest(http.MethodGet, "http://share.test/dav/missing.txt", nil)
+		request.Header.Set("Authorization", header)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		assertDAVUnauthorized(t, recorder)
 	}
 	malloryComponent, _ := basicNamespaceComponent("mallory")
 	if _, err := os.Stat(filepath.Join(root, malloryComponent)); !os.IsNotExist(err) {
@@ -240,7 +267,7 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 			}
 			activateControllerWithConfig(t, controller, fmt.Sprintf("existing-password-%d", index), testShareConfig(password, ""))
 			for _, scheme := range []string{"basic", "bearer"} {
-				request := httptest.NewRequest(http.MethodGet, "http://share.test/", nil)
+				request := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
 				if scheme == "basic" {
 					request.SetBasicAuth("alice", password)
 				} else {
@@ -272,6 +299,7 @@ func TestInvalidBasicUsername(t *testing.T) {
 			if recorder.Code != http.StatusUnauthorized {
 				t.Fatalf("username=%q status=%d body=%q", username, recorder.Code, recorder.Body.String())
 			}
+			assertNoBasicChallenge(t, recorder)
 			entries, err := os.ReadDir(root)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("username=%q changed root: entries=%v err=%v", username, entries, err)
@@ -370,8 +398,8 @@ func TestBasicUserDirectoryIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := request(DavMountUsername, http.MethodGet, "http://share.test/", ""); got.Code != http.StatusOK {
-		t.Fatalf("webdav page = %d", got.Code)
+	if got := request(DavMountUsername, http.MethodGet, "http://share.test/api/list?path=/", ""); got.Code != http.StatusOK {
+		t.Fatalf("webdav list = %d %q", got.Code, got.Body.String())
 	}
 	if info, err := os.Stat(filepath.Join(root, webdavComponent)); err != nil || !info.IsDir() {
 		t.Fatalf("webdav namespace missing: info=%v err=%v", info, err)
@@ -385,6 +413,35 @@ func assertHTTPStatus(t *testing.T, handler http.Handler, want int) {
 	if recorder.Code != want {
 		t.Fatalf("status = %d, want %d body=%q", recorder.Code, want, recorder.Body.String())
 	}
+}
+
+func assertNoBasicChallenge(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := basicChallenges(recorder); len(got) != 0 {
+		t.Fatalf("unexpected Basic challenge %q status=%d body=%q", got, recorder.Code, recorder.Body.String())
+	}
+}
+
+func assertDAVUnauthorized(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("dav status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	got := recorder.Header().Values("WWW-Authenticate")
+	if len(got) != 2 || got[0] != basicChallenge || got[1] != bearerChallenge {
+		t.Fatalf("dav challenges=%q", got)
+	}
+}
+
+func basicChallenges(recorder *httptest.ResponseRecorder) []string {
+	var found []string
+	for _, value := range recorder.Header().Values("WWW-Authenticate") {
+		trimmed := strings.TrimSpace(value)
+		if len(trimmed) >= 5 && strings.EqualFold(trimmed[:5], "basic") {
+			found = append(found, value)
+		}
+	}
+	return found
 }
 
 func activateController(t *testing.T, controller *Controller, generation string) {

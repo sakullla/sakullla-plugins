@@ -1,13 +1,16 @@
 package webdav
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"embed"
 	"errors"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	xwebdav "golang.org/x/net/webdav"
@@ -60,9 +63,20 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, "provider generation is not active", http.StatusServiceUnavailable)
 		return
 	}
+	if isPublicPageRequest(request) {
+		handler.servePage(writer, request)
+		return
+	}
 	scope, err := handler.authorize(request)
 	if errors.Is(err, errUnauthorized) {
-		writeUnauthorized(writer)
+		switch {
+		case isDAVPath(request.URL.Path):
+			writeUnauthorized(writer)
+		case strings.HasPrefix(request.URL.Path, "/api/"):
+			writeAPIUnauthorized(writer)
+		default:
+			writeUnauthorized(writer)
+		}
 		return
 	}
 	if err != nil {
@@ -71,7 +85,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	request = request.WithContext(context.WithValue(request.Context(), requestScopeKey{}, scope))
 	switch {
-	case request.URL.Path == DavPrefix || strings.HasPrefix(request.URL.Path, DavPrefix+"/"):
+	case isDAVPath(request.URL.Path):
 		handler.serveDAV(writer, request, scope)
 	case strings.HasPrefix(request.URL.Path, "/api/"):
 		handler.serveAPI(writer, request)
@@ -120,10 +134,27 @@ func bearerCredential(header string) (string, bool) {
 	return credential, true
 }
 
+func isPublicPageRequest(request *http.Request) bool {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		return false
+	}
+	path := request.URL.Path
+	return path == "/" || path == "/index.html" || strings.HasPrefix(path, "/static/")
+}
+
+func isDAVPath(path string) bool {
+	return path == DavPrefix || strings.HasPrefix(path, DavPrefix+"/")
+}
+
 func writeUnauthorized(writer http.ResponseWriter) {
 	writer.Header().Add("WWW-Authenticate", basicChallenge)
 	writer.Header().Add("WWW-Authenticate", bearerChallenge)
 	http.Error(writer, "unauthorized", http.StatusUnauthorized)
+}
+
+func writeAPIUnauthorized(writer http.ResponseWriter) {
+	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	writeAPIError(writer, http.StatusUnauthorized, errUnauthorized)
 }
 
 func (handler *Handler) serveDAV(writer http.ResponseWriter, request *http.Request, scope requestScope) {
@@ -194,5 +225,18 @@ func (handler *Handler) servePage(writer http.ResponseWriter, request *http.Requ
 		http.NotFound(writer, request)
 		return
 	}
+	if request.URL.Path == "/index.html" {
+		serveEmbeddedAsset(writer, request, name)
+		return
+	}
 	http.ServeFileFS(writer, request, pageAssets, name)
+}
+
+func serveEmbeddedAsset(writer http.ResponseWriter, request *http.Request, name string) {
+	data, err := pageAssets.ReadFile(name)
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	http.ServeContent(writer, request, path.Base(name), time.Time{}, bytes.NewReader(data))
 }

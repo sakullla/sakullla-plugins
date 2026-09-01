@@ -9,49 +9,70 @@
 <body>
   <div class="wash" aria-hidden="true"></div>
   <main>
-    <header class="page-head">
-      <div class="page-head-copy">
-        <p class="kicker">网页 · WebDAV</p>
-        <h1>同一入口管理这份共享</h1>
-        <p class="lede">浏览、下载、上传、新建目录、重命名和删除都使用部署时配置的共享口令。Basic 用户访问按用户名隔离的目录；Bearer 客户端访问共享根。</p>
-      </div>
-      <section class="card mount-card">
-        <p class="kicker">挂载说明</p>
-        <h2>当前入口的 WebDAV</h2>
-        <p>把下面的地址填入系统映射网络驱动器、rclone 或同类客户端。HTTP Basic 的用户名会选择独立目录，口令为共享口令；使用同一口令作为 Bearer token 时访问共享根。</p>
-        <p class="host-line"><span class="host-dot" aria-hidden="true"></span>挂载地址<code id="dav-url">/dav/</code></p>
-        <p class="hint">地址由当前页面的 <code>window.location.origin</code> 加上 <code>/dav/</code> 生成，不必猜测插件内部地址。</p>
-      </section>
-    </header>
-    <section class="card files-card">
-      <div class="files-head">
-        <div>
-          <p class="kicker">文件</p>
-          <h2>当前目录</h2>
-          <nav id="crumbs" class="crumbs" aria-label="路径"></nav>
+    <section id="login-view" class="card login-card">
+      <p class="kicker">网页登录</p>
+      <h1>用自选用户名打开个人目录</h1>
+      <p class="lede">用户名可自定，不必预先注册账号。每个用户名隔离一份个人目录，其他人看不到你的文件。口令是部署时配置的共享口令，不是每人一套密码。</p>
+      <form id="login-form">
+        <label for="login-username">用户名</label>
+        <input id="login-username" name="username" type="text" autocomplete="username" spellcheck="false" required>
+        <p class="hint">用户名由你自己填写，用于隔离个人目录。</p>
+        <label for="login-password">共享口令</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+        <p class="hint">口令是这份共享配置的同一把口令，不是单独账号密码。</p>
+        <p id="login-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button type="submit">登录</button>
         </div>
-        <div class="actions">
-          <label class="upload">
-            上传
-            <input id="upload-input" type="file">
-          </label>
-          <button type="button" id="mkdir-button" class="ghost">新建目录</button>
-        </div>
-      </div>
-      <p id="status" role="status" hidden></p>
-      <table class="listing">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th>类型</th>
-            <th>大小</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="listing"></tbody>
-      </table>
-      <p id="empty" class="hint" hidden>这个目录是空的。</p>
+      </form>
     </section>
+    <div id="manager-view" hidden>
+      <header class="page-head">
+        <div class="page-head-copy">
+          <p class="kicker">网页 · WebDAV</p>
+          <h1>同一入口管理这份共享</h1>
+          <p class="lede">浏览、下载、上传、新建目录、重命名和删除都使用部署时配置的共享口令。Basic 用户访问按用户名隔离的目录；Bearer 客户端访问共享根。</p>
+          <p class="hint">当前用户 <code id="current-username"></code></p>
+        </div>
+        <section class="card mount-card">
+          <p class="kicker">挂载说明</p>
+          <h2>当前入口的 WebDAV</h2>
+          <p>把下面的地址填入系统映射网络驱动器、rclone 或同类客户端。HTTP Basic 的用户名会选择独立目录，口令为共享口令；使用同一口令作为 Bearer token 时访问共享根。</p>
+          <p class="host-line"><span class="host-dot" aria-hidden="true"></span>挂载地址<code id="dav-url">/dav/</code></p>
+          <p class="hint">地址由当前页面的 <code>window.location.origin</code> 加上 <code>/dav/</code> 生成，不必猜测插件内部地址。</p>
+        </section>
+      </header>
+      <section class="card files-card">
+        <div class="files-head">
+          <div>
+            <p class="kicker">文件</p>
+            <h2>当前目录</h2>
+            <nav id="crumbs" class="crumbs" aria-label="路径"></nav>
+          </div>
+          <div class="actions">
+            <label class="upload">
+              上传
+              <input id="upload-input" type="file">
+            </label>
+            <button type="button" id="mkdir-button" class="ghost">新建目录</button>
+            <button type="button" id="logout-button" class="ghost">退出</button>
+          </div>
+        </div>
+        <p id="status" role="status" hidden></p>
+        <table class="listing">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>大小</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="listing"></tbody>
+        </table>
+        <p id="empty" class="hint" hidden>这个目录是空的。</p>
+      </section>
+    </div>
   </main>
   <dialog id="mkdir-dialog" aria-labelledby="mkdir-title">
     <form id="mkdir-form">

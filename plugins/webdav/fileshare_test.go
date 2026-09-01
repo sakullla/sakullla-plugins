@@ -62,28 +62,46 @@ func TestWrongPasswordIs401WithoutFileNamesOrMutations(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(owned, testInsideName), []byte("inside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{
-		"http://provider.test/",
-		"http://provider.test/api/list?path=/",
-		"http://provider.test/dav/",
-	} {
-		recorder := doShareRequest(t, controller, http.MethodGet, target, "wrong-pass", nil)
-		if recorder.Code != http.StatusUnauthorized {
-			t.Fatalf("%s status = %d, want 401 body=%q", target, recorder.Code, recorder.Body.String())
-		}
-		if recorder.Header().Get("WWW-Authenticate") == "" {
-			t.Fatalf("%s missing WWW-Authenticate", target)
-		}
-		if strings.Contains(recorder.Body.String(), testInsideName) {
-			t.Fatalf("%s leaked file name: %q", target, recorder.Body.String())
-		}
+	page := doShareRequest(t, controller, http.MethodGet, "http://provider.test/", "wrong-pass", nil)
+	if page.Code != http.StatusOK {
+		t.Fatalf("page status = %d, want 200 body=%q", page.Code, page.Body.String())
+	}
+	assertNoBasicChallenge(t, page)
+	if strings.Contains(page.Body.String(), testInsideName) {
+		t.Fatalf("page leaked file name: %q", page.Body.String())
+	}
+	api := doShareRequest(t, controller, http.MethodGet, "http://provider.test/api/list?path=/", "wrong-pass", nil)
+	if api.Code != http.StatusUnauthorized {
+		t.Fatalf("api status = %d, want 401 body=%q", api.Code, api.Body.String())
+	}
+	assertNoBasicChallenge(t, api)
+	if strings.Contains(api.Body.String(), testInsideName) {
+		t.Fatalf("api leaked file name: %q", api.Body.String())
+	}
+	dav := doShareRequest(t, controller, http.MethodGet, "http://provider.test/dav/", "wrong-pass", nil)
+	if dav.Code != http.StatusUnauthorized {
+		t.Fatalf("dav status = %d, want 401 body=%q", dav.Code, dav.Body.String())
+	}
+	assertDAVUnauthorized(t, dav)
+	if strings.Contains(dav.Body.String(), testInsideName) {
+		t.Fatalf("dav leaked file name: %q", dav.Body.String())
 	}
 	put := doShareRequest(t, controller, http.MethodPut, "http://provider.test/dav/evil.txt", "wrong-pass", strings.NewReader("nope"))
 	if put.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized put status = %d", put.Code)
 	}
+	assertDAVUnauthorized(t, put)
 	if _, err := os.Stat(filepath.Join(owned, "evil.txt")); !os.IsNotExist(err) {
 		t.Fatalf("unauthorized put wrote a file: %v", err)
+	}
+	entries, err := os.ReadDir(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "user-") {
+			t.Fatalf("wrong password created a namespace: %s", entry.Name())
+		}
 	}
 }
 
@@ -92,10 +110,11 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(owned, testInsideName), []byte("inside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", testSharePassword, nil)
+	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", "", nil)
 	if page.Code != http.StatusOK {
 		t.Fatalf("page status = %d body=%q", page.Code, page.Body.String())
 	}
+	assertNoBasicChallenge(t, page)
 	if !strings.Contains(page.Header().Get("Content-Security-Policy"), "default-src 'self'") {
 		t.Fatalf("page CSP = %q", page.Header().Get("Content-Security-Policy"))
 	}
@@ -103,6 +122,8 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	for _, fragment := range []string{
 		"文件共享", "/dav/", "HTTP Basic", `id="dav-url"`, `id="upload-input"`, `id="mkdir-button"`,
 		`<dialog id="mkdir-dialog"`, `id="mkdir-form"`, `id="mkdir-name"`, `id="mkdir-cancel"`, "目录名称",
+		"用户名可自定", "隔离", "共享口令", `id="login-view"`, `id="login-form"`, `id="login-username"`,
+		`id="login-password"`, `id="logout-button"`, `id="manager-view"`,
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("page missing %q", fragment)
@@ -111,9 +132,22 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	if strings.Contains(body, testInsideName) || strings.Contains(body, testSharePassword) {
 		t.Fatal("page leaked share contents or password")
 	}
-	script := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", testSharePassword, nil)
-	if script.Code != http.StatusOK || !strings.Contains(script.Body.String(), "window.location.origin") || !strings.Contains(script.Body.String(), "/dav/") {
+	script := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", "", nil)
+	if script.Code != http.StatusOK {
 		t.Fatalf("script = %d %q", script.Code, script.Body.String())
+	}
+	assertNoBasicChallenge(t, script)
+	text := script.Body.String()
+	for _, fragment := range []string{
+		"window.location.origin", "/dav/", "sessionStorage", "Authorization", "encodeBasic",
+		"saveCredentials", "clearCredentials", "restoreSession", "downloadFile",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("script missing %q", fragment)
+		}
+	}
+	if strings.Contains(text, `href = "/api/download`) || strings.Contains(text, `href="/api/download`) {
+		t.Fatal("script still uses a bare /api/download link")
 	}
 }
 
@@ -156,10 +190,11 @@ func TestManagerViewportLayout(t *testing.T) {
 
 func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 	controller, _ := startShare(t, "")
-	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", testSharePassword, nil)
+	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", "", nil)
 	if page.Code != http.StatusOK {
 		t.Fatalf("page status = %d body=%q", page.Code, page.Body.String())
 	}
+	assertNoBasicChallenge(t, page)
 	body := page.Body.String()
 	for _, fragment := range []string{
 		`<dialog id="mkdir-dialog"`,
@@ -175,10 +210,11 @@ func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 		}
 	}
 
-	script := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", testSharePassword, nil)
+	script := doShareRequest(t, controller, http.MethodGet, "http://share.test/static/app.js", "", nil)
 	if script.Code != http.StatusOK {
 		t.Fatalf("script status = %d body=%q", script.Code, script.Body.String())
 	}
+	assertNoBasicChallenge(t, script)
 	text := script.Body.String()
 	if strings.Contains(text, `window.prompt("目录名称")`) {
 		t.Fatal("mkdir still uses the native prompt")

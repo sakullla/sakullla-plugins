@@ -136,6 +136,63 @@ func TestAuthenticationAndUserIsolation(t *testing.T) {
 	}
 	activateController(t, controller, "auth-isolation")
 
+	page := httptest.NewRecorder()
+	controller.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "http://share.test/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("public page = %d %q", page.Code, page.Body.String())
+	}
+	if hasBasicChallenge(page) {
+		t.Fatalf("public page sent Basic challenge %q", page.Header().Values("WWW-Authenticate"))
+	}
+	for _, fragment := range []string{"用户名可自定", "隔离", "共享口令", `id="login-username"`, `id="login-password"`} {
+		if !strings.Contains(page.Body.String(), fragment) {
+			t.Fatalf("public page missing %q", fragment)
+		}
+	}
+	script := httptest.NewRecorder()
+	controller.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://share.test/static/app.js", nil))
+	if script.Code != http.StatusOK {
+		t.Fatalf("public script = %d %q", script.Code, script.Body.String())
+	}
+	if hasBasicChallenge(script) {
+		t.Fatalf("public script sent Basic challenge %q", script.Header().Values("WWW-Authenticate"))
+	}
+	unauthAPI := httptest.NewRecorder()
+	controller.ServeHTTP(unauthAPI, httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil))
+	if unauthAPI.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth api = %d %q", unauthAPI.Code, unauthAPI.Body.String())
+	}
+	if hasBasicChallenge(unauthAPI) {
+		t.Fatalf("api 401 sent Basic challenge %q", unauthAPI.Header().Values("WWW-Authenticate"))
+	}
+	wrong := httptest.NewRequest(http.MethodGet, "http://share.test/api/list?path=/", nil)
+	wrong.SetBasicAuth("mallory", "wrong-pass")
+	denied := httptest.NewRecorder()
+	controller.ServeHTTP(denied, wrong)
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password api = %d %q", denied.Code, denied.Body.String())
+	}
+	if hasBasicChallenge(denied) {
+		t.Fatalf("wrong password api sent Basic challenge %q", denied.Header().Values("WWW-Authenticate"))
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "user-") {
+			t.Fatalf("wrong password created a namespace: %s", entry.Name())
+		}
+	}
+	unauthDAV := httptest.NewRecorder()
+	controller.ServeHTTP(unauthDAV, httptest.NewRequest(http.MethodGet, "http://share.test/dav/", nil))
+	if unauthDAV.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth dav = %d %q", unauthDAV.Code, unauthDAV.Body.String())
+	}
+	if challenges := unauthDAV.Header().Values("WWW-Authenticate"); len(challenges) != 2 || challenges[0] != `Basic realm="webdav"` || challenges[1] != `Bearer realm="webdav"` {
+		t.Fatalf("unauth dav challenges = %q", unauthDAV.Header().Values("WWW-Authenticate"))
+	}
+
 	doBasic := func(username, method, target, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -218,6 +275,16 @@ func TestWebDAVConditionalPut(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(root, "existing.txt")); err != nil || string(body) != "replacement-body" {
 		t.Fatalf("ordinary overwrite body = %q err=%v", body, err)
 	}
+}
+
+func hasBasicChallenge(recorder *httptest.ResponseRecorder) bool {
+	for _, value := range recorder.Header().Values("WWW-Authenticate") {
+		trimmed := strings.TrimSpace(value)
+		if len(trimmed) >= 5 && strings.EqualFold(trimmed[:5], "basic") {
+			return true
+		}
+	}
+	return false
 }
 
 func activateControllerWithConfig(t *testing.T, controller *webdav.Controller, generation string, config []byte) {

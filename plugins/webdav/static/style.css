@@ -136,6 +136,44 @@ h2 { font-size: 1.05rem; }
   box-shadow: var(--shadow-xs);
 }
 
+.login-card {
+  margin: 0 auto var(--space-5);
+  width: min(28rem, 100%);
+  max-width: min(28rem, 100%);
+}
+
+#login-form {
+  display: grid;
+  margin-top: var(--space-4);
+}
+
+#login-form label {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+#login-username,
+#login-password {
+  width: 100%;
+  min-height: 2.25rem;
+  margin: 0 0 var(--space-3);
+  padding: 0 0.8rem;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+#login-error {
+  margin: 0 0 var(--space-3);
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
 .mount-card {
   margin: 0;
   width: min(46rem, 100%);
@@ -377,7 +415,9 @@ th { color: var(--color-text-tertiary); font-weight: 650; }
 button:focus-visible,
 .upload:focus-within,
 .listing a:focus-visible,
-#mkdir-name:focus-visible {
+#mkdir-name:focus-visible,
+#login-username:focus-visible,
+#login-password:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
 }
@@ -417,7 +457,7 @@ button:focus-visible,
 @media (min-width: 2560px) {
   html { font-size: 18px; }
   main { width: calc(100% - 3.5rem); padding: 3rem 0 7rem; }
-  button, .upload, #mkdir-name { min-height: 2.75rem; padding-inline: 1.15rem; }
+  button, .upload, #mkdir-name, #login-username, #login-password { min-height: 2.75rem; padding-inline: 1.15rem; }
 }
 
 @media (min-width: 3840px) {
@@ -427,5 +467,5 @@ button:focus-visible,
     --space-5: 1.5rem;
   }
   main { width: calc(100% - 4rem); padding: 3.5rem 0 8rem; }
-  button, .upload, #mkdir-name { min-height: 3rem; padding-inline: 1.25rem; }
+  button, .upload, #mkdir-name, #login-username, #login-password { min-height: 3rem; padding-inline: 1.25rem; }
 }
