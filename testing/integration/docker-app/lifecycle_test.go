@@ -28,6 +28,8 @@ func TestComposeOverlayRejectsImageRuleRefAndInvalidYAML(t *testing.T) {
 		`{"apps":[{"id":"media","compose":"::: not yaml","generation":"generation-1"}]}`,
 		`{"apps":[{"id":"media","compose":"services:\n  web:\n    command: echo hi\n","generation":"generation-1"}]}`,
 		`{"apps":[{"id":"media","compose":"","generation":"generation-1"}]}`,
+		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:1.27\n","generation":"generation-1","image_lock":{"web":"^1.27.1"}}]}`,
+		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:1.27\n","generation":"generation-1","ignored_update":["1.27.2"]}]}`,
 	} {
 		if _, err := dockerapp.ParseConfiguration([]byte(document)); err == nil {
 			t.Fatalf("document %s was accepted", document)

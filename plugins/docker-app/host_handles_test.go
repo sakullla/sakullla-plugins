@@ -160,6 +160,58 @@ func TestHostCapabilityRuntimePersistsAppsThroughHostState(t *testing.T) {
 	}
 }
 
+func TestParseConfigurationLockIgnoreStoreAppsRoundTrip(t *testing.T) {
+	stored := map[string]json.RawMessage{}
+	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		var payload struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			return err
+		}
+		switch call.Operation {
+		case "state.put":
+			stored[payload.Key] = append(json.RawMessage(nil), payload.Value...)
+			return copyHostResult(map[string]any{"stored": true}, target)
+		case "state.get":
+			return copyHostResult(map[string]any{"found": true, "value": stored[payload.Key]}, target)
+		default:
+			t.Fatalf("state operation=%q", call.Operation)
+			return nil
+		}
+	})
+	runtime := newHostCapabilityRuntime(client)
+	want := []App{{
+		ID:         "media",
+		Generation: "generation-1",
+		Compose:    "services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n",
+		ImageLocks: map[string]string{"web": "^1.27.1", "db": "~16.3.0"},
+		IgnoredUpdates: map[string][]string{
+			"web": {"1.27.2"},
+		},
+	}}
+	if err := runtime.StoreApps(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := runtime.LoadApps(context.Background())
+	if err != nil || !found || len(got) != 1 {
+		t.Fatalf("LoadApps()=(%#v,%t,%v)", got, found, err)
+	}
+	if got[0].ImageLocks["web"] != "^1.27.1" || got[0].ImageLocks["db"] != "~16.3.0" {
+		t.Fatalf("locks=%v", got[0].ImageLocks)
+	}
+	if len(got[0].IgnoredUpdates["web"]) != 1 || got[0].IgnoredUpdates["web"][0] != "1.27.2" {
+		t.Fatalf("ignored=%v", got[0].IgnoredUpdates)
+	}
+	if err := got[0].bindCompose(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got[0].ServiceImages) != 2 || got[0].ServiceImages[0] != (ServiceImage{Name: "db", Image: "postgres:16.3"}) || got[0].ServiceImages[1] != (ServiceImage{Name: "web", Image: "nginx:1.27.1"}) {
+		t.Fatalf("paired images=%v", got[0].ServiceImages)
+	}
+}
+
 func TestHostCapabilityRuntimePersistsDeploymentStoreThroughHostState(t *testing.T) {
 	t.Parallel()
 	stored := map[string]json.RawMessage{}

@@ -49,17 +49,26 @@ var (
 	ErrHTTPRuleListFailed      = errors.New("http rule list failed")
 )
 
+// ServiceImage pairs a compose service name with that service's image reference.
+type ServiceImage struct {
+	Name  string
+	Image string
+}
+
 type App struct {
-	ID         string   `json:"id"`
-	AgentID    string   `json:"agent_id,omitempty"`
-	Compose    string   `json:"compose"`
-	Generation string   `json:"generation"`
-	SecretRefs []string `json:"secret_refs,omitempty"`
-	AutoUpdate *bool    `json:"auto_update,omitempty"`
-	Image      string   `json:"-"`
-	RuleRef    string   `json:"-"`
-	WorkDir    string   `json:"-"`
-	Env        string   `json:"-"`
+	ID             string              `json:"id"`
+	AgentID        string              `json:"agent_id,omitempty"`
+	Compose        string              `json:"compose"`
+	Generation     string              `json:"generation"`
+	SecretRefs     []string            `json:"secret_refs,omitempty"`
+	AutoUpdate     *bool               `json:"auto_update,omitempty"`
+	ImageLocks     map[string]string   `json:"image_locks,omitempty"`
+	IgnoredUpdates map[string][]string `json:"ignored_updates,omitempty"`
+	Image          string              `json:"-"`
+	ServiceImages  []ServiceImage      `json:"-"`
+	RuleRef        string              `json:"-"`
+	WorkDir        string              `json:"-"`
+	Env            string              `json:"-"`
 }
 
 func (app App) Validate() error {
@@ -92,7 +101,10 @@ func (app App) Validate() error {
 	if _, err := sortedUnique(app.SecretRefs, MaxSecretRefs); err != nil {
 		return err
 	}
-	return nil
+	if err := validateImageLocks(app.ImageLocks); err != nil {
+		return err
+	}
+	return validateIgnoredUpdates(app.IgnoredUpdates)
 }
 
 type Configuration struct {
@@ -169,7 +181,11 @@ func (app *App) bindCompose() error {
 		return err
 	}
 	app.Image = parsed.Image
+	app.ServiceImages = append([]ServiceImage(nil), parsed.ServiceImages...)
 	app.Compose = parsed.Compose
+	if err := app.normalizeServicePolicies(); err != nil {
+		return err
+	}
 	if len(parsed.SecretRefs) == 0 {
 		return nil
 	}
@@ -237,12 +253,116 @@ func boundedCompose(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && !strings.ContainsRune(value, '\x00')
 }
 
+func (app *App) normalizeServicePolicies() error {
+	locks, err := normalizeImageLocks(app.ImageLocks)
+	if err != nil {
+		return err
+	}
+	app.ImageLocks = locks
+	ignores, err := normalizeIgnoredUpdates(app.IgnoredUpdates)
+	if err != nil {
+		return err
+	}
+	app.IgnoredUpdates = ignores
+	return nil
+}
+
+func validateImageLocks(values map[string]string) error {
+	if len(values) > MaxComposeServices {
+		return fmt.Errorf("%w: image locks", ErrBoundExceeded)
+	}
+	for service, constraint := range values {
+		if !validID(service) {
+			return errors.New("image lock service is invalid")
+		}
+		if !ValidSemverConstraint(constraint) || !boundedText(strings.TrimSpace(constraint), 128) {
+			return errors.New("image lock is invalid")
+		}
+	}
+	return nil
+}
+
+func normalizeImageLocks(values map[string]string) (map[string]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	if err := validateImageLocks(values); err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(values))
+	for service, constraint := range values {
+		result[service] = strings.TrimSpace(constraint)
+	}
+	return result, nil
+}
+
+func validateIgnoredUpdates(values map[string][]string) error {
+	if len(values) > MaxComposeServices {
+		return fmt.Errorf("%w: ignored updates", ErrBoundExceeded)
+	}
+	for service, tags := range values {
+		if !validID(service) {
+			return errors.New("ignored update service is invalid")
+		}
+		if len(tags) > MaxCollectionItems {
+			return fmt.Errorf("%w: ignored updates", ErrBoundExceeded)
+		}
+		seen := make(map[string]struct{}, len(tags))
+		for _, tag := range tags {
+			if !boundedText(tag, 128) {
+				return errors.New("ignored update tag is invalid")
+			}
+			if _, exists := seen[tag]; exists {
+				return errors.New("collection contains a duplicate value")
+			}
+			seen[tag] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func normalizeIgnoredUpdates(values map[string][]string) (map[string][]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	if err := validateIgnoredUpdates(values); err != nil {
+		return nil, err
+	}
+	result := make(map[string][]string, len(values))
+	for service, tags := range values {
+		result[service] = append([]string(nil), tags...)
+	}
+	return result, nil
+}
+
 func cloneBool(value *bool) *bool {
 	if value == nil {
 		return nil
 	}
 	copied := *value
 	return &copied
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneStringSlicesMap(values map[string][]string) map[string][]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string][]string, len(values))
+	for key, value := range values {
+		result[key] = append([]string(nil), value...)
+	}
+	return result
 }
 
 func sortedUnique(values []string, maximum int) ([]string, error) {

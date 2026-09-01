@@ -1039,7 +1039,7 @@ func rollbackRepublishApp(app App, current Deployment, rev DeploymentRevision) A
 	}
 	target.Image = pinImageDigest(image, rev.ImageDigest)
 	if target.Compose != "" {
-		target.Compose = pinComposeImages(target.Compose, rev.ImageDigest)
+		target.Compose = pinComposeImagesForRef(target.Compose, target.Image, rev.ImageDigest)
 	}
 	target.RuleRef = rev.RuleRef
 	if rev.Generation != "" {
@@ -1053,7 +1053,7 @@ func pinnedRuntimeApp(app App, digest string) App {
 		return app
 	}
 	app.Image = pinImageDigest(app.Image, digest)
-	app.Compose = pinComposeImages(app.Compose, digest)
+	app.Compose = pinComposeImagesForRef(app.Compose, app.Image, digest)
 	return app
 }
 

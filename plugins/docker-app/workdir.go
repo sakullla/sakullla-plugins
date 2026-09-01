@@ -598,8 +598,8 @@ type workspaceFileEntry struct {
 	Size int64  `json:"size,omitempty"`
 }
 
-func pinComposeImages(document, digest string) string {
-	if strings.TrimSpace(document) == "" || strings.TrimSpace(digest) == "" {
+func pinComposeImages(document string, serviceDigests map[string]string) string {
+	if strings.TrimSpace(document) == "" || len(serviceDigests) == 0 {
 		return document
 	}
 	var raw map[string]any
@@ -611,8 +611,13 @@ func pinComposeImages(document, digest string) string {
 		return document
 	}
 	changed := false
-	for _, service := range services {
-		body, ok := service.(map[string]any)
+	for name, digest := range serviceDigests {
+		name = strings.TrimSpace(name)
+		digest = strings.TrimSpace(digest)
+		if name == "" || digest == "" {
+			continue
+		}
+		body, ok := services[name].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -636,6 +641,31 @@ func pinComposeImages(document, digest string) string {
 		return document
 	}
 	return string(encoded)
+}
+
+func pinComposeImagesForRef(document, image, digest string) string {
+	want := imageRefName(image)
+	if want == "" || strings.TrimSpace(digest) == "" {
+		return document
+	}
+	pins := make(map[string]string)
+	for _, service := range composeServiceImages(document) {
+		if imageRefName(service.Image) == want {
+			pins[service.Name] = digest
+		}
+	}
+	return pinComposeImages(document, pins)
+}
+
+func imageRefName(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		return strings.TrimSpace(image[:at])
+	}
+	return image
 }
 
 func imageDigestSuffix(image string) string {

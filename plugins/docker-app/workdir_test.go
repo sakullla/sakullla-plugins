@@ -11,21 +11,50 @@ import (
 func TestPinComposeImagesPinsServiceDigest(t *testing.T) {
 	t.Parallel()
 	document := "services:\n  web:\n    image: nginx:latest\n"
-	got := pinComposeImages(document, "sha256:0123456789abcdef0123456789abcdef")
+	got := pinComposeImages(document, map[string]string{"web": "sha256:0123456789abcdef0123456789abcdef"})
 	refs := composeImageRefs(got)
 	if len(refs) != 1 || refs[0] != "nginx:latest@sha256:0123456789abcdef0123456789abcdef" {
 		t.Fatalf("pinned refs=%v document=%q", refs, got)
 	}
-	replaced := pinComposeImages(got, "sha256:fedcba9876543210fedcba9876543210")
+	replaced := pinComposeImages(got, map[string]string{"web": "sha256:fedcba9876543210fedcba9876543210"})
 	replacedRefs := composeImageRefs(replaced)
 	if len(replacedRefs) != 1 || replacedRefs[0] != "nginx:latest@sha256:fedcba9876543210fedcba9876543210" {
 		t.Fatalf("re-pin refs=%v document=%q", replacedRefs, replaced)
 	}
-	fullReference := pinComposeImages(document, "nginx@sha256:abcdef0123456789abcdef0123456789")
+	fullReference := pinComposeImages(document, map[string]string{"web": "nginx@sha256:abcdef0123456789abcdef0123456789"})
 	fullReferenceRefs := composeImageRefs(fullReference)
 	if len(fullReferenceRefs) != 1 || fullReferenceRefs[0] != "nginx:latest@sha256:abcdef0123456789abcdef0123456789" {
 		t.Fatalf("full-reference digest refs=%v document=%q", fullReferenceRefs, fullReference)
 	}
+}
+
+func TestPinComposeImagesDoesNotRewriteOtherService(t *testing.T) {
+	t.Parallel()
+	document := "services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n"
+	const webDigest = "sha256:0123456789abcdef0123456789abcdef"
+	got := pinComposeImages(document, map[string]string{"web": webDigest})
+	if serviceImageRef(got, "web") != "nginx:1.27.1@"+webDigest {
+		t.Fatalf("web image=%q document=%q", serviceImageRef(got, "web"), got)
+	}
+	if serviceImageRef(got, "db") != "postgres:16.3" {
+		t.Fatalf("db image rewritten=%q document=%q", serviceImageRef(got, "db"), got)
+	}
+	matched := pinComposeImagesForRef(document, "nginx:1.27.1", webDigest)
+	if serviceImageRef(matched, "web") != "nginx:1.27.1@"+webDigest {
+		t.Fatalf("ref-matched web image=%q document=%q", serviceImageRef(matched, "web"), matched)
+	}
+	if serviceImageRef(matched, "db") != "postgres:16.3" {
+		t.Fatalf("ref-matched db image rewritten=%q document=%q", serviceImageRef(matched, "db"), matched)
+	}
+}
+
+func serviceImageRef(document, name string) string {
+	for _, service := range composeServiceImages(document) {
+		if service.Name == name {
+			return service.Image
+		}
+	}
+	return ""
 }
 
 func TestPrepareAppWorkspaceCreatesFileBindsNotDirectories(t *testing.T) {

@@ -368,7 +368,7 @@ func (request composeCallRequest) composeForWorkspace(root string) string {
 			}
 		}
 	}
-	return pinComposeImages(compose, digest)
+	return pinComposeImagesForRef(compose, request.Image, digest)
 }
 
 func (request composeCallRequest) reclaimImageRefs(root, dir string) []string {

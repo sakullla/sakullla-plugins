@@ -66,6 +66,16 @@ func SemverGreater(a, b string) bool {
 	return ok && cmp > 0
 }
 
+// ValidSemverConstraint reports whether constraint is an npm-style range.
+func ValidSemverConstraint(constraint string) bool {
+	constraint = strings.TrimSpace(constraint)
+	if constraint == "" {
+		return false
+	}
+	_, err := semver.NewConstraint(constraint)
+	return err == nil
+}
+
 // MatchSemverConstraint reports whether tag satisfies an npm-style constraint.
 // Prereleases match only when the constraint includes a prerelease.
 func MatchSemverConstraint(tag, constraint string) bool {

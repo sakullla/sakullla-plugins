@@ -80,7 +80,7 @@ func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposeP
 		plan.RuleImpacts = []string{ruleRef}
 	}
 	var credentials []TransientCredential
-	var image string
+	var images []ServiceImage
 	for name, service := range file.Services {
 		parsed, serviceCreds, err := composeServiceFromYAML(name, service)
 		if err != nil {
@@ -88,22 +88,22 @@ func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposeP
 			wipeCredentials(credentials)
 			return ComposePlan{}, App{}, err
 		}
-		if image == "" {
-			image = parsed.image
-		}
+		images = append(images, ServiceImage{Name: name, Image: parsed.image})
 		plan.Services = append(plan.Services, parsed.service)
 		credentials = append(credentials, serviceCreds...)
 	}
-	if image == "" {
+	if len(images) == 0 {
 		wipeCredentials(credentials)
 		return ComposePlan{}, App{}, ErrMissingComposeImage
 	}
+	sort.Slice(images, func(i, j int) bool { return images[i].Name < images[j].Name })
+	image := images[0].Image
 	redacted, err := redactComposeYAML(document)
 	if err != nil {
 		wipeCredentials(credentials)
 		return ComposePlan{}, App{}, err
 	}
-	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, RuleRef: ruleRef, Generation: generation, Compose: redacted}, credentials)
+	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, ServiceImages: images, RuleRef: ruleRef, Generation: generation, Compose: redacted}, credentials)
 	if err != nil {
 		return ComposePlan{}, App{}, err
 	}
@@ -141,7 +141,7 @@ func ParseDockerRun(command, generation, ruleRef string) (ComposePlan, App, erro
 		Services:    []ComposeService{parsed.service},
 		RuleImpacts: []string{ruleRef},
 	}
-	app, err := AppWithBoundSecrets(App{ID: parsed.name, Image: parsed.image, RuleRef: ruleRef, Generation: generation}, credentials)
+	app, err := AppWithBoundSecrets(App{ID: parsed.name, Image: parsed.image, ServiceImages: []ServiceImage{{Name: parsed.name, Image: parsed.image}}, RuleRef: ruleRef, Generation: generation}, credentials)
 	if err != nil {
 		return ComposePlan{}, App{}, err
 	}
@@ -271,6 +271,9 @@ func StopManaged(ctx context.Context, app App, executor StopExecutor, auditor Au
 func cloneApp(app App) App {
 	app.SecretRefs = append([]string(nil), app.SecretRefs...)
 	app.AutoUpdate = cloneBool(app.AutoUpdate)
+	app.ServiceImages = append([]ServiceImage(nil), app.ServiceImages...)
+	app.ImageLocks = cloneStringMap(app.ImageLocks)
+	app.IgnoredUpdates = cloneStringSlicesMap(app.IgnoredUpdates)
 	return app
 }
 
@@ -634,6 +637,33 @@ func redactComposeYAML(document string) (string, error) {
 
 func ComposeServiceNames(document string) []string {
 	return composeServiceNames(document)
+}
+
+func ComposeServiceImages(document string) []ServiceImage {
+	return composeServiceImages(document)
+}
+
+func composeServiceImages(document string) []ServiceImage {
+	if strings.TrimSpace(document) == "" {
+		return nil
+	}
+	var file composeDocument
+	if err := yaml.Unmarshal([]byte(document), &file); err != nil || len(file.Services) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(file.Services))
+	for name, service := range file.Services {
+		if strings.TrimSpace(service.Image) == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	images := make([]ServiceImage, 0, len(names))
+	for _, name := range names {
+		images = append(images, ServiceImage{Name: name, Image: strings.TrimSpace(file.Services[name].Image)})
+	}
+	return images
 }
 
 func composeServiceNames(document string) []string {

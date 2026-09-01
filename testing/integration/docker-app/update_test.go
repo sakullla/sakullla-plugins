@@ -32,10 +32,24 @@ func TestDockerAppOverlayPersistsAutoUpdate(t *testing.T) {
 	for _, document := range []string{
 		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","auto_update":"no"}]}`,
 		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","autoupdate":false}]}`,
+		`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:latest\n","generation":"generation-1","image_lock":{"web":"^1.27.1"}}]}`,
 	} {
 		if _, err := dockerapp.ParseConfiguration([]byte(document)); err == nil {
 			t.Fatalf("document %s was accepted", document)
 		}
+	}
+
+	locked := []byte(`{"apps":[{"id":"media","compose":"services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n","generation":"generation-1","auto_update":false,"image_locks":{"web":"^1.27.1"},"ignored_updates":{"web":["1.27.2"]}}]}`)
+	got, err = dockerapp.ParseConfiguration(locked)
+	if err != nil || len(got.Apps) != 1 {
+		t.Fatalf("lock overlay got=%#v err=%v", got, err)
+	}
+	images := dockerapp.ComposeServiceImages(got.Apps[0].Compose)
+	if len(images) != 2 || images[0].Name != "db" || images[0].Image != "postgres:16.3" || images[1].Name != "web" || images[1].Image != "nginx:1.27.1" {
+		t.Fatalf("paired images=%v", images)
+	}
+	if got.Apps[0].ImageLocks["web"] != "^1.27.1" || len(got.Apps[0].IgnoredUpdates["web"]) != 1 || got.Apps[0].IgnoredUpdates["web"][0] != "1.27.2" {
+		t.Fatalf("persisted policies=%#v", got.Apps[0])
 	}
 }
 

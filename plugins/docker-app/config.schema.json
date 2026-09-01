@@ -53,6 +53,35 @@
             "type": "boolean",
             "default": false,
             "description": "缺省关闭。仓库 digest 变化只提示有新版本，需手动更新。"
+          },
+          "image_locks": {
+            "type": "object",
+            "default": {},
+            "maxProperties": 128,
+            "propertyNames": {
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "按 compose 服务锁定 semver 范围。由插件管理页写入，不作为通用配置表单。"
+          },
+          "ignored_updates": {
+            "type": "object",
+            "default": {},
+            "maxProperties": 128,
+            "propertyNames": {
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+            },
+            "additionalProperties": {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1, "maxLength": 128}
+            },
+            "description": "按 compose 服务忽略的候选版本 tag。由插件管理页写入，不作为通用配置表单。"
           }
         }
       }
