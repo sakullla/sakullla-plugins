@@ -248,7 +248,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
 			return
 		}
-		_, existing := controller.appByID(body.ID)
+		existingApp, existing := controller.appByID(body.ID)
 		if !existing || strings.TrimSpace(body.Env) != "" {
 			if err := validateRequiredComposeVariables(body.Compose, body.Env); err != nil {
 				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
@@ -289,7 +289,14 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		for index := range next {
 			if next[index].ID == body.ID {
+				next[index].ImageLocks = cloneStringMap(existingApp.ImageLocks)
+				next[index].IgnoredUpdates = cloneStringSlicesMap(existingApp.IgnoredUpdates)
 				next[index].AutoUpdate = cloneBool(&body.AutoUpdate)
+				if err := next[index].normalizeServicePolicies(); err != nil {
+					controller.allowImageObservation(body.ID)
+					writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+					return
+				}
 			}
 			next[index].Env = ""
 		}

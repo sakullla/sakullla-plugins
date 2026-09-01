@@ -1779,6 +1779,44 @@ func TestAppUIRollbackRequiresHistoryAndRestoresPrior(t *testing.T) {
 	}
 }
 
+func TestAppUIComposeSaveKeepsImageLocksAndIgnoredUpdates(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{tags: []string{"1.27.2"}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	locked := httptest.NewRecorder()
+	controller.ServeHTTP(locked, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"locks":{"web":"~1.27.1"},"ignore":[{"service":"web","tag":"1.27.2"}]}`))
+	if locked.Code != http.StatusOK {
+		t.Fatalf("lock status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	saved := httptest.NewRecorder()
+	controller.ServeHTTP(saved, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1-alpine\n"}`))
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	apps := decodeAppList(t, saved.Body.Bytes())
+	if len(apps) != 1 || len(apps[0].ServiceImages) != 1 {
+		t.Fatalf("saved view=%#v", apps)
+	}
+	if apps[0].ServiceImages[0].Lock != "~1.27.1" {
+		t.Fatalf("compose save dropped lock: %#v", apps[0].ServiceImages)
+	}
+	if strings.Join(apps[0].ServiceImages[0].Ignored, ",") != "1.27.2" {
+		t.Fatalf("compose save dropped ignored: %#v", apps[0].ServiceImages)
+	}
+	stored := controller.Apps()[0]
+	if stored.ImageLocks["web"] != "~1.27.1" {
+		t.Fatalf("stored locks=%v", stored.ImageLocks)
+	}
+	if len(stored.IgnoredUpdates["web"]) != 1 || stored.IgnoredUpdates["web"][0] != "1.27.2" {
+		t.Fatalf("stored ignored=%v", stored.IgnoredUpdates)
+	}
+}
+
 func TestAppUIComposeSaveDropsRollbackHistory(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
