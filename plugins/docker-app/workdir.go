@@ -598,6 +598,78 @@ type workspaceFileEntry struct {
 	Size int64  `json:"size,omitempty"`
 }
 
+func rewriteComposeServiceTags(document string, serviceTags map[string]string) string {
+	if strings.TrimSpace(document) == "" || len(serviceTags) == 0 {
+		return document
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(document), &raw); err != nil || raw == nil {
+		return document
+	}
+	services, _ := raw["services"].(map[string]any)
+	if len(services) == 0 {
+		return document
+	}
+	changed := false
+	for name, tag := range serviceTags {
+		name = strings.TrimSpace(name)
+		tag = extractDockerTag(tag)
+		if name == "" || tag == "" {
+			continue
+		}
+		body, ok := services[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		image, _ := body["image"].(string)
+		image = strings.TrimSpace(image)
+		if image == "" {
+			continue
+		}
+		replaced := replaceImageTag(image, tag)
+		if replaced == image {
+			continue
+		}
+		body["image"] = replaced
+		changed = true
+	}
+	if !changed {
+		return document
+	}
+	encoded, err := yaml.Marshal(raw)
+	if err != nil {
+		return document
+	}
+	return string(encoded)
+}
+
+func replaceImageTag(image, tag string) string {
+	tag = extractDockerTag(strings.TrimSpace(tag))
+	image = strings.TrimSpace(image)
+	if tag == "" || image == "" {
+		return image
+	}
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		image = strings.TrimSpace(image[:at])
+	}
+	if image == "" {
+		return image
+	}
+	name := image
+	if slash := strings.LastIndex(image, "/"); slash >= 0 {
+		name = image[slash+1:]
+	}
+	colon := strings.LastIndex(name, ":")
+	if colon >= 0 {
+		image = image[:len(image)-len(name)+colon]
+	}
+	replaced := image + ":" + tag
+	if !boundedText(replaced, 512) {
+		return image
+	}
+	return replaced
+}
+
 func pinComposeImages(document string, serviceDigests map[string]string) string {
 	if strings.TrimSpace(document) == "" || len(serviceDigests) == 0 {
 		return document

@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1702,6 +1704,105 @@ func TestParseDockerServerVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestControllerCallImageListTagsUsesInjectedLister(t *testing.T) {
+	t.Parallel()
+	observer := imageTagObserver{
+		observe: ImageUpdateObserverFunc(func(_ context.Context, app App) (UpdateObservation, error) {
+			t.Fatalf("list-tags must not observe %q", app.Image)
+			return UpdateObservation{}, nil
+		}),
+		tags: []string{"1.27.2", "1.28.0", "2.0.0"},
+	}
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("list-tags must not fall back to docker CLI")
+		return nil, nil
+	}), observer)
+	payload, err := json.Marshal(map[string]any{"action": "list-tags", "app_id": "media", "image": "nginx:1.27.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(decoded.Tags, ",") != "1.27.2,1.28.0,2.0.0" {
+		t.Fatalf("tags=%v", decoded.Tags)
+	}
+}
+
+func TestControllerCallImageListTagsUsesHubAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v2/repositories/library/nginx/tags" {
+			t.Fatalf("path=%s", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`{"next":"","results":[{"name":"1.27.2"},{"name":"1.28.0"},{"name":"1.27.2"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	previous := dockerHubTagListURL
+	dockerHubTagListURL = func(repository string) string {
+		return server.URL + "/v2/repositories/" + repository + "/tags"
+	}
+	t.Cleanup(func() { dockerHubTagListURL = previous })
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("hub list-tags must not use docker CLI")
+		return nil, nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{"action": "list-tags", "app_id": "media", "image": "nginx:1.27.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(decoded.Tags, ",") != "1.27.2,1.28.0" {
+		t.Fatalf("tags=%v", decoded.Tags)
+	}
+}
+
+func TestControllerCallImageListTagsRequiresImage(t *testing.T) {
+	t.Parallel()
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("missing image must not invoke docker")
+		return nil, nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{"action": "list-tags", "app_id": "media"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload); err == nil {
+		t.Fatal("missing image succeeded")
+	}
+}
+
+type imageTagObserver struct {
+	observe ImageUpdateObserver
+	tags    []string
+}
+
+func (observer imageTagObserver) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
+	if observer.observe == nil {
+		return UpdateObservation{}, errors.New("observe is not configured")
+	}
+	return observer.observe.ObserveImage(ctx, app)
+}
+
+func (observer imageTagObserver) ListImageTags(context.Context, App) ([]string, error) {
+	return append([]string(nil), observer.tags...), nil
 }
 
 func TestControllerCallImageUsesInjectedObserver(t *testing.T) {

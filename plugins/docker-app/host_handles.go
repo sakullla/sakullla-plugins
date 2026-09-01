@@ -375,6 +375,8 @@ func (wire hostHTTPRuleWire) asHostHTTPRule(agentID string) HostHTTPRule {
 	return rule
 }
 
+var _ ImageTagLister = (*hostCapabilityRuntime)(nil)
+
 func (runtime *hostCapabilityRuntime) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
 	if runtime == nil || runtime.client == nil {
 		return UpdateObservation{}, ErrTypedHandlesUnavailable
@@ -392,6 +394,24 @@ func (runtime *hostCapabilityRuntime) ObserveImage(ctx context.Context, app App)
 		return UpdateObservation{}, err
 	}
 	return UpdateObservation{CurrentDigest: result.CurrentDigest, LatestDigest: result.LatestDigest}, nil
+}
+
+func (runtime *hostCapabilityRuntime) ListImageTags(ctx context.Context, app App) ([]string, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(app.AgentID) {
+		return nil, ErrAgentOffline
+	}
+	var result struct {
+		Tags []string `json:"tags"`
+	}
+	if err := runtime.pluginCall(ctx, app.AgentID, pluginCallImageName, map[string]any{
+		"action": "list-tags", "agent_id": app.AgentID, "app_id": app.ID, "image": app.Image,
+	}, &result); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), result.Tags...), nil
 }
 
 type hostRolloutRuntime struct {

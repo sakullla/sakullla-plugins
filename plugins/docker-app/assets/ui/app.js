@@ -81,6 +81,11 @@ const confirmTitle = document.querySelector("#confirm-title");
 const confirmBody = document.querySelector("#confirm-body");
 const confirmOk = document.querySelector("#confirm-ok");
 const confirmCancel = document.querySelector("#confirm-cancel");
+const updateDialog = document.querySelector("#update-dialog");
+const updateForm = document.querySelector("#update-form");
+const updateCopy = document.querySelector("#update-copy");
+const updateServices = document.querySelector("#update-services");
+const updateConfirm = document.querySelector("#update-confirm");
 
 const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
   if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
@@ -1673,29 +1678,184 @@ const runAppAction = async (app, action) => {
     }
   }
   if (action.id === "update") {
-    if (!await askConfirm({
-      title: "更新应用",
-      body: `确认更新 ${app.id}？取消不会换运行镜像。`,
-      confirm: "更新",
-      cancel: "取消",
-    })) {
+    const payload = await askServiceUpdate(app);
+    if (!payload) {
       showStatus("已取消，应用未更改。", false);
       return;
     }
+    setBusy(true);
+    try {
+      if (await postAppActionWithRisk(app, action.id, payload)) showStatus("已更新应用。", false);
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      setBusy(false);
+    }
+    return;
   }
   setBusy(true);
   try {
-    if (action.id === "update") {
-      if (await postAppActionWithRisk(app, action.id)) showStatus("已更新应用镜像。", false);
-    } else {
-      await postAppAction(app, action.id);
-      showStatus(action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
-    }
+    await postAppAction(app, action.id);
+    showStatus(action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
     setBusy(false);
   }
+};
+
+const serviceImages = (app) => (Array.isArray(app.service_images) ? app.service_images.filter((item) => item && item.name) : []);
+
+const askServiceUpdate = (app) => {
+  const services = serviceImages(app);
+  if (!updateDialog || typeof updateDialog.showModal !== "function") {
+    const selected = services.filter((item) => item.update && item.default_tag).map((item) => ({ name: item.name, tag: item.default_tag }));
+    if (!selected.length) return Promise.resolve(null);
+    const lines = selected.map((item) => `${item.name} → ${item.tag}`).join("\n");
+    return Promise.resolve(window.confirm(`确认更新 ${app.id}？\n${lines}\n取消不会改 compose。`) ? { services: selected } : null);
+  }
+  if (updateDialog.open) updateDialog.close("cancel");
+  if (updateCopy) updateCopy.textContent = `按服务选择 ${app.id} 要写入 compose 的目标版本。取消不会改 compose 或运行镜像。`;
+  if (updateServices) {
+    updateServices.replaceChildren();
+    services.forEach((service) => {
+      updateServices.append(renderUpdateServiceRow(service));
+    });
+    if (!services.length) {
+      const empty = document.createElement("p");
+      empty.className = "files-dialog-copy";
+      empty.textContent = "没有可更新的服务镜像。";
+      updateServices.append(empty);
+    }
+  }
+  return new Promise((resolve) => {
+    const onClose = () => {
+      if (updateDialog.returnValue !== "ok") {
+        resolve(null);
+        return;
+      }
+      const payload = collectUpdatePayload();
+      if (!payload || (!payload.services && !payload.ignore && !payload.locks)) {
+        resolve(null);
+        return;
+      }
+      resolve(payload);
+    };
+    updateDialog.addEventListener("close", onClose, { once: true });
+    updateDialog.showModal();
+    if (updateConfirm) updateConfirm.focus();
+  });
+};
+
+const renderUpdateServiceRow = (service) => {
+  const row = document.createElement("section");
+  row.className = "update-service";
+  row.dataset.service = service.name;
+  row.dataset.lock = service.lock || "";
+  const candidates = Array.isArray(service.candidates) ? service.candidates : [];
+  const defaultTag = service.default_tag || (candidates[0] && candidates[0].tag) || "";
+  const checked = service.update === true && !!defaultTag;
+  const head = document.createElement("label");
+  head.className = "update-service-head";
+  const selectBox = document.createElement("input");
+  selectBox.type = "checkbox";
+  selectBox.name = `update-${service.name}`;
+  selectBox.checked = checked;
+  selectBox.disabled = candidates.length === 0;
+  const title = document.createElement("strong");
+  title.textContent = service.name;
+  const current = document.createElement("span");
+  current.className = "update-current";
+  current.textContent = service.tag || service.image || "未知版本";
+  head.append(selectBox, title, current);
+  const target = document.createElement("label");
+  target.className = "update-target";
+  target.append("将更新到");
+  const select = document.createElement("select");
+  select.name = `target-${service.name}`;
+  if (!candidates.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = service.unknown ? "无法列出仓库 tag" : "没有允许的候选";
+    select.append(option);
+    select.disabled = true;
+  } else {
+    candidates.forEach((candidate) => {
+      const option = document.createElement("option");
+      option.value = candidate.tag;
+      option.textContent = candidate.major ? `${candidate.tag}（主版本）` : candidate.tag;
+      if (candidate.major) option.dataset.major = "true";
+      if (candidate.tag === defaultTag) option.selected = true;
+      select.append(option);
+    });
+  }
+  target.append(select);
+  const tools = document.createElement("div");
+  tools.className = "update-tools";
+  const ignore = document.createElement("label");
+  ignore.className = "inline-check";
+  const ignoreBox = document.createElement("input");
+  ignoreBox.type = "checkbox";
+  ignoreBox.name = `ignore-${service.name}`;
+  ignore.append(ignoreBox, "忽略此版本");
+  ignoreBox.addEventListener("change", () => {
+    if (ignoreBox.checked) selectBox.checked = false;
+  });
+  const lockLabel = document.createElement("label");
+  lockLabel.className = "update-lock";
+  lockLabel.append("锁定");
+  const lock = document.createElement("select");
+  lock.name = `lock-${service.name}`;
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "未锁定";
+  if (!service.lock) none.selected = true;
+  lock.append(none);
+  const options = Array.isArray(service.lock_options) ? service.lock_options : [];
+  options.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.constraint || "";
+    option.textContent = item.label || item.id;
+    if (service.lock && item.constraint === service.lock) option.selected = true;
+    lock.append(option);
+  });
+  if (service.lock && !options.some((item) => item.constraint === service.lock)) {
+    const custom = document.createElement("option");
+    custom.value = service.lock;
+    custom.textContent = service.lock;
+    custom.selected = true;
+    lock.append(custom);
+  }
+  lockLabel.append(lock);
+  tools.append(ignore, lockLabel);
+  const arrow = document.createElement("p");
+  arrow.className = "update-arrow";
+  arrow.textContent = `${service.tag || service.image || "当前"} →`;
+  row.append(head, arrow, target, tools);
+  return row;
+};
+
+const collectUpdatePayload = () => {
+  if (!updateServices) return null;
+  const services = [];
+  const ignore = [];
+  const locks = {};
+  updateServices.querySelectorAll(".update-service").forEach((row) => {
+    const name = row.dataset.service;
+    const selected = row.querySelector(`input[name="update-${name}"]`);
+    const target = row.querySelector(`select[name="target-${name}"]`);
+    const ignored = row.querySelector(`input[name="ignore-${name}"]`);
+    const lock = row.querySelector(`select[name="lock-${name}"]`);
+    const tag = target ? String(target.value || "").trim() : "";
+    if (selected && selected.checked && tag) services.push({ name, tag });
+    if (ignored && ignored.checked && tag) ignore.push({ service: name, tag });
+    if (lock && lock.value !== (row.dataset.lock || "")) locks[name] = lock.value;
+  });
+  const payload = {};
+  if (services.length) payload.services = services;
+  if (ignore.length) payload.ignore = ignore;
+  if (Object.keys(locks).length) payload.locks = locks;
+  return payload;
 };
 
 const actionGroups = (app, options = {}) => {
@@ -1711,7 +1871,7 @@ const actionGroups = (app, options = {}) => {
   apiActions.forEach((action) => {
     if (action.id === "configure") return;
     if (action.id === "logs") return;
-    if (options.card && action.id !== "start" && action.id !== "stop" && action.id !== "restart" && action.id !== "update") return;
+    if (options.card && action.id !== "update") return;
     if (options.overview && (action.id === "start" || action.id === "stop" || action.id === "restart")) return;
     const isPrimary = action.id === "start" || action.id === "stop" || action.id === "restart" || action.id === "update";
     const isDelete = action.id === "delete";
@@ -1868,7 +2028,7 @@ const renderApp = (app) => {
     }
   }
   const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
-  ["start", "stop", "restart", "update"].forEach((id) => {
+  ["update"].forEach((id) => {
     const button = card.querySelector(`[data-action="${id}"]`);
     const action = actionsByID.get(id);
     if (!button) return;
@@ -1919,7 +2079,10 @@ const fillCompose = (app) => {
 const renderOverview = (app) => {
   if (!overviewPanel) return;
   overviewPanel.replaceChildren();
-  const services = Array.isArray(app.services) ? app.services.filter(Boolean) : [];
+  const serviceViews = serviceImages(app);
+  const services = serviceViews.length
+    ? serviceViews.map((item) => item.name)
+    : (Array.isArray(app.services) ? app.services.filter(Boolean) : []);
   const ports = appPorts(app);
   const rules = Array.isArray(app.rules) ? app.rules : [];
   const volumes = parseComposeVolumes(app.compose);
@@ -1990,8 +2153,34 @@ const renderOverview = (app) => {
     digest.title = version;
     imageNode.append(digest);
   }
-  addRow(run, "镜像", "", { node: imageNode });
-  addRow(run, "服务", services.length ? services.join(" · ") : app.id);
+  if (serviceViews.length) {
+    const list = document.createElement("div");
+    list.className = "overview-services";
+    serviceViews.forEach((service) => {
+      const item = document.createElement("div");
+      item.className = "overview-service";
+      const name = document.createElement("strong");
+      name.textContent = service.name;
+      const image = document.createElement("span");
+      image.className = "overview-mono";
+      image.textContent = service.image || service.tag || "未解析镜像";
+      item.append(name, image);
+      const meta = document.createElement("p");
+      meta.className = "overview-service-meta";
+      const bits = [];
+      bits.push(service.lock ? `锁定 ${service.lock}` : "未锁定");
+      if (Array.isArray(service.ignored) && service.ignored.length) bits.push(`已忽略 ${service.ignored.join("、")}`);
+      if (service.update) bits.push("有允许候选");
+      else if (service.unknown) bits.push("候选未知");
+      meta.textContent = bits.join(" · ");
+      item.append(meta);
+      list.append(item);
+    });
+    addRow(run, "服务镜像", "", { node: list });
+  } else {
+    addRow(run, "镜像", "", { node: imageNode });
+    addRow(run, "服务", services.length ? services.join(" · ") : app.id);
+  }
   if (ports.length) {
     const list = document.createElement("div");
     list.className = "overview-chips";

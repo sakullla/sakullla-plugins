@@ -618,6 +618,10 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 			request := decodePluginCallRequest(t, call)
 			switch request.Name {
 			case pluginCallImageName:
+				payload := decodePluginCallInner(t, request)
+				if payload["action"] == "list-tags" {
+					return copyHostResult(map[string]any{"tags": []string{"1.27.2", "1.28.0"}}, target)
+				}
 				return copyHostResult(map[string]any{
 					"current_digest": "sha256:current", "latest_digest": "sha256:latest",
 				}, target)
@@ -660,6 +664,14 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	if err != nil || observed.CurrentDigest != "sha256:current" || observed.LatestDigest != "sha256:latest" {
 		t.Fatalf("image observe=%#v err=%v", observed, err)
 	}
+	lister, ok := config.UIImageObserver.(ImageTagLister)
+	if !ok {
+		t.Fatal("image observer does not list tags")
+	}
+	tags, err := lister.ListImageTags(context.Background(), app)
+	if err != nil || len(tags) != 2 || tags[0] != "1.27.2" || tags[1] != "1.28.0" {
+		t.Fatalf("image tags=%v err=%v", tags, err)
+	}
 	if err := config.UIRolloutExecutor.Pull(context.Background(), 1, app); err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +692,7 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(calls) != 10 {
+	if len(calls) != 11 {
 		t.Fatalf("host calls = %d", len(calls))
 	}
 	assertNoNamedAgentHostOps(t, calls)
@@ -697,7 +709,11 @@ func TestHostCapabilityRuntimeWiresHTTPImageAndRolloutHandles(t *testing.T) {
 	if calls[3].Operation != pluginsdk.HostRuntimePluginCall || image.Name != pluginCallImageName || image.AgentID != "agent-1" {
 		t.Fatalf("image plugin.call = %#v", calls[3])
 	}
-	for index, call := range calls[4:] {
+	tagCall := decodePluginCallRequest(t, calls[4])
+	if tagCall.Name != pluginCallImageName || decodePluginCallInner(t, tagCall)["action"] != "list-tags" {
+		t.Fatalf("image list-tags plugin.call = %#v", calls[4])
+	}
+	for index, call := range calls[5:] {
 		request := decodePluginCallRequest(t, call)
 		if request.Name != pluginCallComposeName {
 			t.Fatalf("rollout compose call %d = %#v", index, call)

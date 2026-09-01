@@ -41,18 +41,19 @@ func diskCleanupFailurePublicMessage(kind string) string {
 }
 
 type appView struct {
-	ID         string            `json:"id"`
-	AgentID    string            `json:"agent_id,omitempty"`
-	Name       string            `json:"name"`
-	Status     string            `json:"status"`
-	Notice     string            `json:"notice,omitempty"`
-	Version    string            `json:"version"`
-	Compose    string            `json:"compose,omitempty"`
-	AutoUpdate bool              `json:"auto_update,omitempty"`
-	Ports      []uint16          `json:"ports,omitempty"`
-	Services   []string          `json:"services,omitempty"`
-	Actions    []OpsAction       `json:"actions,omitempty"`
-	Rules      []appHTTPRuleView `json:"rules,omitempty"`
+	ID            string            `json:"id"`
+	AgentID       string            `json:"agent_id,omitempty"`
+	Name          string            `json:"name"`
+	Status        string            `json:"status"`
+	Notice        string            `json:"notice,omitempty"`
+	Version       string            `json:"version"`
+	Compose       string            `json:"compose,omitempty"`
+	AutoUpdate    bool              `json:"auto_update,omitempty"`
+	Ports         []uint16          `json:"ports,omitempty"`
+	Services      []string          `json:"services,omitempty"`
+	ServiceImages []appServiceView  `json:"service_images,omitempty"`
+	Actions       []OpsAction       `json:"actions,omitempty"`
+	Rules         []appHTTPRuleView `json:"rules,omitempty"`
 }
 
 type appHTTPRuleView struct {
@@ -64,16 +65,19 @@ type appHTTPRuleView struct {
 }
 
 type appWriteRequest struct {
-	ID         string `json:"id"`
-	AgentID    string `json:"agent_id"`
-	Compose    string `json:"compose"`
-	Env        string `json:"env"`
-	AutoUpdate bool   `json:"auto_update"`
-	Confirm    string `json:"confirm"`
-	Domain     string `json:"domain"`
-	Port       uint16 `json:"port"`
-	RuleRef    string `json:"rule_ref"`
-	Service    string `json:"service"`
+	ID         string             `json:"id"`
+	AgentID    string             `json:"agent_id"`
+	Compose    string             `json:"compose"`
+	Env        string             `json:"env"`
+	AutoUpdate bool               `json:"auto_update"`
+	Confirm    string             `json:"confirm"`
+	Domain     string             `json:"domain"`
+	Port       uint16             `json:"port"`
+	RuleRef    string             `json:"rule_ref"`
+	Service    string             `json:"service"`
+	Services   []appServiceUpdate `json:"services"`
+	Ignore     []appIgnoredUpdate `json:"ignore"`
+	Locks      map[string]string  `json:"locks"`
 }
 
 type appFilesRequest struct {
@@ -416,30 +420,14 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "update":
-		body, _ := decodeAppWrite(request)
-		preview, previewErr := PreviewComposeDocument(app.ID, app.Generation, app.Compose, app.RuleRef)
-		if previewErr != nil {
-			writeAppJSON(writer, appStatus(previewErr), appAPIResponse{Error: publicAppActionError(previewErr, "update")})
+		body, err := decodeAppWrite(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrInvalidCompose.Error()})
 			return
 		}
-		if RequiresRiskConfirmation(preview) && body.Confirm != preview.Digest {
-			writeRiskDenied(writer, preview, ErrInvalidPreview, "update")
+		if err := controller.applyManualServiceUpdate(request.Context(), writer, app, body); err != nil {
 			return
 		}
-		if err := controller.reconcileAppUpdate(request.Context(), appID); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
-			return
-		}
-		if err := controller.uiRollout.ConfirmUpdate(request.Context(), app); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
-			return
-		}
-		if err := controller.setAppRunning(request.Context(), appID, true); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
-			return
-		}
-		controller.publishHTTPBackendOffers(request.Context())
-		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	case "rollback":
 		if err := controller.uiRollout.Rollback(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "rollback")})
@@ -504,6 +492,166 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 	default:
 		http.Error(writer, "Docker 应用页未找到", http.StatusNotFound)
 	}
+}
+
+func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writer http.ResponseWriter, app App, body appWriteRequest) error {
+	updated := cloneApp(app)
+	locks, err := mergeImageLocks(updated.ImageLocks, body.Locks)
+	if err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+		return err
+	}
+	ignores, err := mergeIgnoredUpdates(updated.IgnoredUpdates, body.Ignore)
+	if err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+		return err
+	}
+	updated.ImageLocks = locks
+	updated.IgnoredUpdates = ignores
+	for _, item := range body.Ignore {
+		if !knownComposeService(updated, item.Service) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrUnknownService.Error()})
+			return ErrUnknownService
+		}
+	}
+	for service := range body.Locks {
+		if !knownComposeService(updated, service) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrUnknownService.Error()})
+			return ErrUnknownService
+		}
+	}
+	serviceTags := make(map[string]string, len(body.Services))
+	for _, item := range body.Services {
+		name := strings.TrimSpace(item.Name)
+		tag := strings.TrimSpace(item.Tag)
+		if name == "" && tag == "" {
+			continue
+		}
+		if !knownComposeService(updated, name) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrUnknownService.Error()})
+			return ErrUnknownService
+		}
+		if !boundedText(tag, 128) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "image tag is invalid"})
+			return ErrInvalidCompose
+		}
+		serviceTags[name] = tag
+	}
+	nextCompose := rewriteComposeServiceTags(updated.Compose, serviceTags)
+	composeChanged := nextCompose != updated.Compose
+	if !composeChanged && mapsEqualString(updated.ImageLocks, app.ImageLocks) && ignoredUpdatesEqual(updated.IgnoredUpdates, app.IgnoredUpdates) {
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
+		return nil
+	}
+	if composeChanged {
+		preview, previewErr := PreviewComposeDocument(app.ID, app.Generation, nextCompose, app.RuleRef)
+		if previewErr != nil {
+			writeAppJSON(writer, appStatus(previewErr), appAPIResponse{Error: publicAppActionError(previewErr, "update")})
+			return previewErr
+		}
+		if RequiresRiskConfirmation(preview) && body.Confirm != preview.Digest {
+			writeRiskDenied(writer, preview, ErrInvalidPreview, "update")
+			return ErrInvalidPreview
+		}
+		if err := controller.reconcileAppUpdate(ctx, app.ID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return err
+		}
+		report, err := controller.observeAgent(ctx, app.AgentID)
+		if err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return err
+		}
+		controller.pinComposeSaveObservation(app.ID)
+		next, err := DeployComposeAppForAgent(ctx, controller.Apps(), ComposeDeploySpec{
+			AppID: app.ID, AgentID: app.AgentID, Generation: app.Generation, Compose: nextCompose,
+			WorkDirRoot: controller.uiWorkDirRoot, Confirm: body.Confirm,
+		}, report, controller.uiApply, controller.uiAuditor)
+		if err != nil {
+			controller.allowImageObservation(app.ID)
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return err
+		}
+		for index := range next {
+			if next[index].ID != app.ID {
+				continue
+			}
+			next[index].ImageLocks = cloneStringMap(updated.ImageLocks)
+			next[index].IgnoredUpdates = cloneStringSlicesMap(updated.IgnoredUpdates)
+			next[index].AutoUpdate = cloneBool(app.AutoUpdate)
+			next[index].Env = ""
+			if err := next[index].normalizeServicePolicies(); err != nil {
+				controller.allowImageObservation(app.ID)
+				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+				return err
+			}
+		}
+		if err := controller.replaceApps(ctx, next); err != nil {
+			controller.allowImageObservation(app.ID)
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return err
+		}
+		controller.allowImageObservation(app.ID)
+		if err := controller.setAppRunning(ctx, app.ID, true); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return err
+		}
+		if err := controller.clearAppDeployment(ctx, app.ID); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			return err
+		}
+		controller.publishHTTPBackendOffers(ctx)
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
+		return nil
+	}
+	apps := cloneApps(controller.Apps())
+	for index := range apps {
+		if apps[index].ID != app.ID {
+			continue
+		}
+		apps[index].ImageLocks = cloneStringMap(updated.ImageLocks)
+		apps[index].IgnoredUpdates = cloneStringSlicesMap(updated.IgnoredUpdates)
+		if err := apps[index].normalizeServicePolicies(); err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+			return err
+		}
+	}
+	if err := controller.replaceApps(ctx, apps); err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+		return err
+	}
+	writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
+	return nil
+}
+
+func mapsEqualString(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func ignoredUpdatesEqual(left, right map[string][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, values := range left {
+		other := right[key]
+		if len(values) != len(other) {
+			return false
+		}
+		for index, value := range values {
+			if other[index] != value {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (controller *Controller) reconcileAppUpdate(ctx context.Context, appID string) error {
@@ -834,7 +982,7 @@ func (controller *Controller) appViewFor(ctx context.Context, app App, listed []
 			deployment = record.Value
 		}
 	}
-	view := projectAppView(app, running, deployment, latest)
+	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app))
 	ports := view.Ports
 	if len(ports) == 0 {
 		ports, _ = ListPublishedPorts(app, nil)
@@ -883,6 +1031,62 @@ func (controller *Controller) cachedLatestDigest(app App) string {
 		return ""
 	}
 	return cached.LatestDigest
+}
+
+func (controller *Controller) tagsForApp(ctx context.Context, app App) map[string][]string {
+	images := app.ServiceImages
+	if len(images) == 0 {
+		images = composeServiceImages(app.Compose)
+	}
+	if len(images) == 0 {
+		return nil
+	}
+	lister := asImageTagLister(controller.uiImageObserver)
+	result := make(map[string][]string, len(images))
+	for _, service := range images {
+		if tags, ok := controller.cachedImageTags(app.ID, service.Image); ok {
+			result[service.Name] = tags
+			continue
+		}
+		if lister == nil {
+			continue
+		}
+		listed, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
+		if err != nil {
+			continue
+		}
+		controller.storeImageTags(app.ID, service.Image, listed)
+		result[service.Name] = listed
+	}
+	return result
+}
+
+func (controller *Controller) cachedImageTags(appID, image string) ([]string, bool) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached, ok := controller.imageCache[appID]
+	if !ok || cached.TagsByImage == nil {
+		return nil, false
+	}
+	tags, ok := cached.TagsByImage[image]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), tags...), true
+}
+
+func (controller *Controller) storeImageTags(appID, image string, tags []string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached := controller.imageCache[appID]
+	if cached.TagsByImage == nil {
+		cached.TagsByImage = map[string][]string{}
+	}
+	cached.TagsByImage[image] = append([]string(nil), tags...)
+	if cached.ObservedAt.IsZero() {
+		cached.ObservedAt = time.Now()
+	}
+	controller.imageCache[appID] = cached
 }
 
 func (controller *Controller) scheduleImageObservation(app App) {
@@ -943,7 +1147,11 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	_, still := controller.snapshotObservationLocked(app, token, epoch)
 	keepRecord := still || controller.catalogHasAppIDLocked(app.ID)
 	if still {
-		controller.imageCache[app.ID] = cachedImageObservation{Image: live.Image, LatestDigest: observed.LatestDigest, ObservedAt: time.Now()}
+		cached := controller.imageCache[app.ID]
+		cached.Image = live.Image
+		cached.LatestDigest = observed.LatestDigest
+		cached.ObservedAt = time.Now()
+		controller.imageCache[app.ID] = cached
 	}
 	controller.mu.Unlock()
 	if !keepRecord {
@@ -985,23 +1193,25 @@ func (controller *Controller) catalogHasAppIDLocked(appID string) bool {
 	return false
 }
 
-func projectAppView(app App, running bool, deployment Deployment, latestDigest string) appView {
+func projectAppView(app App, running bool, deployment Deployment, latestDigest string, tagsByService map[string][]string) appView {
 	name := app.ID
 	if name == "" {
 		name = "未命名应用"
 	}
 	status := ProjectPopularStatus(appLifecycleStatus(running, false, deployment))
+	services, hasUpdate := projectServiceViews(app, tagsByService)
 	notice := ""
-	if appImageUpdateAvailable(deployment, latestDigest) && status != OpsStatusPublishing {
+	if hasUpdate && status != OpsStatusPublishing {
 		notice = OpsStatusUpdateAvailable
 	}
 	ports, _ := ListPublishedPorts(app, nil)
 	return appView{
 		ID: app.ID, AgentID: app.AgentID, Name: name, Status: status, Notice: notice,
-		Version: displayImageVersion(app.Image, deployment.ImageDigest),
+		Version: displayAppVersion(app, deployment.ImageDigest, hasUpdate),
 		Compose: app.Compose, AutoUpdate: AutoUpdateEnabled(app.AutoUpdate),
 		Ports: ports, Services: composeServiceNames(app.Compose),
-		Actions: appViewActions(status, notice, deployment),
+		ServiceImages: services,
+		Actions:       appViewActions(status, notice, deployment),
 	}
 }
 

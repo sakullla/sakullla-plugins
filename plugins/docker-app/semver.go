@@ -171,9 +171,7 @@ func parseSemverTag(raw string) (parsedSemverTag, bool) {
 }
 
 func extractDockerTag(ref string) string {
-	if i := strings.LastIndex(ref, "@"); i >= 0 {
-		ref = ref[:i]
-	}
+	ref = stripImageDigest(ref)
 	if ref == "" {
 		return ""
 	}
@@ -189,6 +187,42 @@ func extractDockerTag(ref string) string {
 		return ""
 	}
 	return ref
+}
+
+func stripImageDigest(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		return strings.TrimSpace(ref[:i])
+	}
+	return ref
+}
+
+func splitDockerRepository(image string) (registry, repository string) {
+	ref := stripImageDigest(image)
+	if ref == "" {
+		return "", ""
+	}
+	name := ref
+	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
+		name = ref[slash+1:]
+	}
+	if colon := strings.LastIndex(name, ":"); colon >= 0 {
+		ref = ref[:len(ref)-len(name)+colon]
+	}
+	if ref == "" {
+		return "", ""
+	}
+	first, rest, found := strings.Cut(ref, "/")
+	if !found {
+		return "docker.io", "library/" + ref
+	}
+	if strings.ContainsAny(first, ".:") || first == "localhost" {
+		if rest == "" {
+			return "", ""
+		}
+		return first, rest
+	}
+	return "docker.io", ref
 }
 
 func normalizeVPrefix(tag string) string {

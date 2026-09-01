@@ -1,6 +1,9 @@
 package dockerapp
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	PluginDisplayName = "Docker 应用"
@@ -153,6 +156,24 @@ func canRollback(deployment Deployment) bool {
 }
 
 const shortDigestHex = 12
+
+func displayAppVersion(app App, digest string, hasUpdate bool) string {
+	images := app.ServiceImages
+	if len(images) == 0 {
+		images = composeServiceImages(app.Compose)
+	}
+	if len(images) <= 1 {
+		image := app.Image
+		if image == "" && len(images) == 1 {
+			image = images[0].Image
+		}
+		return displayImageVersion(image, digest)
+	}
+	if hasUpdate {
+		return fmt.Sprintf("%d 个服务 · 部分有更新", len(images))
+	}
+	return fmt.Sprintf("%d 个服务", len(images))
+}
 
 func displayImageVersion(image, digest string) string {
 	tag, imageDigest := splitImageDigest(image)

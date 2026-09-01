@@ -264,9 +264,6 @@
         </div>
         <div class="app-card-actions">
           <button type="button" class="btn-primary" data-action="open" hidden>打开</button>
-          <button type="button" class="btn-secondary" data-action="start" hidden>启动</button>
-          <button type="button" class="btn-secondary" data-action="stop" hidden>停止</button>
-          <button type="button" class="btn-secondary" data-action="restart" hidden>重启</button>
           <button type="button" class="btn-primary" data-action="update" hidden>更新</button>
           <button type="button" class="btn-secondary" data-action="detail">详情</button>
         </div>
@@ -341,6 +338,17 @@
       </section>
     </template>
   </main>
+  <dialog id="update-dialog" class="files-dialog update-dialog" aria-labelledby="update-title">
+    <form method="dialog" id="update-form" class="files-dialog-form">
+      <h3 id="update-title">更新应用</h3>
+      <p id="update-copy" class="files-dialog-copy">按服务选择要写入 compose 的目标版本。取消不会改 compose 或运行镜像。</p>
+      <div id="update-services" class="update-services"></div>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="btn-secondary" id="update-cancel">取消</button>
+        <button type="submit" value="ok" class="btn-primary" id="update-confirm">更新</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="confirm-dialog" class="files-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog" class="files-dialog-form">
       <h3 id="confirm-title">确认</h3>

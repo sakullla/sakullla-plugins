@@ -1351,20 +1351,17 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
-	observer := &uiTestObserver{current: current, latest: latest}
+	observer := &uiTestObserver{current: current, latest: latest, tags: nginxSemverTags()}
 	controller := newUIControllerWithOptions(t, uiControllerOptions{
 		engineVersion: "27.1.1",
 		observer:      observer,
 		rollout:       &uiTestRollout{},
 	})
 	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
-	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
-		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
-	})
 
 	listed := httptest.NewRecorder()
 	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
@@ -1376,13 +1373,19 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 		t.Fatalf("update view=%#v", apps)
 	}
 	if !hasAppAction(apps[0], OpsActionStop) || !hasAppAction(apps[0], OpsActionRestart) {
-		t.Fatalf("digest drift dropped running ops: %#v", apps)
+		t.Fatalf("running ops dropped from appView: %#v", apps)
 	}
 	if hasAppAction(apps[0], OpsActionRollback) {
 		t.Fatalf("app view offered rollback: %#v", apps)
 	}
-	if apps[0].Version != "nginx:latest sha256:0123456789ab" {
+	if !strings.Contains(apps[0].Version, "nginx:1.27.1") {
 		t.Fatalf("app version = %q", apps[0].Version)
+	}
+	if len(apps[0].Services) != 1 || apps[0].Services[0] != "web" {
+		t.Fatalf("services name array=%v", apps[0].Services)
+	}
+	if len(apps[0].ServiceImages) != 1 || apps[0].ServiceImages[0].Name != "web" || apps[0].ServiceImages[0].Tag != "1.27.1" || !apps[0].ServiceImages[0].Update {
+		t.Fatalf("service projection=%#v", apps[0].ServiceImages)
 	}
 	if strings.Contains(listed.Body.String(), "27.1.1") {
 		t.Fatalf("engine version leaked into app list: %s", listed.Body.String())
@@ -1394,32 +1397,127 @@ func TestAppUIShowsImageVersionSeparateFromEngineAndManualUpdate(t *testing.T) {
 		t.Fatalf("engine status=%d body=%s", engine.Code, engine.Body.String())
 	}
 
-	again := httptest.NewRecorder()
-	controller.ServeHTTP(again, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
-	unchanged := decodeAppList(t, again.Body.Bytes())
-	if unchanged[0].Version != apps[0].Version || unchanged[0].Notice != OpsStatusUpdateAvailable || unchanged[0].Status != OpsStatusRunning {
-		t.Fatalf("list without update changed image: %#v", unchanged)
+	before := controller.Apps()[0]
+	empty := httptest.NewRecorder()
+	controller.ServeHTTP(empty, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if empty.Code != http.StatusOK {
+		t.Fatalf("empty update status=%d body=%s", empty.Code, empty.Body.String())
 	}
-	record, ok := controllerDeployment(controller, "media")
-	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
-		t.Fatalf("digest mutated without confirm: %#v ok=%v", record, ok)
+	if controller.Apps()[0].Compose != before.Compose || controller.Apps()[0].Image != before.Image {
+		t.Fatalf("empty POST mutated compose: before=%q after=%q", before.Compose, controller.Apps()[0].Compose)
+	}
+	if record, ok := controllerDeployment(controller, "media"); ok && record.ImageDigest == latest {
+		t.Fatalf("empty POST published digest: %#v", record)
 	}
 
 	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"1.27.2"}]}`))
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
 	}
 	published := decodeAppList(t, updated.Body.Bytes())
-	if published[0].Notice == OpsStatusUpdateAvailable || published[0].Status != OpsStatusRunning || !strings.Contains(published[0].Version, "sha256:fedcba987654") {
-		t.Fatalf("confirm did not switch digest: %#v", published)
+	if len(published) != 1 || published[0].Status != OpsStatusRunning || !strings.Contains(published[0].Version, "nginx:1.27.2") {
+		t.Fatalf("confirm did not switch tag: %#v", published)
 	}
-	if !hasAppAction(published[0], OpsActionRollback) {
-		t.Fatalf("confirmed update omitted rollback: %#v", published)
+	if !strings.Contains(controller.Apps()[0].Compose, "nginx:1.27.2") {
+		t.Fatalf("catalog compose=%q", controller.Apps()[0].Compose)
 	}
-	got, ok := controllerDeployment(controller, "media")
-	if !ok || got.ImageDigest != latest || len(got.History) == 0 || got.History[0].ImageDigest != current {
-		t.Fatalf("confirm digest=%#v ok=%v", got, ok)
+}
+
+func TestAppUIUpdateSelectedServiceLeavesOtherImage(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{
+		tagsByImage: map[string][]string{
+			"nginx:1.27.1":  nginxSemverTags(),
+			"postgres:16.3": {"16.4", "17.0"},
+		},
+	}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	listed := decodeAppList(t, created.Body.Bytes())
+	if len(listed) != 1 || listed[0].Notice != OpsStatusUpdateAvailable || listed[0].Version != "2 个服务 · 部分有更新" {
+		t.Fatalf("multi-service view=%#v", listed)
+	}
+	if len(listed[0].Services) != 2 || listed[0].Services[0] != "db" || listed[0].Services[1] != "web" {
+		t.Fatalf("services=%v", listed[0].Services)
+	}
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"1.27.2"}]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:1.27.2" {
+		t.Fatalf("web=%q", serviceImageRef(controller.Apps()[0].Compose, "web"))
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "db") != "postgres:16.3" {
+		t.Fatalf("db=%q", serviceImageRef(controller.Apps()[0].Compose, "db"))
+	}
+}
+
+func TestAppUIIgnoreCandidateHidesNoticeUntilHigherLockMatch(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{tags: []string{"1.27.2"}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	ignored := httptest.NewRecorder()
+	controller.ServeHTTP(ignored, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"ignore":[{"service":"web","tag":"1.27.2"}]}`))
+	if ignored.Code != http.StatusOK {
+		t.Fatalf("ignore status=%d body=%s", ignored.Code, ignored.Body.String())
+	}
+	hidden := decodeAppList(t, ignored.Body.Bytes())
+	if len(hidden) != 1 || hidden[0].Notice == OpsStatusUpdateAvailable || hasAppAction(hidden[0], OpsActionUpdate) {
+		t.Fatalf("ignored 1.27.2 still advertised: %#v", hidden)
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:1.27.1" {
+		t.Fatalf("ignore mutated compose=%q", controller.Apps()[0].Compose)
+	}
+	observer.tags = []string{"1.27.2", "1.27.3"}
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	controller.mu.Unlock()
+	refreshed := httptest.NewRecorder()
+	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	shown := decodeAppList(t, refreshed.Body.Bytes())
+	if refreshed.Code != http.StatusOK || len(shown) != 1 || shown[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("higher tag did not restore notice: %#v", shown)
+	}
+	if len(shown[0].ServiceImages) != 1 || shown[0].ServiceImages[0].DefaultTag != "1.27.3" {
+		t.Fatalf("default candidate=%#v", shown[0].ServiceImages)
+	}
+}
+
+func TestAppUILockShortcutHidesMajorCandidate(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{tags: nginxSemverTags()}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	locked := httptest.NewRecorder()
+	controller.ServeHTTP(locked, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"locks":{"web":"~1.27.1"}}`))
+	if locked.Code != http.StatusOK {
+		t.Fatalf("lock status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	apps := decodeAppList(t, locked.Body.Bytes())
+	if len(apps) != 1 || len(apps[0].ServiceImages) != 1 {
+		t.Fatalf("locked view=%#v", apps)
+	}
+	got := make([]string, 0, len(apps[0].ServiceImages[0].Candidates))
+	for _, candidate := range apps[0].ServiceImages[0].Candidates {
+		got = append(got, candidate.Tag)
+	}
+	if strings.Join(got, ",") != "1.27.2" {
+		t.Fatalf("patch lock candidates=%v", got)
 	}
 }
 
@@ -1552,13 +1650,11 @@ func TestAppUIRollbackRequiresHistoryAndRestoresPrior(t *testing.T) {
 		t.Fatalf("rejected rollback mutated deployment: %#v ok=%v", record, ok)
 	}
 
-	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	published := decodeAppList(t, updated.Body.Bytes())
-	if len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
+	confirmDigestUpdate(t, controller, "media")
+	listedAfter := httptest.NewRecorder()
+	controller.ServeHTTP(listedAfter, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	published := decodeAppList(t, listedAfter.Body.Bytes())
+	if listedAfter.Code != http.StatusOK || len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
 		t.Fatalf("confirmed update omitted rollback: %#v", published)
 	}
 	got, ok := controllerDeployment(controller, "media")
@@ -1600,12 +1696,10 @@ func TestAppUIComposeSaveDropsRollbackHistory(t *testing.T) {
 	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
 		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
 	})
-	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	if published := decodeAppList(t, updated.Body.Bytes()); len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
+	confirmDigestUpdate(t, controller, "media")
+	listedAfter := httptest.NewRecorder()
+	controller.ServeHTTP(listedAfter, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if published := decodeAppList(t, listedAfter.Body.Bytes()); listedAfter.Code != http.StatusOK || len(published) != 1 || !hasAppAction(published[0], OpsActionRollback) {
 		t.Fatalf("confirmed update omitted rollback: %#v", published)
 	}
 
@@ -1713,13 +1807,11 @@ func TestAppUIConfirmUpdateAndRollbackMarkRunningAfterStop(t *testing.T) {
 	if stopped.Code != http.StatusOK || decodeAppList(t, stopped.Body.Bytes())[0].Status != OpsStatusStopped {
 		t.Fatalf("stop status=%d body=%s", stopped.Code, stopped.Body.String())
 	}
-	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	published := decodeAppList(t, updated.Body.Bytes())
-	if len(published) != 1 || published[0].Status != OpsStatusRunning || !controller.appIsRunning("media") {
+	confirmDigestUpdate(t, controller, "media")
+	listedAfter := httptest.NewRecorder()
+	controller.ServeHTTP(listedAfter, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	published := decodeAppList(t, listedAfter.Body.Bytes())
+	if listedAfter.Code != http.StatusOK || len(published) != 1 || published[0].Status != OpsStatusRunning || !controller.appIsRunning("media") {
 		t.Fatalf("confirm left stopped: %#v running=%v", published, controller.appIsRunning("media"))
 	}
 
@@ -1805,11 +1897,7 @@ func TestAppUIRestoresPersistedRollbackHistoryAfterRestart(t *testing.T) {
 	waitForDeployment(t, first, "media", func(deployment Deployment) bool {
 		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
 	})
-	updated := httptest.NewRecorder()
-	first.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
+	confirmDigestUpdate(t, first, "media")
 	got, ok := controllerDeployment(first, "media")
 	if !ok || got.ImageDigest != latest || len(got.History) == 0 || got.History[0].ImageDigest != current {
 		t.Fatalf("first confirm history=%#v ok=%v", got, ok)
@@ -1861,11 +1949,7 @@ func TestAppUIRollbackInFlightObserveAfterDeleteDoesNotRestoreHistory(t *testing
 	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
 		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
 	})
-	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
+	confirmDigestUpdate(t, controller, "media")
 	got, ok := controllerDeployment(controller, "media")
 	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current {
 		t.Fatalf("precondition history=%#v ok=%v", got, ok)
@@ -1950,11 +2034,7 @@ func TestAppUIDeleteOverlappingAutoUpdatePersistDoesNotRestoreHistory(t *testing
 	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
 		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
 	})
-	updated := httptest.NewRecorder()
-	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
-	}
+	confirmDigestUpdate(t, controller, "media")
 	got, ok := controllerDeployment(controller, "media")
 	if !ok || len(got.History) == 0 || got.History[0].ImageDigest != current {
 		t.Fatalf("precondition history=%#v ok=%v", got, ok)
@@ -2262,17 +2342,21 @@ func TestAppUIHighRiskComposeRequiresMatchingConfirm(t *testing.T) {
 	if seeded.Code != http.StatusOK {
 		t.Fatalf("update seed status=%d body=%s", seeded.Code, seeded.Body.String())
 	}
-	waitForDeployment(t, updating, "media", func(deployment Deployment) bool {
-		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
-	})
+	emptyUpdate := httptest.NewRecorder()
+	updating.ServeHTTP(emptyUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if emptyUpdate.Code != http.StatusOK {
+		t.Fatalf("empty high-risk update status=%d body=%s", emptyUpdate.Code, emptyUpdate.Body.String())
+	}
+	if !strings.Contains(updating.Apps()[0].Compose, "nginx:latest") {
+		t.Fatalf("empty POST mutated high-risk compose=%q", updating.Apps()[0].Compose)
+	}
 	unconfirmedUpdate := httptest.NewRecorder()
-	updating.ServeHTTP(unconfirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	updating.ServeHTTP(unconfirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"1.27.2"}]}`))
 	if unconfirmedUpdate.Code != http.StatusBadRequest {
 		t.Fatalf("unconfirmed update status=%d body=%s", unconfirmedUpdate.Code, unconfirmedUpdate.Body.String())
 	}
-	record, ok := controllerDeployment(updating, "media")
-	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
-		t.Fatalf("unconfirmed update mutated digest: %#v ok=%v", record, ok)
+	if !strings.Contains(updating.Apps()[0].Compose, "nginx:latest") {
+		t.Fatalf("unconfirmed tag update mutated compose=%q", updating.Apps()[0].Compose)
 	}
 	var updatePreview struct {
 		Preview riskPreviewView `json:"preview"`
@@ -2280,14 +2364,16 @@ func TestAppUIHighRiskComposeRequiresMatchingConfirm(t *testing.T) {
 	if err := json.Unmarshal(unconfirmedUpdate.Body.Bytes(), &updatePreview); err != nil {
 		t.Fatal(err)
 	}
+	if updatePreview.Preview.Digest == "" {
+		t.Fatalf("unconfirmed tag update preview=%#v", updatePreview.Preview)
+	}
 	confirmedUpdate := httptest.NewRecorder()
-	updating.ServeHTTP(confirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"confirm":`+jsonString(updatePreview.Preview.Digest)+`}`))
+	updating.ServeHTTP(confirmedUpdate, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"1.27.2"}],"confirm":`+jsonString(updatePreview.Preview.Digest)+`}`))
 	if confirmedUpdate.Code != http.StatusOK {
 		t.Fatalf("confirmed update status=%d body=%s", confirmedUpdate.Code, confirmedUpdate.Body.String())
 	}
-	published, ok := controllerDeployment(updating, "media")
-	if !ok || published.ImageDigest != latest {
-		t.Fatalf("confirmed update digest=%#v ok=%v", published, ok)
+	if serviceImageRef(updating.Apps()[0].Compose, "web") != "nginx:1.27.2" {
+		t.Fatalf("confirmed high-risk tag=%q", serviceImageRef(updating.Apps()[0].Compose, "web"))
 	}
 }
 
@@ -2369,15 +2455,15 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	current := "sha256:0123456789abcdef0123456789abcdef"
 	latest := "sha256:fedcba9876543210fedcba9876543210"
 	controller := newUIControllerWithOptions(t, uiControllerOptions{
-		observer: &uiTestObserver{current: current, latest: latest},
+		observer: &uiTestObserver{current: current, latest: latest, tags: nginxSemverTags()},
 		rollout:  &uiTestRollout{},
 	})
 	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
-	if createdApps := decodeAppList(t, created.Body.Bytes()); len(createdApps) != 1 || createdApps[0].Status != OpsStatusRunning {
+	if createdApps := decodeAppList(t, created.Body.Bytes()); len(createdApps) != 1 || createdApps[0].Status != OpsStatusRunning || createdApps[0].Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("create response did not return immediately: %#v", createdApps)
 	}
 	record := waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
@@ -2387,7 +2473,7 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	refreshedApps := decodeAppList(t, refreshed.Body.Bytes())
 	if len(refreshedApps) != 1 || refreshedApps[0].Notice != OpsStatusUpdateAvailable {
-		t.Fatalf("background observation did not publish update notice: %#v", refreshedApps)
+		t.Fatalf("background observation hid update notice: %#v", refreshedApps)
 	}
 	_, ok := controllerDeployment(controller, "media")
 	if !ok || record.ImageDigest != current || record.AvailableDigest != latest {
@@ -2465,13 +2551,18 @@ func controllerDeployment(controller *Controller, appID string) (Deployment, boo
 
 func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	t.Parallel()
-	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest", Compose: "services:\n  web:\n    image: nginx:latest\n"}
+	app := App{
+		ID: "media", AgentID: "agent-1", Image: "nginx:1.27.1",
+		ServiceImages: []ServiceImage{{Name: "web", Image: "nginx:1.27.1"}},
+		Compose:       "services:\n  web:\n    image: nginx:1.27.1\n",
+	}
+	tags := map[string][]string{"web": nginxSemverTags()}
 	deployment := Deployment{
 		Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest",
 		History: []DeploymentRevision{{InstanceID: "old", Image: "old-image"}},
 	}
 
-	running := projectAppView(app, true, deployment, "sha256:latest")
+	running := projectAppView(app, true, deployment, "sha256:latest", tags)
 	if running.Status != OpsStatusRunning || running.Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("running update view=%#v", running)
 	}
@@ -2482,7 +2573,7 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 		t.Fatalf("running update omitted rollback: %#v", running.Actions)
 	}
 
-	stopped := projectAppView(app, false, deployment, "sha256:latest")
+	stopped := projectAppView(app, false, deployment, "sha256:latest", tags)
 	if stopped.Status != OpsStatusStopped || stopped.Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("stopped update view=%#v", stopped)
 	}
@@ -2493,7 +2584,7 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 		t.Fatalf("stopped update omitted rollback: %#v", stopped.Actions)
 	}
 
-	withoutHistory := projectAppView(app, true, Deployment{Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest"}, "sha256:latest")
+	withoutHistory := projectAppView(app, true, Deployment{Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest"}, "sha256:latest", tags)
 	if hasOpsAction(withoutHistory.Actions, OpsActionRollback) {
 		t.Fatalf("view without history offered rollback: %#v", withoutHistory.Actions)
 	}
@@ -2501,9 +2592,16 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	enabled := true
 	auto := app
 	auto.AutoUpdate = &enabled
-	ignored := projectAppView(auto, true, deployment, "sha256:latest")
+	ignored := projectAppView(auto, true, deployment, "sha256:latest", tags)
 	if ignored.Notice != OpsStatusUpdateAvailable || !hasOpsAction(ignored.Actions, OpsActionUpdate) {
 		t.Fatalf("auto_update hid 有新版本: %#v", ignored)
+	}
+
+	pinned := app
+	pinned.IgnoredUpdates = map[string][]string{"web": {"1.27.2", "1.28.0", "2.0.0"}}
+	hidden := projectAppView(pinned, true, deployment, "sha256:latest", tags)
+	if hidden.Notice == OpsStatusUpdateAvailable || hasOpsAction(hidden.Actions, OpsActionUpdate) {
+		t.Fatalf("ignored candidates still advertised: %#v", hidden)
 	}
 }
 
@@ -2532,7 +2630,8 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 		"privileged",
 		"host-mount",
 		"capability",
-		`["start", "stop", "restart", "update"]`,
+		`["update"]`,
+		"askServiceUpdate",
 	} {
 		if !strings.Contains(script, token) {
 			t.Fatalf("app.js missing %q", token)
@@ -2575,14 +2674,13 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	cardTemplate := page[templateStart:templateEnd]
 	for _, want := range []string{
 		`data-app-name`, `data-app-status`, `data-action="open"`,
-		`data-action="start"`, `data-action="stop"`, `data-action="restart"`,
 		`data-action="update"`, `data-action="detail"`, "打开", "详情", "更新",
 	} {
 		if !strings.Contains(cardTemplate, want) {
 			t.Fatalf("card template missing hook %q", want)
 		}
 	}
-	for _, forbidden := range []string{"删除", "日志", "files-list", "compose-form", "http-form", "logs-view"} {
+	for _, forbidden := range []string{"删除", "日志", "files-list", "compose-form", "http-form", "logs-view", `data-action="start"`, `data-action="stop"`, `data-action="restart"`} {
 		if strings.Contains(cardTemplate, forbidden) {
 			t.Fatalf("cards still expose %q as list primary", forbidden)
 		}
@@ -2622,13 +2720,11 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if !strings.Contains(listRender, "window.open") || !strings.Contains(listRender, `textContent = "打开"`) || !strings.Contains(listRender, `[data-action="open"]`) {
 		t.Fatal("cards cannot open an enabled HTTP entry")
 	}
-	for _, action := range []string{"start", "stop", "restart", "update"} {
-		if !strings.Contains(listRender, `[data-action="${id}"]`) && !strings.Contains(listRender, `[data-action="`+action+`"]`) {
-			t.Fatalf("card renderer does not fill %s hook", action)
-		}
+	if !strings.Contains(listRender, `[data-action="${id}"]`) && !strings.Contains(listRender, `[data-action="update"]`) {
+		t.Fatal("card renderer does not fill update hook")
 	}
-	if !strings.Contains(listRender, `["start", "stop", "restart", "update"]`) {
-		t.Fatal("card wall does not expose start/stop/restart/update")
+	if strings.Contains(listRender, `["start", "stop", "restart", "update"]`) {
+		t.Fatal("card wall still exposes start/stop/restart as list primaries")
 	}
 	for _, forbidden := range []string{"删除", "日志", "mountAppFiles", "http-form", "openCreate("} {
 		if strings.Contains(listRender, forbidden) {
@@ -2793,23 +2889,17 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form still fills main without a capped operation group")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "repeat(auto-fit, minmax(") {
-		t.Fatal(".app-list is not a filling card grid")
+	if !strings.Contains(appList, "flex-direction: column") {
+		t.Fatal(".app-list is not a scannable column")
 	}
-	if strings.Contains(appList, "auto-fill") {
-		t.Fatal(".app-list still leaves empty auto-fill tracks")
-	}
-	if strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
-		t.Fatal(".app-list is still a single column")
+	if strings.Contains(appList, "auto-fill") || strings.Contains(appList, "repeat(auto-fit") {
+		t.Fatal(".app-list is still a card grid")
 	}
 	for _, want := range []string{
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
 		"max-width: 72rem",
-		"repeat(auto-fit, minmax(17.5rem, 22rem))",
-		"repeat(auto-fit, minmax(18rem, 22rem))",
-		"repeat(auto-fit, minmax(20rem, 22rem))",
 	} {
 		if !strings.Contains(stylesheet, want) {
 			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
@@ -3397,8 +3487,8 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if !strings.Contains(runFn, "确认回滚 ${app.id}") {
 		t.Fatal("rollback is missing confirmation")
 	}
-	if !strings.Contains(runFn, "确认更新 ${app.id}") {
-		t.Fatal("update is missing confirmation")
+	if !strings.Contains(js, "askServiceUpdate") || !strings.Contains(html, `id="update-dialog"`) {
+		t.Fatal("update is missing the per-service dialog")
 	}
 	overviewStart := strings.Index(js, "const renderOverview = (app) => {")
 	overviewEnd := strings.Index(js, "const renderHTTP = (app) => {")
@@ -3519,11 +3609,16 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	}
 	for _, want := range []string{
 		`id="app-card-template"`, `data-app-name`, `data-app-status`,
-		`data-action="open"`, `data-action="start"`, `data-action="stop"`,
-		`data-action="restart"`, `data-action="update"`, `data-action="detail"`, "详情",
+		`data-action="open"`, `data-action="update"`, `data-action="detail"`, "详情",
+		`id="update-dialog"`, `id="update-cancel"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("page missing card-wall hook %q", want)
+		}
+	}
+	for _, want := range []string{"忽略此版本", "将更新到", "askServiceUpdate"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("update dialog missing %q", want)
 		}
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
@@ -3699,7 +3794,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("cleanup result copy missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec"} {
+	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec", "备份还原", "资源监控"} {
 		if strings.Contains(html, forbidden) || strings.Contains(js, forbidden) {
 			t.Fatalf("management page grew %q copy", forbidden)
 		}
@@ -4161,11 +4256,14 @@ func jsonQuote(value string) (string, error) {
 }
 
 type uiAppView struct {
-	ID      string
-	Status  string
-	Notice  string
-	Version string
-	Actions []OpsAction
+	ID            string
+	Status        string
+	Notice        string
+	Version       string
+	Compose       string
+	Services      []string
+	ServiceImages []appServiceView `json:"service_images"`
+	Actions       []OpsAction
 }
 
 func decodeAppList(t *testing.T, payload []byte) []uiAppView {
@@ -4446,10 +4544,39 @@ func assertDiskCleanupHandleIdle(t *testing.T, handle *recordingDiskCleanup) {
 
 type uiTestObserver struct {
 	current, latest string
+	tags            []string
+	tagsByImage     map[string][]string
 }
 
 func (observer *uiTestObserver) ObserveImage(context.Context, App) (UpdateObservation, error) {
 	return UpdateObservation{CurrentDigest: observer.current, LatestDigest: observer.latest}, nil
+}
+
+func (observer *uiTestObserver) ListImageTags(_ context.Context, app App) ([]string, error) {
+	if observer.tagsByImage != nil {
+		if tags, ok := observer.tagsByImage[app.Image]; ok {
+			return append([]string(nil), tags...), nil
+		}
+	}
+	return append([]string(nil), observer.tags...), nil
+}
+
+func confirmDigestUpdate(t *testing.T, controller *Controller, appID string) {
+	t.Helper()
+	app, ok := controller.appByID(appID)
+	if !ok {
+		t.Fatalf("app %s is missing", appID)
+	}
+	if err := controller.uiRollout.ConfirmUpdate(t.Context(), app); err != nil {
+		t.Fatalf("ConfirmUpdate: %v", err)
+	}
+	if err := controller.setAppRunning(t.Context(), appID, true); err != nil {
+		t.Fatalf("setAppRunning: %v", err)
+	}
+}
+
+func nginxSemverTags() []string {
+	return []string{"1.27.2", "1.28.0", "2.0.0", "1.27.2-rc.1"}
 }
 
 type uiTestRollout struct {

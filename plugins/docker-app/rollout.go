@@ -187,6 +187,15 @@ type ImageUpdateObserver interface {
 	ObserveImage(context.Context, App) (UpdateObservation, error)
 }
 
+type ImageTagLister interface {
+	ListImageTags(context.Context, App) ([]string, error)
+}
+
+func asImageTagLister(observer ImageUpdateObserver) ImageTagLister {
+	lister, _ := observer.(ImageTagLister)
+	return lister
+}
+
 type ImageUpdateObserverFunc func(context.Context, App) (UpdateObservation, error)
 
 func (function ImageUpdateObserverFunc) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {

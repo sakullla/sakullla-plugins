@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestRewriteComposeServiceTagsOnlySelectedService(t *testing.T) {
+	t.Parallel()
+	document := "services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n"
+	got := rewriteComposeServiceTags(document, map[string]string{"web": "1.27.2"})
+	if serviceImageRef(got, "web") != "nginx:1.27.2" {
+		t.Fatalf("web image=%q document=%q", serviceImageRef(got, "web"), got)
+	}
+	if serviceImageRef(got, "db") != "postgres:16.3" {
+		t.Fatalf("db image rewritten=%q document=%q", serviceImageRef(got, "db"), got)
+	}
+	cancelled := rewriteComposeServiceTags(document, nil)
+	if cancelled != document {
+		t.Fatalf("empty rewrite mutated compose: %q", cancelled)
+	}
+}
+
+func TestReplaceImageTagStripsDigest(t *testing.T) {
+	t.Parallel()
+	got := replaceImageTag("nginx:1.27.1@sha256:0123456789abcdef0123456789abcdef", "1.27.2")
+	if got != "nginx:1.27.2" {
+		t.Fatalf("replaceImageTag=%q", got)
+	}
+}
+
 func TestPinComposeImagesPinsServiceDigest(t *testing.T) {
 	t.Parallel()
 	document := "services:\n  web:\n    image: nginx:latest\n"

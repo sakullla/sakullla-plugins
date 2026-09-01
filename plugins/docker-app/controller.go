@@ -130,6 +130,7 @@ type Controller struct {
 type cachedImageObservation struct {
 	Image        string
 	LatestDigest string
+	TagsByImage  map[string][]string
 	ObservedAt   time.Time
 }
 

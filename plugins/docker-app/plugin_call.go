@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -738,6 +740,8 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 	switch strings.TrimSpace(request.Action) {
 	case "", "observe":
 		return controller.callImageObserve(ctx, request)
+	case "list-tags":
+		return controller.callImageListTags(ctx, request)
 	case "preview", "preview-prune":
 		return controller.callDiskPrune(ctx, true, false)
 	case "prune":
@@ -745,6 +749,149 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 	default:
 		return nil, fmt.Errorf("image action %q is unknown", request.Action)
 	}
+}
+
+func (controller *Controller) callImageListTags(ctx context.Context, request imageCallRequest) ([]byte, error) {
+	if lister := asImageTagLister(controller.callImages); lister != nil {
+		tags, err := lister.ListImageTags(ctx, App{
+			ID: request.AppID, AgentID: request.AgentID, Image: request.Image,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return marshalImageTags(tags)
+	}
+	if strings.TrimSpace(request.Image) == "" {
+		return nil, errors.New(imageObserveRequiredMessage)
+	}
+	tags, err := controller.dockerImageTags(ctx, request.Image)
+	if err != nil {
+		return marshalImageTags(nil)
+	}
+	return marshalImageTags(tags)
+}
+
+func marshalImageTags(tags []string) ([]byte, error) {
+	if tags == nil {
+		tags = []string{}
+	}
+	return json.Marshal(map[string]any{"tags": tags})
+}
+
+var (
+	imageTagHTTPClient  = http.DefaultClient
+	dockerHubTagListURL = func(repository string) string {
+		return "https://hub.docker.com/v2/repositories/" + repository + "/tags?page_size=100"
+	}
+	registryTagListURL = func(registry, repository string) string {
+		return "https://" + registry + "/v2/" + repository + "/tags/list"
+	}
+)
+
+func (controller *Controller) dockerImageTags(ctx context.Context, image string) ([]string, error) {
+	registry, repository := splitDockerRepository(image)
+	if repository == "" {
+		return nil, errors.New(imageObserveRequiredMessage)
+	}
+	if registry == "docker.io" {
+		return listDockerHubTags(ctx, repository)
+	}
+	return listRegistryTags(ctx, registry, repository)
+}
+
+func listDockerHubTags(ctx context.Context, repository string) ([]string, error) {
+	url := dockerHubTagListURL(repository)
+	seen := map[string]struct{}{}
+	tags := make([]string, 0, 32)
+	for url != "" && len(tags) < MaxCollectionItems {
+		payload, err := fetchImageTagJSON(ctx, url)
+		if err != nil {
+			return tags, err
+		}
+		var document struct {
+			Next    string `json:"next"`
+			Results []struct {
+				Name string `json:"name"`
+			} `json:"results"`
+		}
+		if json.Unmarshal(payload, &document) != nil {
+			return tags, errors.New("image tags payload is invalid")
+		}
+		for _, item := range document.Results {
+			name := strings.TrimSpace(item.Name)
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			tags = append(tags, name)
+			if len(tags) >= MaxCollectionItems {
+				break
+			}
+		}
+		url = strings.TrimSpace(document.Next)
+	}
+	return tags, nil
+}
+
+func listRegistryTags(ctx context.Context, registry, repository string) ([]string, error) {
+	payload, err := fetchImageTagJSON(ctx, registryTagListURL(registry, repository))
+	if err != nil {
+		return nil, err
+	}
+	var document struct {
+		Tags []string `json:"tags"`
+	}
+	if json.Unmarshal(payload, &document) != nil {
+		return nil, errors.New("image tags payload is invalid")
+	}
+	seen := map[string]struct{}{}
+	tags := make([]string, 0, len(document.Tags))
+	for _, tag := range document.Tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, dup := seen[tag]; dup {
+			continue
+		}
+		seen[tag] = struct{}{}
+		tags = append(tags, tag)
+		if len(tags) >= MaxCollectionItems {
+			break
+		}
+	}
+	return tags, nil
+}
+
+func fetchImageTagJSON(ctx context.Context, url string) ([]byte, error) {
+	if strings.TrimSpace(url) == "" {
+		return nil, errors.New("image tags URL is empty")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	client := imageTagHTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, MaxConfigBytes))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("image tags lookup failed: %d", response.StatusCode)
+	}
+	return payload, nil
 }
 
 func (controller *Controller) callImageObserve(ctx context.Context, request imageCallRequest) ([]byte, error) {
