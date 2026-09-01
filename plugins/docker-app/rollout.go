@@ -156,9 +156,12 @@ type Rollout struct {
 	Clock                         func() time.Time
 }
 
-// UpdatePolicy decides whether a newer image digest is published automatically.
-// A nil AutoUpdate means DefaultAutoUpdate (false): digest changes are
-// projected as a new version until ConfirmUpdate.
+// UpdatePolicy decides whether a matching update is published automatically.
+// A nil AutoUpdate means DefaultAutoUpdate (false): matching tag or digest
+// changes are projected as a new version until confirmed. Automatic updates
+// use the same npm-style matching as manual updates, defaulting to caret of
+// the current tag and never applying a major bump unless a service lock
+// allows it. Floating tags still follow the same-tag digest.
 type UpdatePolicy struct {
 	AutoUpdate *bool
 }
@@ -181,6 +184,7 @@ func AutoUpdatePolicy(enabled bool) UpdatePolicy {
 type UpdateObservation struct {
 	CurrentDigest string
 	LatestDigest  string
+	TagsByService map[string][]string
 }
 
 type ImageUpdateObserver interface {
@@ -212,6 +216,7 @@ type UpdateView struct {
 	HasUpdate  bool
 	Published  bool
 	Digest     string
+	Compose    string
 }
 
 func ProjectUpdate(policy UpdatePolicy, currentDigest, latestDigest string) RolloutNotice {
@@ -282,12 +287,20 @@ func (r Rollout) bindLiveCatalogApp(ctx context.Context, app App) (App, error) {
 	if !ok {
 		return App{}, ErrReconcilePending
 	}
+	plannedCompose := app.Compose
+	plannedImage := app.Image
+	plannedServices := app.ServiceImages
 	app.Compose = live.Compose
 	app.Image = live.Image
 	app.Generation = live.Generation
 	app.AutoUpdate = live.AutoUpdate
 	if live.AgentID != "" {
 		app.AgentID = live.AgentID
+	}
+	if plannedCompose != "" && plannedCompose != live.Compose {
+		app.Compose = plannedCompose
+		app.Image = plannedImage
+		app.ServiceImages = append([]ServiceImage(nil), plannedServices...)
 	}
 	return app, nil
 }
@@ -314,6 +327,21 @@ func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed U
 	if rolloutBusy(record.Value, existed, r.now()) {
 		return UpdateView{}, ErrReconcilePending
 	}
+	serviceTags := selectAutoUpdateServiceTags(app, observed.TagsByService)
+	if len(serviceTags) > 0 {
+		view.HasUpdate = true
+		if view.AutoUpdate {
+			next, ok := applyAutoUpdateServiceTags(app, serviceTags)
+			if ok {
+				view.Compose = next.Compose
+				if err := r.publish(ctx, next, ""); err != nil {
+					return UpdateView{}, err
+				}
+				view.Published = true
+				return view, nil
+			}
+		}
+	}
 	current := observed.CurrentDigest
 	if existed && record.Value.ImageDigest != "" {
 		current = record.Value.ImageDigest
@@ -333,11 +361,14 @@ func (r Rollout) AutoUpdate(ctx context.Context, app App, flag *bool, observed U
 	}
 	view.HasUpdate = true
 	view.Digest = latest
-	if !view.AutoUpdate {
+	followDigest := appHasFloatingImage(app)
+	if !view.AutoUpdate || !followDigest {
 		if err := r.rememberDigest(ctx, record, app, current, latest, existed); err != nil {
 			return UpdateView{}, err
 		}
-		audit(r.Auditor, AuditRecord{Action: "rollout.available", Outcome: "projected", Detail: app.ID})
+		if !view.AutoUpdate {
+			audit(r.Auditor, AuditRecord{Action: "rollout.available", Outcome: "projected", Detail: app.ID})
+		}
 		return view, nil
 	}
 	if err := r.publish(ctx, app, latest); err != nil {
@@ -998,6 +1029,76 @@ func (r Rollout) rememberDigest(ctx context.Context, record DeploymentRecord, ap
 
 func priorInstanceAbsent(existed bool, instanceID string) bool {
 	return !existed || instanceID == ""
+}
+
+func selectAutoUpdateServiceTags(app App, tagsByService map[string][]string) map[string]string {
+	images := app.ServiceImages
+	if len(images) == 0 {
+		images = composeServiceImages(app.Compose)
+	}
+	if len(images) == 0 {
+		return nil
+	}
+	selected := make(map[string]string)
+	for _, service := range images {
+		version, _, ok := ParseSemverTag(service.Image)
+		if !ok {
+			continue
+		}
+		lock := strings.TrimSpace(app.ImageLocks[service.Name])
+		if lock == "" {
+			lock = "^" + version
+		}
+		allowed := allowedServiceCandidates(service.Image, tagsByService[service.Name], lock, app.IgnoredUpdates[service.Name])
+		if len(allowed) == 0 {
+			continue
+		}
+		selected[service.Name] = allowed[0]
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	return selected
+}
+
+func applyAutoUpdateServiceTags(app App, serviceTags map[string]string) (App, bool) {
+	if len(serviceTags) == 0 {
+		return app, false
+	}
+	next := cloneApp(app)
+	next.Compose = rewriteComposeServiceTags(app.Compose, serviceTags)
+	if next.Compose == app.Compose {
+		return app, false
+	}
+	if err := next.bindCompose(); err != nil {
+		return app, false
+	}
+	return next, true
+}
+
+func appHasFloatingImage(app App) bool {
+	images := app.ServiceImages
+	if len(images) == 0 {
+		images = composeServiceImages(app.Compose)
+	}
+	if len(images) == 0 {
+		image := strings.TrimSpace(app.Image)
+		if image == "" {
+			return false
+		}
+		_, _, ok := ParseSemverTag(image)
+		return !ok
+	}
+	for _, service := range images {
+		if strings.TrimSpace(service.Image) == "" {
+			continue
+		}
+		_, _, ok := ParseSemverTag(service.Image)
+		if !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Empty RuleRef has no http.rule, so observed routing is vacuously complete.

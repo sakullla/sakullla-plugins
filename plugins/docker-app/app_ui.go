@@ -1073,6 +1073,47 @@ func appServiceImages(app App) []ServiceImage {
 	return composeServiceImages(app.Compose)
 }
 
+func tagsByServiceName(app App, listed map[string][]string) map[string][]string {
+	if len(listed) == 0 {
+		return nil
+	}
+	result := make(map[string][]string)
+	for _, service := range appServiceImages(app) {
+		tags, ok := listed[service.Image]
+		if !ok {
+			continue
+		}
+		result[service.Name] = append([]string(nil), tags...)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func (controller *Controller) persistCatalogCompose(ctx context.Context, appID, compose string) error {
+	if strings.TrimSpace(appID) == "" || strings.TrimSpace(compose) == "" {
+		return nil
+	}
+	apps := cloneApps(controller.Apps())
+	found := false
+	for index := range apps {
+		if apps[index].ID != appID {
+			continue
+		}
+		apps[index].Compose = compose
+		if err := apps[index].bindCompose(); err != nil {
+			return err
+		}
+		found = true
+		break
+	}
+	if !found {
+		return nil
+	}
+	return controller.replaceApps(ctx, apps)
+}
+
 func (controller *Controller) listAppImageTags(ctx context.Context, app App) (listed map[string][]string, failed []string) {
 	lister := asImageTagLister(controller.uiImageObserver)
 	if lister == nil {
@@ -1188,6 +1229,9 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		return
 	}
 	listed, failed := controller.listAppImageTags(ctx, live)
+	if tags := tagsByServiceName(live, listed); len(tags) > 0 {
+		observed.TagsByService = tags
+	}
 	view, autoErr := controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
@@ -1212,6 +1256,9 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		controller.imageCache[app.ID] = cached
 	}
 	controller.mu.Unlock()
+	if still && autoErr == nil && view.Published && view.Compose != "" && view.Compose != live.Compose {
+		_ = controller.persistCatalogCompose(ctx, live.ID, view.Compose)
+	}
 	if !keepRecord {
 		_ = controller.clearAppDeployment(ctx, app.ID)
 	} else if autoErr == nil && view.Published {
@@ -1258,6 +1305,9 @@ func projectAppView(app App, running bool, deployment Deployment, latestDigest s
 	}
 	status := ProjectPopularStatus(appLifecycleStatus(running, false, deployment))
 	services, hasUpdate := projectServiceViews(app, tagsByService)
+	if !hasUpdate && appHasFloatingImage(app) && appImageUpdateAvailable(deployment, latestDigest) {
+		hasUpdate = true
+	}
 	notice := ""
 	if hasUpdate && status != OpsStatusPublishing {
 		notice = OpsStatusUpdateAvailable

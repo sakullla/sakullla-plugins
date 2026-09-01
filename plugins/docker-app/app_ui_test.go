@@ -2558,6 +2558,94 @@ func TestAppUIAutoUpdateTrueObserveFollowsDigest(t *testing.T) {
 	if !ok || got.ImageDigest != latest {
 		t.Fatalf("auto_update digest=%#v ok=%v", got, ok)
 	}
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:latest" {
+		t.Fatalf("floating tag rewritten: %q", controller.Apps()[0].Compose)
+	}
+}
+
+func TestAppUIAutoUpdateAppliesCaretNotMajor(t *testing.T) {
+	t.Parallel()
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{tags: []string{"1.27.2", "2.0.0"}},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n","auto_update":true}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForServiceImage(t, controller, "media", "web", "nginx:1.27.2")
+	if serviceImageRef(controller.Apps()[0].Compose, "web") == "nginx:2.0.0" {
+		t.Fatal("auto_update applied major 2.0.0")
+	}
+}
+
+func TestAppUIAutoUpdateSkipsPinnedAndIgnoredServices(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{
+		tagsByImage: map[string][]string{
+			"nginx:1.27.1":  {"1.27.2", "2.0.0"},
+			"postgres:16.3": {"16.4", "17.0"},
+		},
+	}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: observer,
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
+	locked := httptest.NewRecorder()
+	controller.ServeHTTP(locked, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"locks":{"db":"16.3"},"ignore":[{"service":"web","tag":"1.27.2"}]}`))
+	if locked.Code != http.StatusOK {
+		t.Fatalf("lock/ignore status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	enabled := httptest.NewRecorder()
+	controller.ServeHTTP(enabled, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n  db:\n    image: postgres:16.3\n","auto_update":true}`))
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable auto_update status=%d body=%s", enabled.Code, enabled.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:1.27.1" {
+		t.Fatalf("ignored web rewritten: %q", controller.Apps()[0].Compose)
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "db") != "postgres:16.3" {
+		t.Fatalf("pinned db rewritten: %q", controller.Apps()[0].Compose)
+	}
+}
+
+func TestAppUIAutoUpdateDisabledDoesNotRewriteCompose(t *testing.T) {
+	t.Parallel()
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{
+			current: "sha256:0123456789abcdef0123456789abcdef",
+			latest:  "sha256:fedcba9876543210fedcba9876543210",
+			tags:    []string{"1.27.2", "2.0.0"},
+		},
+		rollout: &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if listed.Code != http.StatusOK || len(apps) != 1 || apps[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("disabled auto_update hid notice: %#v", apps)
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:1.27.1" {
+		t.Fatalf("disabled auto_update rewrote compose=%q", controller.Apps()[0].Compose)
+	}
+	record, ok := controllerDeployment(controller, "media")
+	if ok && record.ImageDigest == "sha256:fedcba9876543210fedcba9876543210" && record.Phase == PhaseActive && record.InstanceID == "new" {
+		t.Fatalf("disabled auto_update published digest: %#v", record)
+	}
 }
 
 func TestAppUIAutoUpdateObserveDoesNotBlockManagementPage(t *testing.T) {
@@ -2668,6 +2756,20 @@ func TestAppUIKeepsComposeOpsWhenDigestDrifts(t *testing.T) {
 	if deleted.Code != http.StatusOK || len(controller.Apps()) != 0 {
 		t.Fatalf("confirmed delete status=%d apps=%#v body=%s", deleted.Code, controller.Apps(), deleted.Body.String())
 	}
+}
+
+func waitForServiceImage(t *testing.T, controller *Controller, appID, service, image string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		app, ok := controller.appByID(appID)
+		if ok && serviceImageRef(app.Compose, service) == image {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	app, _ := controller.appByID(appID)
+	t.Fatalf("auto_update did not rewrite %s to %s: compose=%q", service, image, app.Compose)
 }
 
 func waitForDeployment(t *testing.T, controller *Controller, appID string, ready func(Deployment) bool) Deployment {
