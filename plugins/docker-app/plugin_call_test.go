@@ -1774,6 +1774,34 @@ func TestControllerCallImageListTagsUsesHubAPI(t *testing.T) {
 	}
 }
 
+func TestControllerCallImageListTagsReturnsLookupError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+		_, _ = writer.Write([]byte("nope"))
+	}))
+	t.Cleanup(server.Close)
+	previous := dockerHubTagListURL
+	dockerHubTagListURL = func(repository string) string {
+		return server.URL + "/v2/repositories/" + repository + "/tags"
+	}
+	t.Cleanup(func() { dockerHubTagListURL = previous })
+	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("failed list-tags must not use docker CLI")
+		return nil, nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{"action": "list-tags", "app_id": "media", "image": "nginx:1.27.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, payload)
+	if err == nil {
+		t.Fatalf("hub failure returned tags=%s", raw)
+	}
+	if !strings.Contains(err.Error(), "image tags lookup failed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestControllerCallImageListTagsRequiresImage(t *testing.T) {
 	t.Parallel()
 	controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {

@@ -27,6 +27,7 @@ const (
 	diskCleanupReadonlyStatsMessage     = "读取节点磁盘占用失败，请稍后重试"
 	diskCleanupAgentIDRequiredError     = "agent_id is required"
 	diskCleanupAgentIDInvalidError      = "agent_id is invalid"
+	imageObservationTTL                 = 5 * time.Minute
 )
 
 func diskCleanupFailurePublicMessage(kind string) string {
@@ -1034,10 +1035,7 @@ func (controller *Controller) cachedLatestDigest(app App) string {
 }
 
 func (controller *Controller) tagsForApp(ctx context.Context, app App) map[string][]string {
-	images := app.ServiceImages
-	if len(images) == 0 {
-		images = composeServiceImages(app.Compose)
-	}
+	images := appServiceImages(app)
 	if len(images) == 0 {
 		return nil
 	}
@@ -1061,11 +1059,48 @@ func (controller *Controller) tagsForApp(ctx context.Context, app App) map[strin
 	return result
 }
 
+func appServiceImages(app App) []ServiceImage {
+	if len(app.ServiceImages) > 0 {
+		return app.ServiceImages
+	}
+	return composeServiceImages(app.Compose)
+}
+
+func (controller *Controller) listAppImageTags(ctx context.Context, app App) (listed map[string][]string, failed []string) {
+	lister := asImageTagLister(controller.uiImageObserver)
+	if lister == nil {
+		return nil, nil
+	}
+	images := appServiceImages(app)
+	if len(images) == 0 && strings.TrimSpace(app.Image) != "" {
+		images = []ServiceImage{{Image: app.Image}}
+	}
+	listed = map[string][]string{}
+	seen := map[string]struct{}{}
+	for _, service := range images {
+		image := strings.TrimSpace(service.Image)
+		if image == "" {
+			continue
+		}
+		if _, dup := seen[image]; dup {
+			continue
+		}
+		seen[image] = struct{}{}
+		tags, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: image})
+		if err != nil {
+			failed = append(failed, image)
+			continue
+		}
+		listed[image] = append([]string(nil), tags...)
+	}
+	return listed, failed
+}
+
 func (controller *Controller) cachedImageTags(appID, image string) ([]string, bool) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	cached, ok := controller.imageCache[appID]
-	if !ok || cached.TagsByImage == nil {
+	if !ok || cached.TagsByImage == nil || imageObservationExpired(cached.ObservedAt) {
 		return nil, false
 	}
 	tags, ok := cached.TagsByImage[image]
@@ -1089,13 +1124,17 @@ func (controller *Controller) storeImageTags(appID, image string, tags []string)
 	controller.imageCache[appID] = cached
 }
 
+func imageObservationExpired(observed time.Time) bool {
+	return observed.IsZero() || time.Since(observed) >= imageObservationTTL
+}
+
 func (controller *Controller) scheduleImageObservation(app App) {
 	if controller.uiImageObserver == nil || app.ID == "" || app.Image == "" {
 		return
 	}
 	controller.mu.Lock()
 	cached, cachedOK := controller.imageCache[app.ID]
-	if controller.imageRefresh[app.ID] || cachedOK && cached.Image == app.Image && time.Since(cached.ObservedAt) < 5*time.Minute {
+	if controller.imageRefresh[app.ID] || cachedOK && cached.Image == app.Image && !imageObservationExpired(cached.ObservedAt) {
 		controller.mu.Unlock()
 		return
 	}
@@ -1141,6 +1180,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		controller.mu.Unlock()
 		return
 	}
+	listed, failed := controller.listAppImageTags(ctx, live)
 	view, autoErr := controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
@@ -1151,6 +1191,17 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		cached.Image = live.Image
 		cached.LatestDigest = observed.LatestDigest
 		cached.ObservedAt = time.Now()
+		if listed != nil || len(failed) > 0 {
+			if cached.TagsByImage == nil {
+				cached.TagsByImage = map[string][]string{}
+			}
+			for image, tags := range listed {
+				cached.TagsByImage[image] = append([]string(nil), tags...)
+			}
+			for _, image := range failed {
+				delete(cached.TagsByImage, image)
+			}
+		}
 		controller.imageCache[app.ID] = cached
 	}
 	controller.mu.Unlock()

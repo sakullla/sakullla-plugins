@@ -1479,10 +1479,15 @@ func TestAppUIIgnoreCandidateHidesNoticeUntilHigherLockMatch(t *testing.T) {
 	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:1.27.1" {
 		t.Fatalf("ignore mutated compose=%q", controller.Apps()[0].Compose)
 	}
+	waitForImageObservation(t, controller, "media")
 	observer.tags = []string{"1.27.2", "1.27.3"}
-	controller.mu.Lock()
-	delete(controller.imageCache, "media")
-	controller.mu.Unlock()
+	stale := httptest.NewRecorder()
+	controller.ServeHTTP(stale, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	stillHidden := decodeAppList(t, stale.Body.Bytes())
+	if stale.Code != http.StatusOK || len(stillHidden) != 1 || stillHidden[0].Notice == OpsStatusUpdateAvailable {
+		t.Fatalf("fresh tag cache should keep ignored 1.27.2 hidden: %#v", stillHidden)
+	}
+	expireImageObservation(controller, "media")
 	refreshed := httptest.NewRecorder()
 	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	shown := decodeAppList(t, refreshed.Body.Bytes())
@@ -1491,6 +1496,100 @@ func TestAppUIIgnoreCandidateHidesNoticeUntilHigherLockMatch(t *testing.T) {
 	}
 	if len(shown[0].ServiceImages) != 1 || shown[0].ServiceImages[0].DefaultTag != "1.27.3" {
 		t.Fatalf("default candidate=%#v", shown[0].ServiceImages)
+	}
+}
+
+func TestAppUIClearIgnoredCandidateRestoresNotice(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{tags: []string{"1.27.2"}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	ignored := httptest.NewRecorder()
+	controller.ServeHTTP(ignored, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"ignore":[{"service":"web","tag":"1.27.2"}]}`))
+	if ignored.Code != http.StatusOK {
+		t.Fatalf("ignore status=%d body=%s", ignored.Code, ignored.Body.String())
+	}
+	hidden := decodeAppList(t, ignored.Body.Bytes())
+	if len(hidden) != 1 || hidden[0].Notice == OpsStatusUpdateAvailable || hasAppAction(hidden[0], OpsActionUpdate) {
+		t.Fatalf("ignored 1.27.2 still advertised: %#v", hidden)
+	}
+	cleared := httptest.NewRecorder()
+	controller.ServeHTTP(cleared, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"ignore":[{"service":"web","tag":"1.27.2","clear":true}]}`))
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear ignore status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	shown := decodeAppList(t, cleared.Body.Bytes())
+	if len(shown) != 1 || shown[0].Notice != OpsStatusUpdateAvailable || !hasAppAction(shown[0], OpsActionUpdate) {
+		t.Fatalf("un-ignore did not restore notice: %#v", shown)
+	}
+	if len(shown[0].ServiceImages) != 1 || len(shown[0].ServiceImages[0].Ignored) != 0 {
+		t.Fatalf("cleared ignored=%#v", shown[0].ServiceImages)
+	}
+}
+
+func TestAppUILockAndIgnoreEditorsWithoutUpdateAction(t *testing.T) {
+	t.Parallel()
+	observer := &uiTestObserver{tags: []string{"1.27.2"}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	ignored := httptest.NewRecorder()
+	controller.ServeHTTP(ignored, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"ignore":[{"service":"web","tag":"1.27.2"}]}`))
+	if ignored.Code != http.StatusOK {
+		t.Fatalf("ignore status=%d body=%s", ignored.Code, ignored.Body.String())
+	}
+	hidden := decodeAppList(t, ignored.Body.Bytes())
+	if len(hidden) != 1 || hasAppAction(hidden[0], OpsActionUpdate) {
+		t.Fatalf("expected no update action: %#v", hidden)
+	}
+	if len(hidden[0].ServiceImages) != 1 || len(hidden[0].ServiceImages[0].LockOptions) == 0 {
+		t.Fatalf("lock editor missing without update: %#v", hidden[0].ServiceImages)
+	}
+	if strings.Join(hidden[0].ServiceImages[0].Ignored, ",") != "1.27.2" {
+		t.Fatalf("ignored=%v", hidden[0].ServiceImages[0].Ignored)
+	}
+	locked := httptest.NewRecorder()
+	controller.ServeHTTP(locked, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"locks":{"web":"~1.27.1"}}`))
+	if locked.Code != http.StatusOK {
+		t.Fatalf("lock status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	apps := decodeAppList(t, locked.Body.Bytes())
+	if len(apps) != 1 || len(apps[0].ServiceImages) != 1 || apps[0].ServiceImages[0].Lock != "~1.27.1" {
+		t.Fatalf("lock not persisted without update action: %#v", apps)
+	}
+	if hasAppAction(apps[0], OpsActionUpdate) {
+		t.Fatalf("lock POST restored update action: %#v", apps)
+	}
+}
+
+func TestAppUIObservationRelistsTagsByImage(t *testing.T) {
+	observer := &uiTestObserver{tags: []string{"1.27.2"}}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{observer: observer})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
+	observer.tags = []string{"1.27.2", "1.27.3"}
+	expireImageObservation(controller, "media")
+	controller.scheduleImageObservation(controller.Apps()[0])
+	waitForImageObservation(t, controller, "media")
+	refreshed := httptest.NewRecorder()
+	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	shown := decodeAppList(t, refreshed.Body.Bytes())
+	if refreshed.Code != http.StatusOK || len(shown) != 1 || shown[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("observation cadence did not restore 有新版本: %#v", shown)
+	}
+	if len(shown[0].ServiceImages) != 1 || shown[0].ServiceImages[0].DefaultTag != "1.27.3" {
+		t.Fatalf("observation tags=%#v", shown[0].ServiceImages)
 	}
 }
 
@@ -2199,6 +2298,15 @@ func rolloutCallHas(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func expireImageObservation(controller *Controller, appID string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached := controller.imageCache[appID]
+	cached.ObservedAt = time.Now().Add(-imageObservationTTL)
+	controller.imageCache[appID] = cached
+	controller.imageRefresh[appID] = false
 }
 
 func waitForImageObservation(t *testing.T, controller *Controller, appID string) {
@@ -3616,10 +3724,27 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("page missing card-wall hook %q", want)
 		}
 	}
-	for _, want := range []string{"忽略此版本", "将更新到", "askServiceUpdate"} {
+	for _, want := range []string{"忽略此版本", "将更新到", "askServiceUpdate", "取消忽略", "clear: true", "saveServicePolicy", "renderServiceLockSelect", "overview-service-tools"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("update dialog missing %q", want)
 		}
+	}
+	overviewStart := strings.Index(js, "const renderOverview = (app) => {")
+	overviewEnd := strings.Index(js, "const renderHTTP = (app) => {")
+	if overviewStart < 0 || overviewEnd <= overviewStart {
+		t.Fatal("renderOverview is missing")
+	}
+	overview := js[overviewStart:overviewEnd]
+	if !strings.Contains(overview, "renderServiceLockSelect") || !strings.Contains(overview, "取消忽略") || !strings.Contains(overview, "saveServicePolicy") {
+		t.Fatal("详情 overview does not keep lock/ignore editors")
+	}
+	collectStart := strings.Index(js, "const collectUpdatePayload = () => {")
+	collectEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
+	if collectStart < 0 || collectEnd <= collectStart {
+		t.Fatal("collectUpdatePayload is missing")
+	}
+	if !strings.Contains(js[collectStart:collectEnd], "clear: true") {
+		t.Fatal("update dialog does not send ignore clear")
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
 	renderEnd := strings.Index(js, "const fillCompose = (app) => {")

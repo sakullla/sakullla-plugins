@@ -1051,6 +1051,17 @@ const postAppActionWithRisk = async (app, action, body = {}) => {
   }
 };
 
+const saveServicePolicy = async (app, payload, okMessage) => {
+  setBusy(true);
+  try {
+    if (await postAppActionWithRisk(app, "update", payload)) showStatus(okMessage || "已保存。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
 const MAX_WORKSPACE_FILE_BYTES = 1048576;
 const workspacePathError = "只能使用应用工作区内的相对路径";
 
@@ -1747,6 +1758,58 @@ const askServiceUpdate = (app) => {
   });
 };
 
+const renderServiceLockSelect = (service) => {
+  const lockLabel = document.createElement("label");
+  lockLabel.className = "update-lock";
+  lockLabel.append("锁定");
+  const lock = document.createElement("select");
+  lock.name = `lock-${service.name}`;
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "未锁定";
+  if (!service.lock) none.selected = true;
+  lock.append(none);
+  const options = Array.isArray(service.lock_options) ? service.lock_options : [];
+  options.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.constraint || "";
+    option.textContent = item.label || item.id;
+    if (service.lock && item.constraint === service.lock) option.selected = true;
+    lock.append(option);
+  });
+  if (service.lock && !options.some((item) => item.constraint === service.lock)) {
+    const custom = document.createElement("option");
+    custom.value = service.lock;
+    custom.textContent = service.lock;
+    custom.selected = true;
+    lock.append(custom);
+  }
+  lockLabel.append(lock);
+  return lockLabel;
+};
+
+const persistedIgnoredTags = (service) => (Array.isArray(service.ignored) ? service.ignored.filter(Boolean) : []);
+
+const renderIgnoredClearControls = (service, { buttons = false } = {}) => persistedIgnoredTags(service).map((tag) => {
+  if (buttons) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn-link";
+    button.dataset.tag = tag;
+    button.textContent = `取消忽略 ${tag}`;
+    return button;
+  }
+  const label = document.createElement("label");
+  label.className = "inline-check";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.name = `clear-ignore-${service.name}`;
+  box.dataset.tag = tag;
+  box.dataset.clearIgnore = "true";
+  label.append(box, `取消忽略 ${tag}`);
+  return label;
+});
+
 const renderUpdateServiceRow = (service) => {
   const row = document.createElement("section");
   row.className = "update-service";
@@ -1797,37 +1860,13 @@ const renderUpdateServiceRow = (service) => {
   const ignoreBox = document.createElement("input");
   ignoreBox.type = "checkbox";
   ignoreBox.name = `ignore-${service.name}`;
+  ignoreBox.disabled = !defaultTag;
   ignore.append(ignoreBox, "忽略此版本");
   ignoreBox.addEventListener("change", () => {
     if (ignoreBox.checked) selectBox.checked = false;
   });
-  const lockLabel = document.createElement("label");
-  lockLabel.className = "update-lock";
-  lockLabel.append("锁定");
-  const lock = document.createElement("select");
-  lock.name = `lock-${service.name}`;
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "未锁定";
-  if (!service.lock) none.selected = true;
-  lock.append(none);
-  const options = Array.isArray(service.lock_options) ? service.lock_options : [];
-  options.forEach((item) => {
-    const option = document.createElement("option");
-    option.value = item.constraint || "";
-    option.textContent = item.label || item.id;
-    if (service.lock && item.constraint === service.lock) option.selected = true;
-    lock.append(option);
-  });
-  if (service.lock && !options.some((item) => item.constraint === service.lock)) {
-    const custom = document.createElement("option");
-    custom.value = service.lock;
-    custom.textContent = service.lock;
-    custom.selected = true;
-    lock.append(custom);
-  }
-  lockLabel.append(lock);
-  tools.append(ignore, lockLabel);
+  tools.append(ignore, renderServiceLockSelect(service));
+  renderIgnoredClearControls(service).forEach((node) => tools.append(node));
   const arrow = document.createElement("p");
   arrow.className = "update-arrow";
   arrow.textContent = `${service.tag || service.image || "当前"} →`;
@@ -1849,6 +1888,10 @@ const collectUpdatePayload = () => {
     const tag = target ? String(target.value || "").trim() : "";
     if (selected && selected.checked && tag) services.push({ name, tag });
     if (ignored && ignored.checked && tag) ignore.push({ service: name, tag });
+    row.querySelectorAll(`input[data-clear-ignore="true"]`).forEach((box) => {
+      const clearTag = String(box.dataset.tag || "").trim();
+      if (box.checked && clearTag) ignore.push({ service: name, tag: clearTag, clear: true });
+    });
     if (lock && lock.value !== (row.dataset.lock || "")) locks[name] = lock.value;
   });
   const payload = {};
@@ -2168,12 +2211,30 @@ const renderOverview = (app) => {
       const meta = document.createElement("p");
       meta.className = "overview-service-meta";
       const bits = [];
-      bits.push(service.lock ? `锁定 ${service.lock}` : "未锁定");
-      if (Array.isArray(service.ignored) && service.ignored.length) bits.push(`已忽略 ${service.ignored.join("、")}`);
       if (service.update) bits.push("有允许候选");
       else if (service.unknown) bits.push("候选未知");
-      meta.textContent = bits.join(" · ");
+      meta.textContent = bits.join(" · ") || "无允许候选";
       item.append(meta);
+      const tools = document.createElement("div");
+      tools.className = "overview-service-tools";
+      tools.append(renderServiceLockSelect(service));
+      const lock = tools.querySelector(`select[name="lock-${service.name}"]`);
+      if (lock) {
+        lock.addEventListener("change", () => {
+          saveServicePolicy(app, { locks: { [service.name]: lock.value } }, "已保存锁定。");
+        });
+      }
+      renderIgnoredClearControls(service, { buttons: true }).forEach((button) => {
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const tag = String(button.dataset.tag || "").trim();
+          if (!tag) return;
+          saveServicePolicy(app, { ignore: [{ service: service.name, tag, clear: true }] }, "已取消忽略。");
+        });
+        tools.append(button);
+      });
+      item.append(tools);
       list.append(item);
     });
     addRow(run, "服务镜像", "", { node: list });

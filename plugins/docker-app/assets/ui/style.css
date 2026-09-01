@@ -2128,6 +2128,23 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   font-size: var(--text-sm);
 }
 
+.overview-service-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.65rem;
+  margin-top: 0.2rem;
+}
+
+.overview-service-tools .btn-link {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+}
+
 .update-dialog {
   width: min(36rem, calc(100vw - 2rem));
 }

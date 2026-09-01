@@ -766,7 +766,7 @@ func (controller *Controller) callImageListTags(ctx context.Context, request ima
 	}
 	tags, err := controller.dockerImageTags(ctx, request.Image)
 	if err != nil {
-		return marshalImageTags(nil)
+		return nil, err
 	}
 	return marshalImageTags(tags)
 }
