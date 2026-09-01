@@ -36,6 +36,7 @@ const loginPassword = document.querySelector("#login-password");
 const loginError = document.querySelector("#login-error");
 const logoutButton = document.querySelector("#logout-button");
 const currentUsername = document.querySelector("#current-username");
+const whoInitial = document.querySelector("#who-initial");
 const listing = document.querySelector("#listing");
 const empty = document.querySelector("#empty");
 const crumbs = document.querySelector("#crumbs");
@@ -105,6 +106,10 @@ const showManager = (username) => {
   }
   if (currentUsername) {
     currentUsername.textContent = username || "";
+  }
+  if (whoInitial) {
+    const trimmed = (username || "").trim();
+    whoInitial.textContent = trimmed ? trimmed.slice(0, 1) : "";
   }
 };
 
@@ -213,7 +218,10 @@ const renderCrumbs = (dir) => {
   let prefix = "";
   parts.forEach((part) => {
     prefix += "/" + part;
-    crumbs.append(document.createTextNode(" / "));
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.setAttribute("aria-hidden", "true");
+    crumbs.append(sep);
     add(part, prefix);
   });
 };
@@ -226,12 +234,16 @@ const renderListing = (entries) => {
   empty.hidden = entries.length > 0;
   entries.forEach((entry) => {
     const row = document.createElement("tr");
+    row.className = entry.dir ? "row-dir" : "row-file";
     const nameCell = document.createElement("td");
     const typeCell = document.createElement("td");
     const sizeCell = document.createElement("td");
     const actionCell = document.createElement("td");
     actionCell.className = "row-actions";
-    typeCell.textContent = entry.dir ? "目录" : "文件";
+    const typePill = document.createElement("span");
+    typePill.className = "type-pill";
+    typePill.textContent = entry.dir ? "目录" : "文件";
+    typeCell.append(typePill);
     if (entry.dir) {
       sizeCell.textContent = "—";
     } else {
@@ -257,7 +269,13 @@ const renderListing = (entries) => {
         downloadFile(entry.name).catch((error) => showStatus(error.message, true));
       });
     }
-    nameCell.append(open);
+    const glyph = document.createElement("span");
+    glyph.className = "file-glyph";
+    glyph.setAttribute("aria-hidden", "true");
+    const nameWrap = document.createElement("div");
+    nameWrap.className = "name-wrap";
+    nameWrap.append(glyph, open);
+    nameCell.append(nameWrap);
     const rename = document.createElement("button");
     rename.type = "button";
     rename.className = "ghost";

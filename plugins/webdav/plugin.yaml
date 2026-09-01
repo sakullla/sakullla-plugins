@@ -1,6 +1,6 @@
 schema_version: 1
 id: webdav
-version: 0.1.7
+version: 0.1.8
 name: 文件共享
 description: 在发布的自有域名上提供网页文件管理与 WebDAV 共享
 compatibility:
