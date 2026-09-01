@@ -2,6 +2,11 @@
   "schema_version": 1,
   "code_dependencies": [
     {
+      "name": "github.com/Masterminds/semver/v3",
+      "version": "v3.4.0",
+      "license": "MIT"
+    },
+    {
       "name": "github.com/klauspost/compress",
       "version": "v1.19.2",
       "license": "BSD-3-Clause"

@@ -25,6 +25,16 @@
       "copyrightText": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-Package-Masterminds-semver-v3",
+      "name": "github.com/Masterminds/semver/v3",
+      "versionInfo": "v3.4.0",
+      "downloadLocation": "https://github.com/Masterminds/semver",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-Package-klauspost-compress",
       "name": "github.com/klauspost/compress",
       "versionInfo": "v1.19.2",
@@ -146,6 +156,11 @@
     }
   ],
   "relationships": [
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Masterminds-semver-v3"
+    },
     {
       "spdxElementId": "SPDXRef-Package-sakullla-plugins",
       "relationshipType": "DEPENDS_ON",

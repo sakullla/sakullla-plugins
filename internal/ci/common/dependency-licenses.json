@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "go_modules": {
+    "github.com/Masterminds/semver/v3": "MIT",
     "github.com/klauspost/compress": "BSD-3-Clause",
     "github.com/sakullla/nginx-reverse-emby/plugin-sdk": "GPL-3.0-only",
     "github.com/santhosh-tekuri/jsonschema/v6": "Apache-2.0",

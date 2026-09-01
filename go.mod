@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/klauspost/compress v1.19.2
 	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.7.16
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
