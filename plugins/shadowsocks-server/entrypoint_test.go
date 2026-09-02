@@ -84,6 +84,9 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 	for _, permission := range manifest.Permissions {
 		grants = append(grants, permission.Name)
 	}
+	if !slices.Contains(grants, pluginsdk.PermissionNetworkFull) {
+		t.Fatalf("plugin.yaml permissions omit %q", pluginsdk.PermissionNetworkFull)
+	}
 	requiredFeatures := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
