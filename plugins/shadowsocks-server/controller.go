@@ -236,7 +236,7 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 	}
 	epoch := &controllerEpoch{}
 	epoch.live.Store(true)
-	handle, err := rpcplugin.BindHandle(generation, "listener", epoch, func(epoch *controllerEpoch) {
+	handle, err := rpcplugin.BindHandle(generation, generationHandleScope, epoch, func(epoch *controllerEpoch) {
 		epoch.live.Store(false)
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -296,7 +296,7 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 		if prepared == nil {
 			return ErrTypedHandlesUnavailable
 		}
-		transaction, err := rpcplugin.BindHandle(generation, "listener", prepared, func(p PreparedAdmission) { p.Abort() })
+		transaction, err := rpcplugin.BindHandle(generation, generationHandleScope, prepared, func(p PreparedAdmission) { p.Abort() })
 		if err != nil {
 			prepared.Abort()
 			return err
@@ -325,7 +325,7 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			transaction.Revoke()
 			return safeControllerError(err)
 		}
-		serviceHandle, err := rpcplugin.BindHandle(generation, "listener", service, func(service *Service) { service.Disable() })
+		serviceHandle, err := rpcplugin.BindHandle(generation, generationHandleScope, service, func(service *Service) { service.Disable() })
 		if err != nil {
 			service.Disable()
 			transaction.Revoke()
@@ -393,8 +393,11 @@ func safeControllerError(err error) error {
 		return ErrTypedHandlesUnavailable
 	}
 }
+
+const generationHandleScope = "service.revocable-resource-handle"
+
 func requiredGrants() []string {
-	return []string{"audit", "listener", "monotonic-clock", "replay", "secret", "traffic"}
+	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle"}
 }
 
 type issuedSecrets struct {

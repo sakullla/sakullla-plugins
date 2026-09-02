@@ -81,7 +81,7 @@ func wire(t *testing.T) []byte {
 	return b
 }
 func grants() []string {
-	return []string{"audit", "listener", "monotonic-clock", "replay", "secret", "traffic"}
+	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle"}
 }
 func handshake(scopes []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: ss.PluginID, PluginVersion: ss.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: scopes, Generation: "generation-1"}
@@ -92,8 +92,8 @@ func TestShadowsocksRPCGenerationGrantsAndDefaultFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.Handshake(context.Background(), handshake(grants()[:5])); err == nil {
-		t.Fatal("missing traffic grant accepted")
+	if _, err = c.Handshake(context.Background(), handshake(grants()[:4])); err == nil {
+		t.Fatal("missing revocable-resource-handle grant accepted")
 	}
 	c, _ = ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if _, err = c.Handshake(context.Background(), handshake(grants())); err != nil {
