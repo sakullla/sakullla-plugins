@@ -57,14 +57,23 @@ document.querySelectorAll("[data-view]").forEach((item) => {
   });
 });
 
+const flashCopied = (button, ok) => {
+  const previous = button.dataset.copyLabel || button.textContent;
+  button.dataset.copyLabel = previous;
+  button.textContent = ok ? "已复制" : "复制失败";
+  window.setTimeout(() => {
+    button.textContent = previous;
+  }, 1600);
+};
+
 document.querySelectorAll("[data-copy]").forEach((button) => {
   button.addEventListener("click", async () => {
     const name = button.dataset.copy;
     try {
       await navigator.clipboard.writeText(examples[name]);
-      button.textContent = "已复制";
+      flashCopied(button, true);
     } catch (error) {
-      button.textContent = "复制失败";
+      flashCopied(button, false);
     }
   });
 });
@@ -72,6 +81,7 @@ document.querySelectorAll("[data-copy]").forEach((button) => {
 const supportedHosts = ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"];
 
 const convertInput = document.querySelector("#convert-input");
+const convertSnippet = document.querySelector("#convert-snippet");
 const convertResult = document.querySelector("#convert-result");
 const convertCopy = document.querySelector("#convert-copy");
 const convertHint = document.querySelector("#convert-hint");
@@ -81,13 +91,14 @@ const normalizeSourceUrl = (value) => value.trim().replace(/^[a-z][a-z0-9+.-]*:\
 const updateConversion = () => {
   const target = normalizeSourceUrl(convertInput.value);
   if (!target) {
-    convertResult.hidden = true;
+    convertSnippet.hidden = true;
     convertHint.hidden = true;
     convertCopy.disabled = true;
+    convertResult.textContent = "";
     return;
   }
   convertResult.textContent = `${origin}/${target}`;
-  convertResult.hidden = false;
+  convertSnippet.hidden = false;
   convertCopy.disabled = false;
   const hostName = target.split("/")[0].toLowerCase();
   const supported = supportedHosts.some((item) => hostName === item || hostName.endsWith(`.${item}`));
@@ -103,16 +114,12 @@ convertCopy.addEventListener("click", async () => {
   if (convertCopy.disabled) {
     return;
   }
-  const previous = convertCopy.textContent;
   try {
     await navigator.clipboard.writeText(convertResult.textContent);
-    convertCopy.textContent = "已复制";
+    flashCopied(convertCopy, true);
   } catch (error) {
-    convertCopy.textContent = "复制失败";
+    flashCopied(convertCopy, false);
   }
-  setTimeout(() => {
-    convertCopy.textContent = previous;
-  }, 1600);
 });
 
 const renderStatus = (target, message) => {
@@ -150,8 +157,8 @@ document.querySelector("#search-form").addEventListener("submit", async (event) 
       card.append(title, detail);
       card.addEventListener("click", () => {
         document.querySelector("#tag-image").value = name;
-        showView("tags");
         document.querySelector("#tags-form").requestSubmit();
+        document.querySelector("#tags-heading").scrollIntoView({ block: "start" });
       });
       return card;
     }));
@@ -188,7 +195,7 @@ document.querySelector("#tags-form").addEventListener("submit", async (event) =>
         if (!lines.includes(reference)) {
           area.value = [...lines, reference].join("\n");
         }
-        showView("offline");
+        area.scrollIntoView({ block: "center" });
       });
       return chip;
     }));

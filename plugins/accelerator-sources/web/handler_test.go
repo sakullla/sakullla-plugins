@@ -35,38 +35,44 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	page := bodies["/"]
 	script := bodies["/app.js"]
 	style := bodies["/style.css"]
-	for _, fragment := range []string{"资源加速", `data-panel="usage"`, `data-panel="search"`, `data-panel="tags"`, `data-panel="offline"`} {
+	for _, fragment := range []string{"资源加速", `data-panel="usage"`, `data-panel="mirrors"`} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("visitor page missing %q", fragment)
 		}
 	}
-	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, "id=\"search-view\"") || strings.Contains(page, "id=\"offline-view\"") {
+	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, `id="search-view"`) || strings.Contains(page, `id="offline-view"`) {
 		t.Fatal("visitor page still uses the old tool-shell markup")
 	}
-	if !strings.Contains(page, ">用法<") || !strings.Contains(page, ">搜索<") || !strings.Contains(page, ">标签<") || !strings.Contains(page, ">离线包<") {
-		t.Fatal("primary navigation is not the Chinese product sections")
-	}
-	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="file-sample"`, `id="convert-input"`, `id="convert-result"`, `id="convert-copy"`, `>复制加速链接<`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`} {
+	assertTwoPageDocsNav(t, page)
+	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="file-sample"`, `id="convert-input"`, `id="convert-result"`, `id="convert-copy"`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`, `<h2 id="search-heading">搜索</h2>`, `<h2 id="tags-heading">标签</h2>`, `<h2 id="offline-heading">离线包</h2>`} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("visitor page missing capability markup %q", fragment)
 		}
 	}
+	assertSnippetCopyChrome(t, page)
 	for _, fragment := range []string{"window.location.origin", "window.location.host", "#convert-input", "#convert-copy", "normalizeSourceUrl", "/api/search?q=", "/api/tags?image=", "/api/offline/prepare", "compressed_layers"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("visitor script missing %q", fragment)
 		}
+	}
+	if strings.Contains(script, `showView("tags")`) || strings.Contains(script, `showView("offline")`) || strings.Contains(script, `showView("search")`) {
+		t.Fatal("mirror page still switches top-level views for search, tags, or offline")
 	}
 	for _, fragment := range []string{"#17202a", "header { display: flex", "nav button[aria-pressed=\"true\"]", "--rust", "--paper"} {
 		if strings.Contains(style, fragment) {
 			t.Fatalf("visitor theme still contains a retired theme rule %q", fragment)
 		}
 	}
-	if !strings.Contains(style, "--accent") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".usage-grid") || !strings.Contains(style, ".converter-card") {
-		t.Fatal("visitor theme is not the replacement layout")
+	if !strings.Contains(style, "--accent") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".snippet") || !strings.Contains(style, ".doc-section") {
+		t.Fatal("visitor theme is not the two-page docs layout")
 	}
-	assertConsoleSkin(t, page, script, style)
+	assertDocsSkin(t, page, script, style)
 	if strings.Contains(cssRule(style, ".primary"), "999px") || strings.Contains(cssRule(style, ".primary button"), "999px") {
 		t.Fatal("primary nav still uses a capsule selected state")
+	}
+	selected := cssRule(style, `.primary button[aria-pressed="true"]`)
+	if !strings.Contains(selected, "background: var(--accent)") {
+		t.Fatal("current nav item is not a solid selected state")
 	}
 	for _, fragment := range []string{
 		"@media (max-width: 640px)",
@@ -87,20 +93,17 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	if strings.Contains(style, "overflow: auto") {
 		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")
 	}
-	searchRow := cssRule(style, ".search-row")
-	converter := cssRule(style, ".converter-card")
-	if !strings.Contains(searchRow, "max-width: min(46rem, 100%)") {
-		t.Fatal(".search-row still fills main without a capped operation group")
+	panel := cssRule(style, ".panel")
+	if !strings.Contains(panel, "max-width: min(46rem, 100%)") {
+		t.Fatal(".panel is not a single-column reading width")
 	}
-	if !strings.Contains(converter, "max-width: min(46rem, 100%)") {
-		t.Fatal(".converter-card still fills main without a capped operation group")
+	if strings.Contains(style, ".usage-grid") || strings.Contains(style, ".converter-card") || strings.Contains(style, "repeat(2, minmax(") {
+		t.Fatal("usage page still uses two equal cards or a two-column grid")
 	}
 	for _, want := range []string{
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
 		"html { font-size: 20px; }",
-		"repeat(2, minmax(18rem, 1fr))",
-		"repeat(2, minmax(22rem, 1fr))",
 	} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("visitor stylesheet missing wide-viewport rule %q", want)
@@ -108,7 +111,53 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	}
 }
 
-func assertConsoleSkin(t *testing.T, page, script, style string) {
+func assertTwoPageDocsNav(t *testing.T, page string) {
+	t.Helper()
+	nav := htmlSection(page, `<nav class="primary"`, `</nav>`)
+	if nav == "" {
+		t.Fatal("visitor page missing primary navigation")
+	}
+	if strings.Count(nav, "data-view=") != 2 {
+		t.Fatal("primary navigation is not exactly two items")
+	}
+	if !strings.Contains(nav, ">用法<") || !strings.Contains(nav, ">镜像<") {
+		t.Fatal("primary navigation is not 用法 / 镜像")
+	}
+	if strings.Contains(nav, "搜索") || strings.Contains(nav, "标签") || strings.Contains(nav, "离线包") {
+		t.Fatal("primary navigation still lists 搜索, 标签, or 离线包 as top-bar items")
+	}
+	for _, fragment := range []string{`data-view="search"`, `data-view="tags"`, `data-view="offline"`, `data-panel="search"`, `data-panel="tags"`, `data-panel="offline"`} {
+		if strings.Contains(page, fragment) {
+			t.Fatalf("visitor page still treats %q as a top-level view", fragment)
+		}
+	}
+}
+
+func assertSnippetCopyChrome(t *testing.T, page string) {
+	t.Helper()
+	if strings.Contains(page, `class="wash"`) || strings.Contains(page, `class="ghost"`) || strings.Contains(page, `class="shell"`) {
+		t.Fatal("visitor page still has wash, ghost copy buttons, or terminal shells")
+	}
+	for _, fragment := range []string{"复制加速链接", "复制拉取命令", "复制镜像配置", "复制示例"} {
+		if strings.Contains(page, fragment) {
+			t.Fatalf("standalone copy label %q remains outside snippet chrome", fragment)
+		}
+	}
+	if !strings.Contains(page, `class="snippet-copy" id="convert-copy"`) {
+		t.Fatal("#convert-copy is not on the convert result chrome")
+	}
+	convert := htmlSection(page, `id="convert-snippet"`, `id="convert-result"`)
+	if !strings.Contains(convert, `id="convert-copy"`) || !strings.Contains(convert, `class="snippet-chrome"`) {
+		t.Fatal("#convert-copy is not inside the convert snippet structure")
+	}
+	for _, name := range []string{"docker-pull", "docker-mirror", "file-sample"} {
+		if !strings.Contains(page, `class="snippet-copy" data-copy="`+name+`"`) {
+			t.Fatalf("command block missing in-chrome copy for %q", name)
+		}
+	}
+}
+
+func assertDocsSkin(t *testing.T, page, script, style string) {
 	t.Helper()
 	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
 		t.Fatal("stylesheet still contains sakura theme colors")
@@ -122,11 +171,23 @@ func assertConsoleSkin(t *testing.T, page, script, style string) {
 	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
 		t.Fatal("stylesheet missing light/dark theme selectors")
 	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
+	if strings.Contains(style, "var(--color-terminal)") || strings.Contains(style, "--color-terminal:") || strings.Contains(style, ".shell") || strings.Contains(style, ".wash") {
+		t.Fatal("stylesheet still paints command blocks as light-theme terminals or keeps wash")
 	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
+	snippet := cssRule(style, ".snippet")
+	if snippet == "" || strings.Contains(snippet, "--color-terminal") {
+		t.Fatal("light-theme command blocks are missing or still use --color-terminal")
+	}
+	if !strings.Contains(snippet, "--color-code-bg") {
+		t.Fatal("command blocks are not light-gray document snippets")
+	}
+	pageSel := cssRule(style, "::selection")
+	if strings.Contains(pageSel, "--color-text-primary") {
+		t.Fatal("page-wide ::selection still forces --color-text-primary onto snippets")
+	}
+	snippetSel := cssRule(style, ".snippet *::selection")
+	if snippetSel == "" || !strings.Contains(snippetSel, "color:") || strings.Contains(snippetSel, "--color-text-primary") {
+		t.Fatal("command blocks do not have their own 4.5:1 selection colors")
 	}
 	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
 		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
@@ -153,6 +214,19 @@ func cssRule(css, selector string) string {
 	return rest[:end]
 }
 
+func htmlSection(source, startMark, endMark string) string {
+	start := strings.Index(source, startMark)
+	if start < 0 {
+		return ""
+	}
+	rest := source[start:]
+	end := strings.Index(rest, endMark)
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -164,7 +238,10 @@ func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`, `"640px"`, `"1920px"`, `"2560px"`, `"3840px"`, `"usage"`, `"search"`, `"tags"`, `"offline"`} {
+	if strings.Contains(text, `"views": ["usage", "search", "tags", "offline"]`) {
+		t.Fatal("web corpus still lists four top-level views")
+	}
+	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`, `"640px"`, `"1920px"`, `"2560px"`, `"3840px"`, `"usage"`, `"mirrors"`, `"search"`, `"tags"`, `"offline"`, `"用法"`, `"镜像"`, `".snippet *::selection"`} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("web corpus missing %q", fragment)
 		}

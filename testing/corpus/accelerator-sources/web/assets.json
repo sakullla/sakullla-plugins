@@ -3,7 +3,9 @@
   "title": "资源加速",
   "assets": ["/app.js", "/style.css"],
   "external_dependencies": [],
-  "views": ["usage", "search", "tags", "offline"],
+  "views": ["usage", "mirrors"],
+  "nav": ["用法", "镜像"],
+  "mirror_sections": ["search", "tags", "offline"],
   "apis": ["/api/search", "/api/tags", "/api/offline/prepare"],
   "converter": {
     "input": "#convert-input",
@@ -11,6 +13,11 @@
     "copy": "#convert-copy",
     "scheme_normalization": "strip any leading scheme, then prefix window.location.origin",
     "supported_hosts": ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"]
+  },
+  "command_blocks": {
+    "copy": [".snippet-copy", "#convert-copy", "[data-copy]"],
+    "selection": ".snippet *::selection",
+    "light_background": "--color-code-bg"
   },
   "offline_fields": ["images", "platform", "compressed_layers"],
   "example_hosts": ["window.location.origin", "window.location.host"],

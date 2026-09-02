@@ -7,140 +7,133 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="wash" aria-hidden="true"></div>
   <header class="masthead">
     <div class="masthead-inner">
       <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
       <nav class="primary" aria-label="资源加速">
         <button type="button" data-view="usage" aria-pressed="true">用法</button>
-        <button type="button" data-view="search" aria-pressed="false">搜索</button>
-        <button type="button" data-view="tags" aria-pressed="false">标签</button>
-        <button type="button" data-view="offline" aria-pressed="false">离线包</button>
+        <button type="button" data-view="mirrors" aria-pressed="false">镜像</button>
       </nav>
     </div>
   </header>
 
   <main>
     <section class="panel" id="usage" data-panel="usage">
-      <div class="usage-intro">
-        <div class="hero">
-          <p class="eyebrow">镜像 · 代码 · 模型</p>
-          <h1>用当前域名加速每一次下载</h1>
-          <p class="lede">粘贴原始链接一键生成加速地址；Docker 镜像把当前入口当作前缀即可拉取，无需记忆插件内部地址。</p>
-          <p class="host-line"><span class="host-dot" aria-hidden="true"></span>当前入口<code id="current-host"></code></p>
+      <header class="doc-intro">
+        <h1>用当前域名加速每一次下载</h1>
+        <p class="lede">粘贴原始链接一键生成加速地址；Docker 镜像把当前入口 <code id="current-host"></code> 当作前缀即可拉取，无需记忆插件内部地址。</p>
+      </header>
+
+      <section class="doc-section converter" aria-labelledby="convert-heading">
+        <h2 id="convert-heading">链接转换</h2>
+        <p>在下方粘贴 GitHub 或 Hugging Face 的原始地址，生成的加速链接会出现在结果块中，复制按钮在块头右侧。</p>
+        <label for="convert-input">原始链接</label>
+        <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
+        <div class="snippet" id="convert-snippet" hidden>
+          <div class="snippet-chrome">
+            <p class="snippet-label">加速链接</p>
+            <button type="button" class="snippet-copy" id="convert-copy" disabled>复制</button>
+          </div>
+          <pre class="snippet-body" id="convert-result"></pre>
         </div>
-        <div class="card converter-card">
-          <p class="kicker">链接转换</p>
-          <label for="convert-input">原始链接</label>
+        <p class="hint" id="convert-hint" hidden></p>
+      </section>
+
+      <section class="doc-section" aria-labelledby="docker-heading">
+        <h2 id="docker-heading">Docker</h2>
+        <p>拉取有两种方式。域名前缀直接写在命令里，不必改配置文件；只有走仓库镜像时才需要写入 <code>daemon.json</code> 并重启 Docker。</p>
+        <h3>域名前缀</h3>
+        <p>把当前入口当作 Registry 前缀，一行命令即可拉取，无需配置文件。</p>
+        <div class="snippet">
+          <div class="snippet-chrome">
+            <p class="snippet-label">拉取命令</p>
+            <button type="button" class="snippet-copy" data-copy="docker-pull">复制</button>
+          </div>
+          <pre class="snippet-body" data-example="docker-pull"></pre>
+        </div>
+        <h3>仓库镜像</h3>
+        <p>把下面的 <code>registry-mirrors</code> 写入 Docker 配置文件后重启生效。参考路径：</p>
+        <ul class="path-ref">
+          <li><span>Linux</span><code>/etc/docker/daemon.json</code></li>
+          <li><span>Windows</span><code>%USERPROFILE%\.docker\daemon.json</code></li>
+          <li><span>macOS</span><code>~/.docker/daemon.json</code></li>
+        </ul>
+        <div class="snippet">
+          <div class="snippet-chrome">
+            <p class="snippet-label">daemon.json</p>
+            <button type="button" class="snippet-copy" data-copy="docker-mirror">复制</button>
+          </div>
+          <pre class="snippet-body" data-example="docker-mirror"></pre>
+        </div>
+      </section>
+
+      <section class="doc-section" aria-labelledby="github-heading">
+        <h2 id="github-heading">GitHub</h2>
+        <p>在上方「链接转换」粘贴任意 GitHub 或 Hugging Face 原始地址即可得到加速链接；发行包、源码压缩包、模型文件通用，.sh / .ps1 脚本内的链接下载时会自动改写。</p>
+        <div class="snippet">
+          <div class="snippet-chrome">
+            <p class="snippet-label">示例地址</p>
+            <button type="button" class="snippet-copy" data-copy="file-sample">复制</button>
+          </div>
+          <pre class="snippet-body" data-example="file-sample"></pre>
+        </div>
+      </section>
+    </section>
+
+    <section class="panel" id="mirrors" data-panel="mirrors" hidden>
+      <header class="doc-intro">
+        <h1>镜像</h1>
+        <p class="lede">在同一页搜索 Docker Hub、浏览标签，并把引用加入离线包准备下载。</p>
+      </header>
+
+      <section class="doc-section" aria-labelledby="search-heading">
+        <h2 id="search-heading">搜索</h2>
+        <form id="search-form">
+          <label for="query">镜像名称</label>
           <div class="search-row">
-            <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
-            <button type="button" id="convert-copy" disabled>复制加速链接</button>
+            <input id="query" name="q" required autocomplete="off" placeholder="例如 nginx 或 library/redis">
+            <button type="submit" class="action">搜索</button>
           </div>
-          <pre class="example" id="convert-result" hidden></pre>
-          <p class="hint" id="convert-hint" hidden></p>
-        </div>
-      </div>
-      <div class="usage-grid">
-        <article class="card usage-card">
-          <p class="kicker">Docker</p>
-          <h2>镜像拉取与仓库镜像</h2>
-          <p>拉取有两种方式。域名前缀直接写在命令里，不必改配置文件；只有走仓库镜像时才需要写入 <code>daemon.json</code> 并重启 Docker。</p>
-          <section class="method">
-            <h3>域名前缀</h3>
-            <p>把当前入口当作 Registry 前缀，一行命令即可拉取，无需配置文件。</p>
-            <div class="shell">
-              <p class="shell-bar">拉取命令</p>
-              <pre class="example" data-example="docker-pull"></pre>
-            </div>
-            <button type="button" class="ghost" data-copy="docker-pull">复制拉取命令</button>
-          </section>
-          <section class="method">
-            <h3>仓库镜像</h3>
-            <p>把下面的 <code>registry-mirrors</code> 写入 Docker 配置文件后重启生效。参考路径：</p>
-            <ul class="path-ref">
-              <li><span>Linux</span><code>/etc/docker/daemon.json</code></li>
-              <li><span>Windows</span><code>%USERPROFILE%\.docker\daemon.json</code></li>
-              <li><span>macOS</span><code>~/.docker/daemon.json</code></li>
-            </ul>
-            <div class="shell">
-              <p class="shell-bar">daemon.json</p>
-              <pre class="example" data-example="docker-mirror"></pre>
-            </div>
-            <button type="button" class="ghost" data-copy="docker-mirror">复制镜像配置</button>
-          </section>
-        </article>
-        <article class="card usage-card">
-          <p class="kicker">GitHub · Hugging Face</p>
-          <h2>文件与脚本下载</h2>
-          <p>在上方「链接转换」粘贴任意 GitHub 或 Hugging Face 原始地址即可得到加速链接；发行包、源码压缩包、模型文件通用，.sh / .ps1 脚本内的链接下载时会自动改写。</p>
-          <div class="shell">
-            <p class="shell-bar">示例地址</p>
-            <pre class="example" data-example="file-sample"></pre>
+        </form>
+        <div id="results" class="result-list" aria-live="polite"></div>
+      </section>
+
+      <section class="doc-section" aria-labelledby="tags-heading">
+        <h2 id="tags-heading">标签</h2>
+        <form id="tags-form">
+          <label for="tag-image">镜像</label>
+          <div class="search-row">
+            <input id="tag-image" name="image" required autocomplete="off" placeholder="例如 alpine 或 library/nginx">
+            <button type="submit">查看标签</button>
           </div>
-          <button type="button" class="ghost" data-copy="file-sample">复制示例</button>
-        </article>
-      </div>
-    </section>
+        </form>
+        <div id="tag-results" class="tag-board" aria-live="polite"></div>
+      </section>
 
-    <section class="panel" id="search" data-panel="search" hidden>
-      <div class="section-head">
-        <p class="kicker">Docker Hub</p>
-        <h1>搜索 Docker Hub 镜像</h1>
-        <p>从结果进入标签列表，查看该镜像的可用标签。</p>
-      </div>
-      <form id="search-form" class="card search-card">
-        <label for="query">镜像名称</label>
-        <div class="search-row">
-          <input id="query" name="q" required autocomplete="off" placeholder="例如 nginx 或 library/redis">
-          <button type="submit">搜索</button>
-        </div>
-      </form>
-      <div id="results" class="result-list" aria-live="polite"></div>
-    </section>
-
-    <section class="panel" id="tags" data-panel="tags" hidden>
-      <div class="section-head">
-        <p class="kicker">标签</p>
-        <h1>浏览镜像标签</h1>
-        <p>输入镜像名，或从搜索结果进入。点选标签可加入离线包。</p>
-      </div>
-      <form id="tags-form" class="card search-card">
-        <label for="tag-image">镜像</label>
-        <div class="search-row">
-          <input id="tag-image" name="image" required autocomplete="off" placeholder="例如 alpine 或 library/nginx">
-          <button type="submit">查看标签</button>
-        </div>
-      </form>
-      <div id="tag-results" class="tag-board" aria-live="polite"></div>
-    </section>
-
-    <section class="panel" id="offline" data-panel="offline" hidden>
-      <div class="section-head">
-        <p class="kicker">离线包</p>
-        <h1>准备离线镜像包</h1>
-        <p>可填写一个或多个镜像引用。架构可留空，默认按 linux/amd64；压缩层默认开启，可按需关闭。</p>
-      </div>
-      <form id="offline-form" class="card offline-card">
-        <label for="images">镜像引用，每行一个</label>
-        <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
-        <div class="offline-options">
-          <label for="platform">架构（可留空）
-            <select id="platform">
-              <option value="">留空，默认 linux/amd64</option>
-              <option value="linux/amd64">linux/amd64</option>
-              <option value="linux/arm64">linux/arm64</option>
-              <option value="linux/arm/v7">linux/arm/v7</option>
-            </select>
-          </label>
-          <label class="check">
-            <input id="compressed-layers" type="checkbox" checked>
-            <span>压缩层（默认开启）</span>
-          </label>
-        </div>
-        <p class="hint">未选择架构时按 linux/amd64 处理；所选平台不存在时回退到多架构索引中的第一个合法平台。</p>
-        <button type="submit">准备并下载</button>
-      </form>
-      <div id="download" class="download-box" aria-live="polite"></div>
+      <section class="doc-section" aria-labelledby="offline-heading">
+        <h2 id="offline-heading">离线包</h2>
+        <form id="offline-form" class="offline-form">
+          <label for="images">镜像引用，每行一个</label>
+          <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
+          <div class="offline-options">
+            <label for="platform">架构（可留空）
+              <select id="platform">
+                <option value="">留空，默认 linux/amd64</option>
+                <option value="linux/amd64">linux/amd64</option>
+                <option value="linux/arm64">linux/arm64</option>
+                <option value="linux/arm/v7">linux/arm/v7</option>
+              </select>
+            </label>
+            <label class="check">
+              <input id="compressed-layers" type="checkbox" checked>
+              <span>压缩层（默认开启）</span>
+            </label>
+          </div>
+          <p class="hint">未选择架构时按 linux/amd64 处理；所选平台不存在时回退到多架构索引中的第一个合法平台。</p>
+          <button type="submit" class="action">准备并下载</button>
+        </form>
+        <div id="download" class="download-box" aria-live="polite"></div>
+      </section>
     </section>
   </main>
   <script src="/app.js" defer></script>
