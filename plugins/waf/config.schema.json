@@ -3,10 +3,19 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "mode": {"type": "string", "enum": ["deny", "observe"], "default": "observe"},
+    "mode": {
+      "type": "string",
+      "enum": ["deny", "observe"],
+      "default": "observe",
+      "hostInjected": true,
+      "description": "由专用管理页写入，不作为通用配置表单。"
+    },
     "custom_rules": {
       "type": "array",
       "maxItems": 16,
+      "default": [],
+      "hostInjected": true,
+      "description": "由专用管理页写入，不作为通用配置表单。",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -21,6 +30,9 @@
     "exclusions": {
       "type": "array",
       "maxItems": 16,
+      "default": [],
+      "hostInjected": true,
+      "description": "由专用管理页写入，不作为通用配置表单。",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -33,4 +45,3 @@
     }
   }
 }
-

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Web 防火墙</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wash" aria-hidden="true"></div>
+  <main>
+    <header class="page-head">
+      <div class="page-head-copy">
+        <h1>Web 防火墙</h1>
+        <p class="lede">按 HTTP 入口查看观察中或拦截状态、排除误报，并添加有界自定义规则。不声称完整兼容 CRS 或 PCRE。</p>
+      </div>
+      <div class="page-head-agent">
+        <div class="node-card">
+          <label class="agent-field">节点
+            <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
+            <select id="agent-picker" aria-label="选择节点"></select>
+          </label>
+        </div>
+      </div>
+    </header>
+    <p id="app-loading" role="status">正在加载防护状态…</p>
+    <p id="app-unavailable" role="status" hidden>暂时无法管理 Web 防火墙。</p>
+    <p id="app-denied" role="alert" hidden>无权管理 Web 防火墙。</p>
+    <p id="app-status" role="status" hidden></p>
+    <section id="app-context" class="context-region" hidden>
+      <section class="state-panel" id="app-node-empty" hidden>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <div>
+            <h2>未选择节点</h2>
+            <p>请先选择一台节点，再查看该节点上已挂载的 HTTP 入口。</p>
+          </div>
+        </div>
+      </section>
+      <section class="state-panel" id="app-execution-unavailable" hidden>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
+          <div>
+            <h2>防护执行面暂时不可用</h2>
+            <p>管理页已打开，但还不能列出或改动 HTTP 入口防护。刷新本页，或确认该节点上的策略面已投影。</p>
+          </div>
+        </div>
+      </section>
+    </section>
+    <section id="app-workspace" class="workspace-region" hidden>
+      <div class="workspace-head">
+        <div class="workspace-head-copy">
+          <h2>HTTP 入口</h2>
+          <p id="entry-count" class="count"></p>
+        </div>
+        <div class="workspace-head-actions">
+          <button id="global-observe" class="btn-secondary" type="button">全部观察</button>
+          <button id="global-deny" class="btn-primary" type="button">全部拦截</button>
+        </div>
+      </div>
+      <section id="app-list-panel">
+        <p id="app-empty" hidden>还没有 HTTP 入口。</p>
+        <ul id="entry-list"></ul>
+      </section>
+      <section class="panel" id="rules-panel">
+        <h2>排除与自定义规则</h2>
+        <p class="hint">排除按规则 ID 和路径前缀生效。自定义规则只支持有界字面量，不提供正则。</p>
+        <div class="split">
+          <form id="exclusion-form" class="stack">
+            <h3>添加排除</h3>
+            <label>规则 ID
+              <input name="rule_id" maxlength="32" required>
+            </label>
+            <label>路径前缀
+              <input name="path_prefix" maxlength="96" placeholder="/api" required>
+            </label>
+            <button class="btn-secondary" type="submit">添加排除</button>
+            <ul id="exclusion-list"></ul>
+          </form>
+          <form id="custom-form" class="stack">
+            <h3>添加自定义规则</h3>
+            <label>规则 ID
+              <input name="id" maxlength="32" required>
+            </label>
+            <label>检查目标
+              <select name="target">
+                <option value="path">路径</option>
+                <option value="query">查询</option>
+                <option value="headers">请求头</option>
+                <option value="body">请求体</option>
+              </select>
+            </label>
+            <label>匹配内容
+              <input name="needle" minlength="2" maxlength="64" required>
+            </label>
+            <button class="btn-secondary" type="submit">添加规则</button>
+            <ul id="custom-list"></ul>
+          </form>
+        </div>
+      </section>
+      <section class="panel" id="event-panel">
+        <h2>命中与跳过事件</h2>
+        <p id="event-empty" class="hint">暂无命中或跳过事件。</p>
+        <ul id="event-list"></ul>
+      </section>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
