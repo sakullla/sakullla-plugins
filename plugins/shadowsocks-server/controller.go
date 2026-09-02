@@ -207,9 +207,10 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 	if err := configuration.Validate(); err != nil {
 		return err
 	}
-	if configuration.Generation != generation.ID() {
-		return rpcplugin.ErrGenerationMismatch
-	}
+	// The signed plugin projection carries its provider generation, while the
+	// RPC lifecycle is fenced by the Agent's runtime generation. Bind all
+	// process-local state to the latter after validating the projected config.
+	configuration.Generation = generation.ID()
 	var restoredListeners []ListenRule
 	var restoredSecrets map[string]string
 	if c.listenState != nil {

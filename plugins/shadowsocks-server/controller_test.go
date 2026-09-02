@@ -8,6 +8,34 @@ import (
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
+func TestControllerPrepareBindsConfigurationToHandshakeGeneration(t *testing.T) {
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runtimeGeneration = "runtime-generation-64"
+	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(),
+		Generation: runtimeGeneration, RequiredFeatures: supportedFeatures(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(Configuration{Generation: "provider-generation-607f31da"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: runtimeGeneration, Config: wire}); result.Error != nil {
+		t.Fatalf("Prepare() rejected the Host-projected provider generation: %v", result.Error)
+	}
+	controller.mu.Lock()
+	configuredGeneration := controller.configuration.Generation
+	controller.mu.Unlock()
+	if configuredGeneration != runtimeGeneration {
+		t.Fatalf("prepared generation = %q, want handshake generation %q", configuredGeneration, runtimeGeneration)
+	}
+}
+
 func TestListenControllerCreateTwoSS2022MethodsDoesNotPoisonFirstResolve(t *testing.T) {
 	runtime := &testRuntime{now: 10, used: map[string]uint64{}, refs: map[string]string{}, replay: map[string]bool{}, accountVault: true}
 	controller, err := NewController(ControllerConfig{
