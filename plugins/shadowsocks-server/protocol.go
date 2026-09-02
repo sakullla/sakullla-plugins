@@ -802,7 +802,11 @@ func (e *ProtocolEngine) seal2022UDP(key, identity, sessionID []byte, packetID u
 	separate := make([]byte, 16)
 	copy(separate[:8], sessionID)
 	binary.BigEndian.PutUint64(separate[8:], packetID)
-	block, err := aes.NewCipher(key)
+	packetKey := key
+	if len(identity) != 0 {
+		packetKey = identity
+	}
+	block, err := aes.NewCipher(packetKey)
 	if err != nil {
 		return nil, ErrProtocol
 	}
@@ -831,7 +835,7 @@ func (e *ProtocolEngine) seal2022UDP(key, identity, sessionID []byte, packetID u
 	body = append(body, padding...)
 	body = append(body, address...)
 	body = append(body, payload...)
-	header, err := seal2022Identity(identity, key, separate)
+	header, err := seal2022UDPIdentity(identity, key, separate)
 	if err != nil {
 		return nil, err
 	}
@@ -846,7 +850,11 @@ func (e *ProtocolEngine) open2022UDP(key, identity, wire []byte, now time.Time) 
 	if len(wire) < overhead+16+1+8+2+1+2+16 || len(wire) > maxUDPPacket {
 		return ProxyRequest{}, ErrProtocol
 	}
-	block, err := aes.NewCipher(key)
+	packetKey := key
+	if len(identity) != 0 {
+		packetKey = identity
+	}
+	block, err := aes.NewCipher(packetKey)
 	if err != nil {
 		return ProxyRequest{}, ErrProtocol
 	}
@@ -854,7 +862,7 @@ func (e *ProtocolEngine) open2022UDP(key, identity, wire []byte, now time.Time) 
 	block.Decrypt(separate, wire[:16])
 	position := 16
 	if overhead != 0 {
-		if err := open2022Identity(identity, key, separate, wire[ss2022IdentitySize:2*ss2022IdentitySize]); err != nil {
+		if err := open2022UDPIdentity(identity, key, separate, wire[ss2022IdentitySize:2*ss2022IdentitySize]); err != nil {
 			return ProxyRequest{}, err
 		}
 		position = 2 * ss2022IdentitySize
@@ -999,13 +1007,13 @@ func ss2022IdentityOverhead(identity []byte) int {
 	return ss2022IdentitySize
 }
 
-// seal2022Identity writes SIP022 EIH: AES-ECB(identity_subkey(iPSK)[:16], uPSK[:16] XOR mask).
-// TCP mask is salt[0:16]; UDP mask is the plaintext session header.
-func seal2022Identity(ipsk, nextPSK, mask []byte) ([]byte, error) {
+// seal2022Identity writes the TCP SIP022 EIH. The identity subkey is derived
+// from iPSK || salt and encrypts the first 16 bytes of BLAKE3(uPSK).
+func seal2022Identity(ipsk, nextPSK, salt []byte) ([]byte, error) {
 	if len(ipsk) == 0 {
 		return nil, nil
 	}
-	plain, key, err := ss2022IdentityMaterial(ipsk, nextPSK, mask)
+	plain, key, err := ss2022TCPIdentityMaterial(ipsk, nextPSK, salt)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,11 +1028,11 @@ func seal2022Identity(ipsk, nextPSK, mask []byte) ([]byte, error) {
 	return out, nil
 }
 
-func open2022Identity(ipsk, nextPSK, mask, header []byte) error {
+func open2022Identity(ipsk, nextPSK, salt, header []byte) error {
 	if len(header) != ss2022IdentitySize {
 		return ErrProtocol
 	}
-	plain, key, err := ss2022IdentityMaterial(ipsk, nextPSK, mask)
+	plain, key, err := ss2022TCPIdentityMaterial(ipsk, nextPSK, salt)
 	if err != nil {
 		return err
 	}
@@ -1042,21 +1050,97 @@ func open2022Identity(ipsk, nextPSK, mask, header []byte) error {
 	return nil
 }
 
-func ss2022IdentityMaterial(ipsk, nextPSK, mask []byte) (plain, aesKey []byte, err error) {
-	if len(nextPSK) < ss2022IdentitySize || len(mask) < ss2022IdentitySize {
+func ss2022TCPIdentityMaterial(ipsk, nextPSK, salt []byte) (plain, aesKey []byte, err error) {
+	if (len(ipsk) != 16 && len(ipsk) != 32) || len(nextPSK) != len(ipsk) || len(salt) != len(ipsk) {
 		return nil, nil, ErrProtocol
 	}
-	derived, err := blake3DeriveKey(ss2022IdentityContext, ipsk)
+	material := append(append(make([]byte, 0, len(ipsk)+len(salt)), ipsk...), salt...)
+	derived, err := blake3DeriveKey(ss2022IdentityContext, material)
+	clear(material)
 	if err != nil {
 		return nil, nil, err
 	}
-	aesKey = append([]byte(nil), derived[:ss2022IdentitySize]...)
+	aesKey = append([]byte(nil), derived[:len(ipsk)]...)
 	clear(derived[:])
-	plain = make([]byte, ss2022IdentitySize)
-	for i := range plain {
-		plain[i] = nextPSK[i] ^ mask[i]
+	plain, err = ss2022IdentityHash(nextPSK)
+	if err != nil {
+		clear(aesKey)
+		return nil, nil, err
 	}
 	return plain, aesKey, nil
+}
+
+// UDP SIP022 uses the raw iPSK as its AES key and masks BLAKE3(uPSK) with
+// the plaintext session header before encryption.
+func seal2022UDPIdentity(ipsk, nextPSK, packetHeader []byte) ([]byte, error) {
+	if len(ipsk) == 0 {
+		return nil, nil
+	}
+	plain, err := ss2022UDPIdentityMaterial(nextPSK, packetHeader)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plain)
+	block, err := aes.NewCipher(ipsk)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	out := make([]byte, ss2022IdentitySize)
+	block.Encrypt(out, plain)
+	return out, nil
+}
+
+func open2022UDPIdentity(ipsk, nextPSK, packetHeader, header []byte) error {
+	if len(header) != ss2022IdentitySize {
+		return ErrProtocol
+	}
+	plain, err := ss2022UDPIdentityMaterial(nextPSK, packetHeader)
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	block, err := aes.NewCipher(ipsk)
+	if err != nil {
+		return ErrProtocol
+	}
+	out := make([]byte, ss2022IdentitySize)
+	block.Encrypt(out, plain)
+	if !bytes.Equal(out, header) {
+		return ErrAuthentication
+	}
+	return nil
+}
+
+func ss2022UDPIdentityMaterial(nextPSK, packetHeader []byte) ([]byte, error) {
+	if (len(nextPSK) != 16 && len(nextPSK) != 32) || len(packetHeader) != ss2022IdentitySize {
+		return nil, ErrProtocol
+	}
+	hash, err := ss2022IdentityHash(nextPSK)
+	if err != nil {
+		return nil, err
+	}
+	for index := range hash {
+		hash[index] ^= packetHeader[index]
+	}
+	return hash, nil
+}
+
+func ss2022IdentityHash(psk []byte) ([]byte, error) {
+	if len(psk) != 16 && len(psk) != 32 {
+		return nil, ErrProtocol
+	}
+	digest, err := blake3OneBlockDigest(psk)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), digest[:ss2022IdentitySize]...), nil
+}
+
+func blake3OneBlockDigest(input []byte) ([32]byte, error) {
+	if len(input) > 64 {
+		return [32]byte{}, ErrProtocol
+	}
+	return blake3OneBlock(blake3IV, input, 0), nil
 }
 
 func timestampValid(value uint64, now time.Time) bool {

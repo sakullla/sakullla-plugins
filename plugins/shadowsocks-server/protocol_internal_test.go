@@ -37,6 +37,44 @@ func TestShadowsocksBLAKE3OfficialDeriveKeyVectors(t *testing.T) {
 	}
 }
 
+func TestShadowsocks2022SIP022MihomoReferenceHeaders(t *testing.T) {
+	serverKey := make([]byte, 16)
+	userKey := make([]byte, 16)
+	tcpSalt := make([]byte, 16)
+	udpHeader := make([]byte, 16)
+	for index := range serverKey {
+		serverKey[index] = byte(index)
+		userKey[index] = byte(0x20 + index)
+		tcpSalt[index] = byte(0x40 + index)
+		udpHeader[index] = byte(0x60 + index)
+	}
+	password := base64.StdEncoding.EncodeToString(serverKey) + ":" + base64.StdEncoding.EncodeToString(userKey)
+	engine, err := NewProtocolEngine("2022-blake3-aes-128-gcm", []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Destroy()
+
+	tcpWire, err := engine.SealTCPRequest(tcpSalt, "example.com:443", []byte("payload"), time.Unix(1_700_000_000, 0), []byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := hex.EncodeToString(tcpWire[16:32]), "4cd8316ef4c2c2b915f6f822b6fadac3"; got != want {
+		t.Fatalf("TCP EIH = %s, want Mihomo/SIP022 %s", got, want)
+	}
+
+	udpWire, err := engine.SealUDPPacket(udpHeader[:8], binary.BigEndian.Uint64(udpHeader[8:]), "1.1.1.1:53", []byte("query"), time.Unix(1_700_000_000, 0), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := hex.EncodeToString(udpWire[:16]), "adde68f7ad497268d31a0ddd5c74b08f"; got != want {
+		t.Fatalf("UDP encrypted header = %s, want Mihomo/SIP022 %s", got, want)
+	}
+	if got, want := hex.EncodeToString(udpWire[16:32]), "5a69ff98653c5e6eb7f96274a734ad77"; got != want {
+		t.Fatalf("UDP EIH = %s, want Mihomo/SIP022 %s", got, want)
+	}
+}
+
 func TestShadowsocksTCPServerSessionRequestAndResponseChunks(t *testing.T) {
 	for _, test := range []struct {
 		method   string
@@ -320,7 +358,7 @@ func TestShadowsocks2022IdentityTCPUDPWireUsesSIP022Header(t *testing.T) {
 			separate := make([]byte, ss2022IdentitySize)
 			copy(separate[:8], sessionID)
 			binary.BigEndian.PutUint64(separate[8:], 9)
-			wantUDP, err := seal2022Identity(serverKey, userKey, separate)
+			wantUDP, err := seal2022UDPIdentity(serverKey, userKey, separate)
 			if err != nil {
 				t.Fatal(err)
 			}
