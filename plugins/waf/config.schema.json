@@ -2,9 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["mode"],
   "properties": {
-    "mode": {"type": "string", "enum": ["deny", "observe"]},
+    "mode": {"type": "string", "enum": ["deny", "observe"], "default": "observe"},
     "custom_rules": {
       "type": "array",
       "maxItems": 16,

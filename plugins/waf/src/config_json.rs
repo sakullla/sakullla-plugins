@@ -125,7 +125,7 @@ impl OwnedConfig {
 pub fn decode_config(input: &[u8]) -> Result<PreparedConfig, ConfigDecodeError> {
     let mut parser = Parser { input, offset: 0 };
     let mut config = OwnedConfig {
-        mode: WafMode::Deny,
+        mode: WafMode::Observe,
         rules: [OwnedRule::EMPTY; MAX_RULES],
         rule_count: 0,
         exclusions: [OwnedExclusion::EMPTY; MAX_EXCLUSIONS],
@@ -180,10 +180,65 @@ pub fn decode_config(input: &[u8]) -> Result<PreparedConfig, ConfigDecodeError> 
     if parser.offset != input.len() {
         return Err(ConfigDecodeError::InvalidJson);
     }
-    if !seen_mode {
-        return Err(ConfigDecodeError::MissingField);
-    }
     config.prepare()
+}
+
+pub fn decode_overlay(input: &[u8]) -> Result<Option<WafMode>, ConfigDecodeError> {
+    let input = trim_ascii(input);
+    if input.is_empty() || input == b"null" {
+        return Ok(None);
+    }
+    let mut parser = Parser { input, offset: 0 };
+    let mut mode = None;
+    parser.expect(b'{')?;
+    if !parser.consume(b'}') {
+        loop {
+            let mut key = [0; 24];
+            let key_len = parser.string_into(&mut key)?;
+            parser.expect(b':')?;
+            match key.get(..key_len).ok_or(ConfigDecodeError::InvalidJson)? {
+                b"mode" => {
+                    if mode.is_some() {
+                        return Err(ConfigDecodeError::DuplicateField);
+                    }
+                    let mut value = [0; 16];
+                    let length = parser.string_into(&mut value)?;
+                    let value =
+                        trim_ascii(value.get(..length).ok_or(ConfigDecodeError::InvalidJson)?);
+                    mode = Some(match value {
+                        b"deny" => WafMode::Deny,
+                        b"observe" => WafMode::Observe,
+                        _ => return Err(ConfigDecodeError::InvalidValue),
+                    });
+                }
+                _ => return Err(ConfigDecodeError::UnknownField),
+            }
+            if parser.consume(b'}') {
+                break;
+            }
+            parser.expect(b',')?;
+        }
+    }
+    parser.space();
+    if parser.offset != input.len() {
+        return Err(ConfigDecodeError::InvalidJson);
+    }
+    match mode {
+        Some(mode) => Ok(Some(mode)),
+        None => Err(ConfigDecodeError::MissingField),
+    }
+}
+
+fn trim_ascii(input: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = input.len();
+    while start < end && matches!(input.get(start), Some(&b' ' | &b'\n' | &b'\r' | &b'\t')) {
+        start += 1;
+    }
+    while end > start && matches!(input.get(end - 1), Some(&b' ' | &b'\n' | &b'\r' | &b'\t')) {
+        end -= 1;
+    }
+    input.get(start..end).unwrap_or(&[])
 }
 
 struct Parser<'a> {

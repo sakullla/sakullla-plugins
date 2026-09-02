@@ -1,6 +1,49 @@
-# Supported deterministic substring rules. This is intentionally not CRS/PCRE.
+# Deterministic ASCII substring rules compiled into the guest.
+# This set is intentionally not CRS/PCRE and does not use scoring or PCRE.
+#
+# Path traversal
 managed-path-traversal|Path|../
+managed-path-backslash|Path|..\
+managed-path-encoded-slash|Path|..%2f
+managed-path-encoded-bslash|Path|..%5c
+managed-path-encoded-dotdot|Path|%2e%2e
+managed-path-etc-passwd|Path|/etc/passwd
+managed-path-windows|Path|c:\windows
+managed-path-proc-self|Path|/proc/self
+managed-query-traversal|Query|../
+managed-query-encoded-dotdot|Query|%2e%2e
+#
+# Injection
 managed-sqli-union|Query|union select
+managed-sqli-union-body|Body|union select
+managed-sqli-or-quote|Query|' or '
+managed-sqli-or-1equal|Query|or 1=1
+managed-sqli-sleep|Query|sleep(
+managed-sqli-benchmark|Query|benchmark(
+managed-sqli-waitfor|Query|waitfor delay
+managed-sqli-schema|Query|information_schema
+managed-sqli-xp-cmd|Query|xp_cmdshell
+managed-cmd-bin-sh|Query|/bin/sh
+managed-cmd-bin-bash|Query|/bin/bash
+managed-cmd-cmd-exe|Query|cmd.exe
+managed-cmd-powershell|Query|powershell
+#
+# Cross-site scripting
 managed-xss-script|Body|<script
+managed-xss-script-query|Query|<script
+managed-xss-javascript|Query|javascript:
+managed-xss-onerror|Query|onerror=
+managed-xss-onload|Query|onload=
+managed-xss-iframe|Body|<iframe
+managed-xss-svg|Body|<svg
+managed-xss-img|Query|<img
+#
+# Dangerous request features
 managed-shell-user-agent|Headers|() {
-
+managed-log4j-jndi|Headers|${jndi:
+managed-log4j-jndi-query|Query|${jndi:
+managed-php-wrapper|Query|php://
+managed-file-wrapper|Query|file://
+managed-null-byte|Path|%00
+managed-method-override|Headers|x-http-method-override
+managed-git-config|Path|/.git/

@@ -4,7 +4,7 @@
 mod config_json;
 mod engine;
 
-pub use config_json::{ConfigDecodeError, decode_config};
+pub use config_json::{ConfigDecodeError, decode_config, decode_overlay};
 pub use engine::{
     BodyWindow, ConfigError, CustomRule, DecisionReason, Evaluation, Exclusion, NormalizedRequest,
     PreparedConfig, Target, TrustedSource, WafConfig, WafEngine, WafMode, prepare_config,
@@ -29,7 +29,7 @@ mod wasm {
 
     use crate::{
         BodyWindow, NormalizedRequest, PreparedConfig, TrustedSource, WafEngine, WafMode,
-        decode_config,
+        decode_config, decode_overlay,
     };
 
     const ARENA_BYTES: usize = 132 * 1024;
@@ -55,7 +55,7 @@ mod wasm {
     static RUNTIME: Shared<Runtime> = Shared(UnsafeCell::new(Runtime {
         arena: [0; ARENA_BYTES + OUTPUT_BYTES],
         cursor: 0,
-        config: PreparedConfig::managed_only(WafMode::Deny),
+        config: PreparedConfig::managed_only(WafMode::Observe),
         initialized: false,
     }));
 
@@ -196,6 +196,11 @@ mod wasm {
         if !runtime.initialized {
             return error_response(RuntimeErrorCode::Unavailable, "policy not initialized");
         }
+        let config = match decode_overlay(request.payload) {
+            Ok(Some(mode)) => runtime.config.with_mode(mode),
+            Ok(None) => runtime.config,
+            Err(_) => return error_response(RuntimeErrorCode::InvalidArgument, "invalid overlay"),
+        };
 
         let mut host = None;
         let snapshot = if request.normalized_http.is_empty() {
@@ -230,7 +235,7 @@ mod wasm {
                 Err(status) => return error_response(runtime_error(status), "invalid snapshot"),
             }
         };
-        match evaluate_snapshot(&runtime.config, &snapshot, &mut host) {
+        match evaluate_snapshot(&config, &snapshot, &mut host) {
             Ok((action, event, event_len)) => {
                 let Some(event) = event.get(..event_len) else {
                     return error_response(RuntimeErrorCode::Internal, "invalid event");

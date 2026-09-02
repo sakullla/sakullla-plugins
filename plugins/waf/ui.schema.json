@@ -14,6 +14,7 @@
           "label": "模式",
           "binding": "/mode",
           "required": true,
+          "default": "observe",
           "options": [
             {"value": "deny", "label": "拦截"},
             {"value": "observe", "label": "观察"}
