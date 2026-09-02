@@ -32,6 +32,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	declaration := pluginsdk.RPCPluginDeclaration{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		RequiredCapabilities: requiredGrants(),
+		SupportedFeatures:    supportedFeatures(),
 	}
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
 		Declaration: declaration,
