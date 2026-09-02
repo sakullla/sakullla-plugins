@@ -1,6 +1,6 @@
 schema_version: 1
 id: shadowsocks-server
-version: 0.1.7
+version: 0.1.8
 name: Shadowsocks 服务
 description: 通过简单面板管理账号，并分享本机自监听的 Shadowsocks 服务
 compatibility:

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
@@ -62,8 +63,10 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities: []string{"shadowsocks.business-model"}, RequiredGrants: requiredGrants(),
-		Timeouts: timeouts,
+		Capabilities:      []string{"shadowsocks.business-model"},
+		RequiredGrants:    requiredGrants(),
+		SupportedFeatures: supportedFeatures(),
+		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: c.prepare, ActivateFunc: c.activate, StopFunc: c.stop})
 	if err != nil {
 		return nil, err
@@ -398,6 +401,10 @@ const generationHandleScope = "service.revocable-resource-handle"
 
 func requiredGrants() []string {
 	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle"}
+}
+
+func supportedFeatures() []string {
+	return []string{pluginsdk.RPCFeatureDurableActionsV1}
 }
 
 type issuedSecrets struct {

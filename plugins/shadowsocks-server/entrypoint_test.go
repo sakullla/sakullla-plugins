@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,15 +84,21 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 	for _, permission := range manifest.Permissions {
 		grants = append(grants, permission.Name)
 	}
+	requiredFeatures := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+	response, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: manifest.ID, PluginVersion: manifest.Version,
 		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1",
-	}); err != nil {
+		RequiredFeatures: requiredFeatures,
+	})
+	if err != nil {
 		t.Fatalf("plugin.yaml permissions do not satisfy the runtime handshake: %v", err)
+	}
+	if !slices.Equal(response.Features, requiredFeatures) {
+		t.Fatalf("runtime handshake features = %v, want %v", response.Features, requiredFeatures)
 	}
 }
 
