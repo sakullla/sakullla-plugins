@@ -23,6 +23,7 @@ type uiListenHost struct {
 	mu             sync.Mutex
 	online         bool
 	apply          []listenApplyRequest
+	live           []ListenPortStatus
 	applyErr       error
 	node           NodeAddresses
 	hideReportNode bool
@@ -39,7 +40,7 @@ func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, t
 	defer h.mu.Unlock()
 	switch request.Name {
 	case pluginCallListenReport:
-		report := ListenReport{AgentID: request.AgentID, Online: h.online}
+		report := ListenReport{AgentID: request.AgentID, Online: h.online, Listens: append([]ListenPortStatus(nil), h.live...)}
 		if !h.hideReportNode {
 			report.DDNS, report.IPv4, report.IPv6 = h.node.DDNS, h.node.IPv4, h.node.IPv6
 		}
@@ -55,9 +56,27 @@ func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, t
 		for _, item := range body.Listens {
 			listens = append(listens, ListenPortStatus{ID: item.ID, Port: item.Port, TCP: true, UDP: true})
 		}
+		h.live = append([]ListenPortStatus(nil), listens...)
 		return copyHostResult(listenApplyResult{Accepted: true, AgentID: request.AgentID, Listens: listens}, target)
 	case pluginCallListenStop:
-		return copyHostResult(listenApplyResult{Accepted: true, AgentID: request.AgentID}, target)
+		var body listenStopRequest
+		_ = json.Unmarshal(request.Payload, &body)
+		if len(body.ListenIDs) == 0 {
+			h.live = nil
+		} else {
+			stopped := make(map[string]struct{}, len(body.ListenIDs))
+			for _, id := range body.ListenIDs {
+				stopped[id] = struct{}{}
+			}
+			kept := h.live[:0]
+			for _, item := range h.live {
+				if _, ok := stopped[item.ID]; !ok {
+					kept = append(kept, item)
+				}
+			}
+			h.live = kept
+		}
+		return copyHostResult(listenApplyResult{Accepted: true, AgentID: request.AgentID, Listens: append([]ListenPortStatus(nil), h.live...)}, target)
 	default:
 		return ErrTypedHandlesUnavailable
 	}
@@ -579,15 +598,49 @@ func TestControlAPIRestoresPersistedListensAfterRestart(t *testing.T) {
 	if !state.found || len(state.listens) != 1 || len(state.secrets) == 0 {
 		t.Fatalf("persist listens=%#v secrets=%d", state.listens, len(state.secrets))
 	}
+	host.mu.Lock()
+	applyBefore := len(host.apply)
+	host.mu.Unlock()
 
 	restarted := startUITestController(t, uiTestSetup{host: host, node: host.node, state: state})
 	listed := decodeListenAPI(t, uiJSON(t, restarted, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
-	if len(listed.Listens) != 1 || listed.Listens[0].ID != original.ID || listed.Listens[0].Port != original.Port || len(listed.Listens[0].Users) != 1 {
+	if len(listed.Listens) != 1 || listed.Listens[0].ID != original.ID || listed.Listens[0].Port != original.Port || !listed.Listens[0].Bound || len(listed.Listens[0].Users) != 1 {
 		t.Fatalf("restored list=%#v", listed.Listens)
 	}
 	user := listed.Listens[0].Users[0]
 	if !user.ShareAvailable || user.URI == "" || user.QRContent != user.URI || user.URI != original.Users[0].URI {
 		t.Fatalf("restored share=%#v want %q", user, original.Users[0].URI)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.apply) != applyBefore {
+		t.Fatalf("live restart reapplied %d times", len(host.apply)-applyBefore)
+	}
+}
+
+func TestControlAPIReappliesPersistedListensAfterAgentUpgrade(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	state := &uiMemoryListenState{}
+	first := startUITestController(t, uiTestSetup{host: host, node: host.node, state: state})
+	created := decodeListenAPI(t, uiJSON(t, first, http.MethodPost, "/api/listens", `{"agent_id":"agent-1"}`)).Listen
+	if created == nil || !created.Bound {
+		t.Fatalf("created=%#v", created)
+	}
+
+	host.mu.Lock()
+	host.live = nil
+	applyBefore := len(host.apply)
+	host.mu.Unlock()
+
+	restarted := startUITestController(t, uiTestSetup{host: host, node: host.node, state: state})
+	listed := decodeListenAPI(t, uiJSON(t, restarted, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || listed.Listens[0].ID != created.ID || !listed.Listens[0].Bound {
+		t.Fatalf("reapplied list=%#v", listed.Listens)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.apply) != applyBefore+1 {
+		t.Fatalf("upgrade reconcile applies=%d want=%d", len(host.apply), applyBefore+1)
 	}
 }
 

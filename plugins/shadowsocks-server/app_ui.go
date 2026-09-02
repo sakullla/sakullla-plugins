@@ -867,6 +867,7 @@ func (c *Controller) listenApplyItems(ctx context.Context, agentID string) ([]Li
 }
 
 func (c *Controller) projectListens(ctx context.Context, agentID string) ([]listenAPIView, error) {
+	c.reconcileAgentListens(ctx, agentID)
 	snapshot := c.directory()
 	node := c.shareNode(ctx, agentID)
 	views := make([]listenAPIView, 0)
@@ -874,6 +875,48 @@ func (c *Controller) projectListens(ctx context.Context, agentID string) ([]list
 		views = append(views, c.projectListenView(ctx, listener, node))
 	}
 	return views, nil
+}
+
+// reconcileAgentListens refreshes process-local status after a control-plane
+// restart and restores the persisted desired listeners after an Agent plugin
+// generation is replaced. Reconciliation is best-effort so an offline Agent
+// still leaves its saved configuration visible in the panel.
+func (c *Controller) reconcileAgentListens(ctx context.Context, agentID string) {
+	if c == nil || c.listenHost == nil || !validAgentID(agentID) {
+		return
+	}
+	report, err := c.ReportListen(ctx, agentID)
+	if err != nil {
+		c.listenHost.setLive(agentID, nil)
+		return
+	}
+	c.listenHost.setLive(agentID, report.Listens)
+	desired := c.directory().ListenersForAgent(agentID)
+	if !report.Online || listenRuntimeMatchesDesired(desired, report.Listens) {
+		return
+	}
+	items, err := c.listenApplyItems(ctx, agentID)
+	if err != nil {
+		return
+	}
+	_ = c.ApplyListen(ctx, agentID, items)
+}
+
+func listenRuntimeMatchesDesired(desired []ListenRule, live []ListenPortStatus) bool {
+	if len(desired) != len(live) {
+		return false
+	}
+	byID := make(map[string]ListenPortStatus, len(live))
+	for _, item := range live {
+		byID[item.ID] = item
+	}
+	for _, listener := range desired {
+		item, ok := byID[listener.ID]
+		if !ok || item.Port != listener.Port || !item.TCP || !item.UDP {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Controller) projectListen(ctx context.Context, listenID string) (listenAPIView, error) {
