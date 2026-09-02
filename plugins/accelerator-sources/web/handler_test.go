@@ -94,11 +94,14 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")
 	}
 	panel := cssRule(style, ".panel")
-	if !strings.Contains(panel, "max-width: min(46rem, 100%)") {
-		t.Fatal(".panel is not a single-column reading width")
+	if !strings.Contains(panel, "max-width: min(90rem, 100%)") {
+		t.Fatal(".panel does not follow the masthead content width")
 	}
-	if strings.Contains(style, ".usage-grid") || strings.Contains(style, ".converter-card") || strings.Contains(style, "repeat(2, minmax(") {
-		t.Fatal("usage page still uses two equal cards or a two-column grid")
+	if !strings.Contains(style, ".hero-row") || !strings.Contains(style, ".split-row") || !strings.Contains(style, ".mirrors-row") {
+		t.Fatal("visitor layout is missing dense two-pane rows")
+	}
+	if strings.Contains(style, ".usage-grid") || strings.Contains(style, ".converter-card") {
+		t.Fatal("visitor page still uses retired two-card class names")
 	}
 	for _, want := range []string{
 		"html { font-size: 17px; }",
