@@ -2,10 +2,33 @@ package dockerapp
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestAppValidateEnforcesServicePolicyMapBounds(t *testing.T) {
+	t.Parallel()
+	imageLocks := make(map[string]string, MaxComposeServices+1)
+	ignoredUpdates := make(map[string][]string, MaxComposeServices+1)
+	for index := 0; index <= MaxComposeServices; index++ {
+		service := fmt.Sprintf("service-%03d", index)
+		imageLocks[service] = "^1.0.0"
+		ignoredUpdates[service] = []string{"1.0.1"}
+	}
+	for name, app := range map[string]App{
+		"image locks":     {ID: "media", Generation: "generation-1", Image: "nginx:1.27", ImageLocks: imageLocks},
+		"ignored updates": {ID: "media", Generation: "generation-1", Image: "nginx:1.27", IgnoredUpdates: ignoredUpdates},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := app.Validate(); !errors.Is(err, ErrBoundExceeded) {
+				t.Fatalf("App.Validate() error = %v, want ErrBoundExceeded", err)
+			}
+		})
+	}
+}
 
 func TestComposeImagePairsServices(t *testing.T) {
 	t.Parallel()

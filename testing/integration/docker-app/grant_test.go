@@ -155,6 +155,11 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
 		t.Fatal(err)
 	}
+	for _, keyword := range []string{"maxProperties", "propertyNames"} {
+		if strings.Contains(string(schemaBytes), `"`+keyword+`"`) {
+			t.Fatalf("config schema uses unsupported Host keyword %q", keyword)
+		}
+	}
 	properties, _ := schema["properties"].(map[string]any)
 	apps, _ := properties["apps"].(map[string]any)
 	if injected, _ := apps["hostInjected"].(bool); !injected {

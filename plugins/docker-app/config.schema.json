@@ -57,10 +57,6 @@
           "image_locks": {
             "type": "object",
             "default": {},
-            "maxProperties": 128,
-            "propertyNames": {
-              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
-            },
             "additionalProperties": {
               "type": "string",
               "minLength": 1,
@@ -71,10 +67,6 @@
           "ignored_updates": {
             "type": "object",
             "default": {},
-            "maxProperties": 128,
-            "propertyNames": {
-              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
-            },
             "additionalProperties": {
               "type": "array",
               "maxItems": 256,
