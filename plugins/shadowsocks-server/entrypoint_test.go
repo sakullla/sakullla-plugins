@@ -100,6 +100,11 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 	if !slices.Equal(response.Features, requiredFeatures) {
 		t.Fatalf("runtime handshake features = %v, want %v", response.Features, requiredFeatures)
 	}
+	for _, capability := range response.Capabilities {
+		if !slices.Contains(grants, capability) {
+			t.Fatalf("runtime handshake returned ungranted capability %q", capability)
+		}
+	}
 }
 
 func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {

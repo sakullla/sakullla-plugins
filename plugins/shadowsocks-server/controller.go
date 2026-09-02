@@ -63,7 +63,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities:      []string{"shadowsocks.business-model"},
+		Capabilities:      requiredGrants(),
 		RequiredGrants:    requiredGrants(),
 		SupportedFeatures: supportedFeatures(),
 		Timeouts:          timeouts,
