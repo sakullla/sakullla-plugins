@@ -69,6 +69,32 @@ func TestPluginYAMLDeclaresImplicitRemoteAgentExecution(t *testing.T) {
 	}
 }
 
+func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pluginsdk.Manifest
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	grants := make([]string, 0, len(manifest.Permissions))
+	for _, permission := range manifest.Permissions {
+		grants = append(grants, permission.Name)
+	}
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: manifest.ID, PluginVersion: manifest.Version,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1",
+	}); err != nil {
+		t.Fatalf("plugin.yaml permissions do not satisfy the runtime handshake: %v", err)
+	}
+}
+
 func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("plugin.yaml")

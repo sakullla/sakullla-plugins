@@ -33,7 +33,7 @@ func TestListenControllerCreateTwoSS2022MethodsDoesNotPoisonFirstResolve(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	grants := []string{"audit", "listener", "monotonic-clock", "replay", "secret", "traffic"}
+	grants := requiredGrants()
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants, Generation: "generation-1",
