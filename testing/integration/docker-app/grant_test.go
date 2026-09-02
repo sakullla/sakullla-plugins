@@ -180,6 +180,13 @@ func TestZeroConfigInstallOmitsDockerConnectionFields(t *testing.T) {
 	}
 	items, _ := apps["items"].(map[string]any)
 	itemProperties, _ := items["properties"].(map[string]any)
+	for _, name := range []string{"image_locks", "ignored_updates"} {
+		policy, _ := itemProperties[name].(map[string]any)
+		additional, ok := policy["additionalProperties"].(bool)
+		if !ok || !additional {
+			t.Fatalf("%s additionalProperties must use the Host-supported true boolean", name)
+		}
+	}
 	compose, _ := itemProperties["compose"].(map[string]any)
 	if _, hasTitle := compose["title"]; hasTitle {
 		t.Fatal("compose must not carry a form title")

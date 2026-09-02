@@ -57,22 +57,13 @@
           "image_locks": {
             "type": "object",
             "default": {},
-            "additionalProperties": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
+            "additionalProperties": true,
             "description": "按 compose 服务锁定 semver 范围。由插件管理页写入，不作为通用配置表单。"
           },
           "ignored_updates": {
             "type": "object",
             "default": {},
-            "additionalProperties": {
-              "type": "array",
-              "maxItems": 256,
-              "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1, "maxLength": 128}
-            },
+            "additionalProperties": true,
             "description": "按 compose 服务忽略的候选版本 tag。由插件管理页写入，不作为通用配置表单。"
           }
         }
