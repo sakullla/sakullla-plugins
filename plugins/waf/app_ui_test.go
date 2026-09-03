@@ -53,23 +53,25 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
-		t.Fatalf("dual-face projection missing: %+v", manifest.Runtime)
+	if strings.TrimSpace(manifest.UISchema) != "" {
+		t.Fatalf("waf must not declare ui_schema: %q", manifest.UISchema)
+	}
+	if manifest.Runtime.Kind != pluginsdk.RuntimeRPCService || manifest.Runtime.HostScope != pluginsdk.HostScopeControlPlane {
+		t.Fatalf("control-plane rpc face = %+v", manifest.Runtime)
+	}
+	if manifest.Runtime.PolicyKind != "waf" {
+		t.Fatalf("policy_kind = %q", manifest.Runtime.PolicyKind)
 	}
 	if pluginsdk.RuntimeProjectsAgentRPC(manifest.Runtime) {
 		t.Fatalf("waf must not project Agent RPC: %+v", manifest.Runtime)
 	}
-	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
-	if !ok || projection.PolicyKind != "waf" || projection.Entry != "artifacts/waf.wasm" {
-		t.Fatalf("policy projection = %+v ok=%v", projection, ok)
-	}
-	if len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
-		t.Fatalf("policy-face extensions = %v", projection.ExtensionPoints)
+	if manifest.UIRouteID != "waf" {
+		t.Fatalf("ui_route_id = %q", manifest.UIRouteID)
 	}
 	hasUIRoute, hasHTTPRequest := false, false
 	for _, point := range manifest.ExtensionPoints {
 		switch point {
-		case "ui.route":
+		case pluginsdk.ExtensionUIRoute:
 			hasUIRoute = true
 		case "http.request":
 			hasHTTPRequest = true
