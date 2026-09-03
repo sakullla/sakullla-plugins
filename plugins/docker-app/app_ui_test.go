@@ -1488,6 +1488,12 @@ func TestAppUIIgnoreCandidateHidesNoticeUntilHigherLockMatch(t *testing.T) {
 		t.Fatalf("fresh tag cache should keep ignored 1.27.2 hidden: %#v", stillHidden)
 	}
 	expireImageObservation(controller, "media")
+	refreshing := httptest.NewRecorder()
+	controller.ServeHTTP(refreshing, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	if refreshing.Code != http.StatusOK {
+		t.Fatalf("refresh trigger status=%d body=%s", refreshing.Code, refreshing.Body.String())
+	}
+	waitForImageObservation(t, controller, "media")
 	refreshed := httptest.NewRecorder()
 	controller.ServeHTTP(refreshed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
 	shown := decodeAppList(t, refreshed.Body.Bytes())
@@ -1635,6 +1641,28 @@ func (observer *blockingImageObserver) ObserveImage(ctx context.Context, _ App) 
 		return UpdateObservation{}, errors.New("registry unavailable")
 	case <-ctx.Done():
 		return UpdateObservation{}, ctx.Err()
+	}
+}
+
+type blockingImageTagObserver struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (*blockingImageTagObserver) ObserveImage(context.Context, App) (UpdateObservation, error) {
+	return UpdateObservation{}, nil
+}
+
+func (observer *blockingImageTagObserver) ListImageTags(ctx context.Context, _ App) ([]string, error) {
+	select {
+	case observer.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-observer.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -2681,6 +2709,36 @@ func TestAppUIAutoUpdateObserveDoesNotBlockManagementPage(t *testing.T) {
 	}
 	if listed.Code != http.StatusOK {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestAppUIListDoesNotBlockOnImageTagRefresh(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	defer close(release)
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		config:   `{"apps":[{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n","generation":"generation-1"}]}`,
+		observer: &blockingImageTagObserver{started: started, release: release},
+	})
+
+	listed := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("app list blocked on image tag refresh")
+	}
+	if listed.Code != http.StatusOK || len(decodeAppList(t, listed.Body.Bytes())) != 1 {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background image tag refresh did not start")
 	}
 }
 

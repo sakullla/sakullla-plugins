@@ -224,7 +224,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
 		controller.publishHTTPBackendOffers(request.Context())
-		views, listErr := controller.projectAppViews(request.Context(), agentID)
+		views, listErr := controller.projectAppViews(request.Context(), agentID, false)
 		response := appAPIResponse{Apps: views, Access: struct {
 			CanRead  bool `json:"can_read"`
 			CanWrite bool `json:"can_write"`
@@ -351,7 +351,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		listed, _ := controller.listHostHTTPRules(request.Context(), app.AgentID)
-		view := controller.appViewFor(request.Context(), app, listed)
+		view := controller.appViewFor(request.Context(), app, listed, false)
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
@@ -918,7 +918,7 @@ func (controller *Controller) appByID(appID string) (App, bool) {
 }
 
 func (controller *Controller) appCollectionResponse(ctx context.Context, agentID string) appAPIResponse {
-	views, listErr := controller.projectAppViews(ctx, agentID)
+	views, listErr := controller.projectAppViews(ctx, agentID, true)
 	response := appAPIResponse{Apps: views}
 	if listErr != nil {
 		response.Error = publicAppActionError(listErr, "http-rule-list")
@@ -926,7 +926,7 @@ func (controller *Controller) appCollectionResponse(ctx context.Context, agentID
 	return response
 }
 
-func (controller *Controller) projectAppViews(ctx context.Context, agentID string) ([]appView, error) {
+func (controller *Controller) projectAppViews(ctx context.Context, agentID string, refreshTags bool) ([]appView, error) {
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
 	rulesByAgent := map[string][]HostHTTPRule{}
@@ -948,7 +948,7 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 			}
 			listed = cached
 		}
-		view := controller.appViewFor(ctx, app, listed)
+		view := controller.appViewFor(ctx, app, listed, refreshTags)
 		view.Rules = projectOpenHTTPRuleViews(view.Rules)
 		views = append(views, view)
 	}
@@ -980,7 +980,7 @@ func (controller *Controller) publishHTTPBackendOffers(ctx context.Context) {
 	_ = controller.uiHTTPBackendOffer.ReplaceHTTPBackendOffers(ctx, offers)
 }
 
-func (controller *Controller) appViewFor(ctx context.Context, app App, listed []HostHTTPRule) appView {
+func (controller *Controller) appViewFor(ctx context.Context, app App, listed []HostHTTPRule, refreshTags bool) appView {
 	running := controller.appIsRunning(app.ID)
 	latest := controller.cachedLatestDigest(app)
 	controller.scheduleImageObservation(app)
@@ -990,7 +990,7 @@ func (controller *Controller) appViewFor(ctx context.Context, app App, listed []
 			deployment = record.Value
 		}
 	}
-	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app))
+	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app, refreshTags))
 	ports := view.Ports
 	if len(ports) == 0 {
 		ports, _ = ListPublishedPorts(app, nil)
@@ -1041,7 +1041,7 @@ func (controller *Controller) cachedLatestDigest(app App) string {
 	return cached.LatestDigest
 }
 
-func (controller *Controller) tagsForApp(ctx context.Context, app App) map[string][]string {
+func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh bool) map[string][]string {
 	images := appServiceImages(app)
 	if len(images) == 0 {
 		return nil
@@ -1053,7 +1053,7 @@ func (controller *Controller) tagsForApp(ctx context.Context, app App) map[strin
 			result[service.Name] = tags
 			continue
 		}
-		if lister == nil {
+		if !refresh || lister == nil {
 			continue
 		}
 		listed, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
@@ -1392,7 +1392,7 @@ func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app 
 	if err != nil {
 		return false, err
 	}
-	view := controller.appViewFor(ctx, app, listed)
+	view := controller.appViewFor(ctx, app, listed, false)
 	refs := make([]string, 0, len(view.Rules))
 	for _, rule := range view.Rules {
 		if strings.TrimSpace(rule.Ref) != "" {
