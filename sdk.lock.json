@@ -2,22 +2,22 @@
   "schema_version": 1,
   "repository": {
     "url": "https://github.com/sakullla/nginx-reverse-emby.git",
-    "commit": "33c600cdb7e76bfe4a1c08da0cee0dd973dddf04",
-    "tag": "plugin-sdk/v0.7.16"
+    "commit": "3e3a78361d08bba846eeb6d18256ce1c99edcc9f",
+    "tag": "plugin-sdk/v0.7.19"
   },
   "sdk": {
     "module_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
     "module_directory": "plugin-sdk",
     "package_path": "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go",
-    "contract_tree_oid": "08b768bc515642013224ef5dac5f9cdcc45cceab"
+    "contract_tree_oid": "441ab5a490214c929208da448ed87b5f7729d9a7"
   },
   "artifacts": {
     "descriptor_set_sha256": "47c0dc758ccc30fb596dfe078419aeb1effe8b266ed28d729c64334a09881628",
-    "plugin_manifest_schema_sha256": "33d48dde572bc2c18621cf773521233e910f9cf27df428c2f7f11a6083371928",
+    "plugin_manifest_schema_sha256": "a20587f1bd3d7ab3623f70631d62aab611a7ededfe2673858a269561bbd22817",
     "policy_proto_sha256": "45f856c7fdda40b8d28584153aa71f8621af469f30542b227b11907427c19ded",
     "rpc_proto_sha256": "051afc641346a99dd220338f2302cda0ec185052f1522dea1f56b19540548634",
     "canonical_guest_sha256": "fc89d8d018d749de23b6979774e917f71b22883dd302d931b3791e37f50ea7ec",
-    "validator_tree_oid": "d780a37db778055b6e875737e3d3af279feb4b27"
+    "validator_tree_oid": "f70166605ec478c183eb1a768f1a26199ea12c3f"
   },
   "required_capabilities": [
     {
