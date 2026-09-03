@@ -547,7 +547,9 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 	}
 	nextCompose := rewriteComposeServiceTags(updated.Compose, serviceTags)
 	composeChanged := nextCompose != updated.Compose
-	if !composeChanged && mapsEqualString(updated.ImageLocks, app.ImageLocks) && ignoredUpdatesEqual(updated.IgnoredUpdates, app.IgnoredUpdates) {
+	policyChanged := !mapsEqualString(updated.ImageLocks, app.ImageLocks) || !ignoredUpdatesEqual(updated.IgnoredUpdates, app.IgnoredUpdates)
+	digestRequested := floatingDigestUpdateRequested(updated, serviceTags)
+	if !composeChanged && !policyChanged && !digestRequested {
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
 		return nil
 	}
@@ -612,22 +614,40 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
 		return nil
 	}
-	apps := cloneApps(controller.Apps())
-	for index := range apps {
-		if apps[index].ID != app.ID {
-			continue
+	if policyChanged {
+		apps := cloneApps(controller.Apps())
+		for index := range apps {
+			if apps[index].ID != app.ID {
+				continue
+			}
+			apps[index].ImageLocks = cloneStringMap(updated.ImageLocks)
+			apps[index].IgnoredUpdates = cloneStringSlicesMap(updated.IgnoredUpdates)
+			if err := apps[index].normalizeServicePolicies(); err != nil {
+				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+				return err
+			}
 		}
-		apps[index].ImageLocks = cloneStringMap(updated.ImageLocks)
-		apps[index].IgnoredUpdates = cloneStringSlicesMap(updated.IgnoredUpdates)
-		if err := apps[index].normalizeServicePolicies(); err != nil {
-			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+		if err := controller.replaceApps(ctx, apps); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 			return err
 		}
+		if current, ok := controller.appByID(app.ID); ok {
+			app = current
+		}
+		if !digestRequested {
+			writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
+			return nil
+		}
 	}
-	if err := controller.replaceApps(ctx, apps); err != nil {
+	if err := controller.uiRollout.ConfirmUpdate(ctx, app); err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+		return err
+	}
+	if err := controller.setAppRunning(ctx, app.ID, true); err != nil {
 		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 		return err
 	}
+	controller.publishHTTPBackendOffers(ctx)
 	writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
 	return nil
 }
@@ -1304,8 +1324,9 @@ func projectAppView(app App, running bool, deployment Deployment, latestDigest s
 		name = "未命名应用"
 	}
 	status := ProjectPopularStatus(appLifecycleStatus(running, false, deployment))
-	services, hasUpdate := projectServiceViews(app, tagsByService)
-	if !hasUpdate && appHasFloatingImage(app) && appImageUpdateAvailable(deployment, latestDigest) {
+	digestAvailable := appImageUpdateAvailable(deployment, latestDigest)
+	services, hasUpdate := projectServiceViews(app, tagsByService, digestAvailable)
+	if !hasUpdate && len(services) == 0 && appHasFloatingImage(app) && digestAvailable {
 		hasUpdate = true
 	}
 	notice := ""

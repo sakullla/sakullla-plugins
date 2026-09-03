@@ -2560,6 +2560,85 @@ func previewHasRisk(preview riskPreviewView, kind string) bool {
 	return false
 }
 
+func TestAppUIManualUpdateFollowsFloatingDigest(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest},
+		rollout:  &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(deployment Deployment) bool {
+		return deployment.ImageDigest == current && deployment.AvailableDigest == latest
+	})
+	listed := httptest.NewRecorder()
+	controller.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/apps?agent_id=agent-1", ""))
+	apps := decodeAppList(t, listed.Body.Bytes())
+	if listed.Code != http.StatusOK || len(apps) != 1 || apps[0].Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("floating digest view=%#v body=%s", apps, listed.Body.String())
+	}
+	if len(apps[0].ServiceImages) != 1 || !apps[0].ServiceImages[0].Update || apps[0].ServiceImages[0].DefaultTag != "latest" {
+		t.Fatalf("floating digest candidate=%#v", apps[0].ServiceImages)
+	}
+	if len(apps[0].ServiceImages[0].Candidates) != 1 || !apps[0].ServiceImages[0].Candidates[0].Digest || apps[0].ServiceImages[0].Candidates[0].Tag != "latest" {
+		t.Fatalf("digest candidate=%#v", apps[0].ServiceImages[0].Candidates)
+	}
+
+	empty := httptest.NewRecorder()
+	controller.ServeHTTP(empty, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{}`))
+	if empty.Code != http.StatusOK {
+		t.Fatalf("empty update status=%d body=%s", empty.Code, empty.Body.String())
+	}
+	if record, ok := controllerDeployment(controller, "media"); !ok || record.ImageDigest == latest {
+		t.Fatalf("empty POST published digest: %#v ok=%v", record, ok)
+	}
+
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"latest"}]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("same-tag latest update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	got, ok := controllerDeployment(controller, "media")
+	if !ok || got.ImageDigest != latest {
+		t.Fatalf("same-tag latest did not follow digest: %#v ok=%v", got, ok)
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "web") != "nginx:latest" {
+		t.Fatalf("floating tag rewritten: %q", controller.Apps()[0].Compose)
+	}
+}
+
+func TestProjectServiceViewFloatingDigestCandidate(t *testing.T) {
+	t.Parallel()
+	app := App{
+		ID:            "media",
+		Image:         "nginx:latest",
+		ServiceImages: []ServiceImage{{Name: "web", Image: "nginx:latest"}},
+		Compose:       "services:\n  web:\n    image: nginx:latest\n",
+	}
+	views, hasUpdate := projectServiceViews(app, nil, true)
+	if !hasUpdate || len(views) != 1 || !views[0].Update || views[0].DefaultTag != "latest" {
+		t.Fatalf("digest-available view=%#v hasUpdate=%v", views, hasUpdate)
+	}
+	if len(views[0].Candidates) != 1 || !views[0].Candidates[0].Digest || views[0].Candidates[0].Tag != "latest" {
+		t.Fatalf("digest candidate=%#v", views[0].Candidates)
+	}
+	hidden, noUpdate := projectServiceViews(app, nil, false)
+	if noUpdate || hidden[0].Update || len(hidden[0].Candidates) != 0 {
+		t.Fatalf("digest-unavailable still advertised: %#v hasUpdate=%v", hidden, noUpdate)
+	}
+	ignored := app
+	ignored.IgnoredUpdates = map[string][]string{"web": {"latest"}}
+	skipped, skippedUpdate := projectServiceViews(ignored, nil, true)
+	if skippedUpdate || skipped[0].Update {
+		t.Fatalf("ignored latest still advertised: %#v hasUpdate=%v", skipped, skippedUpdate)
+	}
+}
+
 func TestAppUIAutoUpdateTrueObserveFollowsDigest(t *testing.T) {
 	t.Parallel()
 	current := "sha256:0123456789abcdef0123456789abcdef"
@@ -3195,11 +3274,11 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form still fills main without a capped operation group")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "flex-direction: column") {
-		t.Fatal(".app-list is not a scannable column")
+	if !strings.Contains(appList, "auto-fill") && !strings.Contains(appList, "auto-fit") {
+		t.Fatal(".app-list is not a card grid")
 	}
-	if strings.Contains(appList, "auto-fill") || strings.Contains(appList, "repeat(auto-fit") {
-		t.Fatal(".app-list is still a card grid")
+	if strings.Contains(appList, "flex-direction: column") {
+		t.Fatal(".app-list is still a scannable column")
 	}
 	for _, want := range []string{
 		"html { font-size: 17px; }",
@@ -3922,7 +4001,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("page missing card-wall hook %q", want)
 		}
 	}
-	for _, want := range []string{"忽略此版本", "将更新到", "askServiceUpdate", "取消忽略", "clear: true", "saveServicePolicy", "renderServiceLockSelect", "overview-service-tools"} {
+	for _, want := range []string{"忽略此版本", "将更新到", "askServiceUpdate", "取消忽略", "clear: true", "saveServicePolicy", "renderServiceLockSelect", "overview-service-tools", "新 digest", "candidate.digest", "overview-service-flag"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("update dialog missing %q", want)
 		}

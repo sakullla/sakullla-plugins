@@ -37,8 +37,9 @@ type appServiceView struct {
 }
 
 type appCandidate struct {
-	Tag   string `json:"tag"`
-	Major bool   `json:"major,omitempty"`
+	Tag    string `json:"tag"`
+	Major  bool   `json:"major,omitempty"`
+	Digest bool   `json:"digest,omitempty"`
 }
 
 type appLockOption struct {
@@ -47,7 +48,7 @@ type appLockOption struct {
 	Constraint string `json:"constraint,omitempty"`
 }
 
-func projectServiceViews(app App, tagsByService map[string][]string) ([]appServiceView, bool) {
+func projectServiceViews(app App, tagsByService map[string][]string, digestAvailable bool) ([]appServiceView, bool) {
 	images := app.ServiceImages
 	if len(images) == 0 {
 		images = composeServiceImages(app.Compose)
@@ -58,7 +59,7 @@ func projectServiceViews(app App, tagsByService map[string][]string) ([]appServi
 	views := make([]appServiceView, 0, len(images))
 	hasUpdate := false
 	for _, service := range images {
-		view := projectServiceView(app, service, tagsByService[service.Name])
+		view := projectServiceView(app, service, tagsByService[service.Name], digestAvailable)
 		if view.Update {
 			hasUpdate = true
 		}
@@ -67,7 +68,7 @@ func projectServiceViews(app App, tagsByService map[string][]string) ([]appServi
 	return views, hasUpdate
 }
 
-func projectServiceView(app App, service ServiceImage, tags []string) appServiceView {
+func projectServiceView(app App, service ServiceImage, tags []string, digestAvailable bool) appServiceView {
 	tag := extractDockerTag(service.Image)
 	ignored := append([]string(nil), app.IgnoredUpdates[service.Name]...)
 	lock := strings.TrimSpace(app.ImageLocks[service.Name])
@@ -81,6 +82,11 @@ func projectServiceView(app App, service ServiceImage, tags []string) appService
 	}
 	_, _, semver := ParseSemverTag(service.Image)
 	if !semver {
+		if digestAvailable && tag != "" && !ignoredUpdateTag(tag, ignored) {
+			view.Update = true
+			view.DefaultTag = tag
+			view.Candidates = []appCandidate{{Tag: tag, Digest: true}}
+		}
 		return view
 	}
 	if tags == nil {
@@ -101,6 +107,34 @@ func projectServiceView(app App, service ServiceImage, tags []string) appService
 		})
 	}
 	return view
+}
+
+func floatingDigestUpdateRequested(app App, serviceTags map[string]string) bool {
+	if len(serviceTags) == 0 {
+		return false
+	}
+	images := app.ServiceImages
+	if len(images) == 0 {
+		images = composeServiceImages(app.Compose)
+	}
+	for name, want := range serviceTags {
+		wantTag := extractDockerTag(want)
+		if strings.TrimSpace(name) == "" || wantTag == "" {
+			continue
+		}
+		for _, service := range images {
+			if service.Name != name {
+				continue
+			}
+			if _, _, ok := ParseSemverTag(service.Image); ok {
+				continue
+			}
+			if extractDockerTag(service.Image) == wantTag {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func allowedServiceCandidates(current string, tags []string, lock string, ignored []string) []string {

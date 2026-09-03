@@ -190,9 +190,12 @@ const showStatus = (message, isError) => {
   statusNode.textContent = message || "";
   if (!message) {
     delete statusNode.dataset.error;
+    delete statusNode.dataset.tone;
     return;
   }
+  const cancelled = !isError && /^已取消/.test(message);
   statusNode.dataset.error = isError ? "true" : "false";
+  statusNode.dataset.tone = isError ? "error" : (cancelled ? "info" : "success");
   if (!isError) {
     statusTimer = setTimeout(() => {
       if (statusNode.textContent === message) showStatus("", false);
@@ -1726,7 +1729,12 @@ const askServiceUpdate = (app) => {
     return Promise.resolve(window.confirm(`确认更新 ${app.id}？\n${lines}\n取消不会改 compose。`) ? { services: selected } : null);
   }
   if (updateDialog.open) updateDialog.close("cancel");
-  if (updateCopy) updateCopy.textContent = `按服务选择 ${app.id} 要写入 compose 的目标版本。取消不会改 compose 或运行镜像。`;
+  const digestRefresh = services.some((item) => Array.isArray(item.candidates) && item.candidates.some((candidate) => candidate.digest));
+  if (updateCopy) {
+    updateCopy.textContent = digestRefresh
+      ? `确认拉取 ${app.id} 的新 digest。取消不会改 compose 或运行镜像。`
+      : `按服务选择 ${app.id} 要写入 compose 的目标版本。取消不会改 compose 或运行镜像。`;
+  }
   if (updateServices) {
     updateServices.replaceChildren();
     services.forEach((service) => {
@@ -1759,6 +1767,8 @@ const askServiceUpdate = (app) => {
 };
 
 const renderServiceLockSelect = (service) => {
+  const options = Array.isArray(service.lock_options) ? service.lock_options : [];
+  if (!options.length && !service.lock) return null;
   const lockLabel = document.createElement("label");
   lockLabel.className = "update-lock";
   lockLabel.append("锁定");
@@ -1769,7 +1779,6 @@ const renderServiceLockSelect = (service) => {
   none.textContent = "未锁定";
   if (!service.lock) none.selected = true;
   lock.append(none);
-  const options = Array.isArray(service.lock_options) ? service.lock_options : [];
   options.forEach((item) => {
     const option = document.createElement("option");
     option.value = item.constraint || "";
@@ -1818,41 +1827,61 @@ const renderUpdateServiceRow = (service) => {
   const candidates = Array.isArray(service.candidates) ? service.candidates : [];
   const defaultTag = service.default_tag || (candidates[0] && candidates[0].tag) || "";
   const checked = service.update === true && !!defaultTag;
-  const head = document.createElement("label");
+  if (!candidates.length) row.dataset.empty = "true";
+  const head = document.createElement("div");
   head.className = "update-service-head";
+  const pick = document.createElement("label");
+  pick.className = "update-service-pick";
   const selectBox = document.createElement("input");
   selectBox.type = "checkbox";
   selectBox.name = `update-${service.name}`;
   selectBox.checked = checked;
   selectBox.disabled = candidates.length === 0;
+  const identity = document.createElement("span");
+  identity.className = "update-service-identity";
   const title = document.createElement("strong");
   title.textContent = service.name;
   const current = document.createElement("span");
   current.className = "update-current";
   current.textContent = service.tag || service.image || "未知版本";
-  head.append(selectBox, title, current);
-  const target = document.createElement("label");
+  identity.append(title);
+  pick.append(selectBox, identity);
+  head.append(pick);
+  const body = document.createElement("div");
+  body.className = "update-service-body";
+  const flow = document.createElement("div");
+  flow.className = "update-flow";
+  flow.append(current);
+  const arrow = document.createElement("span");
+  arrow.className = "update-arrow";
+  arrow.textContent = "→";
+  flow.append(arrow);
+  const target = document.createElement("div");
   target.className = "update-target";
-  target.append("将更新到");
-  const select = document.createElement("select");
-  select.name = `target-${service.name}`;
+  const targetLabel = document.createElement("span");
+  targetLabel.className = "update-target-label";
+  targetLabel.textContent = "将更新到";
   if (!candidates.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = service.unknown ? "无法列出仓库 tag" : "没有允许的候选";
-    select.append(option);
-    select.disabled = true;
+    const empty = document.createElement("p");
+    empty.className = "update-empty";
+    empty.textContent = service.unknown ? "无法列出仓库 tag" : "没有允许的候选";
+    target.append(targetLabel, empty);
   } else {
+    const select = document.createElement("select");
+    select.name = `target-${service.name}`;
     candidates.forEach((candidate) => {
       const option = document.createElement("option");
       option.value = candidate.tag;
-      option.textContent = candidate.major ? `${candidate.tag}（主版本）` : candidate.tag;
+      if (candidate.digest) option.textContent = `${candidate.tag}（新 digest）`;
+      else option.textContent = candidate.major ? `${candidate.tag}（主版本）` : candidate.tag;
       if (candidate.major) option.dataset.major = "true";
+      if (candidate.digest) option.dataset.digest = "true";
       if (candidate.tag === defaultTag) option.selected = true;
       select.append(option);
     });
+    target.append(targetLabel, select);
   }
-  target.append(select);
+  flow.append(target);
   const tools = document.createElement("div");
   tools.className = "update-tools";
   const ignore = document.createElement("label");
@@ -1865,12 +1894,12 @@ const renderUpdateServiceRow = (service) => {
   ignoreBox.addEventListener("change", () => {
     if (ignoreBox.checked) selectBox.checked = false;
   });
-  tools.append(ignore, renderServiceLockSelect(service));
+  tools.append(ignore);
+  const lockSelect = renderServiceLockSelect(service);
+  if (lockSelect) tools.append(lockSelect);
   renderIgnoredClearControls(service).forEach((node) => tools.append(node));
-  const arrow = document.createElement("p");
-  arrow.className = "update-arrow";
-  arrow.textContent = `${service.tag || service.image || "当前"} →`;
-  row.append(head, arrow, target, tools);
+  body.append(flow, tools);
+  row.append(head, body);
   return row;
 };
 
@@ -2202,22 +2231,36 @@ const renderOverview = (app) => {
     serviceViews.forEach((service) => {
       const item = document.createElement("div");
       item.className = "overview-service";
+      const head = document.createElement("div");
+      head.className = "overview-service-head";
       const name = document.createElement("strong");
       name.textContent = service.name;
       const image = document.createElement("span");
       image.className = "overview-mono";
       image.textContent = service.image || service.tag || "未解析镜像";
-      item.append(name, image);
-      const meta = document.createElement("p");
-      meta.className = "overview-service-meta";
-      const bits = [];
-      if (service.update) bits.push("有允许候选");
-      else if (service.unknown) bits.push("候选未知");
-      meta.textContent = bits.join(" · ") || "无允许候选";
-      item.append(meta);
+      head.append(name, image);
+      item.append(head);
       const tools = document.createElement("div");
       tools.className = "overview-service-tools";
-      tools.append(renderServiceLockSelect(service));
+      const flag = document.createElement("p");
+      flag.className = "overview-service-flag";
+      const digestRefresh = Array.isArray(service.candidates) && service.candidates.some((candidate) => candidate.digest);
+      if (digestRefresh) {
+        flag.dataset.state = "ready";
+        flag.textContent = "镜像有新 digest";
+      } else if (service.update) {
+        flag.dataset.state = "ready";
+        flag.textContent = "有允许候选";
+      } else if (service.unknown) {
+        flag.dataset.state = "unknown";
+        flag.textContent = "候选未知";
+      } else {
+        flag.dataset.state = "empty";
+        flag.textContent = "无允许候选";
+      }
+      tools.append(flag);
+      const lockSelect = renderServiceLockSelect(service);
+      if (lockSelect) tools.append(lockSelect);
       const lock = tools.querySelector(`select[name="lock-${service.name}"]`);
       if (lock) {
         lock.addEventListener("change", () => {
