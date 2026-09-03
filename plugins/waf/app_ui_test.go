@@ -272,6 +272,102 @@ func TestManagementPageFailsWhenExecutionContractsMissing(t *testing.T) {
 	}
 }
 
+func TestGlobalModeDoesNotPersistBeforeOverlayWrites(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing OverlayWriter", func(t *testing.T) {
+		t.Parallel()
+		catalog := newMemoryCatalog()
+		catalog.entries["agent-1"] = []HTTPEntry{{
+			RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true, Mode: ModeObserve, Attached: true,
+		}}
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: catalog, configs: store})
+		failed := httptest.NewRecorder()
+		controller.ServeHTTP(failed, uiJSONRequest(http.MethodPost, "/api/mode", `{"agent_id":"agent-1","mode":"deny"}`))
+		payload := decodeWAFState(t, failed.Body.Bytes())
+		if failed.Code != http.StatusServiceUnavailable || payload.Error != ErrUnavailable.Error() {
+			t.Fatalf("missing overlay writer status=%d body=%s", failed.Code, failed.Body.String())
+		}
+		if payload.DefaultMode != ModeObserve || controller.currentConfig().Mode != ModeObserve || store.snapshot().Mode == ModeDeny {
+			t.Fatalf("missing overlay writer persisted mode payload=%#v config=%#v store=%#v", payload, controller.currentConfig(), store.snapshot())
+		}
+		if len(payload.Entries) != 1 || payload.Entries[0].Mode != ModeObserve {
+			t.Fatalf("missing overlay writer mutated entry=%#v", payload.Entries)
+		}
+	})
+
+	t.Run("SetMode error after listing attached entries", func(t *testing.T) {
+		t.Parallel()
+		catalog := newMemoryCatalog()
+		catalog.entries["agent-1"] = []HTTPEntry{
+			{RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true, Mode: ModeObserve, Attached: true},
+			{RuleRef: "13", FrontendURL: "http://other.example.com", Enabled: true, Mode: ModeObserve, Attached: true},
+		}
+		store := newMemoryConfigStore()
+		trace := &writeTrace{inner: catalog, store: store, fail: ErrUnavailable}
+		controller := newUIController(t, uiControllerOptions{catalog: catalog, overlays: trace, configs: trace})
+		failed := httptest.NewRecorder()
+		controller.ServeHTTP(failed, uiJSONRequest(http.MethodPost, "/api/mode", `{"agent_id":"agent-1","mode":"deny"}`))
+		payload := decodeWAFState(t, failed.Body.Bytes())
+		if failed.Code != http.StatusServiceUnavailable || payload.Error != ErrUnavailable.Error() {
+			t.Fatalf("overlay error status=%d body=%s", failed.Code, failed.Body.String())
+		}
+		if payload.DefaultMode != ModeObserve || controller.currentConfig().Mode != ModeObserve || store.snapshot().Mode == ModeDeny {
+			t.Fatalf("overlay error persisted mode payload=%#v config=%#v store=%#v", payload, controller.currentConfig(), store.snapshot())
+		}
+		steps := trace.snapshot()
+		if len(steps) == 0 || steps[0] != "overlay:12" {
+			t.Fatalf("overlay error steps=%v", steps)
+		}
+		for _, step := range steps {
+			if step == "config" {
+				t.Fatalf("overlay error persisted config steps=%v", steps)
+			}
+		}
+		if len(payload.Entries) != 2 || payload.Entries[0].Mode != ModeObserve || payload.Entries[1].Mode != ModeObserve {
+			t.Fatalf("overlay error mutated entries=%#v", payload.Entries)
+		}
+	})
+
+	t.Run("writes overlays then persists instance mode", func(t *testing.T) {
+		t.Parallel()
+		catalog := newMemoryCatalog()
+		catalog.entries["agent-1"] = []HTTPEntry{
+			{RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true, Mode: ModeObserve, Attached: true},
+			{RuleRef: "13", FrontendURL: "http://invalid.example.com", OverlayInvalid: true, Notice: invalidOverlayNotice},
+			{RuleRef: "", FrontendURL: "http://empty.example.com", Enabled: true, Mode: ModeObserve, Attached: true},
+			{RuleRef: "14", FrontendURL: "http://detached.example.com", Enabled: true},
+			{RuleRef: "15", FrontendURL: "http://other.example.com", Enabled: true, Mode: ModeObserve, Attached: true},
+		}
+		store := newMemoryConfigStore()
+		trace := &writeTrace{inner: catalog, store: store}
+		controller := newUIController(t, uiControllerOptions{catalog: catalog, overlays: trace, configs: trace})
+		switched := httptest.NewRecorder()
+		controller.ServeHTTP(switched, uiJSONRequest(http.MethodPost, "/api/mode", `{"agent_id":"agent-1","mode":"deny"}`))
+		payload := decodeWAFState(t, switched.Body.Bytes())
+		if switched.Code != http.StatusOK || payload.DefaultMode != ModeDeny || controller.currentConfig().Mode != ModeDeny || store.snapshot().Mode != ModeDeny {
+			t.Fatalf("success status=%d payload=%#v config=%#v store=%#v", switched.Code, payload, controller.currentConfig(), store.snapshot())
+		}
+		wantSteps := []string{"overlay:12", "overlay:15", "config"}
+		steps := trace.snapshot()
+		if len(steps) != len(wantSteps) {
+			t.Fatalf("success steps=%v want=%v", steps, wantSteps)
+		}
+		for index, want := range wantSteps {
+			if steps[index] != want {
+				t.Fatalf("success steps=%v want=%v", steps, wantSteps)
+			}
+		}
+		if len(payload.Entries) != 5 || payload.Entries[0].Mode != ModeDeny || payload.Entries[4].Mode != ModeDeny {
+			t.Fatalf("success attached overlays=%#v", payload.Entries)
+		}
+		if payload.Entries[1].Mode != "" || payload.Entries[2].Mode != ModeObserve || payload.Entries[3].Mode != "" {
+			t.Fatalf("success skipped overlays=%#v", payload.Entries)
+		}
+	})
+}
+
 func TestManagementPageRejectsInvalidCustomRuleWithoutMutating(t *testing.T) {
 	t.Parallel()
 	controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog()})
@@ -409,4 +505,52 @@ func (store *memoryConfigStore) StoreConfig(_ context.Context, config Configurat
 	defer store.mu.Unlock()
 	store.config = cloneConfiguration(config)
 	return nil
+}
+
+func (store *memoryConfigStore) snapshot() Configuration {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return cloneConfiguration(store.config)
+}
+
+type writeTrace struct {
+	mu    sync.Mutex
+	steps []string
+	fail  error
+	inner OverlayWriter
+	store PolicyConfigStore
+}
+
+func (trace *writeTrace) SetMode(ctx context.Context, agentID, ruleRef, mode string) error {
+	trace.mu.Lock()
+	trace.steps = append(trace.steps, "overlay:"+ruleRef)
+	fail := trace.fail
+	inner := trace.inner
+	trace.mu.Unlock()
+	if fail != nil {
+		return fail
+	}
+	if inner != nil {
+		return inner.SetMode(ctx, agentID, ruleRef, mode)
+	}
+	return nil
+}
+
+func (trace *writeTrace) StoreConfig(ctx context.Context, config Configuration) error {
+	trace.mu.Lock()
+	trace.steps = append(trace.steps, "config")
+	store := trace.store
+	trace.mu.Unlock()
+	if store != nil {
+		return store.StoreConfig(ctx, config)
+	}
+	return nil
+}
+
+func (trace *writeTrace) snapshot() []string {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	copied := make([]string, len(trace.steps))
+	copy(copied, trace.steps)
+	return copied
 }

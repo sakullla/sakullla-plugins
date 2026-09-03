@@ -294,30 +294,26 @@ func (controller *Controller) setGlobalMode(ctx context.Context, agentID, mode s
 	if !validMode(mode) {
 		return ErrInvalidMode
 	}
-	config := controller.currentConfig()
-	config.Mode = mode
-	if err := controller.replaceConfig(ctx, config); err != nil {
-		return err
-	}
-	if strings.TrimSpace(agentID) == "" {
-		return nil
-	}
 	if controller.overlaysW == nil {
 		return ErrUnavailable
 	}
-	entries, err := controller.listEntries(ctx, agentID)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.OverlayInvalid || !entry.Attached || strings.TrimSpace(entry.RuleRef) == "" {
-			continue
-		}
-		if err := controller.overlaysW.SetMode(ctx, agentID, entry.RuleRef, mode); err != nil {
+	if strings.TrimSpace(agentID) != "" {
+		entries, err := controller.listEntries(ctx, agentID)
+		if err != nil {
 			return err
 		}
+		for _, entry := range entries {
+			if entry.OverlayInvalid || !entry.Attached || strings.TrimSpace(entry.RuleRef) == "" {
+				continue
+			}
+			if err := controller.overlaysW.SetMode(ctx, agentID, entry.RuleRef, mode); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	config := controller.currentConfig()
+	config.Mode = mode
+	return controller.replaceConfig(ctx, config)
 }
 
 func (controller *Controller) addCustomRule(ctx context.Context, rule CustomRule) error {
