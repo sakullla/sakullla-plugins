@@ -401,7 +401,7 @@ func safeControllerError(err error) error {
 const generationHandleScope = "service.revocable-resource-handle"
 
 func requiredGrants() []string {
-	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", pluginsdk.PermissionNetworkFull}
+	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionNetworkFull}
 }
 
 func supportedFeatures() []string {
