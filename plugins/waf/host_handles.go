@@ -11,8 +11,8 @@ import (
 const (
 	hostHTTPRuleOperation  = pluginsdk.HostRuntimeHTTPRule
 	hostHTTPRuleActionList = pluginsdk.HTTPRuleActionList
-	hostInstanceConfigOp   = "instance.config"
-	hostEventListOp        = "event.list"
+	hostInstanceConfigOp   = pluginsdk.HostRuntimeInstanceConfig
+	hostEventListOp        = pluginsdk.HostRuntimeEventList
 	hostWAFRuleMatchCode   = "waf.rule_match"
 )
 
@@ -22,37 +22,6 @@ type hostRuntimeCaller interface {
 
 type hostCapabilityRuntime struct {
 	client hostRuntimeCaller
-}
-
-type hostHTTPRuleListItem struct {
-	RuleRef     string         `json:"rule_ref"`
-	FrontendURL string         `json:"frontend_url"`
-	Backend     string         `json:"backend"`
-	Enabled     bool           `json:"enabled"`
-	PolicyRef   *hostPolicyRef `json:"policy_ref"`
-}
-
-type hostPolicyRef struct {
-	ID      string          `json:"id"`
-	Overlay json.RawMessage `json:"overlay"`
-}
-
-type hostHTTPRuleListResponse struct {
-	Rules []hostHTTPRuleListItem `json:"rules"`
-}
-
-type hostPolicyEvent struct {
-	Site        string `json:"site"`
-	RuleID      string `json:"rule_id"`
-	Digest      string `json:"digest"`
-	Disposition string `json:"disposition"`
-	Reason      string `json:"reason"`
-	Code        string `json:"code"`
-	Action      string `json:"action"`
-}
-
-type hostEventListResponse struct {
-	Events []hostPolicyEvent `json:"events"`
 }
 
 func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
@@ -69,10 +38,12 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 	if !validAgentID(agentID) {
 		return nil, ErrAgentRequired
 	}
-	var response hostHTTPRuleListResponse
-	if err := callHost(ctx, runtime.client, "", hostHTTPRuleOperation, pluginsdk.HTTPRuleRequest{
-		Action: hostHTTPRuleActionList, AgentID: agentID,
-	}, &response); err != nil {
+	request := pluginsdk.HTTPRuleRequest{Action: hostHTTPRuleActionList, AgentID: agentID}
+	if err := request.Validate(); err != nil {
+		return nil, ErrUnavailable
+	}
+	var response pluginsdk.HTTPRuleListResponse
+	if err := callHost(ctx, runtime.client, "", hostHTTPRuleOperation, request, &response); err != nil {
 		return nil, ErrUnavailable
 	}
 	entries := make([]HTTPEntry, 0, len(response.Rules))
@@ -86,7 +57,7 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 	return entries, nil
 }
 
-func projectHostHTTPEntry(item hostHTTPRuleListItem, ref string) HTTPEntry {
+func projectHostHTTPEntry(item pluginsdk.HTTPRuleListItem, ref string) HTTPEntry {
 	entry := HTTPEntry{
 		RuleRef:     ref,
 		FrontendURL: strings.TrimSpace(item.FrontendURL),
@@ -126,18 +97,16 @@ func (runtime *hostCapabilityRuntime) SetMode(ctx context.Context, agentID, rule
 	if err != nil {
 		return ErrUnavailable
 	}
-	payload := struct {
-		Action  string          `json:"action"`
-		AgentID string          `json:"agent_id"`
-		RuleRef string          `json:"rule_ref"`
-		Overlay json.RawMessage `json:"overlay"`
-	}{
+	request := pluginsdk.HTTPRuleRequest{
 		Action:  pluginsdk.HTTPRuleActionCutover,
 		AgentID: agentID,
 		RuleRef: ruleRef,
 		Overlay: overlay,
 	}
-	if err := callHost(ctx, runtime.client, overlayOperationID(agentID, ruleRef, mode), hostHTTPRuleOperation, payload, nil); err != nil {
+	if err := request.Validate(); err != nil {
+		return ErrUnavailable
+	}
+	if err := callHost(ctx, runtime.client, overlayOperationID(agentID, ruleRef, mode), hostHTTPRuleOperation, request, nil); err != nil {
 		return ErrUnavailable
 	}
 	return nil
@@ -151,13 +120,12 @@ func (runtime *hostCapabilityRuntime) StoreConfig(ctx context.Context, config Co
 	if err != nil {
 		return ErrUnavailable
 	}
-	var response struct {
-		Stored bool `json:"stored"`
+	request := pluginsdk.InstanceConfigRequest{Config: encoded}
+	if err := request.Validate(); err != nil {
+		return ErrUnavailable
 	}
-	payload := struct {
-		Config json.RawMessage `json:"config"`
-	}{Config: encoded}
-	if err := callHost(ctx, runtime.client, configOperationID(), hostInstanceConfigOp, payload, &response); err != nil {
+	var response pluginsdk.InstanceConfigResponse
+	if err := callHost(ctx, runtime.client, configOperationID(), hostInstanceConfigOp, request, &response); err != nil {
 		return ErrUnavailable
 	}
 	if !response.Stored {
@@ -173,12 +141,12 @@ func (runtime *hostCapabilityRuntime) ListEvents(ctx context.Context, agentID st
 	if !validAgentID(agentID) {
 		return nil, ErrAgentRequired
 	}
-	var response hostEventListResponse
-	payload := struct {
-		AgentID string `json:"agent_id"`
-		Code    string `json:"code"`
-	}{AgentID: agentID, Code: hostWAFRuleMatchCode}
-	if err := callHost(ctx, runtime.client, "", hostEventListOp, payload, &response); err != nil {
+	request := pluginsdk.EventListRequest{AgentID: agentID, Code: hostWAFRuleMatchCode}
+	if err := request.Validate(); err != nil {
+		return nil, ErrUnavailable
+	}
+	var response pluginsdk.EventListResponse
+	if err := callHost(ctx, runtime.client, "", hostEventListOp, request, &response); err != nil {
 		return nil, ErrUnavailable
 	}
 	events := make([]SecurityEvent, 0, len(response.Events))
@@ -190,7 +158,7 @@ func (runtime *hostCapabilityRuntime) ListEvents(ctx context.Context, agentID st
 	return events, nil
 }
 
-func projectHostPolicyEvent(item hostPolicyEvent) (SecurityEvent, bool) {
+func projectHostPolicyEvent(item pluginsdk.PolicyEvent) (SecurityEvent, bool) {
 	code := strings.TrimSpace(item.Code)
 	if code != "" && code != hostWAFRuleMatchCode {
 		return SecurityEvent{}, false

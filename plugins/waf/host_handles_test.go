@@ -13,19 +13,19 @@ import (
 func TestHostListProjectsAttachmentFromPolicyRef(t *testing.T) {
 	t.Parallel()
 	host := newFakeHostRuntime()
-	host.rules["agent-1"] = []hostHTTPRuleListItem{
+	host.rules["agent-1"] = []pluginsdk.HTTPRuleListItem{
 		{RuleRef: "11", FrontendURL: "http://plain.example.com", Backend: "127.0.0.1:8096", Enabled: true},
 		{
 			RuleRef: "12", FrontendURL: "http://app.example.com", Backend: "127.0.0.1:8096", Enabled: true,
-			PolicyRef: &hostPolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"observe"}`)},
+			PolicyRef: &pluginsdk.PolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"observe"}`)},
 		},
 		{
 			RuleRef: "13", FrontendURL: "http://deny.example.com", Enabled: true,
-			PolicyRef: &hostPolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"deny"}`)},
+			PolicyRef: &pluginsdk.PolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"deny"}`)},
 		},
 		{
 			RuleRef: "14", FrontendURL: "http://broken.example.com", Enabled: true,
-			PolicyRef: &hostPolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"block"}`)},
+			PolicyRef: &pluginsdk.PolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"block"}`)},
 		},
 	}
 	runtime := newHostCapabilityRuntime(host)
@@ -48,22 +48,28 @@ func TestHostListProjectsAttachmentFromPolicyRef(t *testing.T) {
 	if !entries[3].Attached || !entries[3].OverlayInvalid || entries[3].Notice != invalidOverlayNotice {
 		t.Fatalf("invalid overlay = %#v", entries[3])
 	}
+	if host.lastHTTPRule.Action != pluginsdk.HTTPRuleActionList || len(host.lastHTTPRule.Overlay) != 0 {
+		t.Fatalf("list must not carry overlay: %#v", host.lastHTTPRule)
+	}
 }
 
 func TestHostRuntimePersistsConfigOverlayAndEvents(t *testing.T) {
 	t.Parallel()
 	host := newFakeHostRuntime()
-	host.rules["agent-1"] = []hostHTTPRuleListItem{{
+	host.rules["agent-1"] = []pluginsdk.HTTPRuleListItem{{
 		RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true,
-		PolicyRef: &hostPolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"observe"}`)},
+		PolicyRef: &pluginsdk.PolicyRef{ID: "waf-instance", Overlay: json.RawMessage(`{"mode":"observe"}`)},
 	}}
-	host.events = []hostPolicyEvent{{
+	host.events = []pluginsdk.PolicyEvent{{
 		Site: "app.example.com", RuleID: "path-traversal", Digest: "abc",
 		Disposition: ModeObserve, Reason: "rule_matched", Code: hostWAFRuleMatchCode,
 	}}
 	runtime := newHostCapabilityRuntime(host)
 	if err := runtime.SetMode(context.Background(), "agent-1", "12", ModeDeny); err != nil {
 		t.Fatal(err)
+	}
+	if host.lastHTTPRule.Action != pluginsdk.HTTPRuleActionCutover || len(host.lastHTTPRule.Overlay) == 0 {
+		t.Fatalf("cutover must carry overlay: %#v", host.lastHTTPRule)
 	}
 	entries, err := runtime.List(context.Background(), "agent-1")
 	if err != nil || len(entries) != 1 || entries[0].Mode != ModeDeny || !entries[0].Attached {
@@ -76,9 +82,15 @@ func TestHostRuntimePersistsConfigOverlayAndEvents(t *testing.T) {
 	if host.stored.Mode != ModeDeny || len(host.stored.CustomRules) != 1 || host.stored.CustomRules[0].ID != "block-admin" {
 		t.Fatalf("instance config = %#v", host.stored)
 	}
+	if len(host.lastConfig.Config) == 0 {
+		t.Fatalf("instance.config request = %#v", host.lastConfig)
+	}
 	events, err := runtime.ListEvents(context.Background(), "agent-1")
 	if err != nil || len(events) != 1 || events[0].RuleID != "path-traversal" || events[0].Reason != "rule_matched" {
 		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	if host.lastEventList.AgentID != "agent-1" || host.lastEventList.Code != hostWAFRuleMatchCode {
+		t.Fatalf("event.list request = %#v", host.lastEventList)
 	}
 }
 
@@ -99,15 +111,18 @@ func TestHostRuntimeFailsVisiblyWhenContractsReject(t *testing.T) {
 }
 
 type fakeHostRuntime struct {
-	mu     sync.Mutex
-	rules  map[string][]hostHTTPRuleListItem
-	events []hostPolicyEvent
-	stored Configuration
-	reject bool
+	mu            sync.Mutex
+	rules         map[string][]pluginsdk.HTTPRuleListItem
+	events        []pluginsdk.PolicyEvent
+	stored        Configuration
+	reject        bool
+	lastHTTPRule  pluginsdk.HTTPRuleRequest
+	lastConfig    pluginsdk.InstanceConfigRequest
+	lastEventList pluginsdk.EventListRequest
 }
 
 func newFakeHostRuntime() *fakeHostRuntime {
-	return &fakeHostRuntime{rules: map[string][]hostHTTPRuleListItem{}}
+	return &fakeHostRuntime{rules: map[string][]pluginsdk.HTTPRuleListItem{}}
 }
 
 func (host *fakeHostRuntime) Call(_ context.Context, call pluginsdk.HostRuntimeCall, result any) error {
@@ -118,17 +133,16 @@ func (host *fakeHostRuntime) Call(_ context.Context, call pluginsdk.HostRuntimeC
 	}
 	switch call.Operation {
 	case pluginsdk.HostRuntimeHTTPRule:
-		var request struct {
-			Action  string          `json:"action"`
-			AgentID string          `json:"agent_id"`
-			RuleRef string          `json:"rule_ref"`
-			Overlay json.RawMessage `json:"overlay"`
-		}
+		var request pluginsdk.HTTPRuleRequest
 		if err := json.Unmarshal(call.Payload, &request); err != nil {
 			return err
 		}
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		host.lastHTTPRule = request
 		if request.Action == pluginsdk.HTTPRuleActionList {
-			return writeFakeHostResult(result, hostHTTPRuleListResponse{Rules: append([]hostHTTPRuleListItem(nil), host.rules[request.AgentID]...)})
+			return writeFakeHostResult(result, pluginsdk.HTTPRuleListResponse{Rules: append([]pluginsdk.HTTPRuleListItem(nil), host.rules[request.AgentID]...)})
 		}
 		if request.Action != pluginsdk.HTTPRuleActionCutover || len(request.Overlay) == 0 {
 			return ErrUnavailable
@@ -139,28 +153,38 @@ func (host *fakeHostRuntime) Call(_ context.Context, call pluginsdk.HostRuntimeC
 				continue
 			}
 			if rules[index].PolicyRef == nil {
-				rules[index].PolicyRef = &hostPolicyRef{ID: "waf-instance"}
+				rules[index].PolicyRef = &pluginsdk.PolicyRef{ID: "waf-instance"}
 			}
 			rules[index].PolicyRef.Overlay = append(json.RawMessage(nil), request.Overlay...)
 			host.rules[request.AgentID] = rules
 			return writeFakeHostResult(result, map[string]string{"rule_ref": request.RuleRef})
 		}
 		return ErrUnknownEntry
-	case hostInstanceConfigOp:
-		var request struct {
-			Config json.RawMessage `json:"config"`
-		}
+	case pluginsdk.HostRuntimeInstanceConfig:
+		var request pluginsdk.InstanceConfigRequest
 		if err := json.Unmarshal(call.Payload, &request); err != nil {
 			return err
 		}
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		host.lastConfig = request
 		config, err := ParseConfiguration(request.Config)
 		if err != nil {
 			return err
 		}
 		host.stored = config
-		return writeFakeHostResult(result, map[string]bool{"stored": true})
-	case hostEventListOp:
-		return writeFakeHostResult(result, hostEventListResponse{Events: append([]hostPolicyEvent(nil), host.events...)})
+		return writeFakeHostResult(result, pluginsdk.InstanceConfigResponse{Stored: true})
+	case pluginsdk.HostRuntimeEventList:
+		var request pluginsdk.EventListRequest
+		if err := json.Unmarshal(call.Payload, &request); err != nil {
+			return err
+		}
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		host.lastEventList = request
+		return writeFakeHostResult(result, pluginsdk.EventListResponse{Events: append([]pluginsdk.PolicyEvent(nil), host.events...)})
 	default:
 		return ErrUnavailable
 	}
@@ -179,10 +203,10 @@ func writeFakeHostResult(result any, payload any) error {
 
 func TestProjectHostPolicyEventIgnoresForeignCodes(t *testing.T) {
 	t.Parallel()
-	if _, ok := projectHostPolicyEvent(hostPolicyEvent{Code: "other.event", Action: ModeDeny}); ok {
+	if _, ok := projectHostPolicyEvent(pluginsdk.PolicyEvent{Code: "other.event", Action: ModeDeny}); ok {
 		t.Fatal("foreign event codes must not be listed")
 	}
-	event, ok := projectHostPolicyEvent(hostPolicyEvent{Code: hostWAFRuleMatchCode, Action: ModeDeny, Site: "app.example.com"})
+	event, ok := projectHostPolicyEvent(pluginsdk.PolicyEvent{Code: hostWAFRuleMatchCode, Action: ModeDeny, Site: "app.example.com"})
 	if !ok || event.Disposition != ModeDeny || strings.Contains(event.Site, "<") {
 		t.Fatalf("event=%#v ok=%v", event, ok)
 	}

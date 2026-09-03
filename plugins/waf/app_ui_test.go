@@ -65,6 +65,9 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if pluginsdk.RuntimeProjectsAgentRPC(manifest.Runtime) {
 		t.Fatalf("waf must not project Agent RPC: %+v", manifest.Runtime)
 	}
+	if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
+		t.Fatalf("dual-face runtime = %+v", manifest.Runtime)
+	}
 	if manifest.UIRouteID != "waf" {
 		t.Fatalf("ui_route_id = %q", manifest.UIRouteID)
 	}
@@ -73,12 +76,19 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 		switch point {
 		case pluginsdk.ExtensionUIRoute:
 			hasUIRoute = true
-		case "http.request":
+		case pluginsdk.ExtensionHTTPRequest:
 			hasHTTPRequest = true
 		}
 	}
 	if !hasUIRoute || !hasHTTPRequest {
 		t.Fatalf("extension_points = %v", manifest.ExtensionPoints)
+	}
+	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
+	if !ok {
+		t.Fatal("waf must project Agent policy")
+	}
+	if len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
+		t.Fatalf("PolicyStage must keep http.request and omit ui.route: %#v", projection.ExtensionPoints)
 	}
 }
 
