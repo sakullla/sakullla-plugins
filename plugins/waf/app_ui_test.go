@@ -34,6 +34,18 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if !strings.Contains(text, "host_scope: control-plane") {
 		t.Fatal("primary host_scope must be control-plane")
 	}
+	if !strings.Contains(text, "kind: wasm-policy") {
+		t.Fatal("plugin.yaml must nest wasm-policy on the Agent face")
+	}
+	if !strings.Contains(text, "policy_kind: waf") {
+		t.Fatal("plugin.yaml must declare policy_kind waf")
+	}
+	if !strings.Contains(text, "artifacts/waf.wasm") {
+		t.Fatal("plugin.yaml must declare artifacts/waf.wasm")
+	}
+	if !strings.Contains(text, "http.request") {
+		t.Fatal("plugin.yaml must declare http.request")
+	}
 	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
 		t.Fatal("plugin.yaml must declare frontend files below assets/")
 	}
@@ -41,18 +53,23 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
-		t.Fatalf("dual-face projection missing: %+v", manifest.Runtime)
-	}
 	if pluginsdk.RuntimeProjectsAgentRPC(manifest.Runtime) {
 		t.Fatalf("waf must not project Agent RPC: %+v", manifest.Runtime)
 	}
-	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
-	if !ok || projection.PolicyKind != "waf" || projection.Entry != "artifacts/waf.wasm" {
-		t.Fatalf("policy projection = %+v ok=%v", projection, ok)
+	if manifest.Runtime.HostScope != "control-plane" || manifest.Runtime.PolicyKind != "waf" {
+		t.Fatalf("dual-face runtime = %+v", manifest.Runtime)
 	}
-	if len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
-		t.Fatalf("policy-face extensions = %v", projection.ExtensionPoints)
+	hasUIRoute, hasHTTPRequest := false, false
+	for _, point := range manifest.ExtensionPoints {
+		switch point {
+		case "ui.route":
+			hasUIRoute = true
+		case "http.request":
+			hasHTTPRequest = true
+		}
+	}
+	if !hasUIRoute || !hasHTTPRequest {
+		t.Fatalf("extension_points = %v", manifest.ExtensionPoints)
 	}
 }
 
