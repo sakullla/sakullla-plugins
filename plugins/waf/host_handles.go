@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	pluginConfigStateKey   = "waf-config"
-	pluginOverlayStateKey  = "waf-overlays"
 	hostHTTPRuleOperation  = pluginsdk.HostRuntimeHTTPRule
 	hostHTTPRuleActionList = pluginsdk.HTTPRuleActionList
+	hostInstanceConfigOp   = "instance.config"
+	hostEventListOp        = "event.list"
+	hostWAFRuleMatchCode   = "waf.rule_match"
 )
 
 type hostRuntimeCaller interface {
@@ -23,43 +24,42 @@ type hostCapabilityRuntime struct {
 	client hostRuntimeCaller
 }
 
+type hostHTTPRuleListItem struct {
+	RuleRef     string         `json:"rule_ref"`
+	FrontendURL string         `json:"frontend_url"`
+	Backend     string         `json:"backend"`
+	Enabled     bool           `json:"enabled"`
+	PolicyRef   *hostPolicyRef `json:"policy_ref"`
+}
+
+type hostPolicyRef struct {
+	ID      string          `json:"id"`
+	Overlay json.RawMessage `json:"overlay"`
+}
+
+type hostHTTPRuleListResponse struct {
+	Rules []hostHTTPRuleListItem `json:"rules"`
+}
+
+type hostPolicyEvent struct {
+	Site        string `json:"site"`
+	RuleID      string `json:"rule_id"`
+	Digest      string `json:"digest"`
+	Disposition string `json:"disposition"`
+	Reason      string `json:"reason"`
+	Code        string `json:"code"`
+	Action      string `json:"action"`
+}
+
+type hostEventListResponse struct {
+	Events []hostPolicyEvent `json:"events"`
+}
+
 func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 	if client == nil {
 		return nil
 	}
 	return &hostCapabilityRuntime{client: client}
-}
-
-func (runtime *hostCapabilityRuntime) LoadConfig(ctx context.Context) (Configuration, bool, error) {
-	raw, found, err := runtime.loadState(ctx, pluginConfigStateKey)
-	if err != nil || !found {
-		return Configuration{}, found, err
-	}
-	config, err := ParseConfiguration(raw)
-	if err != nil {
-		return Configuration{}, false, ErrUnavailable
-	}
-	return config, true, nil
-}
-
-func (runtime *hostCapabilityRuntime) StoreConfig(ctx context.Context, config Configuration) error {
-	return runtime.storeState(ctx, pluginConfigStateKey, config)
-}
-
-func (runtime *hostCapabilityRuntime) LoadOverlays(ctx context.Context) (map[string]string, bool, error) {
-	raw, found, err := runtime.loadState(ctx, pluginOverlayStateKey)
-	if err != nil || !found {
-		return nil, found, err
-	}
-	var overlays map[string]string
-	if json.Unmarshal(raw, &overlays) != nil {
-		return nil, false, ErrUnavailable
-	}
-	return cloneOverlays(overlays), true, nil
-}
-
-func (runtime *hostCapabilityRuntime) StoreOverlays(ctx context.Context, overlays map[string]string) error {
-	return runtime.storeState(ctx, pluginOverlayStateKey, cloneOverlays(overlays))
 }
 
 func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) ([]HTTPEntry, error) {
@@ -69,8 +69,8 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 	if !validAgentID(agentID) {
 		return nil, ErrAgentRequired
 	}
-	var response pluginsdk.HTTPRuleListResponse
-	if err := callHost(ctx, runtime.client, hostHTTPRuleOperation, pluginsdk.HTTPRuleRequest{
+	var response hostHTTPRuleListResponse
+	if err := callHost(ctx, runtime.client, "", hostHTTPRuleOperation, pluginsdk.HTTPRuleRequest{
 		Action: hostHTTPRuleActionList, AgentID: agentID,
 	}, &response); err != nil {
 		return nil, ErrUnavailable
@@ -81,53 +81,134 @@ func (runtime *hostCapabilityRuntime) List(ctx context.Context, agentID string) 
 		if ref == "" {
 			continue
 		}
-		entries = append(entries, HTTPEntry{
-			RuleRef:     ref,
-			FrontendURL: strings.TrimSpace(item.FrontendURL),
-			Backend:     strings.TrimSpace(item.Backend),
-			Enabled:     item.Enabled,
-			Mode:        ModeObserve,
-			Attached:    true,
-		})
+		entries = append(entries, projectHostHTTPEntry(item, ref))
 	}
 	return entries, nil
 }
 
-func (runtime *hostCapabilityRuntime) loadState(ctx context.Context, key string) (json.RawMessage, bool, error) {
-	if runtime == nil || runtime.client == nil {
-		return nil, false, ErrUnavailable
+func projectHostHTTPEntry(item hostHTTPRuleListItem, ref string) HTTPEntry {
+	entry := HTTPEntry{
+		RuleRef:     ref,
+		FrontendURL: strings.TrimSpace(item.FrontendURL),
+		Backend:     strings.TrimSpace(item.Backend),
+		Enabled:     item.Enabled,
 	}
-	var response struct {
-		Found bool            `json:"found"`
-		Value json.RawMessage `json:"value"`
+	if item.PolicyRef == nil || strings.TrimSpace(item.PolicyRef.ID) == "" {
+		return entry
 	}
-	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": key}, &response); err != nil {
-		return nil, false, err
+	entry.Attached = true
+	mode, ok := parseOverlayMode(item.PolicyRef.Overlay)
+	if !ok {
+		entry.OverlayInvalid = true
+		entry.Notice = invalidOverlayNotice
+		return entry
 	}
-	if !response.Found {
-		return nil, false, nil
-	}
-	return response.Value, true, nil
+	entry.Mode = mode
+	return entry
 }
 
-func (runtime *hostCapabilityRuntime) storeState(ctx context.Context, key string, value any) error {
+func (runtime *hostCapabilityRuntime) SetMode(ctx context.Context, agentID, ruleRef, mode string) error {
 	if runtime == nil || runtime.client == nil {
 		return ErrUnavailable
 	}
-	encoded, err := json.Marshal(value)
+	if !validAgentID(agentID) {
+		return ErrAgentRequired
+	}
+	if strings.TrimSpace(ruleRef) == "" {
+		return ErrUnknownEntry
+	}
+	if !validMode(mode) {
+		return ErrInvalidMode
+	}
+	overlay, err := json.Marshal(struct {
+		Mode string `json:"mode"`
+	}{Mode: mode})
+	if err != nil {
+		return ErrUnavailable
+	}
+	payload := struct {
+		Action  string          `json:"action"`
+		AgentID string          `json:"agent_id"`
+		RuleRef string          `json:"rule_ref"`
+		Overlay json.RawMessage `json:"overlay"`
+	}{
+		Action:  pluginsdk.HTTPRuleActionCutover,
+		AgentID: agentID,
+		RuleRef: ruleRef,
+		Overlay: overlay,
+	}
+	if err := callHost(ctx, runtime.client, overlayOperationID(agentID, ruleRef, mode), hostHTTPRuleOperation, payload, nil); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreConfig(ctx context.Context, config Configuration) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrUnavailable
+	}
+	encoded, err := json.Marshal(config)
 	if err != nil {
 		return ErrUnavailable
 	}
 	var response struct {
 		Stored bool `json:"stored"`
 	}
-	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": key, "value": json.RawMessage(encoded)}, &response); err != nil {
-		return err
+	payload := struct {
+		Config json.RawMessage `json:"config"`
+	}{Config: encoded}
+	if err := callHost(ctx, runtime.client, configOperationID(), hostInstanceConfigOp, payload, &response); err != nil {
+		return ErrUnavailable
 	}
 	if !response.Stored {
 		return ErrUnavailable
 	}
 	return nil
+}
+
+func (runtime *hostCapabilityRuntime) ListEvents(ctx context.Context, agentID string) ([]SecurityEvent, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, ErrUnavailable
+	}
+	if !validAgentID(agentID) {
+		return nil, ErrAgentRequired
+	}
+	var response hostEventListResponse
+	payload := struct {
+		AgentID string `json:"agent_id"`
+		Code    string `json:"code"`
+	}{AgentID: agentID, Code: hostWAFRuleMatchCode}
+	if err := callHost(ctx, runtime.client, "", hostEventListOp, payload, &response); err != nil {
+		return nil, ErrUnavailable
+	}
+	events := make([]SecurityEvent, 0, len(response.Events))
+	for _, item := range response.Events {
+		if event, ok := projectHostPolicyEvent(item); ok {
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+func projectHostPolicyEvent(item hostPolicyEvent) (SecurityEvent, bool) {
+	code := strings.TrimSpace(item.Code)
+	if code != "" && code != hostWAFRuleMatchCode {
+		return SecurityEvent{}, false
+	}
+	disposition := strings.TrimSpace(item.Disposition)
+	if disposition == "" {
+		disposition = strings.TrimSpace(item.Action)
+	}
+	if disposition != "" && !validMode(disposition) {
+		return SecurityEvent{}, false
+	}
+	return SecurityEvent{
+		Site:        strings.TrimSpace(item.Site),
+		RuleID:      strings.TrimSpace(item.RuleID),
+		Digest:      strings.TrimSpace(item.Digest),
+		Disposition: disposition,
+		Reason:      strings.TrimSpace(item.Reason),
+	}, true
 }
 
 func bindProductionHostCapabilities(config ControllerConfig) ControllerConfig {
@@ -139,13 +220,27 @@ func bindProductionHostCapabilities(config ControllerConfig) ControllerConfig {
 	if config.Catalog == nil {
 		config.Catalog = runtime
 	}
-	if config.State == nil {
-		config.State = runtime
+	if config.Overlays == nil {
+		config.Overlays = runtime
+	}
+	if config.Events == nil {
+		config.Events = runtime
+	}
+	if config.Configs == nil {
+		config.Configs = runtime
 	}
 	return config
 }
 
-func callHost(ctx context.Context, client hostRuntimeCaller, operation string, payload any, result any) error {
+func overlayOperationID(agentID, ruleRef, mode string) string {
+	return "waf.overlay." + strings.TrimSpace(agentID) + "." + strings.TrimSpace(ruleRef) + "." + strings.TrimSpace(mode)
+}
+
+func configOperationID() string {
+	return "waf.instance.config"
+}
+
+func callHost(ctx context.Context, client hostRuntimeCaller, operationID, operation string, payload any, result any) error {
 	if client == nil {
 		return ErrUnavailable
 	}
@@ -154,7 +249,7 @@ func callHost(ctx context.Context, client hostRuntimeCaller, operation string, p
 		return ErrUnavailable
 	}
 	var raw json.RawMessage
-	if err := client.Call(ctx, pluginsdk.HostRuntimeCall{Operation: operation, Payload: encoded}, &raw); err != nil {
+	if err := client.Call(ctx, pluginsdk.HostRuntimeCall{Operation: operation, OperationID: operationID, Payload: encoded}, &raw); err != nil {
 		return ErrUnavailable
 	}
 	if result == nil || len(raw) == 0 {

@@ -54,8 +54,8 @@ func TestProductionConfigLeavesCatalogEmptyWithoutHost(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
 	config := bindProductionHostCapabilities(ControllerConfig{})
-	if config.Catalog != nil {
-		t.Fatal("production catalog must stay unset without a host runtime endpoint")
+	if config.Catalog != nil || config.Overlays != nil || config.Events != nil || config.Configs != nil {
+		t.Fatalf("production execution contracts must stay unset without a host runtime endpoint: %+v", config)
 	}
 }
 

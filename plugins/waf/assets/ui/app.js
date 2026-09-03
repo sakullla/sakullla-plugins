@@ -208,7 +208,7 @@ const loadAgents = async () => {
   try {
     const payload = await panelJSON("/panel-api/agents");
     agentsCache = Array.isArray(payload.agents)
-      ? payload.agents.filter((agent) => agent && agent.is_local !== true && agent.mode !== "local")
+      ? payload.agents.filter((agent) => agent && agent.id)
       : [];
   } catch (_error) {
     agentsCache = [];

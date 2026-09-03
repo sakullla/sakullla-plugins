@@ -11,13 +11,6 @@ import (
 
 const generationHandleScope = "ui.dynamic"
 
-type CatalogStore interface {
-	LoadConfig(context.Context) (Configuration, bool, error)
-	StoreConfig(context.Context, Configuration) error
-	LoadOverlays(context.Context) (map[string]string, bool, error)
-	StoreOverlays(context.Context, map[string]string) error
-}
-
 type HTTPEntryCatalog interface {
 	List(context.Context, string) ([]HTTPEntry, error)
 }
@@ -30,26 +23,29 @@ type EventSource interface {
 	ListEvents(context.Context, string) ([]SecurityEvent, error)
 }
 
+type PolicyConfigStore interface {
+	StoreConfig(context.Context, Configuration) error
+}
+
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 	Catalog                                                    HTTPEntryCatalog
 	Overlays                                                   OverlayWriter
 	Events                                                     EventSource
-	State                                                      CatalogStore
+	Configs                                                    PolicyConfigStore
 }
 
 type Controller struct {
 	*rpcplugin.Adapter
 	mu        sync.Mutex
 	config    Configuration
-	overlays  map[string]string
 	epoch     *commitEpoch
 	commit    *rpcplugin.Handle[*commitEpoch]
 	catalog   HTTPEntryCatalog
 	overlaysW OverlayWriter
 	events    EventSource
-	state     CatalogStore
+	configs   PolicyConfigStore
 }
 
 type commitEpoch struct {
@@ -63,8 +59,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		catalog:   config.Catalog,
 		overlaysW: config.Overlays,
 		events:    config.Events,
-		state:     config.State,
-		overlays:  map[string]string{},
+		configs:   config.Configs,
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
@@ -79,31 +74,13 @@ func NewController(config ControllerConfig) (*Controller, error) {
 }
 
 func requiredGrants() []string {
-	return []string{"http.rule", "ui.dynamic", "storage.read", "storage.write"}
+	return []string{"http.rule", "ui.dynamic", "event.emit", "storage.read", "storage.write"}
 }
 
 func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin.Generation, config []byte) error {
 	parsed, err := ParseConfiguration(config)
 	if err != nil {
 		return err
-	}
-	if controller.state != nil {
-		persisted, found, loadErr := controller.state.LoadConfig(ctx)
-		if loadErr != nil {
-			return loadErr
-		}
-		if found {
-			parsed = persisted
-		}
-		overlays, overlayFound, overlayErr := controller.state.LoadOverlays(ctx)
-		if overlayErr != nil {
-			return overlayErr
-		}
-		if overlayFound {
-			controller.mu.Lock()
-			controller.overlays = cloneOverlays(overlays)
-			controller.mu.Unlock()
-		}
 	}
 	epoch := &commitEpoch{generation: generation.ID()}
 	epoch.live.Store(true)
@@ -112,7 +89,6 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		controller.mu.Lock()
 		if controller.epoch == epoch {
 			controller.config = Configuration{}
-			controller.overlays = map[string]string{}
 			controller.commit = nil
 			controller.epoch = nil
 		}
@@ -144,7 +120,6 @@ func (controller *Controller) activate(context.Context, *rpcplugin.Generation) e
 func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error {
 	controller.mu.Lock()
 	controller.config = Configuration{}
-	controller.overlays = map[string]string{}
 	controller.commit = nil
 	controller.epoch = nil
 	controller.mu.Unlock()
@@ -167,38 +142,14 @@ func (controller *Controller) replaceConfig(ctx context.Context, next Configurat
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if controller.state != nil {
-		if err := controller.state.StoreConfig(ctx, next); err != nil {
-			return err
-		}
+	if controller.configs == nil {
+		return ErrUnavailable
+	}
+	if err := controller.configs.StoreConfig(ctx, next); err != nil {
+		return err
 	}
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.config = cloneConfiguration(next)
 	return nil
-}
-
-func (controller *Controller) overlayMode(agentID, ruleRef string) (string, bool) {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	mode, ok := controller.overlays[overlayKey(agentID, ruleRef)]
-	return mode, ok
-}
-
-func (controller *Controller) replaceOverlays(ctx context.Context, next map[string]string) error {
-	if controller.state != nil {
-		if err := controller.state.StoreOverlays(ctx, next); err != nil {
-			return err
-		}
-	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	controller.overlays = cloneOverlays(next)
-	return nil
-}
-
-func (controller *Controller) snapshotOverlays() map[string]string {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	return cloneOverlays(controller.overlays)
 }

@@ -75,6 +75,24 @@ func TestManagementPageServesChineseCopy(t *testing.T) {
 	}
 }
 
+func TestLoadAgentsKeepsLocalAgents(t *testing.T) {
+	t.Parallel()
+	script, err := os.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	if !strings.Contains(text, "const loadAgents") {
+		t.Fatal("loadAgents missing")
+	}
+	if strings.Contains(text, "is_local") || strings.Contains(text, `mode !== "local"`) || strings.Contains(text, "mode != \"local\"") {
+		t.Fatal("loadAgents must keep local agents that own HTTP entries")
+	}
+	if !strings.Contains(text, "agent.id") {
+		t.Fatal("loadAgents must still require an agent id")
+	}
+}
+
 func TestManagementPageListsHTTPEntriesAsObserve(t *testing.T) {
 	t.Parallel()
 	catalog := newMemoryCatalog()
@@ -209,6 +227,49 @@ func TestManagementPageVisibleEmptyDeniedUnavailable(t *testing.T) {
 	if overlay.Code != http.StatusOK || len(got.Entries) != 1 || !got.Entries[0].OverlayInvalid || got.Entries[0].Notice != invalidOverlayNotice {
 		t.Fatalf("invalid overlay=%#v", got.Entries)
 	}
+
+	detached := newMemoryCatalog()
+	detached.entries["agent-1"] = []HTTPEntry{{
+		RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true,
+	}}
+	unattached := newUIController(t, uiControllerOptions{catalog: detached})
+	listedDetached := httptest.NewRecorder()
+	unattached.ServeHTTP(listedDetached, uiRequest(http.MethodGet, "/api/state?agent_id=agent-1", ""))
+	detachedPayload := decodeWAFState(t, listedDetached.Body.Bytes())
+	if listedDetached.Code != http.StatusOK || len(detachedPayload.Entries) != 1 || detachedPayload.Entries[0].Attached || detachedPayload.Entries[0].Notice != notAttachedNotice {
+		t.Fatalf("unattached=%#v", detachedPayload.Entries)
+	}
+}
+
+func TestManagementPageFailsWhenExecutionContractsMissing(t *testing.T) {
+	t.Parallel()
+	catalog := newMemoryCatalog()
+	catalog.entries["agent-1"] = []HTTPEntry{{
+		RuleRef: "12", FrontendURL: "http://app.example.com", Enabled: true, Mode: ModeObserve, Attached: true,
+	}}
+	withoutOverlay := newUIController(t, uiControllerOptions{catalog: catalog})
+	switched := httptest.NewRecorder()
+	withoutOverlay.ServeHTTP(switched, uiJSONRequest(http.MethodPost, "/api/entries/mode", `{"agent_id":"agent-1","rule_ref":"12","mode":"deny"}`))
+	if switched.Code != http.StatusServiceUnavailable || !strings.Contains(switched.Body.String(), ErrUnavailable.Error()) {
+		t.Fatalf("missing overlay writer status=%d body=%s", switched.Code, switched.Body.String())
+	}
+
+	withoutConfig := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), omitConfig: true})
+	rule := httptest.NewRecorder()
+	withoutConfig.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/custom-rules", `{"agent_id":"agent-1","id":"block-admin","target":"path","needle":"/admin"}`))
+	if rule.Code != http.StatusServiceUnavailable || !strings.Contains(rule.Body.String(), ErrUnavailable.Error()) {
+		t.Fatalf("missing config store status=%d body=%s", rule.Code, rule.Body.String())
+	}
+	if len(withoutConfig.currentConfig().CustomRules) != 0 {
+		t.Fatalf("failed persist mutated config=%#v", withoutConfig.currentConfig())
+	}
+
+	withoutEvents := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), omitEvents: true})
+	listed := httptest.NewRecorder()
+	withoutEvents.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/state?agent_id=agent-1", ""))
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), ErrUnavailable.Error()) {
+		t.Fatalf("missing events status=%d body=%s", listed.Code, listed.Body.String())
+	}
 }
 
 func TestManagementPageRejectsInvalidCustomRuleWithoutMutating(t *testing.T) {
@@ -225,10 +286,13 @@ func TestManagementPageRejectsInvalidCustomRuleWithoutMutating(t *testing.T) {
 }
 
 type uiControllerOptions struct {
-	catalog  HTTPEntryCatalog
-	overlays OverlayWriter
-	events   EventSource
-	config   string
+	catalog    HTTPEntryCatalog
+	overlays   OverlayWriter
+	events     EventSource
+	configs    PolicyConfigStore
+	config     string
+	omitConfig bool
+	omitEvents bool
 }
 
 func newUIController(t *testing.T, opts uiControllerOptions) *Controller {
@@ -237,9 +301,17 @@ func newUIController(t *testing.T, opts uiControllerOptions) *Controller {
 	if config == "" {
 		config = `{"mode":"observe"}`
 	}
+	events := opts.events
+	if events == nil && !opts.omitEvents {
+		events = emptyEvents{}
+	}
+	configs := opts.configs
+	if configs == nil && !opts.omitConfig {
+		configs = newMemoryConfigStore()
+	}
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
-		Catalog: opts.catalog, Overlays: opts.overlays, Events: opts.events,
+		Catalog: opts.catalog, Overlays: opts.overlays, Events: events, Configs: configs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,4 +387,26 @@ func (catalog *memoryCatalog) SetMode(_ context.Context, agentID, ruleRef, mode 
 
 func (catalog *memoryCatalog) ListEvents(_ context.Context, _ string) ([]SecurityEvent, error) {
 	return cloneEvents(catalog.events), nil
+}
+
+type emptyEvents struct{}
+
+func (emptyEvents) ListEvents(context.Context, string) ([]SecurityEvent, error) {
+	return nil, nil
+}
+
+type memoryConfigStore struct {
+	mu     sync.Mutex
+	config Configuration
+}
+
+func newMemoryConfigStore() *memoryConfigStore {
+	return &memoryConfigStore{}
+}
+
+func (store *memoryConfigStore) StoreConfig(_ context.Context, config Configuration) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.config = cloneConfiguration(config)
+	return nil
 }

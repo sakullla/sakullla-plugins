@@ -210,16 +210,16 @@ func (controller *Controller) stateResponse(ctx context.Context, agentID, failed
 	if len(entries) == 0 {
 		response.Notice = emptyEntriesNotice
 	}
-	if controller.events != nil {
-		events, eventErr := controller.events.ListEvents(ctx, agentID)
-		if eventErr != nil {
-			if response.Error == "" {
-				response.Error = publicWAFError(eventErr)
-			}
-		} else {
-			response.Events = events
-		}
+	if controller.events == nil {
+		response.Error = publicWAFError(ErrUnavailable)
+		return response
 	}
+	events, eventErr := controller.events.ListEvents(ctx, agentID)
+	if eventErr != nil {
+		response.Error = publicWAFError(eventErr)
+		return response
+	}
+	response.Events = events
 	return response
 }
 
@@ -246,9 +246,7 @@ func (controller *Controller) listEntries(ctx context.Context, agentID string) (
 			entries = append(entries, projected)
 			continue
 		}
-		if overlay, ok := controller.overlayMode(agentID, projected.RuleRef); ok && validMode(overlay) {
-			projected.Mode = overlay
-		} else if !validMode(projected.Mode) {
+		if projected.Attached && !validMode(projected.Mode) {
 			projected.Mode = defaultMode
 		}
 		if !projected.Attached {
@@ -286,14 +284,10 @@ func (controller *Controller) setEntryMode(ctx context.Context, agentID, ruleRef
 	if !found {
 		return ErrUnknownEntry
 	}
-	if controller.overlaysW != nil {
-		if err := controller.overlaysW.SetMode(ctx, agentID, ruleRef, mode); err != nil {
-			return err
-		}
+	if controller.overlaysW == nil {
+		return ErrUnavailable
 	}
-	next := controller.snapshotOverlays()
-	next[overlayKey(agentID, ruleRef)] = mode
-	return controller.replaceOverlays(ctx, next)
+	return controller.overlaysW.SetMode(ctx, agentID, ruleRef, mode)
 }
 
 func (controller *Controller) setGlobalMode(ctx context.Context, agentID, mode string) error {
@@ -308,23 +302,22 @@ func (controller *Controller) setGlobalMode(ctx context.Context, agentID, mode s
 	if strings.TrimSpace(agentID) == "" {
 		return nil
 	}
+	if controller.overlaysW == nil {
+		return ErrUnavailable
+	}
 	entries, err := controller.listEntries(ctx, agentID)
 	if err != nil {
 		return err
 	}
-	next := controller.snapshotOverlays()
 	for _, entry := range entries {
-		if entry.OverlayInvalid || strings.TrimSpace(entry.RuleRef) == "" {
+		if entry.OverlayInvalid || !entry.Attached || strings.TrimSpace(entry.RuleRef) == "" {
 			continue
 		}
-		if controller.overlaysW != nil {
-			if err := controller.overlaysW.SetMode(ctx, agentID, entry.RuleRef, mode); err != nil {
-				return err
-			}
+		if err := controller.overlaysW.SetMode(ctx, agentID, entry.RuleRef, mode); err != nil {
+			return err
 		}
-		next[overlayKey(agentID, entry.RuleRef)] = mode
 	}
-	return controller.replaceOverlays(ctx, next)
+	return nil
 }
 
 func (controller *Controller) addCustomRule(ctx context.Context, rule CustomRule) error {
