@@ -1,16 +1,19 @@
 package waf
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+//go:embed rules/managed.rules
+var managedRulesSource string
 
 const (
 	PluginID      = "waf"
@@ -33,8 +36,8 @@ var (
 	ErrInvalidExclusion  = errors.New("排除项无效。")
 	ErrDuplicateRule     = errors.New("自定义规则 ID 已存在。")
 	ErrAgentRequired     = errors.New("请先选择一台节点。")
-	ruleIDPattern        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	customRuleTargets    = map[string]struct{}{"path": {}, "query": {}, "headers": {}, "body": {}}
+	managedRuleIDs       = parseManagedRuleIDs(managedRulesSource)
 )
 
 type Configuration struct {
@@ -113,12 +116,15 @@ func (config Configuration) Validate() error {
 		if err := exclusion.Validate(); err != nil {
 			return err
 		}
+		if !knownRule(seen, exclusion.RuleID) {
+			return ErrInvalidExclusion
+		}
 	}
 	return nil
 }
 
 func (rule CustomRule) Validate() error {
-	if !ruleIDPattern.MatchString(rule.ID) {
+	if !validID(rule.ID) {
 		return ErrInvalidRule
 	}
 	if _, ok := customRuleTargets[rule.Target]; !ok {
@@ -131,16 +137,56 @@ func (rule CustomRule) Validate() error {
 }
 
 func (exclusion Exclusion) Validate() error {
-	if strings.TrimSpace(exclusion.RuleID) == "" || utf8.RuneCountInString(exclusion.RuleID) > 32 {
-		return ErrInvalidExclusion
-	}
-	if strings.ContainsAny(exclusion.RuleID, "\r\n\x00") {
+	if !validID(exclusion.RuleID) {
 		return ErrInvalidExclusion
 	}
 	if !strings.HasPrefix(exclusion.PathPrefix, "/") || !boundedLiteral(exclusion.PathPrefix, 1, 96) {
 		return ErrInvalidExclusion
 	}
 	return nil
+}
+
+func validID(value string) bool {
+	if value == "" || len(value) > 32 {
+		return false
+	}
+	if value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b < 'a' || b > 'z') && (b < '0' || b > '9') && b != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func knownRule(customIDs map[string]struct{}, ruleID string) bool {
+	if _, ok := managedRuleIDs[ruleID]; ok {
+		return true
+	}
+	_, ok := customIDs[ruleID]
+	return ok
+}
+
+func parseManagedRuleIDs(source string) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, line := range strings.Split(source, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "|")
+		if len(fields) != 3 || fields[0] == "" {
+			panic("plugins/waf: invalid managed rule line: " + line)
+		}
+		ids[fields[0]] = struct{}{}
+	}
+	if len(ids) == 0 {
+		panic("plugins/waf: managed.rules produced no rule ids")
+	}
+	return ids
 }
 
 func validMode(value string) bool {

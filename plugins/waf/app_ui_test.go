@@ -381,6 +381,88 @@ func TestManagementPageRejectsInvalidCustomRuleWithoutMutating(t *testing.T) {
 	}
 }
 
+func TestManagementPageRejectsInvalidIDsWithoutPersisting(t *testing.T) {
+	t.Parallel()
+
+	t.Run("digit-start custom ID", func(t *testing.T) {
+		t.Parallel()
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), configs: store})
+		denied := httptest.NewRecorder()
+		controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/custom-rules", `{"id":"1admin","target":"path","needle":"ab"}`))
+		if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), ErrInvalidRule.Error()) {
+			t.Fatalf("status=%d body=%s", denied.Code, denied.Body.String())
+		}
+		if len(controller.currentConfig().CustomRules) != 0 || len(store.snapshot().CustomRules) != 0 {
+			t.Fatalf("digit-start custom id persisted config=%#v store=%#v", controller.currentConfig(), store.snapshot())
+		}
+	})
+
+	t.Run("invalid exclusion rule_id", func(t *testing.T) {
+		t.Parallel()
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), configs: store})
+		denied := httptest.NewRecorder()
+		controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/exclusions", `{"rule_id":"1admin","path_prefix":"/health"}`))
+		if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), ErrInvalidExclusion.Error()) {
+			t.Fatalf("status=%d body=%s", denied.Code, denied.Body.String())
+		}
+		if len(controller.currentConfig().Exclusions) != 0 || len(store.snapshot().Exclusions) != 0 {
+			t.Fatalf("invalid exclusion persisted config=%#v store=%#v", controller.currentConfig(), store.snapshot())
+		}
+	})
+
+	t.Run("unknown exclusion rule_id", func(t *testing.T) {
+		t.Parallel()
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), configs: store})
+		denied := httptest.NewRecorder()
+		controller.ServeHTTP(denied, uiJSONRequest(http.MethodPost, "/api/exclusions", `{"rule_id":"not-present","path_prefix":"/"}`))
+		if denied.Code != http.StatusBadRequest || !strings.Contains(denied.Body.String(), ErrInvalidExclusion.Error()) {
+			t.Fatalf("status=%d body=%s", denied.Code, denied.Body.String())
+		}
+		if len(controller.currentConfig().Exclusions) != 0 || len(store.snapshot().Exclusions) != 0 {
+			t.Fatalf("unknown exclusion persisted config=%#v store=%#v", controller.currentConfig(), store.snapshot())
+		}
+	})
+
+	t.Run("valid managed exclusion", func(t *testing.T) {
+		t.Parallel()
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), configs: store})
+		accepted := httptest.NewRecorder()
+		controller.ServeHTTP(accepted, uiJSONRequest(http.MethodPost, "/api/exclusions", `{"rule_id":"managed-path-traversal","path_prefix":"/health"}`))
+		payload := decodeWAFState(t, accepted.Body.Bytes())
+		if accepted.Code != http.StatusOK || len(payload.Exclusions) != 1 || payload.Exclusions[0].RuleID != "managed-path-traversal" {
+			t.Fatalf("managed exclusion status=%d payload=%#v", accepted.Code, payload)
+		}
+		if len(store.snapshot().Exclusions) != 1 || store.snapshot().Exclusions[0].RuleID != "managed-path-traversal" {
+			t.Fatalf("managed exclusion store=%#v", store.snapshot())
+		}
+	})
+
+	t.Run("valid custom exclusion", func(t *testing.T) {
+		t.Parallel()
+		store := newMemoryConfigStore()
+		controller := newUIController(t, uiControllerOptions{catalog: newMemoryCatalog(), configs: store})
+		rule := httptest.NewRecorder()
+		controller.ServeHTTP(rule, uiJSONRequest(http.MethodPost, "/api/custom-rules", `{"id":"block-admin","target":"path","needle":"/admin"}`))
+		if rule.Code != http.StatusOK {
+			t.Fatalf("custom rule status=%d body=%s", rule.Code, rule.Body.String())
+		}
+		exclusion := httptest.NewRecorder()
+		controller.ServeHTTP(exclusion, uiJSONRequest(http.MethodPost, "/api/exclusions", `{"rule_id":"block-admin","path_prefix":"/health"}`))
+		payload := decodeWAFState(t, exclusion.Body.Bytes())
+		if exclusion.Code != http.StatusOK || len(payload.CustomRules) != 1 || len(payload.Exclusions) != 1 {
+			t.Fatalf("custom exclusion status=%d payload=%#v", exclusion.Code, payload)
+		}
+		stored := store.snapshot()
+		if len(stored.CustomRules) != 1 || len(stored.Exclusions) != 1 || stored.Exclusions[0].RuleID != "block-admin" {
+			t.Fatalf("custom exclusion store=%#v", stored)
+		}
+	})
+}
+
 type uiControllerOptions struct {
 	catalog    HTTPEntryCatalog
 	overlays   OverlayWriter

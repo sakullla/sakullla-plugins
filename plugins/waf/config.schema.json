@@ -21,7 +21,7 @@
         "additionalProperties": false,
         "required": ["id", "target", "needle"],
         "properties": {
-          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
           "target": {"type": "string", "enum": ["path", "query", "headers", "body"]},
           "needle": {"type": "string", "minLength": 2, "maxLength": 64}
         }
@@ -38,7 +38,7 @@
         "additionalProperties": false,
         "required": ["rule_id", "path_prefix"],
         "properties": {
-          "rule_id": {"type": "string", "maxLength": 32},
+          "rule_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$", "maxLength": 32},
           "path_prefix": {"type": "string", "minLength": 1, "maxLength": 96}
         }
       }
