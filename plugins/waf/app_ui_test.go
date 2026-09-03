@@ -53,11 +53,18 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
+		t.Fatalf("dual-face projection missing: %+v", manifest.Runtime)
+	}
 	if pluginsdk.RuntimeProjectsAgentRPC(manifest.Runtime) {
 		t.Fatalf("waf must not project Agent RPC: %+v", manifest.Runtime)
 	}
-	if manifest.Runtime.HostScope != "control-plane" || manifest.Runtime.PolicyKind != "waf" {
-		t.Fatalf("dual-face runtime = %+v", manifest.Runtime)
+	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
+	if !ok || projection.PolicyKind != "waf" || projection.Entry != "artifacts/waf.wasm" {
+		t.Fatalf("policy projection = %+v ok=%v", projection, ok)
+	}
+	if len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
+		t.Fatalf("policy-face extensions = %v", projection.ExtensionPoints)
 	}
 	hasUIRoute, hasHTTPRequest := false, false
 	for _, point := range manifest.ExtensionPoints {
