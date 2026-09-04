@@ -559,6 +559,7 @@ type quicConn struct {
 	cryptoRead    [3]uint64
 	streams       map[uint64]*quicStream
 	handshakeDone bool
+	ackPending    [3]bool
 	onPacket      func()
 	coalesce      bool
 }
@@ -840,12 +841,13 @@ func suiteKeys(suite uint16, secret []byte) (quicKeys, error) {
 func (conn *quicConn) flush(ctx context.Context) error {
 	_ = ctx
 	var datagram []byte
+	var coalescedACKs [3]bool
 	for _, space := range []quicSpace{spaceInitial, spaceHandshake, spaceApplication} {
-		if len(conn.cryptoOut[space]) == 0 && conn.largestRecv[space] < 0 {
+		if len(conn.cryptoOut[space]) == 0 && !conn.ackPending[space] {
 			continue
 		}
 		frames := []byte{}
-		if conn.largestRecv[space] >= 0 {
+		if conn.ackPending[space] && conn.largestRecv[space] >= 0 {
 			frames = append(frames, encodeACK(uint64(conn.largestRecv[space]))...)
 		}
 		if len(conn.cryptoOut[space]) > 0 {
@@ -865,15 +867,22 @@ func (conn *quicConn) flush(ctx context.Context) error {
 		}
 		if conn.coalesce {
 			datagram = append(datagram, packet...)
+			coalescedACKs[space] = conn.ackPending[space]
 			continue
 		}
 		if _, err := conn.udp.Write(packet); err != nil {
 			return ErrUpstreamFailed
 		}
+		conn.ackPending[space] = false
 	}
 	if len(datagram) > 0 {
 		if _, err := conn.udp.Write(datagram); err != nil {
 			return ErrUpstreamFailed
+		}
+		for space, sent := range coalescedACKs {
+			if sent {
+				conn.ackPending[space] = false
+			}
 		}
 	}
 	return nil
@@ -1023,6 +1032,7 @@ func (conn *quicConn) handleFrames(space quicSpace, payload []byte) error {
 		case kind == 0x00:
 			continue
 		case kind == 0x01:
+			conn.ackPending[space] = true
 			continue
 		case kind == 0x02 || kind == 0x03:
 			_, next, err := readVarint(payload, offset)
@@ -1093,6 +1103,7 @@ func (conn *quicConn) handleFrames(space quicSpace, payload []byte) error {
 				}
 				conn.cryptoRead[space] += uint64(len(next))
 			}
+			conn.ackPending[space] = true
 		case kind >= 0x08 && kind <= 0x0f:
 			offBit := kind&0x04 != 0
 			lenBit := kind&0x02 != 0
@@ -1139,6 +1150,7 @@ func (conn *quicConn) handleFrames(space quicSpace, payload []byte) error {
 			if fin {
 				stream.fin = true
 			}
+			conn.ackPending[space] = true
 		case kind == 0x1c || kind == 0x1d:
 			return ErrUpstreamFailed
 		default:
@@ -1147,6 +1159,7 @@ func (conn *quicConn) handleFrames(space quicSpace, payload []byte) error {
 				return err
 			}
 			offset = next
+			conn.ackPending[space] = true
 		}
 	}
 	return nil

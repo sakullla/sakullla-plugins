@@ -185,6 +185,47 @@ func TestQUICSkipsHandshakeDoneAndMaxData(t *testing.T) {
 	}
 }
 
+func TestQUICDoesNotAckAckOnlyPacket(t *testing.T) {
+	keys := deriveQUICKeys(bytesRepeat(0x11, 32), 16)
+	localCID := bytesRepeat(0x22, 8)
+	packet, err := sealQUICPacket(encodeShortHeader(localCID, 0), encodeACK(0), 0, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := &writeCountingConn{}
+	conn := &quicConn{
+		udp:         writes,
+		scid:        localCID,
+		peerCID:     bytesRepeat(0x33, 8),
+		keys:        [3]quicKeys{spaceApplication: keys},
+		readKeys:    [3]quicKeys{spaceApplication: keys},
+		largestRecv: [3]int64{-1, -1, -1},
+		streams:     map[uint64]*quicStream{},
+	}
+	if err := conn.handleDatagram(packet); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if writes.count != 0 {
+		t.Fatalf("ACK-only packet triggered %d response datagrams", writes.count)
+	}
+}
+
+type writeCountingConn struct {
+	count int
+}
+
+func (*writeCountingConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (conn *writeCountingConn) Write(p []byte) (int, error) { conn.count++; return len(p), nil }
+func (*writeCountingConn) Close() error                     { return nil }
+func (*writeCountingConn) LocalAddr() net.Addr              { return nil }
+func (*writeCountingConn) RemoteAddr() net.Addr             { return nil }
+func (*writeCountingConn) SetDeadline(time.Time) error      { return nil }
+func (*writeCountingConn) SetReadDeadline(time.Time) error  { return nil }
+func (*writeCountingConn) SetWriteDeadline(time.Time) error { return nil }
+
 func TestDNSCryptISO7816Padding(t *testing.T) {
 	query := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	padded := padDNSCryptQuery(query)

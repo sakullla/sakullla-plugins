@@ -1,6 +1,6 @@
 schema_version: 1
 id: doh
-version: 0.2.4
+version: 0.2.5
 name: HTTPS 域名解析
 description: 为零配置发布的自有域名提供 DNS over HTTPS 解析
 compatibility:
