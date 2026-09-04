@@ -23,6 +23,7 @@ import (
 	"github.com/sakullla/sakullla-plugins/plugins/doh"
 	reversel4 "github.com/sakullla/sakullla-plugins/plugins/reverse-l4"
 	shadowsocksserver "github.com/sakullla/sakullla-plugins/plugins/shadowsocks-server"
+	"github.com/sakullla/sakullla-plugins/plugins/waf"
 	"github.com/sakullla/sakullla-plugins/plugins/webdav"
 )
 
@@ -168,6 +169,7 @@ func TestRPCPluginBinaryIdentityMatchesManifest(t *testing.T) {
 		{"doh", doh.PluginID, doh.PluginVersion},
 		{"reverse-l4", reversel4.PluginID, reversel4.PluginVersion},
 		{"shadowsocks-server", shadowsocksserver.PluginID, shadowsocksserver.PluginVersion},
+		{"waf", waf.PluginID, waf.PluginVersion},
 		{"webdav", webdav.PluginID, webdav.PluginVersion},
 	}
 	for _, test := range tests {
@@ -297,7 +299,7 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 		{id: "cloudflare-dns", kind: artifactRPCService, sourceNeedle: "cloudflare-dns/cmd/cloudflare-dns"},
 		{id: "shadowsocks-server", kind: artifactRPCService, sourceNeedle: "shadowsocks-server/cmd/shadowsocks-server"},
 		{id: "webdav", kind: artifactRPCService, sourceNeedle: "webdav/cmd/webdav"},
-		{id: "waf", kind: artifactWASMPolicy, packageName: "sakullla-waf"},
+		{id: "waf", kind: artifactRPCService, sourceNeedle: "waf/cmd/waf", packageName: "sakullla-waf"},
 		{id: "ip-policy", kind: artifactWASMPolicy, packageName: "sakullla-ip-policy"},
 		{id: "rate-limit", kind: artifactWASMPolicy, packageName: "sakullla-rate-limit"},
 	}
@@ -329,6 +331,63 @@ func TestPluginReverseL4ManifestDriftFailsClosed(t *testing.T) {
 			_, err := pluginArtifactSpecFor(root, "reverse-l4")
 			if err == nil || !strings.Contains(err.Error(), test.needle) {
 				t.Fatalf("manifest drift error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPluginWAFAllowlistRequiresControlPlaneRPCWithNestedWASM(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := pluginArtifactSpecFor(repositoryRoot, "waf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.kind != artifactRPCService || spec.artifactName != "waf" || spec.packageName != "sakullla-waf" || !strings.Contains(spec.sourcePath, "waf/cmd/waf") {
+		t.Fatalf("waf dual-face spec = %#v", spec)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		needle string
+	}{
+		{name: "kind", mutate: func(document map[string]any) {
+			runtime := document["runtime"].(map[string]any)
+			runtime["kind"] = "wasm-policy"
+			runtime["abi"] = "nre:policy/v1"
+			runtime["entry"] = "artifacts/waf.wasm"
+		}, needle: "runtime kind"},
+		{name: "host-scope", mutate: func(document map[string]any) {
+			document["runtime"].(map[string]any)["host_scope"] = "agent"
+		}, needle: "control-plane"},
+		{name: "policy-kind", mutate: func(document map[string]any) {
+			document["runtime"].(map[string]any)["policy_kind"] = "ip"
+		}, needle: "policy_kind"},
+		{name: "nested-policy", mutate: func(document map[string]any) {
+			delete(document["runtime"].(map[string]any), "policy")
+		}, needle: "nested Agent wasm-policy"},
+		{name: "wasm-entry", mutate: func(document map[string]any) {
+			document["runtime"].(map[string]any)["policy"].(map[string]any)["entry"] = "artifacts/other.wasm"
+		}, needle: "assets/waf.wasm or artifacts/waf.wasm"},
+		{name: "native-artifact", mutate: func(document map[string]any) {
+			document["artifacts"] = []map[string]any{{"path": "artifacts/waf.wasm", "sha256": strings.Repeat("b", 64), "size": 1, "mode": "wasm"}}
+		}, needle: "native executable plus wasm artifacts"},
+		{name: "wasm-artifact", mutate: func(document map[string]any) {
+			document["artifacts"] = []map[string]any{{"path": "artifacts/linux-amd64/waf", "sha256": strings.Repeat("a", 64), "size": 1, "mode": "executable", "goos": "linux", "goarch": "amd64"}}
+		}, needle: "native executable plus wasm artifacts"},
+		{name: "policy-stage", mutate: func(document map[string]any) {
+			document["extension_points"] = []string{"ui.route"}
+		}, needle: "omit ui.route"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeWAFDualFaceManifest(t, root, test.mutate)
+			_, err := pluginArtifactSpecFor(root, "waf")
+			if err == nil || !strings.Contains(err.Error(), test.needle) {
+				t.Fatalf("waf allowlist error = %v", err)
 			}
 		})
 	}
@@ -401,6 +460,37 @@ func TestReleaseManifestUsesGeneratedArtifactMetadataWithoutRewritingSource(t *t
 	}
 }
 
+func TestReleaseManifestKeepsWAFNativeAndWASMArtifacts(t *testing.T) {
+	root := t.TempDir()
+	writeWAFDualFaceManifest(t, root, nil)
+	source := filepath.Join(root, "plugins", "waf", "plugin.yaml")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(source), "config.schema.json"), []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDirectory := filepath.Join(root, "target", "nre-ci", "waf")
+	if err := os.MkdirAll(artifactDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(artifactDirectory, "waf")
+	if err := os.WriteFile(artifact, []byte("native"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wasm := filepath.Join(artifactDirectory, "plugin.wasm")
+	if err := os.WriteFile(wasm, []byte("wasm"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := releaseManifest(source, "waf", pluginArtifactSpec{kind: artifactRPCService, packageName: "sakullla-waf", artifactName: "waf"}, artifact, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.entry != "artifacts/linux-amd64/waf" || metadata.artifactMode != "executable" {
+		t.Fatalf("waf native artifact destination = %s mode=%s", metadata.entry, metadata.artifactMode)
+	}
+	if metadata.extraFiles["artifacts/waf.wasm"] != wasm {
+		t.Fatalf("waf wasm extra file = %#v", metadata.extraFiles)
+	}
+}
+
 func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string) {
 	t.Helper()
 	directory := filepath.Join(root, "plugins", pluginID)
@@ -416,6 +506,46 @@ func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string)
 		"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "on-failure", "core_fallback": "preserve"},
 		"signature":       map[string]any{"algorithm": "ed25519", "key_id": "sakullla-official-root-2026", "file": "signature.json"},
 		"cleanup":         map[string]any{"instances": "delete", "config": "delete", "owned_data": "delete", "grants": "delete", "shared_refs": "retain", "audit_events": "retain"},
+	}
+	wire, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plugin.yaml"), wire, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeWAFDualFaceManifest(t *testing.T, root string, mutate func(map[string]any)) {
+	t.Helper()
+	directory := filepath.Join(root, "plugins", "waf")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"schema_version": 1, "id": "waf", "version": "0.1.0", "name": "Web 防火墙", "description": "fixture",
+		"compatibility": map[string]any{"host": "*", "agent": "*"},
+		"runtime": map[string]any{
+			"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "waf", "policy_kind": "waf",
+			"policy": map[string]any{
+				"kind": "wasm-policy", "abi": "nre:policy/v1", "host_scope": "agent", "entry": "artifacts/waf.wasm",
+				"resource_budget": map[string]any{"timeout_ms": 2, "memory_bytes": 16777216, "concurrency": 64, "input_bytes": 131072, "output_bytes": 4096},
+				"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "never", "core_fallback": "preserve"},
+			},
+		},
+		"artifacts": []map[string]any{
+			{"path": "artifacts/linux-amd64/waf", "sha256": strings.Repeat("a", 64), "size": 1, "mode": "executable", "goos": "linux", "goarch": "amd64"},
+			{"path": "artifacts/waf.wasm", "sha256": strings.Repeat("b", 64), "size": 1, "mode": "wasm"},
+		},
+		"extension_points": []string{"ui.route", "http.request"},
+		"permissions":      []map[string]string{{"name": "http.rule"}}, "config_schema": "config.schema.json",
+		"resource_budget": map[string]any{"timeout_ms": 1000, "memory_bytes": 65536, "concurrency": 1, "input_bytes": 1, "output_bytes": 1, "cpu_millis": 1, "restarts": 0},
+		"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "on-failure", "core_fallback": "preserve"},
+		"signature":       map[string]any{"algorithm": "ed25519", "key_id": "sakullla-official-root-2026", "file": "signature.json"},
+		"cleanup":         map[string]any{"instances": "delete", "config": "delete", "owned_data": "delete", "grants": "delete", "shared_refs": "retain", "audit_events": "retain"},
+	}
+	if mutate != nil {
+		mutate(document)
 	}
 	wire, err := json.Marshal(document)
 	if err != nil {
