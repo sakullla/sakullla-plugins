@@ -1,6 +1,6 @@
 schema_version: 1
 id: accelerator-sources
-version: 0.1.10
+version: 0.1.11
 name: 资源加速
 description: 为零配置发布的自有域名提供 Docker、GitHub 与 Hugging Face 加速
 compatibility:
