@@ -524,6 +524,10 @@ func (controller *Controller) applyDiskCleanup(ctx context.Context) ([]byte, err
 	})
 }
 
+// These argv shapes must stay exact: the Agent docker command proxy allowlists
+// system df, image prune -f, and builder prune -f --keep-storage <size>.
+// keep-storage is plugin policy (2GB); the proxy only requires a positive
+// k/m/g/t size so unbounded or zero prunes stay denied.
 func systemDfArgs() []string {
 	return []string{"system", "df"}
 }

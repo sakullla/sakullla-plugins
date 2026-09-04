@@ -819,6 +819,26 @@ func TestControllerCallImagePreviewPruneFailsOnCommandError(t *testing.T) {
 		}
 	})
 
+	t.Run("command-not-allowed", func(t *testing.T) {
+		t.Parallel()
+		controller := newCallController(t, t.TempDir(), CommandRunnerFunc(func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+			if strings.Join(args, " ") == "system df" {
+				return []byte("Docker command is not allowed"), errors.New("exit status 1")
+			}
+			t.Fatalf("preview invoked %q", strings.Join(args, " "))
+			return nil, errors.New("unexpected command")
+		}), nil)
+		decoded := callPreviewDiskCleanup(t, controller)
+		if decoded["status"] != diskCleanupStatusFailed || decoded["failure_kind"] != diskCleanupFailureReadonlyStats {
+			t.Fatalf("command-not-allowed preview=%#v", decoded)
+		}
+		images, _ := decoded["images"].(string)
+		if !strings.Contains(images, "Docker command is not allowed") {
+			t.Fatalf("command-not-allowed dropped public reason: %#v", decoded)
+		}
+		assertDiskCleanupPreviewNotTypedHandleLoss(t, decoded)
+	})
+
 	t.Run("one-line-socket-error-keeps-public-reason", func(t *testing.T) {
 		t.Parallel()
 		got := sanitizePruneReport("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\nnpipe:////./pipe/docker_engine\npassword=fixture-value")
