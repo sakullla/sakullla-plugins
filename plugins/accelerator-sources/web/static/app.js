@@ -110,6 +110,22 @@ const updateConversion = () => {
 
 convertInput.addEventListener("input", updateConversion);
 
+const samples = {
+  github: "github.com/cli/cli/releases/download/v2.40.0/gh_linux_amd64.tar.gz",
+  huggingface: "huggingface.co/bert-base-uncased/resolve/main/config.json",
+};
+
+document.querySelectorAll("[data-sample]").forEach((button) => {
+  button.addEventListener("click", () => {
+    convertInput.value = samples[button.dataset.sample] || "";
+    document.querySelectorAll("[data-sample]").forEach((item) => {
+      item.setAttribute("aria-pressed", item === button ? "true" : "false");
+    });
+    updateConversion();
+    convertInput.focus();
+  });
+});
+
 convertCopy.addEventListener("click", async () => {
   if (convertCopy.disabled) {
     return;

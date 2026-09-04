@@ -9,7 +9,10 @@
 <body>
   <header class="masthead">
     <div class="masthead-inner">
-      <a class="wordmark" href="#usage" data-view="usage">资源加速</a>
+      <a class="wordmark" href="#usage" data-view="usage">
+        <span class="wordmark-mark" aria-hidden="true"></span>
+        资源加速
+      </a>
       <nav class="primary" aria-label="资源加速">
         <button type="button" data-view="usage" aria-pressed="true">用法</button>
         <button type="button" data-view="mirrors" aria-pressed="false">镜像</button>
@@ -19,72 +22,120 @@
 
   <main>
     <section class="panel" id="usage" data-panel="usage">
-        <header class="doc-intro">
-          <h1>用当前域名加速每一次下载</h1>
-          <p class="lede">粘贴 GitHub 或 Hugging Face 原始链接即可生成加速地址。Docker 把 <code id="current-host"></code> 当前缀拉取，无需记忆插件内部地址。</p>
-        </header>
+        <div class="hero-row">
+          <header class="doc-intro">
+            <p class="kicker">当前域名即加速入口</p>
+            <h1>用当前域名加速每一次下载</h1>
+            <p class="lede">粘贴 GitHub 或 Hugging Face 原始链接即可生成加速地址。Docker 把 <code id="current-host"></code> 当前缀拉取，无需记忆插件内部地址。</p>
+            <ul class="rail">
+              <li>
+                <span class="rail-mark" data-kind="file" aria-hidden="true"></span>
+                <div>
+                  <strong>GitHub 文件</strong>
+                  <span>发行包、源码压缩包与 raw 文件</span>
+                </div>
+              </li>
+              <li>
+                <span class="rail-mark" data-kind="model" aria-hidden="true"></span>
+                <div>
+                  <strong>Hugging Face</strong>
+                  <span>模型与数据集直链同样改写</span>
+                </div>
+              </li>
+              <li>
+                <span class="rail-mark" data-kind="image" aria-hidden="true"></span>
+                <div>
+                  <strong>Docker 镜像</strong>
+                  <span>域名前缀拉取，或写入仓库镜像</span>
+                </div>
+              </li>
+            </ul>
+          </header>
 
-        <section class="doc-section converter" aria-labelledby="convert-heading">
-          <h2 id="convert-heading">链接转换</h2>
-          <label for="convert-input">原始链接</label>
-          <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
-          <div class="snippet" id="convert-snippet" hidden>
-            <div class="snippet-chrome">
-              <p class="snippet-label">加速链接</p>
-              <button type="button" class="snippet-copy" id="convert-copy" disabled>复制</button>
+          <section class="doc-section converter tone-converter" aria-labelledby="convert-heading">
+            <p class="kicker">即时生成</p>
+            <h2 id="convert-heading">链接转换</h2>
+            <p class="section-copy">支持的地址会立刻加上当前源站前缀；其它域名会给出提示，但仍可复制。</p>
+            <div class="sample-row" role="group" aria-label="示例链接">
+              <button type="button" class="sample-chip" data-sample="github">GitHub 发行包</button>
+              <button type="button" class="sample-chip" data-sample="huggingface">Hugging Face</button>
             </div>
-            <pre class="snippet-body" id="convert-result"></pre>
-          </div>
-          <p class="hint" id="convert-hint" hidden></p>
-        </section>
+            <label for="convert-input">原始链接</label>
+            <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
+            <div class="snippet" id="convert-snippet" hidden>
+              <div class="snippet-chrome">
+                <p class="snippet-label">加速链接</p>
+                <button type="button" class="snippet-copy" id="convert-copy" disabled>复制</button>
+              </div>
+              <pre class="snippet-body" id="convert-result"></pre>
+            </div>
+            <p class="hint" id="convert-hint" hidden></p>
+            <p class="convert-empty">粘贴后会立刻生成可复制的加速链接。</p>
+          </section>
+        </div>
 
-        <section class="doc-section pane-docker" aria-labelledby="docker-heading">
-          <h2 id="docker-heading">Docker</h2>
-          <p>域名前缀直接写在命令里；只有走仓库镜像时才需要写入 <code>daemon.json</code>。</p>
-          <h3>域名前缀</h3>
-          <div class="snippet">
-            <div class="snippet-chrome">
-              <p class="snippet-label">拉取命令</p>
-              <button type="button" class="snippet-copy" data-copy="docker-pull">复制</button>
+        <div class="split-row">
+          <section class="doc-section pane-docker tone-docker" aria-labelledby="docker-heading">
+            <p class="kicker">容器</p>
+            <h2 id="docker-heading">Docker</h2>
+            <p>域名前缀直接写在命令里；只有走仓库镜像时才需要写入 <code>daemon.json</code>。</p>
+            <h3>域名前缀</h3>
+            <div class="snippet">
+              <div class="snippet-chrome">
+                <p class="snippet-label">拉取命令</p>
+                <button type="button" class="snippet-copy" data-copy="docker-pull">复制</button>
+              </div>
+              <pre class="snippet-body" data-example="docker-pull"></pre>
             </div>
-            <pre class="snippet-body" data-example="docker-pull"></pre>
-          </div>
-          <h3>仓库镜像</h3>
-          <ul class="path-ref">
-            <li><span>Linux</span><code>/etc/docker/daemon.json</code></li>
-            <li><span>Windows</span><code>%USERPROFILE%\.docker\daemon.json</code></li>
-            <li><span>macOS</span><code>~/.docker/daemon.json</code></li>
-          </ul>
-          <div class="snippet">
-            <div class="snippet-chrome">
-              <p class="snippet-label">daemon.json</p>
-              <button type="button" class="snippet-copy" data-copy="docker-mirror">复制</button>
+            <h3>仓库镜像</h3>
+            <ul class="path-ref">
+              <li><span>Linux</span><code>/etc/docker/daemon.json</code></li>
+              <li><span>Windows</span><code>%USERPROFILE%\.docker\daemon.json</code></li>
+              <li><span>macOS</span><code>~/.docker/daemon.json</code></li>
+            </ul>
+            <div class="snippet">
+              <div class="snippet-chrome">
+                <p class="snippet-label">daemon.json</p>
+                <button type="button" class="snippet-copy" data-copy="docker-mirror">复制</button>
+              </div>
+              <pre class="snippet-body" data-example="docker-mirror"></pre>
             </div>
-            <pre class="snippet-body" data-example="docker-mirror"></pre>
-          </div>
-        </section>
+          </section>
 
-        <section class="doc-section pane-github" aria-labelledby="github-heading">
-          <h2 id="github-heading">GitHub</h2>
-          <p>发行包、源码压缩包、模型文件通用；脚本里的链接下载时会自动改写。</p>
-          <div class="snippet">
-            <div class="snippet-chrome">
-              <p class="snippet-label">示例地址</p>
-              <button type="button" class="snippet-copy" data-copy="file-sample">复制</button>
+          <section class="doc-section pane-github tone-github" aria-labelledby="github-heading">
+            <p class="kicker">文件</p>
+            <h2 id="github-heading">GitHub</h2>
+            <p>发行包、源码压缩包、模型文件通用；脚本里的链接下载时会自动改写。</p>
+            <div class="snippet">
+              <div class="snippet-chrome">
+                <p class="snippet-label">示例地址</p>
+                <button type="button" class="snippet-copy" data-copy="file-sample">复制</button>
+              </div>
+              <pre class="snippet-body" data-example="file-sample"></pre>
             </div>
-            <pre class="snippet-body" data-example="file-sample"></pre>
-          </div>
-        </section>
+            <ul class="note-list">
+              <li>把原始主机名留在路径里，当前源站只做前缀。</li>
+              <li>Hugging Face 解析链与 GitHub 发行包走同一套改写。</li>
+              <li>脚本、Dockerfile 里的直链在下载时也会被替换。</li>
+            </ul>
+          </section>
+        </div>
     </section>
 
     <section class="panel" id="mirrors" data-panel="mirrors" hidden>
         <header class="doc-intro">
+          <p class="kicker">镜像工作台</p>
           <h1>镜像</h1>
           <p class="lede">搜索 Docker Hub、浏览标签，并把引用加入离线包准备下载。</p>
+          <ol class="steps">
+            <li><span>1</span>搜索镜像</li>
+            <li><span>2</span>挑选标签</li>
+            <li><span>3</span>准备离线包</li>
+          </ol>
         </header>
 
         <div class="mirrors-row">
-          <section class="doc-section" aria-labelledby="search-heading">
+          <section class="doc-section tone-search" aria-labelledby="search-heading">
             <h2 id="search-heading">搜索</h2>
             <form id="search-form">
               <label for="query">镜像名称</label>
@@ -96,7 +147,7 @@
             <div id="results" class="result-list" aria-live="polite"></div>
           </section>
 
-          <section class="doc-section" aria-labelledby="tags-heading">
+          <section class="doc-section tone-tags" aria-labelledby="tags-heading">
             <h2 id="tags-heading">标签</h2>
             <form id="tags-form">
               <label for="tag-image">镜像</label>
@@ -109,7 +160,7 @@
           </section>
         </div>
 
-        <section class="doc-section pane-offline" aria-labelledby="offline-heading">
+        <section class="doc-section pane-offline tone-offline" aria-labelledby="offline-heading">
           <h2 id="offline-heading">离线包</h2>
           <form id="offline-form" class="offline-form">
             <label for="images">镜像引用，每行一个</label>
