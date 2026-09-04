@@ -112,6 +112,33 @@ func TestValidateRejectsBusinessPermissionAndIncompleteDynamicActionGrant(t *tes
 	}
 }
 
+func TestValidateRejectsRPCPolicyKindWithoutNestedFace(t *testing.T) {
+	manifest := validRPCManifest(strings.Repeat("a", 64), 1)
+	manifest.Runtime.PolicyKind = "waf"
+	if err := Validate(manifest, manifest.ID); err == nil || !strings.Contains(err.Error(), "nested agent policy face") {
+		t.Fatalf("rpc policy_kind without nested face error = %v", err)
+	}
+}
+
+func TestValidateAdmitsControlPlaneRPCWithNestedAgentWAF(t *testing.T) {
+	manifest := validDualFaceWAFManifest(strings.Repeat("a", 64), 1)
+	if err := Validate(manifest, manifest.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) || pluginsdk.RuntimeProjectsAgentRPC(manifest.Runtime) {
+		t.Fatalf("dual-face runtime = %+v", manifest.Runtime)
+	}
+	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
+	if !ok || len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
+		t.Fatalf("PolicyStage must keep http.request and omit ui.route: %#v ok=%v", projection, ok)
+	}
+	for _, point := range projection.ExtensionPoints {
+		if point == pluginsdk.ExtensionUIRoute {
+			t.Fatalf("PolicyStage copied ui.route: %#v", projection.ExtensionPoints)
+		}
+	}
+}
+
 func validRPCManifest(digest string, size int64) Manifest {
 	return Manifest{
 		SchemaVersion: 1, ID: "example-plugin", Version: "1.0.0", Name: "Example Plugin", Description: "Example description",
@@ -124,6 +151,21 @@ func validRPCManifest(digest string, size int64) Manifest {
 		Signature:      Signature{Algorithm: "ed25519", KeyID: OfficialKeyID, File: "signature.json"},
 		Cleanup:        Cleanup{Instances: "delete", Config: "delete", OwnedData: "delete", Grants: "delete", SharedRefs: "retain", AuditEvents: "retain"},
 	}
+}
+
+func validDualFaceWAFManifest(digest string, size int64) Manifest {
+	manifest := validRPCManifest(digest, size)
+	manifest.Runtime.HostScope = pluginsdk.HostScopeControlPlane
+	manifest.Runtime.PolicyKind = "waf"
+	manifest.Runtime.Policy = &pluginsdk.RuntimePolicy{
+		Kind: RuntimeWASMPolicy, ABI: PolicyABIV1, HostScope: pluginsdk.HostScopeAgent,
+		Entry:          "artifacts/waf.wasm",
+		ResourceBudget: ResourceBudget{TimeoutMS: 2, MemoryBytes: 16777216, Concurrency: 64, InputBytes: 131072, OutputBytes: 4096},
+		FailurePolicy:  FailurePolicy{OnError: "fail-closed", OnBudget: "fail-closed", Restart: "never", CoreFallback: "preserve"},
+	}
+	manifest.Artifacts = append(manifest.Artifacts, Artifact{Path: "artifacts/waf.wasm", SHA256: strings.Repeat("b", 64), Size: 1, Mode: "wasm"})
+	manifest.ExtensionPoints = []string{pluginsdk.ExtensionUIRoute, pluginsdk.ExtensionHTTPRequest}
+	return manifest
 }
 
 func writeTestFile(t *testing.T, root, name string, data []byte, mode os.FileMode) string {
@@ -154,7 +196,7 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		"doh":                 {name: "HTTPS 域名解析"},
 		"reverse-l4":          {name: "四层反向穿透"},
 		"shadowsocks-server":  {name: "Shadowsocks 服务"},
-		"waf":                 {name: "Web 防火墙", declaredUI: true},
+		"waf":                 {name: "Web 防火墙"},
 		"webdav":              {name: "文件共享"},
 	}
 	pluginsRoot := filepath.Join("..", "..", "plugins")
@@ -181,6 +223,21 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		if id == "accelerator-sources" {
 			if len(manifest.HTTPBackendProviders) != 1 || manifest.HTTPBackendProviders[0].ID != "default" || manifest.HTTPBackendProviders[0].DisplayName != "资源加速" {
 				t.Fatalf("accelerator-sources provider must stay default/资源加速: %#v", manifest.HTTPBackendProviders)
+			}
+		}
+		if id == "waf" {
+			if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
+				t.Fatalf("waf dual-face runtime = %+v", manifest.Runtime)
+			}
+			if manifest.UISchema != "" {
+				t.Fatal("waf must not declare ui.schema.json as the operator path")
+			}
+			if manifest.Runtime.PolicyKind != "waf" || manifest.Runtime.Policy == nil || manifest.Runtime.Policy.Kind != RuntimeWASMPolicy || manifest.Runtime.Policy.Entry != "artifacts/waf.wasm" {
+				t.Fatalf("waf nested wasm-policy = %+v", manifest.Runtime)
+			}
+			projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
+			if !ok || len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
+				t.Fatalf("PolicyStage must keep http.request and omit ui.route: %#v ok=%v", projection, ok)
 			}
 		}
 		if id == "webdav" {

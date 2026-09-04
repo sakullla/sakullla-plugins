@@ -337,6 +337,9 @@ func validateRuntimeAndArtifacts(manifest Manifest) error {
 	runtime := manifest.Runtime
 	switch runtime.Kind {
 	case RuntimeWASMPolicy:
+		if runtime.Policy != nil {
+			return errors.New("wasm-policy cannot declare a nested policy face")
+		}
 		if runtime.ABI != PolicyABIV1 || runtime.HostScope != "agent" || !oneOf(runtime.PolicyKind, "ip", "rate", "waf") || len(manifest.Artifacts) != 1 {
 			return errors.New("wasm-policy requires nre:policy/v1, agent scope, policy_kind, and exactly one artifact")
 		}
@@ -345,10 +348,21 @@ func validateRuntimeAndArtifacts(manifest Manifest) error {
 			return errors.New("wasm-policy artifact must be the single platform-neutral .wasm runtime entry")
 		}
 	case RuntimeRPCService:
-		if runtime.ABI != RPCABIV1 || !oneOf(runtime.HostScope, "agent", "control-plane") || runtime.PolicyKind != "" || runtime.Entry == "" || strings.ContainsAny(runtime.Entry, `/\\`) {
+		if runtime.ABI != RPCABIV1 || !oneOf(runtime.HostScope, "agent", "control-plane") || runtime.Entry == "" || strings.ContainsAny(runtime.Entry, `/\\`) {
 			return errors.New("rpc-service requires nre:rpc/v1, an allowed host_scope, and a logical entry name")
 		}
+		if err := validateOfficialPolicyFace(manifest); err != nil {
+			return err
+		}
+		wasmCount, rpcCount := 0, 0
 		for _, artifact := range manifest.Artifacts {
+			if isOfficialPolicyWASM(manifest, artifact) {
+				if artifact.Mode != "wasm" || artifact.GOOS != "" || artifact.GOARCH != "" || !strings.HasPrefix(artifact.Path, "artifacts/") || path.Ext(artifact.Path) != ".wasm" || artifact.Path != runtime.Policy.Entry {
+					return errors.New("dual-face wasm artifact must be the platform-neutral policy entry")
+				}
+				wasmCount++
+				continue
+			}
 			extension := ""
 			if artifact.GOOS == "windows" {
 				extension = ".exe"
@@ -357,6 +371,14 @@ func validateRuntimeAndArtifacts(manifest Manifest) error {
 			if artifact.Path != want || artifact.Mode != "executable" || !oneOf(artifact.GOOS, "linux", "windows", "darwin", "freebsd") || !oneOf(artifact.GOARCH, "amd64", "arm64") {
 				return fmt.Errorf("RPC artifact %q must match artifacts/<goos>-<goarch>/<entry>[.exe]", artifact.Path)
 			}
+			rpcCount++
+		}
+		if runtime.Policy != nil {
+			if wasmCount != 1 || rpcCount == 0 {
+				return errors.New("dual-face rpc-service requires native executable artifacts and one wasm policy entry")
+			}
+		} else if wasmCount != 0 {
+			return errors.New("rpc-service without a policy face cannot declare wasm artifacts")
 		}
 	default:
 		return fmt.Errorf("runtime kind %q is not allowed", runtime.Kind)
@@ -437,6 +459,62 @@ func validateDynamicUI(filename string, permissions []Permission) error {
 		}
 	}
 	return nil
+}
+
+func validateOfficialPolicyFace(manifest Manifest) error {
+	runtime := manifest.Runtime
+	policyKind := strings.TrimSpace(runtime.PolicyKind)
+	if runtime.Policy == nil {
+		if policyKind != "" {
+			return errors.New("rpc-service policy_kind requires a nested agent policy face")
+		}
+		return nil
+	}
+	if !pluginsdk.RuntimeDeclaresHostScope(runtime, pluginsdk.HostScopeControlPlane) {
+		return errors.New("UI and agent policy dual-face requires a control-plane rpc-service host")
+	}
+	if !oneOf(policyKind, "ip", "rate", "waf") {
+		return errors.New("dual-face rpc-service requires policy_kind ip, rate, or waf")
+	}
+	policy := runtime.Policy
+	if strings.TrimSpace(policy.Kind) != RuntimeWASMPolicy || strings.TrimSpace(policy.ABI) != PolicyABIV1 || strings.TrimSpace(policy.HostScope) != "agent" || strings.TrimSpace(policy.Entry) == "" {
+		return errors.New("nested policy face requires wasm-policy nre:policy/v1 on the agent host")
+	}
+	budget := policy.ResourceBudget
+	if budget.TimeoutMS <= 0 || budget.MemoryBytes <= 0 || budget.Concurrency <= 0 || budget.InputBytes <= 0 || budget.OutputBytes <= 0 || budget.CPUMillis != 0 || budget.Restarts != 0 {
+		return errors.New("nested policy face requires a wasm resource budget without cpu_millis or restarts")
+	}
+	failure := policy.FailurePolicy
+	if !oneOf(failure.OnError, "fail-open", "fail-closed", "degraded") || !oneOf(failure.OnBudget, "fail-open", "fail-closed") || failure.Restart != "never" || failure.CoreFallback != "preserve" {
+		return errors.New("nested policy face failure_policy is outside the v1 wasm allowlist")
+	}
+	if !hasExtension(manifest.ExtensionPoints, pluginsdk.ExtensionHTTPRequest) || !hasExtension(manifest.ExtensionPoints, pluginsdk.ExtensionUIRoute) {
+		return errors.New("control-plane UI and agent policy dual-face requires ui.route and http.request")
+	}
+	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
+	if !ok {
+		return errors.New("dual-face rpc-service must project an Agent policy face")
+	}
+	if policyKind == "waf" && (len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest) {
+		return errors.New("waf PolicyStage must keep http.request and omit ui.route")
+	}
+	return nil
+}
+
+func isOfficialPolicyWASM(manifest Manifest, artifact Artifact) bool {
+	if manifest.Runtime.Policy == nil {
+		return false
+	}
+	return artifact.Mode == "wasm" || artifact.Path == strings.TrimSpace(manifest.Runtime.Policy.Entry)
+}
+
+func hasExtension(points []string, want string) bool {
+	for _, point := range points {
+		if point == want {
+			return true
+		}
+	}
+	return false
 }
 
 func artifactForBuild(manifest Manifest) (Artifact, error) {
