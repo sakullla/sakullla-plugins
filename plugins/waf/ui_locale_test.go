@@ -22,8 +22,17 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(manifest), "ui_schema: ui.schema.json") {
-		t.Fatal("waf plugin.yaml must declare ui_schema: ui.schema.json")
+	if strings.Contains(string(manifest), "ui_schema:") {
+		t.Fatal("waf plugin.yaml must not declare ui_schema as the operator path")
+	}
+	page, err := os.ReadFile(filepath.Join(wafDir, "assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Web 防火墙", "观察中", "拦截", "排除", "自定义规则", "命中与跳过事件"} {
+		if !strings.Contains(string(page), want) {
+			t.Fatalf("management page missing %q", want)
+		}
 	}
 
 	cases := []struct {
@@ -57,20 +66,6 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 			secondsBindings: []string{
 				"/http/source/emission_interval_ns",
 				"/l4/source/emission_interval_ns",
-			},
-		},
-		{
-			rel:   filepath.Join("waf", "ui.schema.json"),
-			title: "Web 防火墙设置",
-			bindings: map[string][]string{
-				"/mode":         {"deny", "observe"},
-				"/custom_rules": nil,
-				"/id":           nil,
-				"/target":       {"path", "query", "headers", "body"},
-				"/needle":       nil,
-				"/exclusions":   nil,
-				"/rule_id":      nil,
-				"/path_prefix":  nil,
 			},
 		},
 	}

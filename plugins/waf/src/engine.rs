@@ -103,6 +103,14 @@ impl PreparedConfig {
             exclusions: [None; MAX_EXCLUSIONS],
         }
     }
+
+    pub const fn with_mode(self, mode: WafMode) -> Self {
+        Self {
+            mode,
+            custom: self.custom,
+            exclusions: self.exclusions,
+        }
+    }
 }
 
 pub fn prepare_config(config: WafConfig<'_>) -> Result<PreparedConfig, ConfigError> {
