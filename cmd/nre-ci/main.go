@@ -465,7 +465,16 @@ func releaseManifest(path, expectedID string, spec pluginArtifactSpec, artifactF
 	}
 	manifestPath := path
 	if bindBuiltArtifact {
-		bound, wire, err := pluginmanifest.RenderBuiltArtifactManifest(manifest, filepath.Dir(path), expectedID, artifactFile)
+		additionalArtifacts := map[string]string{}
+		if spec.kind == artifactRPCService && spec.packageName != "" {
+			wasmFile := filepath.Join(filepath.Dir(artifactFile), "plugin.wasm")
+			for _, artifact := range manifest.Artifacts {
+				if artifact.Mode == "wasm" {
+					additionalArtifacts[artifact.Path] = wasmFile
+				}
+			}
+		}
+		bound, wire, err := pluginmanifest.RenderBuiltArtifactManifest(manifest, filepath.Dir(path), expectedID, artifactFile, additionalArtifacts)
 		if err != nil {
 			return verifiedPlugin{}, fmt.Errorf("bind built artifact in %s: %w", path, err)
 		}

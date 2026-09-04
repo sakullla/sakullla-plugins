@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -489,6 +491,23 @@ func TestReleaseManifestKeepsWAFNativeAndWASMArtifacts(t *testing.T) {
 	if metadata.extraFiles["artifacts/waf.wasm"] != wasm {
 		t.Fatalf("waf wasm extra file = %#v", metadata.extraFiles)
 	}
+	generated, err := pluginmanifest.Load(metadata.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wasmDigest := sha256.Sum256([]byte("wasm"))
+	for _, declared := range generated.Artifacts {
+		if declared.Path == "artifacts/waf.wasm" {
+			if got, want := declared.SHA256, hex.EncodeToString(wasmDigest[:]); got != want {
+				t.Fatalf("generated WAF wasm digest = %s, want %s", got, want)
+			}
+			if got, want := declared.Size, int64(len("wasm")); got != want {
+				t.Fatalf("generated WAF wasm size = %d, want %d", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("generated manifest omitted artifacts/waf.wasm")
 }
 
 func writeRPCManifest(t *testing.T, root, pluginID, id, kind, abi, entry string) {

@@ -78,9 +78,10 @@ func Load(filename string) (Manifest, error) {
 }
 
 // RenderBuiltArtifactManifest returns a deterministic candidate manifest whose
-// artifact digest and size are bound to the artifact produced by the release
-// builder. The source manifest remains unchanged.
-func RenderBuiltArtifactManifest(manifest Manifest, root, expectedID, artifactFile string) (Manifest, []byte, error) {
+// artifact digests and sizes are bound to the artifacts produced by the release
+// builder. The source manifest remains unchanged. additionalArtifacts maps
+// manifest artifact paths to secondary build outputs for dual-face plugins.
+func RenderBuiltArtifactManifest(manifest Manifest, root, expectedID, artifactFile string, additionalArtifacts map[string]string) (Manifest, []byte, error) {
 	if err := ValidateSourceContract(manifest, root, expectedID); err != nil {
 		return Manifest{}, nil, err
 	}
@@ -88,28 +89,39 @@ func RenderBuiltArtifactManifest(manifest Manifest, root, expectedID, artifactFi
 	if err != nil {
 		return Manifest{}, nil, err
 	}
-	info, err := os.Stat(artifactFile)
-	if err != nil || !info.Mode().IsRegular() {
-		return Manifest{}, nil, fmt.Errorf("artifact %q is not a regular build output: %w", artifactFile, err)
-	}
-	digest, err := digestFile(artifactFile)
-	if err != nil {
-		return Manifest{}, nil, err
+	builtArtifacts := make(map[string]string, len(additionalArtifacts)+1)
+	builtArtifacts[declared.Path] = artifactFile
+	for destination, filename := range additionalArtifacts {
+		if current, exists := builtArtifacts[destination]; exists && current != filename {
+			return Manifest{}, nil, fmt.Errorf("artifact %q has conflicting build outputs", destination)
+		}
+		builtArtifacts[destination] = filename
 	}
 	bound := manifest
 	bound.Artifacts = append([]Artifact(nil), manifest.Artifacts...)
-	updated := false
+	updated := make(map[string]struct{}, len(builtArtifacts))
 	for index := range bound.Artifacts {
 		artifact := &bound.Artifacts[index]
-		if artifact.Path == declared.Path && artifact.Mode == declared.Mode && artifact.GOOS == declared.GOOS && artifact.GOARCH == declared.GOARCH {
-			artifact.SHA256 = digest
-			artifact.Size = info.Size()
-			updated = true
-			break
+		filename, ok := builtArtifacts[artifact.Path]
+		if !ok {
+			continue
 		}
+		info, err := os.Stat(filename)
+		if err != nil || !info.Mode().IsRegular() {
+			return Manifest{}, nil, fmt.Errorf("artifact %q is not a regular build output: %w", filename, err)
+		}
+		digest, err := digestFile(filename)
+		if err != nil {
+			return Manifest{}, nil, err
+		}
+		artifact.SHA256 = digest
+		artifact.Size = info.Size()
+		updated[artifact.Path] = struct{}{}
 	}
-	if !updated {
-		return Manifest{}, nil, errors.New("built artifact is absent from plugin manifest")
+	for destination := range builtArtifacts {
+		if _, ok := updated[destination]; !ok {
+			return Manifest{}, nil, fmt.Errorf("built artifact %q is absent from plugin manifest", destination)
+		}
 	}
 	if err := ValidateSource(bound, root, expectedID, artifactFile); err != nil {
 		return Manifest{}, nil, err

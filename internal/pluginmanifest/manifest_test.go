@@ -65,7 +65,7 @@ func TestRenderBuiltArtifactManifestBindsWorkflowOutputWithoutMutatingSource(t *
 	artifactFile := writeTestFile(t, root, "build/example-plugin", artifactData, 0o755)
 	writeTestFile(t, root, "config.schema.json", []byte(`{"type":"object"}`), 0o644)
 	manifest := validRPCManifest(strings.Repeat("a", 64), 1)
-	bound, wire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile)
+	bound, wire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestRenderBuiltArtifactManifestBindsWorkflowOutputWithoutMutatingSource(t *
 	if manifest.Artifacts[0].SHA256 != strings.Repeat("a", 64) || manifest.Artifacts[0].Size != 1 {
 		t.Fatal("source manifest was mutated")
 	}
-	second, secondWire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile)
+	second, secondWire, err := RenderBuiltArtifactManifest(manifest, root, manifest.ID, artifactFile, nil)
 	if err != nil || second.Artifacts[0] != bound.Artifacts[0] || !bytes.Equal(secondWire, wire) {
 		t.Fatalf("generated manifest is not deterministic: %v", err)
 	}

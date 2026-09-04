@@ -36,11 +36,11 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 	}
 
 	cases := []struct {
-		rel             string
-		title           string
-		bindings        map[string][]string
-		absent          []string
-		secondsBindings []string
+		rel                string
+		title              string
+		bindings           map[string][]string
+		absent             []string
+		nanosecondBindings []string
 	}{
 		{
 			rel:   filepath.Join("ip-policy", "ui.schema.json"),
@@ -63,7 +63,7 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 				"/l4/source/emission_interval_ns":   nil,
 				"/l4/source/burst":                  nil,
 			},
-			secondsBindings: []string{
+			nanosecondBindings: []string{
 				"/http/source/emission_interval_ns",
 				"/l4/source/emission_interval_ns",
 			},
@@ -84,9 +84,6 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		}
 		if strings.Contains(string(data), "句柄") {
 			t.Fatalf("%s still exposes host handle copy", test.rel)
-		}
-		if strings.Contains(string(data), "纳秒") {
-			t.Fatalf("%s still contains nanosecond units in form copy", test.rel)
 		}
 		var document map[string]any
 		if err := json.Unmarshal(data, &document); err != nil {
@@ -110,20 +107,20 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 				t.Fatalf("%s still exposes binding %s", test.rel, binding)
 			}
 		}
-		for _, binding := range test.secondsBindings {
+		for _, binding := range test.nanosecondBindings {
 			label := labels[binding]
-			if !strings.Contains(label, "秒") || strings.Contains(label, "纳秒") {
-				t.Fatalf("%s binding %s label = %q, want seconds without nanosecond units", test.rel, binding, label)
+			if !strings.Contains(label, "纳秒") {
+				t.Fatalf("%s binding %s label = %q, want nanosecond units", test.rel, binding, label)
 			}
 			field := fields[binding]
-			if jsonInt(field["minimum"]) != 1 || jsonInt(field["maximum"]) != 3600 {
-				t.Fatalf("%s binding %s bounds = %v–%v, want 1–3600", test.rel, binding, field["minimum"], field["maximum"])
+			if jsonInt(field["minimum"]) != 1 || jsonInt(field["maximum"]) != 3_600_000_000_000 {
+				t.Fatalf("%s binding %s bounds = %v–%v, want 1–3600000000000", test.rel, binding, field["minimum"], field["maximum"])
 			}
-			if jsonInt(field["scale"]) != 1_000_000_000 {
-				t.Fatalf("%s binding %s scale = %v, want 1000000000", test.rel, binding, field["scale"])
+			if _, ok := field["scale"]; ok {
+				t.Fatalf("%s binding %s uses unsupported scale", test.rel, binding)
 			}
-			if unit, _ := field["unit"].(string); unit != "s" {
-				t.Fatalf("%s binding %s unit = %v, want s", test.rel, binding, field["unit"])
+			if _, ok := field["unit"]; ok {
+				t.Fatalf("%s binding %s uses unsupported unit", test.rel, binding)
 			}
 		}
 	}
