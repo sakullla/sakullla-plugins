@@ -58,6 +58,10 @@
   --color-warning-soft: color-mix(in srgb, var(--color-warning) 12%, transparent);
   --color-danger: #b91c1c;
   --color-danger-soft: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  --color-iris: #6d28d9;
+  --color-iris-soft: color-mix(in srgb, var(--color-iris) 10%, transparent);
+  --color-coral: #c2410c;
+  --color-coral-soft: color-mix(in srgb, var(--color-coral) 11%, transparent);
 
   --shadow-hairline: 0 1px 0 color-mix(in srgb, var(--color-text) 5%, transparent);
   --shadow-card:
@@ -102,6 +106,10 @@
   --color-warning-soft: color-mix(in srgb, var(--color-warning) 14%, transparent);
   --color-danger: #f87171;
   --color-danger-soft: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  --color-iris: #a78bfa;
+  --color-iris-soft: color-mix(in srgb, var(--color-iris) 14%, transparent);
+  --color-coral: #fb923c;
+  --color-coral-soft: color-mix(in srgb, var(--color-coral) 14%, transparent);
 
   --shadow-hairline: 0 1px 0 color-mix(in srgb, #000000 30%, transparent);
   --shadow-card:
@@ -258,7 +266,7 @@ main {
   margin-bottom: var(--space-4);
 }
 
-.notices:has(> [hidden]) { margin-bottom: 0; }
+.notices:not(:has(> :not([hidden]))) { margin-bottom: 0; }
 
 .notice {
   margin: 0;
@@ -517,6 +525,18 @@ main {
   color: var(--color-text-secondary);
   background: var(--color-hover);
   border-color: var(--color-border-strong);
+}
+
+.listen-card-mark[data-tone="4"] {
+  color: var(--color-iris);
+  background: var(--color-iris-soft);
+  border-color: color-mix(in srgb, var(--color-iris) 28%, transparent);
+}
+
+.listen-card-mark[data-tone="5"] {
+  color: var(--color-coral);
+  background: var(--color-coral-soft);
+  border-color: color-mix(in srgb, var(--color-coral) 30%, transparent);
 }
 
 .listen-card-identity {
