@@ -38,7 +38,7 @@ async function findBrowser() {
 
 class Page {
   constructor(socket) {
-    this.socket = socket; this.id = 0; this.pending = new Map(); this.errors = [];
+    this.socket = socket; this.id = 0; this.pending = new Map(); this.errors = []; this.navigations = 0;
     socket.addEventListener("message", ({ data }) => {
       const message = JSON.parse(data);
       const pending = this.pending.get(message.id);
@@ -49,6 +49,7 @@ class Page {
         else pending.resolve(message.result);
       }
       if (message.method === "Runtime.exceptionThrown") this.errors.push(message.params.exceptionDetails.text);
+      if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) this.navigations += 1;
     });
   }
   send(method, params = {}) {
@@ -151,9 +152,15 @@ try {
   await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   page = new Page(socket);
   await page.send("Runtime.enable"); await page.send("Page.enable");
+  await page.send("Network.enable"); await page.send("Network.setCacheDisabled", { cacheDisabled: true });
   await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   const test = async (name, run) => { await run(); evidence.results.push({ name, status: "passed" }); console.log(`PASS ${name}`); };
-  const navigate = async (query = "") => { await page.send("Page.navigate", { url: origin + "/" + query }); await eventually(() => page.evaluate(`document.querySelector('#app-loading')?.hidden === true`), "page loaded"); };
+  const navigate = async (query = "") => {
+    const previous = page.navigations;
+    await page.send("Page.navigate", { url: origin + "/" + query });
+    await eventually(() => page.navigations > previous, "new document committed");
+    await eventually(() => page.evaluate(`document.querySelector('#app-loading')?.hidden === true`), "page loaded");
+  };
 
   await test("no selection and explicit node states", async () => {
     await navigate(); await page.waitVisible("#app-node-empty");
@@ -275,6 +282,55 @@ try {
       assert.ok(await page.evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`), `detail does not overflow at ${width}`);
       await page.click("#detail-back");
     }
+  });
+
+  await test("pending workspace refresh never restores detail over a newer navigation", async () => {
+    for (const destination of ["create", "cancel-create", "list", "beta", "node-b", "compose"]) {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+      await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+      const pending = hold("/api/apps?agent_id=node-a");
+      await page.click("#workspace-refresh"); await eventually(() => pending.seen, `held detail refresh for ${destination}`);
+      if (destination === "compose") {
+        await page.click('#detail-nav [data-section="compose"]');
+      } else {
+        await page.click("#detail-back");
+        if (destination === "create" || destination === "cancel-create") {
+          await page.click("#deploy-toggle"); await page.waitVisible("#create-form");
+          await page.click('#create-form input[name="id"]');
+          await page.send("Input.insertText", { text: "refresh-draft" });
+          await page.click('#create-form textarea[name="compose"]');
+          await page.send("Input.insertText", { text: "services:\n  draft:\n    image: nginx:1.27\n" });
+          if (destination === "cancel-create") await page.click("#create-cancel");
+        } else if (destination === "beta") {
+          // A newer list refresh supplies the next application while the first stays held.
+          gates.delete("/api/apps?agent_id=node-a");
+          await page.click("#workspace-refresh"); await page.waitVisible('[data-id="beta"]');
+          await page.click('[data-id="beta"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+        } else if (destination === "node-b") {
+          await page.selectAgent("node-b"); await page.waitVisible('[data-id="bravo"]');
+        }
+      }
+      const detailReads = requests.filter((r) => r.path === "/api/apps/alpha").length;
+      pending.release(); await delay(150);
+      assert.equal(requests.filter((r) => r.path === "/api/apps/alpha").length, detailReads, `stale refresh must not issue a new alpha detail read after ${destination}`);
+      if (destination === "create") {
+        assert.ok(await page.visible("#create-form"));
+        assert.equal(await page.visible("#app-detail"), false);
+        assert.equal(await page.evaluate(`document.querySelector('#create-form input[name="id"]').value`), "refresh-draft");
+        assert.equal(await page.evaluate(`document.querySelector('#create-form textarea[name="compose"]').value`), "services:\n  draft:\n    image: nginx:1.27\n");
+      } else if (destination === "beta") {
+        assert.equal(await page.evaluate(`document.querySelector('#detail-title').textContent`), "beta");
+      } else if (destination === "compose") {
+        assert.ok(await page.visible("#compose-form"));
+        assert.equal(await page.evaluate(`document.querySelector('#detail-title').textContent`), "alpha");
+      } else {
+        assert.equal(await page.visible("#app-detail"), false, `detail stays closed after ${destination}`);
+        assert.equal(await page.visible("#create-form"), false);
+        if (destination === "node-b") assert.equal(await page.evaluate(`document.querySelector('#agent-select').value`), "node-b");
+      }
+    }
+    assert.equal(requests.filter((r) => r.method !== "GET").length, 0, "refresh and navigation never mutate");
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
   });
 
   await test("confirmation Escape and cancel never mutate", async () => {

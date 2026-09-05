@@ -162,6 +162,16 @@ let view = "list";
 let selectedAppID = "";
 let detailSection = "overview";
 let detailApp = null;
+let navigationVersion = 0;
+const advanceNavigation = () => { navigationVersion += 1; };
+const navigationSnapshot = () => ({
+  ...contextSnapshot(), navigation: navigationVersion, view,
+  app: selectedAppID, section: detailSection, create: !createPanel.hidden,
+});
+const navigationCurrent = (snapshot) => contextCurrent(snapshot)
+  && snapshot.navigation === navigationVersion && snapshot.view === view
+  && snapshot.app === selectedAppID && snapshot.section === detailSection
+  && snapshot.create === !createPanel.hidden;
 let logsPaused = false;
 let logsTimer = null;
 let logsLoaded = false;
@@ -923,8 +933,7 @@ const applyCreateTemplate = (name) => {
 const openCreate = async () => {
   if (!engineReady || !agentOnline) return;
   if (view === "detail" && !(await leaveDetail())) return;
-  // Deployment navigation supersedes any detail request still loading from the list.
-  detailRequest += 1;
+  advanceNavigation();
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
   if (idInput) {
@@ -947,6 +956,7 @@ const openCreate = async () => {
 };
 
 const closeCreate = () => {
+  if (createPanel && !createPanel.hidden) advanceNavigation();
   if (createForm) createForm.reset();
   if (idInput) idInput.readOnly = false;
   if (createTitle) createTitle.textContent = "部署应用";
@@ -2701,8 +2711,11 @@ const paintDetail = (app) => {
 };
 
 const setDetailSection = async (section) => {
+  const navigation = navigationSnapshot();
   const next = section || "overview";
   if (next !== "files" && !(await filesWorkspace.confirmLeave())) return false;
+  if (!navigationCurrent(navigation)) return false;
+  if (next !== detailSection) advanceNavigation();
   if (detailSection === "logs" && next !== "logs") stopLogPolling();
   detailSection = next;
   document.querySelectorAll("[data-section-panel]").forEach((panel) => {
@@ -2732,8 +2745,10 @@ const setDetailSection = async (section) => {
 };
 
 const leaveDetail = async ({ force } = {}) => {
+  const navigation = navigationSnapshot();
   if (!force && !(await filesWorkspace.confirmLeave())) return false;
-  detailRequest += 1;
+  if (!navigationCurrent(navigation)) return false;
+  advanceNavigation();
   stopLogPolling();
   resetLogsTerminal();
   if (force) filesWorkspace.discard();
@@ -2752,12 +2767,15 @@ const leaveDetail = async ({ force } = {}) => {
 
 const showDetail = async (appID, section) => {
   const snapshot = contextSnapshot();
+  const previousNavigation = navigationSnapshot();
   if (!(await confirmLeaveEditor())) return;
-  if (!contextCurrent(snapshot)) return;
+  if (!navigationCurrent(previousNavigation)) return;
+  advanceNavigation();
+  const navigation = navigationSnapshot();
   const request = ++detailRequest;
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
-    if (!contextCurrent(snapshot) || request !== detailRequest) return;
+    if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const app = payload.app;
     if (!app) throw Object.assign(new Error("应用已不存在。"), { status: 404 });
     if (app.id !== appID || app.agent_id !== snapshot.agent) throw new Error("应用与当前节点不匹配，请刷新列表。");
@@ -2767,7 +2785,7 @@ const showDetail = async (appID, section) => {
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
   } catch (error) {
-    if (!contextCurrent(snapshot) || request !== detailRequest) return;
+    if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
     await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
@@ -2872,6 +2890,7 @@ const renderWorkspace = async () => {
   const seq = ++workspaceSeq;
   const snapshot = contextSnapshot();
   const keepDetailID = view === "detail" ? selectedAppID : "";
+  const keepDetailApp = detailApp;
   const keepSection = detailSection;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
@@ -2882,6 +2901,7 @@ const renderWorkspace = async () => {
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
   closeCreate();
+  const navigation = navigationSnapshot();
   showStatus("", false);
   renderApps([]);
   if (!selectedAgentID) {
@@ -2924,11 +2944,14 @@ const renderWorkspace = async () => {
   try {
     payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(snapshot.agent)}`);
   } catch (error) {
-    if (seq !== workspaceSeq || !contextCurrent(snapshot)) return;
+    if (seq !== workspaceSeq || !navigationCurrent(navigation)) return;
     throw error;
   }
-  if (seq !== workspaceSeq) return;
+  if (seq !== workspaceSeq || !contextCurrent(snapshot)) return;
+  // Collection data belongs to the node; restoring a detail page also belongs to
+  // the exact navigation and detail object that initiated this refresh.
   renderApps(payload.apps);
+  if (!navigationCurrent(navigation) || detailApp !== keepDetailApp) return;
   if (payload.error) showStatus(payload.error, true);
   if (keepDetailID) {
     const stillThere = (payload.apps || []).some((app) => app.id === keepDetailID);
