@@ -10,7 +10,9 @@
   <header class="masthead">
     <div class="masthead-inner">
       <a class="wordmark" href="#usage" data-view="usage">
-        <span class="wordmark-mark" aria-hidden="true"></span>
+        <span class="wordmark-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M13.2 2.5 4.8 13.6h5.4l-1.4 7.9 8.4-11.1h-5.4l1.4-7.9Z" fill="currentColor"/></svg>
+        </span>
         资源加速
       </a>
       <nav class="primary" aria-label="资源加速">
@@ -24,26 +26,32 @@
     <section class="panel" id="usage" data-panel="usage">
         <div class="hero-row">
           <header class="doc-intro">
-            <p class="kicker">当前域名即加速入口</p>
-            <h1>用当前域名加速每一次下载</h1>
+            <p class="kicker"><span class="kicker-mark" aria-hidden="true"></span>当前域名即加速入口</p>
+            <h1>一个域名，<br><em>加速所有来源。</em></h1>
             <p class="lede">粘贴 GitHub 或 Hugging Face 原始链接即可生成加速地址。Docker 把 <code id="current-host"></code> 当前缀拉取，无需记忆插件内部地址。</p>
             <ul class="rail">
               <li>
-                <span class="rail-mark" data-kind="file" aria-hidden="true"></span>
+                <span class="rail-mark" data-kind="file" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 14h6M9 17h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </span>
                 <div>
                   <strong>GitHub 文件</strong>
                   <span>发行包、源码压缩包与 raw 文件</span>
                 </div>
               </li>
               <li>
-                <span class="rail-mark" data-kind="model" aria-hidden="true"></span>
+                <span class="rail-mark" data-kind="model" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M12 3l2.1 4.6L19 8.3l-3.5 3.6.8 5L12 14.6 7.7 17l.8-5L5 8.3l4.9-.7L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+                </span>
                 <div>
                   <strong>Hugging Face</strong>
                   <span>模型与数据集直链同样改写</span>
                 </div>
               </li>
               <li>
-                <span class="rail-mark" data-kind="image" aria-hidden="true"></span>
+                <span class="rail-mark" data-kind="image" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M4 9h4V5h4v4h3V7h4v4h1a1 1 0 0 1 1 1v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-6a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="9" cy="15" r="1.4" fill="currentColor"/><circle cx="15" cy="15" r="1.4" fill="currentColor"/></svg>
+                </span>
                 <div>
                   <strong>Docker 镜像</strong>
                   <span>域名前缀拉取，或写入仓库镜像</span>
@@ -52,8 +60,8 @@
             </ul>
           </header>
 
-          <section class="doc-section converter tone-converter" aria-labelledby="convert-heading">
-            <p class="kicker">即时生成</p>
+          <section class="doc-section converter" aria-labelledby="convert-heading">
+            <p class="kicker"><span class="kicker-mark" aria-hidden="true"></span>即时生成</p>
             <h2 id="convert-heading">链接转换</h2>
             <p class="section-copy">支持的地址会立刻加上当前源站前缀；其它域名会给出提示，但仍可复制。</p>
             <div class="sample-row" role="group" aria-label="示例链接">
@@ -61,7 +69,7 @@
               <button type="button" class="sample-chip" data-sample="huggingface">Hugging Face</button>
             </div>
             <label for="convert-input">原始链接</label>
-            <input id="convert-input" autocomplete="off" placeholder="粘贴 GitHub / Hugging Face 原始链接">
+            <input id="convert-input" autocomplete="off" spellcheck="false" placeholder="粘贴 GitHub / Hugging Face 原始链接">
             <div class="snippet" id="convert-snippet" hidden>
               <div class="snippet-chrome">
                 <p class="snippet-label">加速链接</p>
@@ -75,9 +83,16 @@
         </div>
 
         <div class="split-row">
-          <section class="doc-section pane-docker tone-docker" aria-labelledby="docker-heading">
-            <p class="kicker">容器</p>
-            <h2 id="docker-heading">Docker</h2>
+          <section class="doc-section pane pane-docker" aria-labelledby="docker-heading">
+            <header class="pane-head">
+              <span class="pane-icon" data-kind="image" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M4 9h4V5h4v4h3V7h4v4h1a1 1 0 0 1 1 1v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-6a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              </span>
+              <div>
+                <p class="kicker"><span class="kicker-mark" aria-hidden="true"></span>容器</p>
+                <h2 id="docker-heading">Docker</h2>
+              </div>
+            </header>
             <p>域名前缀直接写在命令里；只有走仓库镜像时才需要写入 <code>daemon.json</code>。</p>
             <h3>域名前缀</h3>
             <div class="snippet">
@@ -102,9 +117,16 @@
             </div>
           </section>
 
-          <section class="doc-section pane-github tone-github" aria-labelledby="github-heading">
-            <p class="kicker">文件</p>
-            <h2 id="github-heading">GitHub</h2>
+          <section class="doc-section pane pane-github" aria-labelledby="github-heading">
+            <header class="pane-head">
+              <span class="pane-icon" data-kind="file" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              </span>
+              <div>
+                <p class="kicker"><span class="kicker-mark" aria-hidden="true"></span>文件</p>
+                <h2 id="github-heading">GitHub</h2>
+              </div>
+            </header>
             <p>发行包、源码压缩包、模型文件通用；脚本里的链接下载时会自动改写。</p>
             <div class="snippet">
               <div class="snippet-chrome">
@@ -124,8 +146,8 @@
 
     <section class="panel" id="mirrors" data-panel="mirrors" hidden>
         <header class="doc-intro">
-          <p class="kicker">镜像工作台</p>
-          <h1>镜像</h1>
+          <p class="kicker"><span class="kicker-mark" aria-hidden="true"></span>镜像工作台</p>
+          <h1>搜索、选标签、<br><em>打包离线镜像。</em></h1>
           <p class="lede">搜索 Docker Hub、浏览标签，并把引用加入离线包准备下载。</p>
           <ol class="steps">
             <li><span>1</span>搜索镜像</li>
@@ -135,7 +157,7 @@
         </header>
 
         <div class="mirrors-row">
-          <section class="doc-section tone-search" aria-labelledby="search-heading">
+          <section class="doc-section pane" aria-labelledby="search-heading">
             <h2 id="search-heading">搜索</h2>
             <form id="search-form">
               <label for="query">镜像名称</label>
@@ -147,7 +169,7 @@
             <div id="results" class="result-list" aria-live="polite"></div>
           </section>
 
-          <section class="doc-section tone-tags" aria-labelledby="tags-heading">
+          <section class="doc-section pane" aria-labelledby="tags-heading">
             <h2 id="tags-heading">标签</h2>
             <form id="tags-form">
               <label for="tag-image">镜像</label>
@@ -160,11 +182,12 @@
           </section>
         </div>
 
-        <section class="doc-section pane-offline tone-offline" aria-labelledby="offline-heading">
+        <section class="doc-section pane pane-offline" aria-labelledby="offline-heading">
           <h2 id="offline-heading">离线包</h2>
           <form id="offline-form" class="offline-form">
             <label for="images">镜像引用，每行一个</label>
-            <textarea id="images" required placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
+            <textarea id="images" required spellcheck="false" placeholder="alpine:latest&#10;library/nginx:stable"></textarea>
+            <div id="queue" class="queue" aria-live="polite"></div>
             <div class="offline-options">
               <label for="platform">架构（可留空）
                 <select id="platform">

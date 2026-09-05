@@ -43,10 +43,8 @@ const showView = (name) => {
   document.querySelectorAll("[data-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.panel !== name;
   });
-  document.querySelectorAll(".primary button, .wordmark").forEach((item) => {
-    if (item.matches("button")) {
-      item.setAttribute("aria-pressed", item.dataset.view === name ? "true" : "false");
-    }
+  document.querySelectorAll(".primary button").forEach((item) => {
+    item.setAttribute("aria-pressed", item.dataset.view === name ? "true" : "false");
   });
 };
 
@@ -145,6 +143,47 @@ const renderStatus = (target, message) => {
   target.replaceChildren(status);
 };
 
+const imageArea = document.querySelector("#images");
+const queueBoard = document.querySelector("#queue");
+
+const imageLines = () => imageArea.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+
+const writeImageLines = (lines) => {
+  imageArea.value = lines.join("\n");
+  renderQueue();
+};
+
+const tagImageName = () => document.querySelector("#tag-image").value.trim();
+
+const syncTagPressed = () => {
+  const image = tagImageName();
+  const lines = imageLines();
+  document.querySelectorAll("#tag-results .tag-chip").forEach((chip) => {
+    const reference = `${image}:${chip.dataset.tag}`;
+    chip.setAttribute("aria-pressed", lines.includes(reference) ? "true" : "false");
+  });
+};
+
+const renderQueue = () => {
+  const lines = imageLines();
+  queueBoard.replaceChildren(...lines.map((line) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "queue-chip";
+    chip.textContent = line;
+    chip.title = "点击移除";
+    chip.addEventListener("click", () => {
+      writeImageLines(imageLines().filter((item) => item !== line));
+    });
+    return chip;
+  }));
+  syncTagPressed();
+};
+
+imageArea.addEventListener("input", renderQueue);
+document.querySelector("#tag-image").addEventListener("input", syncTagPressed);
+renderQueue();
+
 document.querySelector("#search-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const results = document.querySelector("#results");
@@ -187,7 +226,7 @@ document.querySelector("#tags-form").addEventListener("submit", async (event) =>
   event.preventDefault();
   const board = document.querySelector("#tag-results");
   renderStatus(board, "正在加载标签...");
-  const image = document.querySelector("#tag-image").value.trim();
+  const image = tagImageName();
   try {
     const response = await fetch(`/api/tags?image=${encodeURIComponent(image)}`);
     const payload = await response.json();
@@ -203,18 +242,21 @@ document.querySelector("#tags-form").addEventListener("submit", async (event) =>
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "tag-chip";
+      chip.dataset.tag = entry.name;
       chip.textContent = entry.name;
       chip.addEventListener("click", () => {
-        const area = document.querySelector("#images");
-        const reference = `${image}:${entry.name}`;
-        const lines = area.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-        if (!lines.includes(reference)) {
-          area.value = [...lines, reference].join("\n");
+        const reference = `${tagImageName()}:${entry.name}`;
+        const lines = imageLines();
+        if (lines.includes(reference)) {
+          writeImageLines(lines.filter((item) => item !== reference));
+        } else {
+          writeImageLines([...lines, reference]);
+          imageArea.scrollIntoView({ block: "center" });
         }
-        area.scrollIntoView({ block: "center" });
       });
       return chip;
     }));
+    syncTagPressed();
   } catch (error) {
     renderStatus(board, error.message);
   }
@@ -224,7 +266,7 @@ document.querySelector("#offline-form").addEventListener("submit", async (event)
   event.preventDefault();
   const output = document.querySelector("#download");
   renderStatus(output, "正在准备离线包...");
-  const images = document.querySelector("#images").value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const images = imageLines();
   const platform = document.querySelector("#platform").value;
   const compressedLayers = document.querySelector("#compressed-layers").checked;
   try {
