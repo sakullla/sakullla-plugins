@@ -180,10 +180,6 @@ let filesDirty = false;
 let filesEditorOpen = false;
 let filesMountedFor = "";
 let composeFilledFor = "";
-let discardFileEditor = () => {
-  filesDirty = false;
-  filesEditorOpen = false;
-};
 let syncSelectionActions = () => {};
 const engineCache = new Map();
 const ENGINE_CACHE_MS = 15000;
@@ -899,19 +895,58 @@ if (createForm) {
   });
 }
 
-const confirmLeaveEditor = async () => {
-  if (!filesEditorOpen || !filesDirty) return true;
+// Draft baselines live only in this document, including optional .env values.
+const makeDraft = (read, restore) => ({
+  baseline: read(),
+  get dirty() { return JSON.stringify(read()) !== JSON.stringify(this.baseline); },
+  capture(value = read()) { this.baseline = value; },
+  discard() { restore(this.baseline); },
+});
+const readComposeForm = (form) => Object.fromEntries(Array.from(form.elements)
+  .filter((field) => field.name).map((field) => [field.name, field.type === "checkbox" ? field.checked : field.value]));
+const restoreComposeForm = (form, values) => {
+  Object.entries(values).forEach(([name, value]) => {
+    const field = form.elements.namedItem(name);
+    if (field.type === "checkbox") field.checked = value;
+    else { field.value = value; if (field.tagName === "TEXTAREA") paintCodeEditor(field); }
+  });
+  updateDraftIndicators();
+};
+const createDraft = makeDraft(() => readComposeForm(createForm), (value) => restoreComposeForm(createForm, value));
+const composeDraft = makeDraft(() => readComposeForm(composeForm), (value) => restoreComposeForm(composeForm, value));
+let fileDraft = null;
+const activeDrafts = () => [
+  { id: "create", label: "部署", draft: createDraft, active: !createPanel.hidden },
+  { id: "compose", label: "Compose", draft: composeDraft, active: view === "detail" },
+  { id: "file", label: "文件", draft: fileDraft, active: filesEditorOpen },
+];
+const updateDraftIndicators = () => {
+  document.querySelector("#create-dirty").hidden = !createDraft.dirty;
+  document.querySelector("#compose-dirty").hidden = !composeDraft.dirty;
+};
+const confirmDiscardDrafts = async (ids = ["create", "compose", "file"], { discard = true } = {}) => {
+  const dirty = activeDrafts().filter((item) => ids.includes(item.id) && item.active && item.draft?.dirty);
+  if (!dirty.length) return true;
   const ok = await askConfirm({
-    title: "文本尚未保存",
-    body: "离开将丢弃改动，取消则留在当前编辑。",
-    confirm: "丢弃",
-    cancel: "取消",
-    danger: true,
+    title: "改动尚未保存",
+    body: `${dirty.map((item) => item.label).join("、")}有未保存的输入。丢弃后继续，取消则保留输入和当前位置。`,
+    confirm: "丢弃", cancel: "取消", danger: true,
   });
   if (!ok) return false;
-  discardFileEditor();
+  if (discard) dirty.forEach((item) => item.draft.discard());
+  updateDraftIndicators();
   return true;
 };
+const confirmLeaveEditor = () => confirmDiscardDrafts();
+[createForm, composeForm].forEach((form) => {
+  form.addEventListener("input", updateDraftIndicators);
+  form.addEventListener("change", updateDraftIndicators);
+});
+window.addEventListener("beforeunload", (event) => {
+  if (!activeDrafts().some((item) => item.active && item.draft?.dirty)) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 const markCreateTemplate = (name) => {
   const root = createTemplates || createPanel;
@@ -921,12 +956,14 @@ const markCreateTemplate = (name) => {
   });
 };
 
-const applyCreateTemplate = (name) => {
+const applyCreateTemplate = async (name) => {
   const template = COMPOSE_TEMPLATES[name];
-  if (!template || !composeInput) return;
+  if (!template || !composeInput || busy) return;
+  if (composeInput.value !== createDraft.baseline.compose && !(await confirmDiscardDrafts(["create"], { discard: false }))) return;
   composeInput.value = template.compose || "";
   paintCodeEditor(composeInput);
   markCreateTemplate(name);
+  updateDraftIndicators();
   composeInput.focus();
 };
 
@@ -950,6 +987,10 @@ const openCreate = async () => {
   }
   if (autoUpdateInput) autoUpdateInput.checked = false;
   markCreateTemplate("blank");
+  createDraft.capture();
+  updateDraftIndicators();
+  document.querySelector("#create-context").textContent = `目标节点：${agentDisplayName(selectedAgent())}`;
+  showFormFeedback(createForm, "");
   createPanel.hidden = false;
   syncListPanel();
   if (composeInput) composeInput.focus();
@@ -958,6 +999,8 @@ const openCreate = async () => {
 const closeCreate = () => {
   if (createPanel && !createPanel.hidden) advanceNavigation();
   if (createForm) createForm.reset();
+  createDraft.capture();
+  updateDraftIndicators();
   if (idInput) idInput.readOnly = false;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
@@ -1249,7 +1292,6 @@ const mountAppFiles = () => {
   let selectedPath = "";
   let selectedName = "";
   let selectedDir = false;
-  let savedContent = "";
 
   const setDirty = (next) => {
     filesDirty = Boolean(next);
@@ -1279,7 +1321,6 @@ const mountAppFiles = () => {
   const hideEditor = () => {
     filesEditorOpen = false;
     setDirty(false);
-    savedContent = "";
     if (editor) editor.hidden = true;
     if (editorInput) editorInput.value = "";
     if (binaryHint) binaryHint.hidden = true;
@@ -1288,22 +1329,14 @@ const mountAppFiles = () => {
     syncSelectionActions();
   };
 
-  discardFileEditor = hideEditor;
 
-  const confirmLeave = async () => {
-    if (!filesEditorOpen || !filesDirty) {
-      if (filesEditorOpen && !filesDirty) hideEditor();
-      return true;
-    }
-    const ok = await askConfirm({
-      title: "文本尚未保存",
-      body: "离开将丢弃改动，取消则留在当前编辑。",
-      confirm: "丢弃",
-      cancel: "取消",
-      danger: true,
-    });
-    if (!ok) return false;
+  fileDraft = makeDraft(() => editorInput?.value || "", (value) => {
+    if (editorInput) editorInput.value = value || "";
     hideEditor();
+  });
+  const confirmLeave = async () => {
+    if (!(await confirmDiscardDrafts(["file"]))) return false;
+    if (filesEditorOpen) hideEditor();
     return true;
   };
 
@@ -1323,7 +1356,7 @@ const mountAppFiles = () => {
 
   const showEditor = (path, name, content) => {
     filesEditorOpen = true;
-    savedContent = content;
+    fileDraft.capture(content);
     setDirty(false);
     selectEntry(path, name, false);
     if (browser) browser.hidden = true;
@@ -1457,10 +1490,12 @@ const mountAppFiles = () => {
         if (listEl) listEl.append(item);
       });
       if (emptyEl) emptyEl.hidden = listed !== 0;
+      return true;
     } catch (error) {
       if (listEl) listEl.replaceChildren();
       if (emptyEl) emptyEl.hidden = true;
       showStatus(error.message, true);
+      return false;
     }
   };
 
@@ -1555,7 +1590,7 @@ const mountAppFiles = () => {
     });
   }
   if (newForm) {
-    newForm.addEventListener("submit", (event) => {
+    newForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !app) return;
       const name = newName ? newName.value.trim() : "";
@@ -1571,7 +1606,8 @@ const mountAppFiles = () => {
       }
       if (newName) newName.value = "";
       closeNamedDialog(newDialog);
-      openNewFile(next, name);
+      await openNewFile(next, name);
+      fileDraft.capture(null);
       setDirty(true);
     });
   }
@@ -1650,10 +1686,10 @@ const mountAppFiles = () => {
       setBusy(true);
       try {
         await postAppFiles(app, { action: "write", path: selectedPath, content });
-        savedContent = content;
+        fileDraft.capture(content);
         setDirty(false);
         showStatus("已保存工作区文件。", false);
-        await loadList(currentPath);
+        if (await loadList(currentPath) === false) showStatus("文件已保存，但目录刷新失败。请稍后刷新，无需重复保存。", true, "partial");
       } catch (error) {
         showStatus(error.message, true);
       } finally {
@@ -1677,7 +1713,7 @@ const mountAppFiles = () => {
   syncSelectionActions();
   if (editorInput) {
     editorInput.addEventListener("input", () => {
-      setDirty(editorInput.value !== savedContent);
+      setDirty(fileDraft.dirty);
       paintCodeEditor(editorInput);
     });
   }
@@ -2215,6 +2251,8 @@ const fillCompose = (app) => {
   }
   if (detailAutoUpdateInput) detailAutoUpdateInput.checked = app.auto_update === true;
   composeFilledFor = app.id;
+  composeDraft.capture();
+  updateDraftIndicators();
 };
 
 const renderOverview = (app) => {
@@ -2746,7 +2784,7 @@ const setDetailSection = async (section) => {
 
 const leaveDetail = async ({ force } = {}) => {
   const navigation = navigationSnapshot();
-  if (!force && !(await filesWorkspace.confirmLeave())) return false;
+  if (!force && !(await confirmLeaveEditor())) return false;
   if (!navigationCurrent(navigation)) return false;
   advanceNavigation();
   stopLogPolling();
@@ -2768,7 +2806,7 @@ const leaveDetail = async ({ force } = {}) => {
 const showDetail = async (appID, section) => {
   const snapshot = contextSnapshot();
   const previousNavigation = navigationSnapshot();
-  if (!(await confirmLeaveEditor())) return;
+  if (appID !== selectedAppID && !(await confirmLeaveEditor())) return;
   if (!navigationCurrent(previousNavigation)) return;
   advanceNavigation();
   const navigation = navigationSnapshot();
@@ -2784,11 +2822,13 @@ const showDetail = async (appID, section) => {
     paintDetail(app);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
+    return true;
   } catch (error) {
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
     await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
+    return false;
   }
 };
 
@@ -2926,7 +2966,7 @@ const renderWorkspace = async () => {
     renderEngineBadge(null);
     showContext(error.denied ? "denied" : "detection-failed");
     if (error.denied) engineStatus.textContent = "无权管理该节点";
-    return;
+    return false;
   }
   if (seq !== workspaceSeq) return;
   lastEngine = engine;
@@ -2936,7 +2976,7 @@ const renderWorkspace = async () => {
     leaveDetail({ force: true });
     renderGuide(engine);
     showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : engine?.state === "missing" ? "unready" : "detection-failed");
-    return;
+    return false;
   }
   showContext("");
   workspaceNode.hidden = false;
@@ -2960,7 +3000,7 @@ const renderWorkspace = async () => {
       leaveDetail({ force: true });
       return;
     }
-    await showDetail(keepDetailID, keepSection);
+    return await showDetail(keepDetailID, keepSection);
   } else {
     syncListPanel();
   }
@@ -3012,6 +3052,7 @@ agentPicker.onChange = async (value) => {
 
 document.querySelector("#workspace-refresh")?.addEventListener("click", async () => {
   if (busy || !(await confirmLeaveEditor())) return;
+  composeFilledFor = "";
   try { await renderWorkspace(); } catch (error) { showStatus(error.message, true); }
 });
 
@@ -3174,8 +3215,12 @@ if (diskCleanup) {
   });
 }
 
-if (createCancel) createCancel.addEventListener("click", closeCreate);
-if (createBack) createBack.addEventListener("click", closeCreate);
+const requestCloseCreate = async () => {
+  if (busy || !(await confirmDiscardDrafts(["create"]))) return;
+  closeCreate();
+};
+if (createCancel) createCancel.addEventListener("click", requestCloseCreate);
+if (createBack) createBack.addEventListener("click", requestCloseCreate);
 
 const templateRoot = createTemplates || createPanel;
 if (templateRoot) {
@@ -3272,93 +3317,71 @@ if (copyDaemon) {
   });
 }
 
-if (composeForm) {
-  composeForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (busy || !detailApp) return;
-    if (!selectedAgentID) {
-      showStatus("请先选择一台节点。", true);
-      return;
-    }
-    if (!agentOnline) {
-      showStatus("该节点离线，不能部署。", true);
-      return;
-    }
-    if (!engineReady) {
-      showStatus("引擎未就绪，不能部署。", true);
-      return;
-    }
-    const updating = true;
-    setBusy(true);
-    showStatus("正在更新应用…", false);
+const showFormFeedback = (form, message, state = "failed") => {
+  const node = form.querySelector("[data-form-feedback]");
+  node.textContent = message;
+  node.hidden = !message;
+  node.dataset.state = state;
+  node.setAttribute("role", state === "failed" ? "alert" : "status");
+};
+const submitCompose = async (form, updating) => {
+  if (busy || (updating && !detailApp)) return;
+  const invalid = Array.from(form.elements).find((field) => field.willValidate && (!field.checkValidity() || (field.required && !field.value.trim())));
+  if (invalid) {
+    showFormFeedback(form, invalid.name === "id" ? "填写有效的应用 ID：小写字母、数字及连字符。" : "请填写 Compose YAML。");
+    invalid.setAttribute("aria-invalid", "true");
+    invalid.focus();
+    return;
+  }
+  form.querySelectorAll('[aria-invalid]').forEach((field) => field.removeAttribute("aria-invalid"));
+  if (!selectedAgentID || !agentOnline || !engineReady) {
+    showFormFeedback(form, "当前节点无法部署，请检查节点状态。");
+    return;
+  }
+  const data = new FormData(form);
+  const nextApp = {
+    id: updating ? detailApp.id : String(data.get("id") || "").trim(),
+    agent_id: selectedAgentID,
+    compose: String(data.get("compose") || ""),
+    env: String(data.get("env") || ""),
+    auto_update: data.get("auto_update") === "on",
+  };
+  const navigation = navigationSnapshot();
+  const draft = updating ? composeDraft : createDraft;
+  setBusy(true);
+  showFormFeedback(form, updating ? "正在保存 Compose…" : "正在部署应用…", "running");
+  try {
+    const saved = await deployComposePayload(nextApp);
+    if (!saved) { showFormFeedback(form, "已取消，输入已保留。", "cancelled"); return; }
+    if (!navigationCurrent(navigation)) return;
+    // Submission succeeded. Clear submitted secrets before any fallible refresh.
+    form.elements.namedItem("env").value = "";
+    paintCodeEditor(form.elements.namedItem("env"));
+    draft.capture();
+    updateDraftIndicators();
+    if (updating) composeFilledFor = "";
+    else closeCreate();
+    showStatus(updating ? "已更新应用。" : "已部署应用。", false);
+    showFormFeedback(form, "已保存。", "succeeded");
     try {
-      const saved = await deployComposePayload({
-        id: detailApp.id,
-        agent_id: selectedAgentID,
-        compose: detailComposeInput ? detailComposeInput.value : "",
-        env: detailEnvInput ? String(detailEnvInput.value || "") : "",
-        auto_update: detailAutoUpdateInput ? detailAutoUpdateInput.checked : false,
-      });
-      if (!saved) return;
-      composeFilledFor = "";
-      showStatus("已更新应用。", false);
-      try {
-        await renderWorkspace();
-      } catch (refreshError) {
-        showStatus(`应用已更新，但列表刷新失败：${refreshError.message}`, true);
-      }
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-  });
-}
-
-if (createForm) {
-  createForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (busy) return;
-    if (!selectedAgentID) {
-      showStatus("请先选择一台节点。", true);
-      return;
-    }
-    if (!agentOnline) {
-      showStatus("该节点离线，不能部署。", true);
-      return;
-    }
-    if (!engineReady) {
-      showStatus("引擎未就绪，不能部署。", true);
-      return;
-    }
-    const data = new FormData(createForm);
-    const nextApp = {
-      id: String(data.get("id") || "").trim(),
-      agent_id: selectedAgentID,
-      compose: String(data.get("compose") || ""),
-      env: String(data.get("env") || ""),
-      auto_update: data.get("auto_update") === "on",
-    };
-    const updating = false;
-    setBusy(true);
-    showStatus(updating ? "正在更新应用…" : "正在部署应用…", false);
-    try {
-      const saved = await deployComposePayload(nextApp);
-      if (!saved) return;
-      closeCreate();
+      const refreshed = await renderWorkspace();
+      if (refreshed === false) throw new Error("节点或详情未能刷新");
       showStatus(updating ? "已更新应用。" : "已部署应用。", false);
-      try {
-        await renderWorkspace();
-      } catch (refreshError) {
-        showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true);
-      }
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
+    } catch (refreshError) {
+      showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true, "partial");
+      showFormFeedback(form, "操作已完成，但页面刷新失败。请稍后刷新，无需重复提交。", "partial");
     }
-  });
-}
+  } catch (error) {
+    showFormFeedback(form, error.message);
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+[ [composeForm, true], [createForm, false] ].forEach(([form, updating]) => {
+  form.noValidate = true;
+  form.addEventListener("submit", (event) => { event.preventDefault(); submitCompose(form, updating); });
+});
 
 (async () => {
   try {

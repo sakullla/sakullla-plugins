@@ -8,12 +8,13 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { agents, makeApp, longApp, engineFor } from "./fixtures/workspace.mjs";
+import { runCompose } from "./compose.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const assets = resolve(here, "../../assets/ui");
 const suite = process.argv[process.argv.indexOf("--suite") + 1];
-if (suite !== "workspace") throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+if (!["workspace", "compose"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
 
 async function eventually(check, description, timeout = 10000) {
   const until = Date.now() + timeout;
@@ -38,7 +39,7 @@ async function findBrowser() {
 
 class Page {
   constructor(socket) {
-    this.socket = socket; this.id = 0; this.pending = new Map(); this.errors = []; this.navigations = 0;
+    this.socket = socket; this.id = 0; this.pending = new Map(); this.errors = []; this.navigations = 0; this.javascriptDialogs = [];
     socket.addEventListener("message", ({ data }) => {
       const message = JSON.parse(data);
       const pending = this.pending.get(message.id);
@@ -50,6 +51,10 @@ class Page {
       }
       if (message.method === "Runtime.exceptionThrown") this.errors.push(message.params.exceptionDetails.text);
       if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) this.navigations += 1;
+      if (message.method === "Page.javascriptDialogOpening") {
+        this.javascriptDialogs.push(message.params.type);
+        if (message.params.type === "beforeunload") this.send("Page.handleJavaScriptDialog", {accept:true});
+      }
     });
   }
   send(method, params = {}) {
@@ -93,6 +98,7 @@ class Page {
 }
 
 const requests = [];
+const composeState = { previewError: "", saveError: "", listError: false, risk: false, previewCount: 0, saveCount: 0, lastSave: null, file: "original\n", fileError: false, fileListError: false };
 const gates = new Map();
 let apps = [makeApp("alpha"), makeApp("beta"), longApp, makeApp("bravo", "node-b")];
 const server = createServer(async (request, response) => {
@@ -109,7 +115,40 @@ const server = createServer(async (request, response) => {
       const id = record.agent;
       return id === "denied" ? json({ error: "无权访问" }, 403) : json({ engine: engineFor(id) });
     }
-    if (url.pathname === "/api/apps") return json({ apps: apps.filter((app) => app.agent_id === record.agent) });
+    if (suite === "compose" && request.method === "POST") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const body = raw ? JSON.parse(raw) : {};
+      if (url.pathname === "/api/apps/preview") {
+        composeState.previewCount += 1;
+        if (composeState.previewError || !body.compose?.includes("services:")) return json({error: composeState.previewError || "Compose YAML 无效，请检查服务配置。"}, 422);
+        return json({preview:{digest:"fixture-digest", items:composeState.risk ? [{kind:"privileged",target:"web"}] : []}});
+      }
+      if (url.pathname === "/api/apps") {
+        composeState.saveCount += 1;
+        composeState.lastSave = body;
+        if (composeState.saveError) return json({error:composeState.saveError}, 422);
+        if (body.compose.includes("REQUIRED_VALUE") && !body.env.includes("REQUIRED_VALUE=")) return json({error:"缺少必需环境变量，请填写 .env。"}, 422);
+        const app = makeApp(body.id, body.agent_id, {compose:body.compose, auto_update:body.auto_update});
+        apps = [...apps.filter((item) => item.id !== body.id), app];
+        return json({app});
+      }
+      if (url.pathname.endsWith("/files")) {
+        record.action = body.action;
+        if (body.action === "list") return stateFileList();
+        function stateFileList() {
+          if (composeState.fileListError) return json({error:"目录读取失败。"},500);
+          return json({path:".",entries:[{name:"config.txt",path:"config.txt",dir:false,size:composeState.file.length}]});
+        }
+        if (body.action === "read") return json({content:composeState.file});
+        if (composeState.fileError) return json({error:"文件保存失败。"},500);
+        if (body.action === "write") { composeState.file = body.content; return json({accepted:true}); }
+      }
+    }
+    if (url.pathname === "/api/apps") {
+      if (suite === "compose" && composeState.listError) return json({error:"列表读取失败。"}, 500);
+      return json({ apps: apps.filter((app) => app.agent_id === record.agent) });
+    }
     if (url.pathname === "/api/disk-cleanup") return json({ cleanup: { steps: [] } });
     if (request.method === "POST" && url.pathname === "/api/apps/alpha/delete") {
       apps = apps.filter((app) => app.id !== "alpha");
@@ -136,7 +175,7 @@ function hold(path) {
 }
 
 const evidence = { kind: "fixture-browser", suite, results: [], started_at: new Date().toISOString() };
-const output = resolve(repo, "dist/docker-app-ui-validation/workspace.json");
+const output = resolve(repo, `dist/docker-app-ui-validation/${suite}.json`);
 let browser, profile, page;
 try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -162,6 +201,31 @@ try {
     await eventually(() => page.evaluate(`document.querySelector('#app-loading')?.hidden === true`), "page loaded");
   };
 
+  const capture = async (name, width = 1440) => {
+    await page.send("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
+    await page.evaluate("window.scrollTo(0, 0)");
+    const bounds = await page.evaluate(`(() => {
+      const detail = document.querySelector('#app-detail');
+      if (!detail?.getClientRects().length) return null;
+      const head = detail.querySelector('.detail-head').getBoundingClientRect();
+      const nav = detail.querySelector('.detail-nav').getBoundingClientRect();
+      const context = detail.querySelector('#detail-context').getBoundingClientRect();
+      return {headBottom:head.bottom, navTop:nav.top, contextTop:context.top, headTop:head.top};
+    })()`);
+    if (bounds) assert.ok(bounds.navTop >= bounds.headBottom - 1 && bounds.contextTop >= bounds.headTop, `detail context and navigation must not be clipped: ${JSON.stringify(bounds)}`);
+    const shot = await page.send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false});
+    const ref = `dist/docker-app-ui-validation/${suite}/${name}-${width}.png`;
+    await mkdir(dirname(resolve(repo, ref)), {recursive:true});
+    await writeFile(resolve(repo, ref), Buffer.from(shot.data, "base64"));
+    (evidence.screenshots ||= []).push({ref, width, theme:"light", scenario:`fixture-${name}`});
+  };
+  if (suite === "workspace") {
+    const closeDraft = async () => {
+      await page.click("#create-cancel");
+      await eventually(async () => (await page.visible("#confirm-dialog")) || !(await page.visible("#create-form")), "close deployment or confirm discard");
+      if (await page.visible("#confirm-dialog")) await page.click("#confirm-ok");
+      await eventually(async () => !(await page.visible("#create-form")), "deployment closed");
+    };
   await test("no selection and explicit node states", async () => {
     await navigate(); await page.waitVisible("#app-node-empty");
     for (const [id, panel] of [["offline", "#app-offline"], ["unavailable", "#app-execution-unavailable"], ["failed", "#app-detection-failed"], ["denied", "#app-node-denied"], ["missing", "#engine-guide"]]) {
@@ -186,7 +250,7 @@ try {
     apps = apps.filter((app) => app.agent_id !== "node-b");
     await page.click("#workspace-refresh"); await page.waitVisible("#app-empty");
     await page.click("#deploy-toggle"); await page.waitVisible("#create-form");
-    await page.click("#create-cancel");
+    await closeDraft();
     apps.push(makeApp("bravo", "node-b"));
   });
 
@@ -238,7 +302,7 @@ try {
     assert.equal(await page.evaluate(`document.querySelector('#create-form input[name="id"]').value`), "draft-race");
     assert.equal(await page.evaluate(`document.querySelector('#create-form textarea[name="compose"]').value`), draft);
     assert.equal(requests.filter((r) => r.method !== "GET").length, 0);
-    await page.click("#create-cancel");
+    await closeDraft();
   });
 
   await test("long labels and all actions stay separate across representative widths", async () => {
@@ -300,7 +364,7 @@ try {
           await page.send("Input.insertText", { text: "refresh-draft" });
           await page.click('#create-form textarea[name="compose"]');
           await page.send("Input.insertText", { text: "services:\n  draft:\n    image: nginx:1.27\n" });
-          if (destination === "cancel-create") await page.click("#create-cancel");
+          if (destination === "cancel-create") await closeDraft();
         } else if (destination === "beta") {
           // A newer list refresh supplies the next application while the first stays held.
           gates.delete("/api/apps?agent_id=node-a");
@@ -364,6 +428,9 @@ try {
     assert.match(await page.evaluate(`document.querySelector('#app-status').textContent`), /删除失败/);
     assert.equal(requests.filter((r) => r.method === "POST").length, 2);
   });
+  } else {
+    await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
+  }
   assert.deepEqual(page.errors, [], "no uncaught page exceptions");
   evidence.status = "passed";
   evidence.browser = executable;

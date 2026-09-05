@@ -155,6 +155,14 @@ func TestAppUIRejectsMissingRequiredComposeEnvironmentBeforeDeploy(t *testing.T)
 	if len(controller.Apps()) != 0 {
 		t.Fatalf("rejected deployment mutated apps: %#v", controller.Apps())
 	}
+	corrected := httptest.NewRecorder()
+	controller.ServeHTTP(corrected, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`,"env":"DATABASE_PASSWORD=fixture-corrected-value"}`))
+	if corrected.Code != http.StatusOK || len(controller.Apps()) != 1 {
+		t.Fatalf("corrected draft could not deploy: status=%d body=%s", corrected.Code, corrected.Body.String())
+	}
+	if strings.Contains(corrected.Body.String(), "fixture-corrected-value") {
+		t.Fatal("successful deployment response echoed submitted environment contents")
+	}
 }
 
 type uiMemoryAppState struct {
@@ -1255,6 +1263,15 @@ func TestAppUIRejectsInvalidComposeWithoutMutatingExisting(t *testing.T) {
 	if len(apps) != 1 || apps[0].ID != "media" || apps[0].Image != "nginx:1.27" {
 		t.Fatalf("rejected compose mutated apps=%#v", apps)
 	}
+	invalidEdit := httptest.NewRecorder()
+	controller.ServeHTTP(invalidEdit, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"::: not yaml","auto_update":true,"env":"FIXTURE_VALUE=do-not-echo"}`))
+	if invalidEdit.Code != http.StatusBadRequest || strings.Contains(invalidEdit.Body.String(), "do-not-echo") {
+		t.Fatalf("invalid edit status=%d body=%s", invalidEdit.Code, invalidEdit.Body.String())
+	}
+	unchanged := controller.Apps()
+	if len(unchanged) != 1 || unchanged[0].Compose != apps[0].Compose || unchanged[0].AutoUpdate == nil || apps[0].AutoUpdate == nil || *unchanged[0].AutoUpdate != *apps[0].AutoUpdate {
+		t.Fatalf("rejected edit changed the existing Compose or update policy: before=%#v after=%#v", apps, unchanged)
+	}
 }
 
 func TestAppUIDeploysRelativeBindsAgainstWorkDir(t *testing.T) {
@@ -1760,6 +1777,14 @@ func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
 	failure := strings.Index(text, "但列表刷新失败")
 	if success < 0 || refresh < 0 || failure < 0 || success > refresh {
 		t.Fatalf("deploy success/refresh ordering is missing: success=%d refresh=%d failure=%d", success, refresh, failure)
+	}
+	clearEnv := strings.Index(text, `form.elements.namedItem("env").value = ""`)
+	baseline := strings.Index(text, "draft.capture();")
+	if clearEnv < 0 || baseline < clearEnv || baseline > success {
+		t.Fatal("submitted env must be cleared and the successful baseline recorded before refresh")
+	}
+	if !strings.Contains(text, "confirmDiscardDrafts") || !strings.Contains(text, "beforeunload") {
+		t.Fatal("Compose drafts lack shared navigation and document-unload protection")
 	}
 	page, err := os.ReadFile("assets/ui/index.html")
 	if err != nil {
@@ -3303,8 +3328,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal(".workspace-head is not a left-aligned operation group")
 	}
 	createForm := cssRule(stylesheet, "#create-form")
-	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
-		t.Fatal("#create-form still fills main without a capped operation group")
+	if !strings.Contains(createForm, "max-width: none") {
+		t.Fatal("#create-form does not offer the full editor width")
 	}
 	appList := cssRule(stylesheet, ".app-list")
 	if !strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
@@ -3546,7 +3571,7 @@ func assertFilesManagerPage(t *testing.T) {
 	}
 
 	hideStart := strings.Index(js, "const hideEditor = () => {")
-	hideEnd := strings.Index(js, "discardFileEditor = hideEditor")
+	hideEnd := strings.Index(js, "fileDraft = makeDraft")
 	if hideStart < 0 || hideEnd <= hideStart {
 		t.Fatal("hideEditor is missing")
 	}
@@ -3929,10 +3954,10 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if !strings.Contains(html, `id="create-back"`) || !strings.Contains(html, "返回") {
 		t.Fatal("deploy form is missing 返回")
 	}
-	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createCancel.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy cancel is not wired back to the card wall")
 	}
-	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createBack.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy 返回 is not wired back to the card wall")
 	}
 	if strings.Count(html, `id="create-templates"`) != 1 {
@@ -4083,7 +4108,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, "selectEntry(entryPath") {
 		t.Fatal("clicking a file no longer selects without reading")
 	}
-	if !strings.Contains(js, "文本尚未保存") || !strings.Contains(js, "取消则留在当前编辑") {
+	if !strings.Contains(js, "改动尚未保存") || !strings.Contains(js, "取消则保留输入和当前位置") || !strings.Contains(js, `confirmDiscardDrafts(["file"])`) {
 		t.Fatal("unsaved editor leave confirmation is missing")
 	}
 	if !strings.Contains(js, "自动刷新失败，已保留上次快照") {
@@ -4298,10 +4323,10 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, "COMPOSE_TEMPLATES") || !strings.Contains(js, "applyCreateTemplate") || !strings.Contains(js, "composeInput.value = template.compose") {
 		t.Fatal("deploy form cannot fill a small YAML template")
 	}
-	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createCancel.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy form cannot cancel back to the card wall")
 	}
-	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createBack.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy form cannot return back to the card wall")
 	}
 	syncStart := strings.Index(js, "const syncListPanel = () => {")

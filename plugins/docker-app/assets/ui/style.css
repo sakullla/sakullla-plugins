@@ -702,8 +702,8 @@ h2 { font-size: 1.05rem; letter-spacing: -0.02em; }
   gap: var(--space-4);
   margin-top: 0;
   margin-inline: auto;
-  width: min(46rem, 100%);
-  max-width: min(46rem, 100%);
+  width: 100%;
+  max-width: none;
   padding: 0;
   border: 0;
   background: transparent;
@@ -726,7 +726,7 @@ h2 { font-size: 1.05rem; letter-spacing: -0.02em; }
 }
 
 #app-detail {
-  overflow: hidden;
+  overflow: clip;
   padding: 0 1.15rem 1.15rem;
 }
 
@@ -780,8 +780,8 @@ h2 { font-size: 1.05rem; letter-spacing: -0.02em; }
 #create-form {
   display: grid;
   gap: 1.15rem;
-  width: min(46rem, 100%);
-  max-width: min(46rem, 100%);
+  width: 100%;
+  max-width: none;
   margin-inline: auto;
 }
 
@@ -3011,3 +3011,30 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 }
 #app-status[data-state="partial"] { color: var(--color-warning); background: var(--color-warning-subtle); }
 dialog { max-width: calc(100vw - 2rem); max-height: calc(100dvh - 2rem); overflow: auto; }
+
+.editor-context { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.draft-marker { margin: 0.5rem 0; color: var(--color-warning); font-size: var(--text-sm); }
+.form-feedback { margin: 0; padding: 0.75rem; border: 1px solid var(--color-border-default); border-radius: var(--radius-md); }
+.form-feedback[data-state="failed"] { color: var(--color-danger); background: var(--color-danger-subtle); }
+.form-feedback[data-state="partial"] { color: var(--color-warning); background: var(--color-warning-subtle); }
+.form-feedback[data-state="succeeded"] { color: var(--color-success); }
+[aria-invalid="true"] { outline: 2px solid var(--color-danger); }
+#create-form, #compose-form { display: grid; gap: 1rem; }
+#create-form .code-editor[data-lang="yaml"] textarea,
+#compose-form .code-editor[data-lang="yaml"] textarea { min-height: 20rem; max-height: 32rem; }
+#create-form .code-editor[data-lang="env"] textarea,
+#compose-form .code-editor[data-lang="env"] textarea { min-height: 5rem; max-height: 12rem; }
+#create-form .form-footer, #compose-form .form-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 0.75rem 0;
+  background: var(--color-bg-surface);
+  border-top: 1px solid var(--color-border-default);
+}
+@media (max-width: 720px) {
+  #create-form .code-editor[data-lang="yaml"] textarea,
+  #compose-form .code-editor[data-lang="yaml"] textarea { min-height: 16rem; }
+}
+
+.detail-head-copy #detail-context { flex-basis: 100%; overflow-wrap: anywhere; }

@@ -123,7 +123,10 @@
           <button id="create-back" class="btn-link back-link" type="button">返回</button>
           <h2 id="app-create-title">部署应用</h2>
         </div>
-        <form id="create-form" method="post">
+        <p id="create-context" class="editor-context"></p>
+        <p id="create-dirty" class="draft-marker" hidden>有未保存的输入</p>
+        <form id="create-form" method="post" aria-describedby="create-feedback">
+          <p id="create-feedback" class="form-feedback" data-form-feedback role="alert" hidden></p>
           <label>应用 ID <input name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"></label>
           <div class="create-templates" id="create-templates">
             <div class="create-templates-head">
@@ -178,7 +181,7 @@
           <label class="code-field">Compose .env（可选）
             <span class="code-editor" data-lang="env">
               <pre class="code-editor__highlight" aria-hidden="true"></pre>
-              <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="POSTGRES_PASSWORD=change-me&#10;JWT_SECRET=..."></textarea>
+              <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="可选：VARIABLE=value"></textarea>
             </span>
           </label>
           <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
@@ -197,12 +200,12 @@
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
       <section class="panel" id="app-detail" aria-labelledby="detail-title" hidden>
-        <p id="detail-context"></p>
         <div class="detail-head">
           <button id="detail-back" class="btn-link back-link" type="button">返回列表</button>
           <div class="detail-head-copy">
             <h2 id="detail-title">应用详情</h2>
             <p id="detail-status" class="app-card-status" data-detail-status></p>
+            <p id="detail-context"></p>
           </div>
           <div class="detail-head-actions">
             <a id="detail-open" class="btn-primary" data-action="open" hidden target="_blank" rel="noopener noreferrer">打开</a>
@@ -220,7 +223,10 @@
         </nav>
         <section id="detail-overview" class="detail-section" data-section-panel="overview"></section>
         <section id="detail-compose" class="detail-section" data-section-panel="compose" hidden>
-          <form id="compose-form" method="post">
+          <p class="editor-context">修改当前应用的部署配置，保存后重新部署。留空 .env 会复用节点上的已有文件。</p>
+          <p id="compose-dirty" class="draft-marker" hidden>有未保存的输入</p>
+          <form id="compose-form" method="post" aria-describedby="compose-feedback">
+            <p id="compose-feedback" class="form-feedback" data-form-feedback role="alert" hidden></p>
             <label class="code-field">Compose YAML
               <span class="code-editor" data-lang="yaml">
                 <pre class="code-editor__highlight" aria-hidden="true"></pre>
