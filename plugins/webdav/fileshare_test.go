@@ -226,6 +226,17 @@ func TestMobileManagerToolbar(t *testing.T) {
 	if !strings.Contains(actions, "grid-template-columns: 1fr 1fr") {
 		t.Fatalf("mobile actions are not a two-up row: %s", actions)
 	}
+	if strings.Contains(mobile, ".listing, .listing tbody, .listing tr, .listing td { display: block") {
+		t.Fatal("listing cells still stack as full-width blocks on mobile")
+	}
+	row := cssRule(mobile, ".listing tbody tr")
+	if !strings.Contains(row, "display: flex") {
+		t.Fatalf("listing rows are not a compact flex row: %s", row)
+	}
+	typeCell := cssRule(mobile, ".listing td:nth-child(2)")
+	if !strings.Contains(typeCell, "display: none") {
+		t.Fatalf("type pills still occupy a mobile row: %s", typeCell)
+	}
 }
 
 func TestManagerMkdirUsesInPageDialog(t *testing.T) {
