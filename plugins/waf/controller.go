@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 	"github.com/sakullla/nginx-reverse-emby/plugin-sdk/go/rpcplugin"
 )
 
@@ -64,7 +65,8 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities: requiredGrants(), RequiredGrants: requiredGrants(),
-		Timeouts: timeouts,
+		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
+		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
 		return nil, err

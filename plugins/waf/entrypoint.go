@@ -23,6 +23,7 @@ func wafHandshakeDeclaration() pluginsdk.RPCPluginDeclaration {
 		PluginID:             PluginID,
 		PluginVersion:        PluginVersion,
 		RequiredCapabilities: requiredGrants(),
+		SupportedFeatures:    []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}
 }
 
