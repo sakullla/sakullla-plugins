@@ -26,7 +26,7 @@ const listNode = document.querySelector("#listen-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#listen-count");
 const listPanel = document.querySelector("#app-list-panel");
-const workspaceHead = document.querySelector(".workspace-head");
+const workspaceHead = document.querySelector(".workspace-bar");
 const createDialog = document.querySelector("#create-dialog");
 const createForm = document.querySelector("#create-form");
 const createSubmit = document.querySelector("#create-submit");
@@ -769,7 +769,7 @@ const bindQRImage = (img, user) => {
 const qrButton = (user) => {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "btn-secondary";
+  button.className = "btn btn--ghost";
   button.textContent = "二维码";
   button.addEventListener("click", () => openQR(user));
   return button;
@@ -793,7 +793,7 @@ const openQR = (user) => {
 
 const renderStatusPill = (text, on) => {
   const status = document.createElement("span");
-  status.className = "status-pill";
+  status.className = "pill";
   status.dataset.on = on ? "true" : "false";
   status.textContent = text;
   return status;
@@ -802,7 +802,7 @@ const renderStatusPill = (text, on) => {
 const copyURIButton = (user) => {
   const copy = document.createElement("button");
   copy.type = "button";
-  copy.className = "btn-primary";
+  copy.className = "btn btn--primary";
   copy.textContent = "复制 ss://";
   copy.addEventListener("click", async () => {
     try {
@@ -826,7 +826,7 @@ const shareHint = (user) => {
 
 const renderShare = (user) => {
   const wrap = document.createElement("div");
-  wrap.className = "share-row";
+  wrap.className = "share-strip";
   if (user.share_available && user.uri) {
     wrap.append(copyURIButton(user), qrButton(user));
   } else {
@@ -840,12 +840,12 @@ const userManageButtons = (user) => {
   actions.className = "account-actions";
   const toggle = document.createElement("button");
   toggle.type = "button";
-  toggle.className = "btn-secondary";
+  toggle.className = "btn btn--ghost";
   toggle.textContent = user.enabled ? "停用" : "再启用";
   toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn-link danger";
+  remove.className = "btn btn--text btn--danger";
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
   actions.append(toggle, remove);
@@ -854,7 +854,7 @@ const userManageButtons = (user) => {
 
 const renderUser = (user, { manage = false, compact = false } = {}) => {
   const article = document.createElement("article");
-  article.className = compact ? "account account--card" : "account";
+  article.className = compact ? "account account--compact" : "account";
   article.dataset.id = user.id;
   article.dataset.enabled = user.enabled ? "true" : "false";
   const head = document.createElement("div");
@@ -874,11 +874,11 @@ const primaryUser = (listen) => {
 
 const listenFooterActions = (listen, { detail = false, close = false } = {}) => {
   const actions = document.createElement("div");
-  actions.className = detail ? "dialog-actions" : "listen-card-actions";
+  actions.className = detail ? "dialog-actions" : "listen-actions";
   if (!detail) {
     const open = document.createElement("button");
     open.type = "button";
-    open.className = "btn-secondary";
+    open.className = "btn btn--ghost";
     open.textContent = "详情";
     open.addEventListener("click", () => openDetail(listen));
     actions.append(open);
@@ -886,21 +886,21 @@ const listenFooterActions = (listen, { detail = false, close = false } = {}) => 
   if (isSS2022(listen.method)) {
     const append = document.createElement("button");
     append.type = "button";
-    append.className = "btn-secondary";
+    append.className = "btn btn--ghost";
     append.textContent = "追加用户";
     append.addEventListener("click", () => appendUser(listen));
     actions.append(append);
   }
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn-link danger";
+  remove.className = "btn btn--text btn--danger";
   remove.textContent = "删除监听";
   remove.addEventListener("click", () => deleteListen(listen));
   actions.append(remove);
   if (close) {
     const done = document.createElement("button");
     done.type = "button";
-    done.className = "btn-secondary";
+    done.className = "btn btn--ghost";
     done.textContent = "关闭";
     done.addEventListener("click", closeDetail);
     actions.append(done);
@@ -940,10 +940,10 @@ const renderListen = (listen) => {
     if (users.length > 1) {
       const more = document.createElement("button");
       more.type = "button";
-      more.className = "btn-link more-users";
+      more.className = "btn btn--text more-users";
       more.textContent = `还有 ${users.length - 1} 个用户`;
       more.addEventListener("click", () => openDetail(listen));
-      const share = account.querySelector(".share-row");
+      const share = account.querySelector(".share-strip");
       if (share) share.append(more);
       else account.append(more);
     }
