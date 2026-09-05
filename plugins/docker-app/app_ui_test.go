@@ -3281,9 +3281,10 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal(".app-list is still a scannable column")
 	}
 	for _, want := range []string{
+		"html { margin: 0; min-height: 100%; font-size: 15px; }",
+		"html { font-size: 16px; }",
 		"html { font-size: 17px; }",
 		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
 		"max-width: 72rem",
 	} {
 		if !strings.Contains(stylesheet, want) {
