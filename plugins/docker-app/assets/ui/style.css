@@ -3038,3 +3038,13 @@ dialog { max-width: calc(100vw - 2rem); max-height: calc(100dvh - 2rem); overflo
 }
 
 .detail-head-copy #detail-context { flex-basis: 100%; overflow-wrap: anywhere; }
+
+.service-policy-summary, .service-candidates { margin: 0; width: 100%; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.overview-service { min-width: 0; }
+.update-current { overflow-wrap: anywhere; }
+.update-dialog { width: min(60rem, calc(100vw - 2rem)); }
+.update-service { min-width: 0; }
+@media (max-width: 720px) {
+  .update-service-body, .update-flow { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .update-tools { flex-wrap: wrap; }
+}

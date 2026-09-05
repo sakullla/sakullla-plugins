@@ -3922,10 +3922,10 @@ func assertDetailWorkspacePage(t *testing.T) {
 		t.Fatal("HTTP delete is missing confirmation")
 	}
 
-	if !strings.Contains(runFn, "确认删除 ${app.id}") {
+	if !strings.Contains(runFn, `title: "删除应用"`) || !strings.Contains(runFn, "关联 HTTP 规则") || !strings.Contains(runFn, "confirm: app.id") {
 		t.Fatal("app delete is missing confirmation in detail")
 	}
-	if !strings.Contains(runFn, "确认回滚 ${app.id}") {
+	if !strings.Contains(runFn, `title: "回滚应用"`) || !strings.Contains(runFn, "服务端记录的上一部署版本") || !strings.Contains(runFn, "appVersion(app)") {
 		t.Fatal("rollback is missing confirmation")
 	}
 	if !strings.Contains(js, "askServiceUpdate") || !strings.Contains(html, `id="update-dialog"`) {
@@ -4068,8 +4068,8 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("renderOverview is missing")
 	}
 	overview := js[overviewStart:overviewEnd]
-	if !strings.Contains(overview, "renderServiceLockSelect") || !strings.Contains(overview, "取消忽略") || !strings.Contains(overview, "saveServicePolicy") {
-		t.Fatal("详情 overview does not keep lock/ignore editors")
+	if !strings.Contains(overview, "service-policy-summary") || !strings.Contains(overview, "persistedIgnoredTags") || !strings.Contains(overview, "saveServicePolicy") {
+		t.Fatal("详情 overview must show lock/ignore state and provide confirmed policy editing")
 	}
 	collectStart := strings.Index(js, "const collectUpdatePayload = () => {")
 	collectEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
@@ -4311,7 +4311,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if strings.Contains(runFn[logsGate:logsOpen+logsReturn], "已执行操作") || strings.Contains(runFn[logsGate:logsOpen+logsReturn], "postAppAction") {
 		t.Fatal("logs still reports 已执行操作 without opening the logs section")
 	}
-	if !strings.Contains(runFn, `确认删除 ${app.id}？取消不会更改应用。`) {
+	if !strings.Contains(runFn, `title: "删除应用"`) || !strings.Contains(runFn, "confirm: app.id") || !strings.Contains(runFn, "规则清理失败会中止应用删除") {
 		t.Fatal("app delete no longer requires confirmation")
 	}
 	if strings.Contains(listRender, "删除") {

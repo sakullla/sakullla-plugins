@@ -9,12 +9,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { agents, makeApp, longApp, engineFor } from "./fixtures/workspace.mjs";
 import { runCompose } from "./compose.mjs";
+import { runOperations } from "./operations.mjs";
+import { createOperationsState, handleOperationsRequest } from "./fixtures/operations.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const assets = resolve(here, "../../assets/ui");
 const suite = process.argv[process.argv.indexOf("--suite") + 1];
-if (!["workspace", "compose"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+if (!["workspace", "compose", "operations"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
 
 async function eventually(check, description, timeout = 10000) {
   const until = Date.now() + timeout;
@@ -98,6 +100,7 @@ class Page {
 }
 
 const requests = [];
+const operationsState = createOperationsState();
 const composeState = { previewError: "", saveError: "", listError: false, risk: false, previewCount: 0, saveCount: 0, lastSave: null, file: "original\n", fileError: false, fileListError: false };
 const gates = new Map();
 let apps = [makeApp("alpha"), makeApp("beta"), longApp, makeApp("bravo", "node-b")];
@@ -115,6 +118,7 @@ const server = createServer(async (request, response) => {
       const id = record.agent;
       return id === "denied" ? json({ error: "无权访问" }, 403) : json({ engine: engineFor(id) });
     }
+    if (suite === "operations" && await handleOperationsRequest({url, request, json, state:operationsState, record})) return;
     if (suite === "compose" && request.method === "POST") {
       let raw = "";
       for await (const chunk of request) raw += chunk;
@@ -406,6 +410,7 @@ try {
       assert.equal(await page.evaluate(`document.querySelector('#app-status').dataset.state`), "confirming");
       if (dismiss === "escape") await page.key("Escape"); else await page.click("#confirm-cancel");
       await eventually(async () => !(await page.visible("#confirm-dialog")), "dialog closed");
+      await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'cancelled' && !document.querySelector('.agent-search-select__trigger').disabled`), "cancellation finished");
       assert.equal(await page.evaluate(`document.activeElement.dataset.action`), "delete");
     }
     assert.equal(requests.filter((r) => r.method !== "GET").length, 0, "workspace navigation and cancelled dialogs issue zero mutations");
@@ -423,14 +428,17 @@ try {
     await page.click('[data-id="beta"] [data-action="detail"]'); await page.waitVisible("#app-detail");
     await page.click('#detail-overview [data-action="delete"]'); await page.waitVisible("#confirm-dialog");
     await page.key("Escape"); await eventually(async () => !(await page.visible("#confirm-dialog")), "reopened dialog cancelled");
+    await eventually(() => page.evaluate(`!document.querySelector('.agent-search-select__trigger').disabled`), "cancelled operation controls restored");
     assert.equal(requests.filter((r) => r.method === "POST").length, 1);
     await page.click('#detail-overview [data-action="delete"]'); await page.waitVisible("#confirm-dialog"); await page.click("#confirm-ok");
     await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'failed'`), "failure feedback");
     assert.match(await page.evaluate(`document.querySelector('#app-status').textContent`), /删除失败/);
     assert.equal(requests.filter((r) => r.method === "POST").length, 2);
   });
-  } else {
+  } else if (suite === "compose") {
     await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
+  } else {
+    await runOperations({page, test, navigate, hold, requests, state:operationsState, capture, eventually});
   }
   assert.deepEqual(page.errors, [], "no uncaught page exceptions");
   evidence.status = "passed";
@@ -439,6 +447,10 @@ try {
   for (const name of ["index.html", "app.js", "style.css"]) hash.update(await readFile(join(assets, name)));
   evidence.assets_sha256 = hash.digest("hex");
 } catch (error) {
+  if (page) {
+    evidence.failure_context = await page.evaluate(`({title:document.querySelector('#detail-title')?.textContent,section:document.querySelector('#detail-nav [aria-current="page"]')?.dataset.section,status:document.querySelector('#app-status')?.textContent,fileSelection:document.querySelector('#files-selected')?.textContent,fileEditorHidden:document.querySelector('#files-editor')?.hidden,focus:document.activeElement?.id})`).catch(() => null);
+    evidence.last_requests = requests.slice(-12);
+  }
   evidence.status = "failed"; evidence.error = error.stack; process.exitCode = 1; console.error(error);
 } finally {
   evidence.finished_at = new Date().toISOString();

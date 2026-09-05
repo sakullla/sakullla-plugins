@@ -148,6 +148,7 @@ const askConfirm = async ({ title, body, confirm = "确定", cancel = "取消", 
 };
 
 let busy = false;
+let busyFocusTarget = null;
 let selectedAgentID = "";
 let agentsCache = [];
 let engineReady = false;
@@ -308,11 +309,12 @@ const riskConfirmBody = (preview) => {
   return items.map((item) => `${labels[item.kind] || item.kind}${item.target ? `：${item.target}` : ""}`).join("\n");
 };
 
-const confirmComposeRisk = async (preview) => {
+const confirmComposeRisk = async (preview, target) => {
   if (!requiresRiskConfirm(preview)) return true;
+  const agent = agentsCache.find((agent) => agent.id === target.agent_id);
   const ok = await askConfirm({
     title: "确认高风险配置",
-    body: riskConfirmBody(preview),
+    body: `节点 ${agentDisplayName(agent) || target.agent_id} · 应用 ${target.id}\n${riskConfirmBody(preview)}`,
     confirm: "继续",
     cancel: "取消",
     danger: true,
@@ -327,7 +329,7 @@ const deployComposePayload = async (payload) => {
     agent_id: payload.agent_id,
     compose: payload.compose,
   });
-  if (!(await confirmComposeRisk(previewed.preview))) return null;
+  if (!(await confirmComposeRisk(previewed.preview, payload))) return null;
   const next = { ...payload };
   if (previewed.preview && previewed.preview.digest) next.confirm = previewed.preview.digest;
   return sendPluginJSON("api/apps", next);
@@ -335,6 +337,7 @@ const deployComposePayload = async (payload) => {
 
 const setBusy = (next) => {
   if (next && !busy) {
+    busyFocusTarget = document.activeElement;
     // A mutation owns the target from preview through confirmation and completion.
     // Reads started before it may not restore pages or replace draft/status state.
     readVersion += 1;
@@ -358,6 +361,12 @@ const setBusy = (next) => {
   });
   agentPicker.setDisabled(next);
   if (!next) syncSelectionActions();
+  if (!next && !document.querySelector("dialog[open]")) {
+    const target = busyFocusTarget;
+    if (target?.isConnected && !target.disabled && target.getClientRects().length) target.focus();
+    else document.querySelector("#workspace-refresh")?.focus();
+    busyFocusTarget = null;
+  }
 };
 
 const parseAgentTime = (value) => {
@@ -1163,34 +1172,38 @@ const copyText = async (text) => {
 };
 
 const postAppAction = async (app, action, body = {}) => {
-  await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, body);
+  const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, body);
   closeCreate();
-  if (action === "delete" && selectedAppID === app.id) leaveDetail({ force: true });
-  await renderWorkspace();
+  if (action === "delete" && selectedAppID === app.id) await leaveDetail({ force: true });
+  try {
+    if (await renderWorkspace() === false) throw new Error("节点或详情未能刷新");
+    return { payload };
+  } catch (error) {
+    return { payload, refreshError: error.message };
+  }
 };
-
+const reportActionResult = (result, message) => {
+  if (!result) return;
+  if (result.refreshError) showStatus(`${message}但页面刷新失败：${result.refreshError}`, true, "partial");
+  else showStatus(message, false);
+};
 const postAppActionWithRisk = async (app, action, body = {}) => {
-  try {
-    await postAppAction(app, action, body);
-    return true;
-  } catch (error) {
-    if (action !== "update" || !requiresRiskConfirm(error.preview)) throw error;
-    if (!(await confirmComposeRisk(error.preview))) return false;
-    await postAppAction(app, action, { ...body, confirm: error.preview.digest });
-    return true;
+  let next = { ...body };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await postAppAction(app, action, next);
+    } catch (error) {
+      if (action !== "update" || !requiresRiskConfirm(error.preview)) throw error;
+      const digest = error.preview?.digest;
+      if (!digest || digest === next.confirm) throw new Error("风险确认已失效，请重新打开版本操作。");
+      if (attempt === 2) throw new Error("风险摘要持续变化，请刷新应用后重新确认。");
+      if (!(await confirmComposeRisk(error.preview, app))) return null;
+      next = { ...body, confirm: digest };
+    }
   }
+  throw new Error("风险摘要持续变化，请刷新应用后重新确认。");
 };
-
-const saveServicePolicy = async (app, payload, okMessage) => {
-  setBusy(true);
-  try {
-    if (await postAppActionWithRisk(app, "update", payload)) showStatus(okMessage || "已保存。", false);
-  } catch (error) {
-    showStatus(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-};
+const saveServicePolicy = (app, service) => runAppAction(app, { id: "service-policy", label: "管理版本策略", service });
 
 const MAX_WORKSPACE_FILE_BYTES = 1048576;
 const workspacePathError = "只能使用应用工作区内的相对路径";
@@ -1787,70 +1800,48 @@ const actionButton = (action, className, label) => {
 
 const runAppAction = async (app, action) => {
   if (busy) return;
-  if (action.id === "configure") {
-    showDetail(app.id, "compose");
-    return;
-  }
-  if (action.id === "logs") {
-    showDetail(app.id, "logs");
-    return;
-  }
-  if (action.id === "delete") {
-    if (!await askConfirm({
-      title: "删除应用",
-      body: `确认删除 ${app.id}？取消不会更改应用。`,
-      confirm: "删除",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      await postAppAction(app, "delete", { confirm: app.id });
-      showStatus("已删除应用。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-    return;
-  }
-  if (action.id === "rollback") {
-    if (!await askConfirm({
-      title: "回滚应用",
-      body: `确认回滚 ${app.id} 到上一版本？取消不会更改应用。`,
-      confirm: "回滚",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-  }
-  if (action.id === "update") {
-    const payload = await askServiceUpdate(app);
-    if (!payload) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      if (await postAppActionWithRisk(app, action.id, payload)) showStatus("已更新应用。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-    return;
-  }
+  const trigger = document.activeElement;
+  if (action.id === "configure") { await showDetail(app.id, "compose"); return; }
+  if (action.id === "logs") { await showDetail(app.id, "logs"); return; }
+  const policy = action.id === "service-policy";
+  if (!policy && !(app.actions || []).some((item) => item.id === action.id)) return;
+  if (policy && !serviceImages(app).some((service) => service.name === action.service)) return;
+  if (["update", "rollback", "delete"].includes(action.id) && !(await confirmLeaveEditor())) return;
+  const target = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}`;
   setBusy(true);
+  busyFocusTarget = trigger;
   try {
-    await postAppAction(app, action.id);
-    showStatus(action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
+    if (action.id === "delete") {
+      const rules = Array.isArray(app.rules) ? app.rules : [];
+      const entries = rules.length ? `\n当前显示的入口：${rules.map((rule) => rule.domain || rule.ref).join("、")}` : "";
+      if (!(await askConfirm({
+        title: "删除应用",
+        body: `${target}\n先删除宿主上的关联 HTTP 规则，再停止容器并删除应用工作区。规则清理失败会中止应用删除；规则删除后若应用删除失败，已删除的入口不会恢复。${entries}`,
+        confirm: "删除", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，应用未更改。", false); return; }
+      reportActionResult(await postAppAction(app, "delete", { confirm: app.id }), `${target}：已删除应用。`);
+      return;
+    }
+    if (action.id === "rollback") {
+      if (!(await askConfirm({
+        title: "回滚应用",
+        body: `${target}\n当前镜像：${appVersion(app)}\n目标：服务端记录的上一部署版本。将重新创建应用服务，期间可能短暂不可用。取消不会更改应用。`,
+        confirm: "回滚", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，应用未更改。", false); return; }
+    }
+    if (action.id === "update" || policy) {
+      const payload = await askServiceUpdate(app, { service: action.service, policyOnly: policy });
+      if (!payload) { showStatus("已取消，应用未更改。", false); return; }
+      const result = await postAppActionWithRisk(app, "update", payload);
+      reportActionResult(result, `${target}：${payload.services?.length ? "已更新所选服务。" : "已保存版本策略。"}`);
+      return;
+    }
+    const messages = { start: "已启动应用。", stop: "已停止应用。", restart: "已重启应用。", rollback: "已回滚应用。" };
+    reportActionResult(await postAppAction(app, action.id), `${target}：${messages[action.id] || "已执行操作。"}`);
   } catch (error) {
-    showStatus(error.message, true);
+    // This is the plugin's existing public, server-authoritative deletion stage.
+    const partial = error.message.startsWith("入口规则已按宿主结果删除") || error.message.startsWith("Docker 操作已完成，但应用状态保存失败");
+    showStatus(`${target}：${error.message}`, true, partial ? "partial" : "failed");
   } finally {
     setBusy(false);
   }
@@ -1858,8 +1849,8 @@ const runAppAction = async (app, action) => {
 
 const serviceImages = (app) => (Array.isArray(app.service_images) ? app.service_images.filter((item) => item && item.name) : []);
 
-const askServiceUpdate = async (app) => {
-  const services = serviceImages(app);
+const askServiceUpdate = async (app, options = {}) => {
+  const services = serviceImages(app).filter((service) => !options.service || service.name === options.service);
   if (!updateDialog || typeof updateDialog.showModal !== "function") {
     const selected = services.filter((item) => item.update && item.default_tag).map((item) => ({ name: item.name, tag: item.default_tag }));
     if (!selected.length) return Promise.resolve(null);
@@ -1870,14 +1861,12 @@ const askServiceUpdate = async (app) => {
   if (dialogClosures.has(updateDialog)) await dialogClosures.get(updateDialog);
   const digestRefresh = services.some((item) => Array.isArray(item.candidates) && item.candidates.some((candidate) => candidate.digest));
   if (updateCopy) {
-    updateCopy.textContent = digestRefresh
-      ? `确认拉取 ${app.id} 的新 digest。取消不会改 compose 或运行镜像。`
-      : `按服务选择 ${app.id} 要写入 compose 的目标版本。取消不会改 compose 或运行镜像。`;
+    updateCopy.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}。${digestRefresh ? "有新的镜像 digest。" : ""}仅更新勾选的服务；锁定和忽略在确认后保存。取消不会改 Compose、版本策略或运行镜像。`;
   }
   if (updateServices) {
     updateServices.replaceChildren();
     services.forEach((service) => {
-      updateServices.append(renderUpdateServiceRow(service));
+      updateServices.append(renderUpdateServiceRow(service, options));
     });
     if (!services.length) {
       const empty = document.createElement("p");
@@ -1957,14 +1946,14 @@ const renderIgnoredClearControls = (service, { buttons = false } = {}) => persis
   return label;
 });
 
-const renderUpdateServiceRow = (service) => {
+const renderUpdateServiceRow = (service, options = {}) => {
   const row = document.createElement("section");
   row.className = "update-service";
   row.dataset.service = service.name;
   row.dataset.lock = service.lock || "";
   const candidates = Array.isArray(service.candidates) ? service.candidates : [];
   const defaultTag = service.default_tag || (candidates[0] && candidates[0].tag) || "";
-  const checked = service.update === true && !!defaultTag;
+  const checked = !options.policyOnly && service.update === true && !!defaultTag;
   if (!candidates.length) row.dataset.empty = "true";
   const head = document.createElement("div");
   head.className = "update-service-head";
@@ -1981,7 +1970,7 @@ const renderUpdateServiceRow = (service) => {
   title.textContent = service.name;
   const current = document.createElement("span");
   current.className = "update-current";
-  current.textContent = service.tag || service.image || "未知版本";
+  current.textContent = `当前：${service.image || service.tag || "未知版本"}`;
   identity.append(title);
   pick.append(selectBox, identity);
   head.append(pick);
@@ -2032,6 +2021,7 @@ const renderUpdateServiceRow = (service) => {
   ignoreBox.addEventListener("change", () => {
     if (ignoreBox.checked) selectBox.checked = false;
   });
+  selectBox.addEventListener("change", () => { if (selectBox.checked) ignoreBox.checked = false; });
   tools.append(ignore);
   const lockSelect = renderServiceLockSelect(service);
   if (lockSelect) tools.append(lockSelect);
@@ -2069,9 +2059,7 @@ const collectUpdatePayload = () => {
 };
 
 const actionGroups = (app, options = {}) => {
-  const apiActions = Array.isArray(app.actions) && app.actions.length
-    ? app.actions
-    : [{ id: "configure", label: "编辑" }, { id: "delete", label: "删除" }];
+  const apiActions = Array.isArray(app.actions) ? app.actions : [];
   const primary = document.createElement("div");
   primary.className = "app-actions app-actions-primary";
   const secondary = document.createElement("div");
@@ -2409,24 +2397,16 @@ const renderOverview = (app) => {
         flag.textContent = "无允许候选";
       }
       tools.append(flag);
-      const lockSelect = renderServiceLockSelect(service);
-      if (lockSelect) tools.append(lockSelect);
-      const lock = tools.querySelector(`select[name="lock-${service.name}"]`);
-      if (lock) {
-        lock.addEventListener("change", () => {
-          saveServicePolicy(app, { locks: { [service.name]: lock.value } }, "已保存锁定。");
-        });
-      }
-      renderIgnoredClearControls(service, { buttons: true }).forEach((button) => {
-        button.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          const tag = String(button.dataset.tag || "").trim();
-          if (!tag) return;
-          saveServicePolicy(app, { ignore: [{ service: service.name, tag, clear: true }] }, "已取消忽略。");
-        });
-        tools.append(button);
-      });
+      const currentPolicy = document.createElement("p");
+      currentPolicy.className = "service-policy-summary";
+      currentPolicy.textContent = `锁定：${service.lock || "未锁定"} · 忽略：${persistedIgnoredTags(service).join("、") || "无"}`;
+      const candidates = document.createElement("p");
+      candidates.className = "service-candidates";
+      candidates.textContent = `候选：${(service.candidates || []).map((candidate) => candidate.tag).join("、") || "无允许的候选"}`;
+      const manage = actionButton({ id: "service-policy" }, "btn-secondary", "管理版本策略");
+      manage.dataset.service = service.name;
+      manage.addEventListener("click", () => saveServicePolicy(app, service.name));
+      tools.append(currentPolicy, candidates, manage);
       item.append(tools);
       list.append(item);
     });
@@ -2496,12 +2476,18 @@ const renderOverview = (app) => {
   } else {
     addRow(store, "数据卷", "无数据卷");
   }
+  if (!(app.actions || []).some((action) => action.id === "rollback")) {
+    const history = document.createElement("p");
+    history.className = "hint rollback-unavailable";
+    history.textContent = "当前没有可用的回滚操作；有上一部署记录且节点可执行时才能回滚。";
+    overviewPanel.append(history);
+  }
   overviewPanel.append(sheet);
   actionGroups(app, { overview: true }).forEach((group) => {
     if (group.classList.contains("app-actions-danger")) {
       const copy = document.createElement("p");
       copy.className = "overview-danger-copy";
-      copy.textContent = "删除会停止容器并清掉该应用工作区。";
+      copy.textContent = "删除会先处理关联 HTTP 入口，再停止容器并清掉应用工作区。";
       group.prepend(copy);
     }
     overviewPanel.append(group);
@@ -3054,9 +3040,11 @@ const renderWorkspace = async () => {
       leaveDetail({ force: true });
       return;
     }
-    return await showDetail(keepDetailID, keepSection, composeRevision);
+    const restored = await showDetail(keepDetailID, keepSection, composeRevision);
+    return payload.error ? false : restored;
   } else {
     syncListPanel();
+    return !payload.error;
   }
 };
 
@@ -3184,7 +3172,7 @@ const formatDiskCleanupBody = (cleanup) => {
 };
 
 const formatDiskCleanupResult = (cleanup) => {
-  if (!cleanup) return "已执行磁盘清理。";
+  if (!cleanup) return "未返回磁盘清理结果，请刷新检查节点状态。";
   if (cleanup.unchanged) return "已取消，未清理节点磁盘。";
   const overall = diskCleanupStatusLabel(cleanup.status) || "未知";
   const imageState = diskCleanupStatusLabel(cleanup.images_status) || "未知";
@@ -3211,51 +3199,29 @@ const formatDiskCleanupResult = (cleanup) => {
 
 const runDiskCleanup = async () => {
   if (busy || !selectedAgentID) return;
-  if (!agentOnline) {
-    showStatus("该节点离线，不能清理磁盘。", true);
-    return;
-  }
-  if (!engineReady) {
-    showStatus("引擎未就绪，不能清理磁盘。", true);
-    return;
-  }
-  setBusy(true);
-  let previewed = null;
-  try {
-    const payload = await panelJSON(`api/disk-cleanup?agent_id=${encodeURIComponent(selectedAgentID)}`);
-    previewed = payload.cleanup || null;
-  } catch (error) {
-    showStatus(error.message, true);
-    setBusy(false);
-    return;
-  }
-  setBusy(false);
-  if (diskCleanupPreviewFailed(previewed)) {
-    showStatus(formatDiskCleanupPreviewFailure(previewed), true);
-    return;
-  }
-  const empty = !previewed || previewed.empty === true;
-  const ok = await askConfirm({
-    title: "清理节点磁盘",
-    body: formatDiskCleanupBody(previewed),
-    confirm: empty ? "知道了" : "清理",
-    cancel: empty ? "知道了" : "取消",
-    danger: !empty,
-    hideConfirm: empty,
-  });
-  if (!ok || empty) {
-    showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false);
-    return;
-  }
+  if (!agentOnline || !engineReady) { showStatus("当前节点无法清理磁盘，请检查节点状态。", true); return; }
+  const agentID = selectedAgentID;
+  const target = agentDisplayName(selectedAgent());
   setBusy(true);
   try {
-    const payload = await sendPluginJSON("api/disk-cleanup", {
-      agent_id: selectedAgentID,
-      confirm: true,
+    const payload = await panelJSON(`api/disk-cleanup?agent_id=${encodeURIComponent(agentID)}`);
+    const previewed = payload.cleanup;
+    if (!previewed) throw new Error("未获得磁盘清理预览，请重试。");
+    if (diskCleanupPreviewFailed(previewed)) throw new Error(formatDiskCleanupPreviewFailure(previewed));
+    const empty = previewed.empty === true;
+    const ok = await askConfirm({
+      title: `清理节点磁盘 · ${target}`, body: formatDiskCleanupBody(previewed),
+      confirm: "清理", cancel: empty ? "知道了" : "取消", danger: !empty, hideConfirm: empty,
     });
-    const cleanup = payload.cleanup || {};
-    const failed = cleanup.status === "failed" || cleanup.status === "partial";
-    showStatus(formatDiskCleanupResult(cleanup), failed);
+    if (!ok || empty) { showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false, "cancelled"); return; }
+    showStatus(`正在清理节点 ${target}…`, false, "running");
+    const result = await sendPluginJSON("api/disk-cleanup", { agent_id: agentID, confirm: true });
+    const cleanup = result.cleanup;
+    if (!cleanup || !["success", "partial", "failed"].includes(cleanup.status)) throw new Error("未获得可确认的清理结果，请刷新检查节点状态。");
+    const steps = [cleanup.images_status, cleanup.builder_cache_status];
+    const allDone = steps.every((step) => step === "success" || step === "skipped");
+    const state = cleanup.unchanged ? "cancelled" : cleanup.status === "partial" ? "partial" : cleanup.status === "success" && allDone ? "succeeded" : "failed";
+    showStatus(`节点 ${target}\n${formatDiskCleanupResult(cleanup)}`, state === "partial" || state === "failed", state);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
