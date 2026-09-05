@@ -125,6 +125,80 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     assert.ok(await page.evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`));
   });
 
+  await test("failed listing for a new owner cannot reuse or operate old file rows", async () => {
+    for (const [agent,id] of [["node-b","bravo"],["node-a","no-ports"]]) {
+      await reset();
+      await page.click(file("root.txt"));
+      await page.evaluate(`window.oldFileRow = document.querySelector('[data-path="root.txt"] .files-name')`);
+      state.listErrorOwner = `${agent}/${id}`;
+      if (agent === "node-b") { await page.selectAgent(agent); await page.waitVisible('[data-id="bravo"]'); }
+      else { await page.click("#detail-back"); await page.waitVisible('[data-id="no-ports"]'); }
+      await page.click(`[data-id="${id}"] [data-action="detail"]`); await page.waitVisible("#app-detail");
+      await page.click('#detail-nav [data-section="files"]');
+      await eventually(() => page.evaluate(`document.querySelector('#files-status').dataset.state === 'failed'`),"new owner listing failed");
+      assert.equal(await page.evaluate(`document.querySelectorAll('#files-list li').length`),0,`${agent}/${id} must not show alpha files`);
+      await page.evaluate(`window.oldFileRow.click()`);
+      for (const control of ["files-edit","files-download","files-delete"]) assert.equal(await page.evaluate(`document.querySelector('#${control}').disabled`),true,"detached old row cannot select a target in the new owner");
+      assert.equal(fileWrites().length,0);
+      const expected = agent === "node-b" ? "bravo original\n" : "other application original\n";
+      assert.equal(state.filesByOwner.get(`${agent}/${id}`).get("root.txt"),expected);
+      state.listErrorOwner = ""; await page.click("#files-refresh"); await page.waitVisible('[data-path="root.txt"]');
+      await page.click(file("root.txt")); await page.click("#files-edit"); await page.waitVisible("#files-editor");
+      assert.equal(await value("#files-editor textarea"),expected,"same-name file comes from the selected owner");
+      assert.equal(fileWrites().length,0);
+    }
+  });
+
+  await test("same-owner directory snapshots and stale row callbacks retain their path identity", async () => {
+    await reset("files","alpha",() => state.files.set("docs/root.txt","nested original\n"));
+    await page.evaluate(`window.oldFileRow = document.querySelector('[data-path="root.txt"] .files-name')`);
+    state.listError = true; await page.click(file("docs"));
+    await eventually(() => page.evaluate(`document.querySelector('#files-list').dataset.stale === 'true'`),"same-owner failed navigation keeps a labelled snapshot");
+    assert.ok(await page.visible('[data-path="root.txt"]'));
+    assert.equal(await text("#files-breadcrumb"),"工作区");
+    state.listError = false; await page.click(file("docs")); await page.waitVisible('[data-path="docs/root.txt"]');
+    await page.evaluate(`window.oldFileRow.click()`);
+    assert.equal(await page.evaluate(`document.querySelector('#files-delete').disabled`),true,"old root row cannot select in the newer directory snapshot");
+    await page.click(file("docs/root.txt")); await page.click("#files-edit"); await page.waitVisible("#files-editor");
+    assert.equal(await value("#files-editor textarea"),"nested original\n");
+    assert.equal(await text("#files-editor-name"),"docs/root.txt");
+    await page.click('#detail-nav [data-section="overview"]');
+    await page.evaluate(`window.oldFileRow.click()`);
+    assert.equal(fileWrites().length,0);
+  });
+
+  await test("mkdir success remains explicit when its directory refresh fails", async () => {
+    await reset(); state.listErrorAfterMkdir = true;
+    await page.click("#files-mkdir"); await page.waitVisible("#files-mkdir-dialog");
+    await fill("#files-mkdir-name","created-before-refresh-failure"); await page.click('#files-mkdir-form button[type="submit"]');
+    await idle();
+    assert.equal(state.files.has("created-before-refresh-failure"),true);
+    assert.equal(await page.evaluate(`document.querySelector('#app-status').dataset.state`),"partial");
+    assert.match(await text("#app-status"),/已创建.*刷新失败/);
+    assert.equal(fileWrites().filter((call) => call.body.action === "mkdir").length,1);
+    state.listError = false; await page.click("#files-refresh"); await page.waitVisible('[data-path="created-before-refresh-failure"]');
+    assert.equal(fileWrites().filter((call) => call.body.action === "mkdir").length,1);
+  });
+
+  await test("file dialogs and pending choosers keep their directory target", async () => {
+    await reset();
+    const pending = hold("/api/apps/alpha/files");
+    await page.click(file("docs")); await eventually(() => pending.seen,"directory navigation held");
+    await page.click("#files-mkdir"); await page.waitVisible("#files-mkdir-dialog");
+    await fill("#files-mkdir-name","pinned-parent");
+    pending.release(); await delay(150);
+    await page.click('#files-mkdir-form button[type="submit"]'); await idle();
+    assert.equal(state.files.has("pinned-parent"),true);
+    assert.equal(state.files.has("docs/pinned-parent"),false);
+
+    await reset();
+    const upload = join(outputDir,"directory-bound-upload.txt"); await writeFile(upload,"fixture content\n");
+    await page.click("#files-upload");
+    await page.click(file("docs")); await page.waitVisible('[data-path="docs/config.txt"]');
+    await attach(upload); await delay(150);
+    assert.equal(fileWrites().length,0,"directory change cancels the older chooser target");
+  });
+
   await test("a file chooser from an old node cannot upload into the new context", async () => {
     await reset();
     const path = join(outputDir,"node-bound-upload.txt"); await writeFile(path,"fixture content\n");

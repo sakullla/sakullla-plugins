@@ -4,7 +4,7 @@ export function createResourcesState() {
   const state = { reset() {
     Object.assign(this, {
       files:new Map([[".",null],["docs",null],["docs/config.txt","initial text\n"],["root.txt","root text\n"],["binary.bin","\u0000binary"],["large.txt","x".repeat(1048577)]]),
-      calls:[], logsCalls:[], readError:false, writeError:false, listError:false, rulesError:false, rulesWriteError:false, rulesErrorAfterWrite:false,
+      calls:[], logsCalls:[], readError:false, writeError:false, listError:false, listErrorOwner:"", listErrorAfterMkdir:false, rulesError:false, rulesWriteError:false, rulesErrorAfterWrite:false,
       logs:{web:"web ready\n",worker:"worker ready\n"}, logsError:false,
       apps:[
         makeApp("alpha","node-a",{ports:[8080,9090],services:["web","worker"],rules:[
@@ -16,6 +16,11 @@ export function createResourcesState() {
         makeApp("bravo","node-b"),
       ],
     });
+    this.filesByOwner = new Map([
+      ["node-a/alpha",this.files],
+      ["node-b/bravo",new Map([[".",null],["root.txt","bravo original\n"]])],
+      ["node-a/no-ports",new Map([[".",null],["root.txt","other application original\n"]])],
+    ]);
   }};
   state.reset(); return state;
 }
@@ -43,26 +48,28 @@ export async function handleResourcesRequest({url,request,json,state,record}) {
     return true;
   }
   if (action === "files") {
+    const owner = `${app.agent_id}/${app.id}`;
+    const files = state.filesByOwner.get(owner);
     const path = body.path;
     if (!path || path.startsWith("/") || path.includes("..") || path.includes(":")) { json({error:"只能使用应用工作区内的相对路径"},400); return true; }
     if (body.action === "list") {
-      if (state.listError) { json({error:"目录读取失败。"},500); return true; }
+      if (state.listError || state.listErrorOwner === owner) { json({error:"目录读取失败。"},500); return true; }
       const prefix = path === "." ? "" : path + "/";
-      const entries = [...state.files.entries()].filter(([name]) => name !== path && name.startsWith(prefix) && !name.slice(prefix.length).includes("/"))
+      const entries = [...files.entries()].filter(([name]) => name !== path && name.startsWith(prefix) && !name.slice(prefix.length).includes("/"))
         .map(([name,content]) => ({name:name.slice(prefix.length),path:name,dir:content === null,size:content?.length}));
       json({path,entries}); return true;
     }
     if (body.action === "read") {
       if (state.readError) json({error:"文件读取失败。"},500);
-      else if (!state.files.has(path)) json({error:"文件不存在。"},404);
-      else json({content:state.files.get(path)});
+      else if (!files.has(path)) json({error:"文件不存在。"},404);
+      else json({content:files.get(path)});
       return true;
     }
     if (state.writeError) { json({error:"文件写入失败。"},500); return true; }
-    if (body.action === "mkdir") state.files.set(path,null);
-    else if (body.action === "write") state.files.set(path,body.content);
+    if (body.action === "mkdir") { files.set(path,null); if (state.listErrorAfterMkdir) state.listError = true; }
+    else if (body.action === "write") files.set(path,body.content);
     else if (body.action === "delete") {
-      for (const name of [...state.files.keys()]) if (name === path || name.startsWith(path+"/")) state.files.delete(name);
+      for (const name of [...files.keys()]) if (name === path || name.startsWith(path+"/")) files.delete(name);
     } else { json({error:"Unknown fixture file operation"},400); return true; }
     json({accepted:true}); return true;
   }

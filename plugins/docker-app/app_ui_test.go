@@ -3572,7 +3572,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if !strings.Contains(crumbFn, `addCrumb("工作区", ".", parts.length === 0)`) {
 		t.Fatal("breadcrumb is missing the workspace root")
 	}
-	if !strings.Contains(crumbFn, `button.addEventListener("click", () => requestList(path))`) {
+	if !strings.Contains(crumbFn, `button.addEventListener("click", () => { if (snapshotCurrent(snapshot)) requestList(path); })`) {
 		t.Fatal("breadcrumb cannot return to a parent directory")
 	}
 	if !strings.Contains(crumbFn, "upBtn.hidden = currentPath === \".\"") {
@@ -3674,7 +3674,7 @@ func assertFilesManagerPage(t *testing.T) {
 		t.Fatal("setBusy no longer toggles workspace controls")
 	}
 
-	syncBodyStart := strings.Index(js, "const hasFile = Boolean(selectedPath) && !selectedDir;")
+	syncBodyStart := strings.Index(js, "const hasFile = selectionCurrent() && Boolean(selectedPath) && !selectedDir;")
 	if syncBodyStart < 0 {
 		t.Fatal("syncSelectionActions is missing")
 	}
@@ -3682,7 +3682,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if end := strings.Index(syncBody, "};"); end > 0 {
 		syncBody = syncBody[:end]
 	}
-	if !strings.Contains(syncBody, "editBtn.disabled = !hasFile") || !strings.Contains(syncBody, "downloadBtn.disabled = !hasFile") || !strings.Contains(syncBody, "deleteBtn.disabled = !hasTarget") {
+	if !strings.Contains(syncBody, "editBtn.disabled = busy || !hasFile") || !strings.Contains(syncBody, "downloadBtn.disabled = busy || !hasFile") || !strings.Contains(syncBody, "deleteBtn.disabled = busy || !hasTarget") {
 		t.Fatal("syncSelectionActions no longer disables edit/download/delete when nothing is selected")
 	}
 	if !strings.Contains(js, `let selectedPath = "";`) {
@@ -3711,15 +3711,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if mkdirPost < 0 {
 		t.Fatal("mkdir does not write a workspace directory")
 	}
-	start := mkdirPost - 400
-	if start < 0 {
-		start = 0
-	}
-	end := mkdirPost + 400
-	if end > len(js) {
-		end = len(js)
-	}
-	mkdirWindow := js[start:end]
+	mkdirWindow := mkdirFn
 	if !strings.Contains(mkdirWindow, "setBusy(true)") || !strings.Contains(mkdirWindow, "setBusy(false)") {
 		t.Fatal("mkdir does not go through setBusy")
 	}

@@ -1283,6 +1283,7 @@ const mountAppFiles = () => {
   if (!template || !filesPanel) {
     return {
       bind() {},
+      unbind() {},
       confirmLeave: () => true,
       discard() {},
     };
@@ -1337,6 +1338,18 @@ const mountAppFiles = () => {
   let selectedDir = false;
   let fileReadSequence = 0;
   let fileListSequence = 0;
+  let boundOwner = "";
+  let bindingVersion = 0;
+  let listingSnapshot = null;
+  let selectedOwner = "";
+  let selectedBinding = 0;
+  const namedTargets = new WeakMap();
+  const ownerKey = (value) => value ? `${value.agent_id}/${value.id}` : "";
+  const bindingCurrent = (owner = boundOwner, version = bindingVersion) => !!owner
+    && owner === boundOwner && owner === ownerKey(app) && version === bindingVersion
+    && app.agent_id === selectedAgentID && app.id === selectedAppID && view === "detail" && detailSection === "files";
+  const selectionCurrent = () => bindingCurrent(selectedOwner, selectedBinding);
+  const snapshotCurrent = (snapshot) => snapshot && snapshot === listingSnapshot && bindingCurrent(snapshot.owner, snapshot.binding);
 
   const setDirty = (next) => {
     filesDirty = Boolean(next);
@@ -1351,11 +1364,11 @@ const mountAppFiles = () => {
   };
 
   syncSelectionActions = () => {
-    const hasFile = Boolean(selectedPath) && !selectedDir;
-    const hasTarget = Boolean(selectedPath) && selectedPath !== ".";
-    if (editBtn) editBtn.disabled = !hasFile;
-    if (downloadBtn) downloadBtn.disabled = !hasFile;
-    if (deleteBtn) deleteBtn.disabled = !hasTarget;
+    const hasFile = selectionCurrent() && Boolean(selectedPath) && !selectedDir;
+    const hasTarget = selectionCurrent() && Boolean(selectedPath) && selectedPath !== ".";
+    if (editBtn) editBtn.disabled = busy || !hasFile;
+    if (downloadBtn) downloadBtn.disabled = busy || !hasFile;
+    if (deleteBtn) deleteBtn.disabled = busy || !hasTarget;
     if (selectedLabel) {
       selectedLabel.textContent = hasTarget
         ? `已选择 ${selectedName || selectedPath}`
@@ -1386,10 +1399,13 @@ const mountAppFiles = () => {
     return true;
   };
 
-  const selectEntry = (path, name, isDir) => {
+  const selectEntry = (path, name, isDir, owner = boundOwner, binding = bindingVersion) => {
+    if (path && (busy || !bindingCurrent(owner, binding))) return;
     selectedPath = path;
     selectedName = name;
     selectedDir = isDir;
+    selectedOwner = path ? owner : "";
+    selectedBinding = binding;
     paintSelection();
     syncSelectionActions();
   };
@@ -1423,6 +1439,7 @@ const mountAppFiles = () => {
     if (upBtn) upBtn.hidden = currentPath === ".";
     if (!breadcrumb) return;
     breadcrumb.replaceChildren();
+    const snapshot = listingSnapshot;
     const addCrumb = (label, path, current) => {
       if (current) {
         const currentNode = document.createElement("span");
@@ -1435,7 +1452,7 @@ const mountAppFiles = () => {
       button.type = "button";
       button.className = "btn-link";
       button.textContent = label;
-      button.addEventListener("click", () => requestList(path));
+      button.addEventListener("click", () => { if (snapshotCurrent(snapshot)) requestList(path); });
       breadcrumb.append(button);
     };
     const parts = currentPath === "." ? [] : currentPath.split("/").filter(Boolean);
@@ -1453,9 +1470,12 @@ const mountAppFiles = () => {
   };
 
   const openFile = async (path, name) => {
-    if (!app) return;
+    if (!bindingCurrent() || !selectionCurrent()) return;
+    const owner = boundOwner;
+    const binding = bindingVersion;
     if (filesEditorOpen && filesDirty && selectedPath === path) return;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(owner, binding)) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
       fileError(workspacePathError);
@@ -1465,7 +1485,7 @@ const mountAppFiles = () => {
     const navigation = navigationSnapshot();
     const revision = fileDraft.revision;
     const request = ++fileReadSequence;
-    const current = () => navigationCurrent(navigation) && app?.id === target.id
+    const current = () => bindingCurrent(owner, binding) && navigationCurrent(navigation) && app?.id === target.id
       && revision === fileDraft.revision && request === fileReadSequence;
     setFilesStatus(`正在读取文件 ${relative}…`, "loading");
     try {
@@ -1490,28 +1510,35 @@ const mountAppFiles = () => {
     }
   };
 
-  const openNewFile = async (path, name) => {
+  const openNewFile = async (path, name, target) => {
+    if (!target || !bindingCurrent(target.owner, target.binding)) return false;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(target.owner, target.binding)) return false;
     showEditor(path, name, "");
+    return true;
   };
 
   const loadList = async (path) => {
-    if (!app) return;
+    if (!bindingCurrent()) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
       fileError(workspacePathError);
       return;
     }
     const target = app;
+    const owner = boundOwner;
+    const binding = bindingVersion;
     const context = contextSnapshot();
     const request = ++fileListSequence;
     setFilesStatus(`正在读取目录 ${relative}…`, "loading");
-    const current = () => contextCurrent(context) && selectedAppID === target.id
+    const current = () => bindingCurrent(owner, binding) && contextCurrent(context) && selectedAppID === target.id
       && view === "detail" && request === fileListSequence;
     try {
       const payload = await postAppFiles(target, { action: "list", path: relative });
       if (!current()) return;
       currentPath = relativeWorkspacePath(payload.path) || relative;
+      listingSnapshot = {owner, binding, path:currentPath};
+      const snapshot = listingSnapshot;
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
       if (!filesEditorOpen) {
         const visible = entries.some((entry) => relativeWorkspacePath(entry.path || entry.name) === selectedPath);
@@ -1538,8 +1565,9 @@ const mountAppFiles = () => {
         open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
         open.addEventListener("click", (event) => {
           event.stopPropagation();
+          if (!snapshotCurrent(snapshot)) return;
           if (entry.dir) requestList(entryPath);
-          else selectEntry(entryPath, entry.name || entryPath, false);
+          else selectEntry(entryPath, entry.name || entryPath, false, snapshot.owner, snapshot.binding);
         });
         nameWrap.append(open);
         item.append(nameWrap);
@@ -1550,7 +1578,7 @@ const mountAppFiles = () => {
           item.append(size);
         }
         item.addEventListener("click", () => {
-          selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir));
+          if (snapshotCurrent(snapshot)) selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir), snapshot.owner, snapshot.binding);
         });
         if (listEl) listEl.append(item);
       });
@@ -1559,20 +1587,29 @@ const mountAppFiles = () => {
       return true;
     } catch (error) {
       if (!current()) return;
-      if (listEl) listEl.dataset.stale = "true";
+      const retained = snapshotCurrent(listingSnapshot);
+      if (listEl) {
+        if (!retained) listEl.replaceChildren();
+        listEl.dataset.stale = String(!!retained);
+      }
       if (emptyEl) emptyEl.hidden = true;
-      fileError(`目录 ${relative} 读取失败；显示上次读取的 ${currentPath}。${error.message}`);
+      fileError(`目录 ${relative} 读取失败。${retained ? `显示该应用上次读取的 ${currentPath}。` : "未获得该应用的目录快照。"}${error.message}`);
       return false;
     }
   };
 
   const requestList = async (path) => {
+    const owner = boundOwner;
+    const binding = bindingVersion;
+    if (!bindingCurrent(owner, binding)) return;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(owner, binding)) return;
+    fileReadSequence += 1;
     loadList(path);
   };
 
   const removePath = async (path, name) => {
-    if (busy || !app) return;
+    if (busy || !bindingCurrent() || !selectionCurrent()) return;
     const relative = relativeWorkspacePath(path);
     if (!relative || relative === ".") { fileError(relative === "." ? "不能删除应用工作区根目录" : workspacePathError); return; }
     const target = app;
@@ -1592,7 +1629,10 @@ const mountAppFiles = () => {
   };
 
   const openNamedDialog = (dialog, input) => {
-    if (!dialog || typeof dialog.showModal !== "function") return;
+    if (!bindingCurrent() || !dialog || typeof dialog.showModal !== "function") return;
+    fileReadSequence += 1;
+    fileListSequence += 1;
+    namedTargets.set(dialog, {app,owner:boundOwner,binding:bindingVersion,path:currentPath});
     if (input) input.value = "";
     const feedback = dialog.querySelector("[data-dialog-feedback]");
     if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
@@ -1619,23 +1659,25 @@ const mountAppFiles = () => {
     mkdirForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !app) return;
+      const target = namedTargets.get(mkdirDialog);
+      if (!target || !bindingCurrent(target.owner, target.binding)) return;
       const name = mkdirName ? mkdirName.value.trim() : "";
       if (!name) {
         if (mkdirName) mkdirName.focus();
         return;
       }
-      const next = joinWorkspacePath(currentPath, name);
+      const next = joinWorkspacePath(target.path, name);
       if (!next) {
         dialogError(mkdirDialog, workspacePathError);
         return;
       }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "mkdir", path: next });
+        await postAppFiles(target.app, { action: "mkdir", path: next });
         if (mkdirName) mkdirName.value = "";
         closeNamedDialog(mkdirDialog);
         showStatus("已新建目录。", false);
-        await loadList(currentPath);
+        if (await loadList(target.path) === false) showStatus(`目录 ${next} 已创建，但目录刷新失败。无需重复创建。`, true, "partial");
       } catch (error) {
         dialogError(mkdirDialog, error.message);
       } finally {
@@ -1654,27 +1696,29 @@ const mountAppFiles = () => {
     newForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !app) return;
+      const target = namedTargets.get(newDialog);
+      if (!target || !bindingCurrent(target.owner, target.binding)) return;
       const name = newName ? newName.value.trim() : "";
       if (!name) {
         showStatus("请填写要新建的文本文件名。", true);
         if (newName) newName.focus();
         return;
       }
-      const next = joinWorkspacePath(currentPath, name);
+      const next = joinWorkspacePath(target.path, name);
       if (!next) {
         dialogError(newDialog, workspacePathError);
         return;
       }
       if (newName) newName.value = "";
       closeNamedDialog(newDialog);
-      await openNewFile(next, name);
+      if (!(await openNewFile(next, name, target))) return;
       fileDraft.capture(null);
       setDirty(true);
     });
   }
   if (editBtn) {
     editBtn.addEventListener("click", () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedDir) {
         showStatus("请先选择一个文件再编辑。", true);
         return;
@@ -1685,16 +1729,18 @@ const mountAppFiles = () => {
   if (uploadBtn && uploadInput) {
     let uploadContext = null;
     uploadBtn.addEventListener("click", () => {
-      if (busy || !app) return;
-      uploadContext = {navigation:navigationSnapshot(),app,path:currentPath};
+      if (busy || !bindingCurrent()) return;
+      fileReadSequence += 1;
+      fileListSequence += 1;
+      uploadContext = {navigation:navigationSnapshot(),app,path:currentPath,owner:boundOwner,binding:bindingVersion};
       uploadInput.click();
     });
     uploadInput.addEventListener("change", async () => {
       const file = uploadInput.files && uploadInput.files[0];
       uploadInput.value = "";
-      const context = uploadContext || {navigation:navigationSnapshot(),app,path:currentPath};
+      const context = uploadContext;
       uploadContext = null;
-      if (!file || busy || !context.app || !navigationCurrent(context.navigation)) return;
+      if (!file || busy || !context || !bindingCurrent(context.owner, context.binding) || context.path !== currentPath || !navigationCurrent(context.navigation)) return;
       const next = joinWorkspacePath(context.path, file.name);
       if (!next) { fileError(workspacePathError); return; }
       if (file.size > MAX_WORKSPACE_FILE_BYTES) { fileError("文件超过 1MiB 上限"); return; }
@@ -1713,7 +1759,7 @@ const mountAppFiles = () => {
   }
   if (downloadBtn) {
     downloadBtn.addEventListener("click", async () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedDir) {
         showStatus("请先选择一个文件再下载。", true);
         return;
@@ -1721,9 +1767,11 @@ const mountAppFiles = () => {
       const target = app;
       const filename = selectedName || selectedPath.split("/").pop();
       const context = contextSnapshot();
+      const owner = boundOwner;
+      const binding = bindingVersion;
       try {
         const file = await postAppFiles(target, { action: "read", path: selectedPath });
-        if (!contextCurrent(context)) return;
+        if (!bindingCurrent(owner, binding) || !contextCurrent(context)) return;
         downloadTextFile(filename, file.content || "");
         showStatus("已开始下载。", false);
       } catch (error) {
@@ -1733,7 +1781,7 @@ const mountAppFiles = () => {
   }
   if (deleteBtn) {
     deleteBtn.addEventListener("click", () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedPath === ".") {
         showStatus("请先选择要删除的文件或目录。", true);
         return;
@@ -1743,7 +1791,9 @@ const mountAppFiles = () => {
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
-      if (busy || !app || !selectedPath || selectedDir) return;
+      if (busy || !selectionCurrent() || !selectedPath || selectedDir) return;
+      const target = app;
+      const path = selectedPath;
       const content = editorInput ? editorInput.value : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
         fileError("文件超过 1MiB 上限");
@@ -1751,7 +1801,7 @@ const mountAppFiles = () => {
       }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "write", path: selectedPath, content });
+        await postAppFiles(target, { action: "write", path, content });
         fileDraft.capture(content);
         setDirty(false);
         showStatus("已保存工作区文件。", false);
@@ -1786,22 +1836,46 @@ const mountAppFiles = () => {
     });
   }
 
+  const unbind = () => {
+    bindingVersion += 1;
+    fileReadSequence += 1;
+    fileListSequence += 1;
+    app = null;
+    boundOwner = "";
+    filesMountedFor = "";
+    listingSnapshot = null;
+    currentPath = ".";
+    selectedPath = "";
+    selectedName = "";
+    selectedDir = false;
+    selectedOwner = "";
+    hideEditor();
+    fileDraft.capture("");
+    if (listEl) { listEl.replaceChildren(); delete listEl.dataset.stale; }
+    if (breadcrumb) breadcrumb.replaceChildren();
+    if (emptyEl) emptyEl.hidden = true;
+    setFilesStatus("");
+    closeNamedDialog(mkdirDialog);
+    closeNamedDialog(newDialog);
+    namedTargets.delete(mkdirDialog);
+    namedTargets.delete(newDialog);
+  };
   return {
     bind(nextApp) {
-      app = nextApp;
-      if (!app) {
-        hideEditor();
-        filesMountedFor = "";
-        return;
-      }
-      if (filesMountedFor !== app.id) {
-        hideEditor();
-        currentPath = ".";
-        selectEntry("", "", false);
-        filesMountedFor = app.id;
-        loadList(".");
+      const owner = ownerKey(nextApp);
+      if (!owner || owner !== boundOwner) {
+        unbind();
+        app = nextApp;
+        boundOwner = owner;
+        filesMountedFor = owner;
+        if (owner) { renderBreadcrumb(); loadList("."); }
+      } else {
+        app = nextApp;
+        syncSelectionActions();
+        if (!listingSnapshot && !filesEditorOpen) loadList(currentPath);
       }
     },
+    unbind,
     confirmLeave,
     discard: hideEditor,
   };
@@ -2758,6 +2832,7 @@ const startLogPolling = () => {
 
 const paintDetail = (app, composeRevision) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
+  if (appChanged || detailApp?.agent_id !== app.agent_id) filesWorkspace.unbind();
   detailApp = app;
   selectedAppID = app.id;
   if (detailTitle) detailTitle.textContent = app.name || app.id;
@@ -2835,7 +2910,7 @@ const leaveDetail = async ({ force } = {}) => {
   advanceNavigation();
   stopLogPolling();
   resetLogsTerminal();
-  if (force) filesWorkspace.discard();
+  filesWorkspace.unbind();
   view = "list";
   selectedAppID = "";
   detailApp = null;
