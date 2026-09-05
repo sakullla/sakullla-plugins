@@ -176,7 +176,7 @@ body:has(#login-view:not([hidden])) main {
 }
 
 h1, h2 { margin: 0; font-weight: 700; }
-h1 { font-size: clamp(1.75rem, 1.25rem + 1.4vw, 2.45rem); letter-spacing: -0.05em; line-height: 1.12; }
+h1 { font-size: 1.35rem; letter-spacing: -0.03em; line-height: 1.25; }
 h2 { font-size: 1.02rem; letter-spacing: -0.02em; }
 
 .lede, .hint, td, th {
@@ -452,6 +452,8 @@ button.danger:hover { color: var(--color-danger); border-color: var(--color-dang
 
 .crumbs { color: var(--color-text-tertiary); font-size: var(--text-sm); }
 
+.crumbs:empty { display: none; }
+
 .crumbs button {
   min-height: 1.8rem;
   padding: 0.15rem 0.5rem;
@@ -687,11 +689,35 @@ button:focus-visible,
 }
 
 @media (max-width: 720px) {
-  main { width: calc(100% - 1.5rem); padding-top: 1.5rem; }
-  .files-head { flex-direction: column; align-items: stretch; }
-  .actions { width: 100%; margin-left: 0; }
-  .actions button, .upload { width: 100%; }
+  main { width: calc(100% - 1.25rem); padding: 1rem 0 3.5rem; }
+  .topbar { gap: 0.55rem 0.75rem; margin-bottom: 0.85rem; }
+  .files-card, .mount-card { padding: 0.95rem 0.9rem 0.75rem; }
+  .files-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.7rem;
+    padding-bottom: 0.7rem;
+  }
+  .files-head > div:not(.actions) {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+  .actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+    gap: 0.55rem;
+  }
+  .actions > .upload,
+  .actions > button {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+  }
   .topbar-meta { width: 100%; margin-left: 0; }
+  #empty { padding: 1.35rem 0 1.1rem; }
   .listing thead { display: none; }
   .listing, .listing tbody, .listing tr, .listing td { display: block; width: 100%; }
   .listing th:nth-child(1),

@@ -188,6 +188,46 @@ func TestManagerViewportLayout(t *testing.T) {
 	}
 }
 
+func TestLoginHeadingSize(t *testing.T) {
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	heading := cssRule(string(css), "h1")
+	if heading == "" {
+		t.Fatal("missing h1 rule")
+	}
+	if strings.Contains(heading, "clamp(") || strings.Contains(heading, "2.45rem") || strings.Contains(heading, "1.75rem") {
+		t.Fatalf("login heading still uses oversized fluid type: %s", heading)
+	}
+	if !strings.Contains(heading, "1.35rem") {
+		t.Fatalf("login heading is not compact: %s", heading)
+	}
+}
+
+func TestMobileManagerToolbar(t *testing.T) {
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	if !strings.Contains(text, ".crumbs:empty") {
+		t.Fatal("empty breadcrumbs still reserve space")
+	}
+	mobile := cssMedia(text, "(max-width: 720px)")
+	if mobile == "" {
+		t.Fatal("missing 720px manager stylesheet")
+	}
+	pathCluster := cssRule(mobile, ".files-head > div:not(.actions)")
+	if !strings.Contains(pathCluster, "flex: 0 0 auto") {
+		t.Fatalf("path cluster still grows on mobile: %s", pathCluster)
+	}
+	actions := cssRule(mobile, ".actions")
+	if !strings.Contains(actions, "grid-template-columns: 1fr 1fr") {
+		t.Fatalf("mobile actions are not a two-up row: %s", actions)
+	}
+}
+
 func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 	controller, _ := startShare(t, "")
 	page := doShareRequest(t, controller, http.MethodGet, "http://share.test/", "", nil)
@@ -314,6 +354,32 @@ func cssRule(css, selector string) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+func cssMedia(css, query string) string {
+	needle := "@media " + query
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	open := strings.Index(rest, "{")
+	if open < 0 {
+		return rest
+	}
+	depth := 0
+	for i := open; i < len(rest); i++ {
+		switch rest[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:i+1]
+			}
+		}
+	}
+	return rest
 }
 
 func TestFormatIECSize(t *testing.T) {
