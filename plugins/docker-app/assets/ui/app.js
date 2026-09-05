@@ -180,6 +180,7 @@ let filesDirty = false;
 let filesEditorOpen = false;
 let filesMountedFor = "";
 let composeFilledFor = "";
+let composeDraftOwner = "";
 let syncSelectionActions = () => {};
 const engineCache = new Map();
 const ENGINE_CACHE_MS = 15000;
@@ -898,9 +899,11 @@ if (createForm) {
 // Draft baselines live only in this document, including optional .env values.
 const makeDraft = (read, restore) => ({
   baseline: read(),
+  revision: 0,
+  touch() { this.revision += 1; },
   get dirty() { return JSON.stringify(read()) !== JSON.stringify(this.baseline); },
-  capture(value = read()) { this.baseline = value; },
-  discard() { restore(this.baseline); },
+  capture(value = read()) { this.baseline = value; this.touch(); },
+  discard() { this.touch(); restore(this.baseline); },
 });
 const readComposeForm = (form) => Object.fromEntries(Array.from(form.elements)
   .filter((field) => field.name).map((field) => [field.name, field.type === "checkbox" ? field.checked : field.value]));
@@ -939,8 +942,12 @@ const confirmDiscardDrafts = async (ids = ["create", "compose", "file"], { disca
 };
 const confirmLeaveEditor = () => confirmDiscardDrafts();
 [createForm, composeForm].forEach((form) => {
-  form.addEventListener("input", updateDraftIndicators);
-  form.addEventListener("change", updateDraftIndicators);
+  const changed = () => {
+    (form === createForm ? createDraft : composeDraft).touch();
+    updateDraftIndicators();
+  };
+  form.addEventListener("input", changed);
+  form.addEventListener("change", changed);
 });
 window.addEventListener("beforeunload", (event) => {
   if (!activeDrafts().some((item) => item.active && item.draft?.dirty)) return;
@@ -961,6 +968,7 @@ const applyCreateTemplate = async (name) => {
   if (!template || !composeInput || busy) return;
   if (composeInput.value !== createDraft.baseline.compose && !(await confirmDiscardDrafts(["create"], { discard: false }))) return;
   composeInput.value = template.compose || "";
+  createDraft.touch();
   paintCodeEditor(composeInput);
   markCreateTemplate(name);
   updateDraftIndicators();
@@ -1292,6 +1300,8 @@ const mountAppFiles = () => {
   let selectedPath = "";
   let selectedName = "";
   let selectedDir = false;
+  let fileReadSequence = 0;
+  let fileListSequence = 0;
 
   const setDirty = (next) => {
     filesDirty = Boolean(next);
@@ -1319,6 +1329,7 @@ const mountAppFiles = () => {
   };
 
   const hideEditor = () => {
+    fileDraft?.touch();
     filesEditorOpen = false;
     setDirty(false);
     if (editor) editor.hidden = true;
@@ -1415,8 +1426,15 @@ const mountAppFiles = () => {
       showStatus(workspacePathError, true);
       return;
     }
+    const target = app;
+    const navigation = navigationSnapshot();
+    const revision = fileDraft.revision;
+    const request = ++fileReadSequence;
+    const current = () => navigationCurrent(navigation) && app?.id === target.id
+      && revision === fileDraft.revision && request === fileReadSequence;
     try {
-      const payload = await postAppFiles(app, { action: "read", path: relative });
+      const payload = await postAppFiles(target, { action: "read", path: relative });
+      if (!current()) return;
       const content = typeof payload.content === "string" ? payload.content : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
         showStatus("文件超过 1MiB 上限", true);
@@ -1429,6 +1447,7 @@ const mountAppFiles = () => {
       }
       showEditor(relative, name || relative.split("/").pop(), content);
     } catch (error) {
+      if (!current()) return;
       showStatus(error.message, true);
     }
   };
@@ -1445,8 +1464,14 @@ const mountAppFiles = () => {
       showStatus(workspacePathError, true);
       return;
     }
+    const target = app;
+    const context = contextSnapshot();
+    const request = ++fileListSequence;
+    const current = () => contextCurrent(context) && selectedAppID === target.id
+      && view === "detail" && request === fileListSequence;
     try {
-      const payload = await postAppFiles(app, { action: "list", path: relative });
+      const payload = await postAppFiles(target, { action: "list", path: relative });
+      if (!current()) return;
       currentPath = relativeWorkspacePath(payload.path) || relative;
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
       if (!filesEditorOpen) {
@@ -1492,6 +1517,7 @@ const mountAppFiles = () => {
       if (emptyEl) emptyEl.hidden = listed !== 0;
       return true;
     } catch (error) {
+      if (!current()) return;
       if (listEl) listEl.replaceChildren();
       if (emptyEl) emptyEl.hidden = true;
       showStatus(error.message, true);
@@ -1713,6 +1739,7 @@ const mountAppFiles = () => {
   syncSelectionActions();
   if (editorInput) {
     editorInput.addEventListener("input", () => {
+      fileDraft.touch();
       setDirty(fileDraft.dirty);
       paintCodeEditor(editorInput);
     });
@@ -2240,7 +2267,14 @@ const renderApp = (app) => {
   return card;
 };
 
-const fillCompose = (app) => {
+const fillCompose = (app, revision = composeDraft.revision) => {
+  const owner = `${app.agent_id}/${app.id}`;
+  // A refresh may start while clean and finish after typing. Neither a delayed
+  // collection nor a same-app detail response may turn those edits into a baseline.
+  if (composeDraftOwner === owner && (composeDraft.dirty || composeDraft.revision !== revision)) {
+    showFormFeedback(composeForm, "已刷新应用状态，保留当前未提交的编辑。", "info");
+    return;
+  }
   if (detailComposeInput) {
     detailComposeInput.value = app.compose || "";
     paintCodeEditor(detailComposeInput);
@@ -2251,6 +2285,7 @@ const fillCompose = (app) => {
   }
   if (detailAutoUpdateInput) detailAutoUpdateInput.checked = app.auto_update === true;
   composeFilledFor = app.id;
+  composeDraftOwner = owner;
   composeDraft.capture();
   updateDraftIndicators();
 };
@@ -2710,7 +2745,7 @@ const startLogPolling = () => {
   logsTimer = setInterval(fetchLogs, LOG_REFRESH_MS);
 };
 
-const paintDetail = (app) => {
+const paintDetail = (app, composeRevision) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
   detailApp = app;
   selectedAppID = app.id;
@@ -2742,7 +2777,7 @@ const paintDetail = (app) => {
     if (action) button.textContent = action.label || id;
   });
   renderOverview(app);
-  if (composeFilledFor !== app.id) fillCompose(app);
+  if (composeFilledFor !== app.id) fillCompose(app, composeRevision);
   renderHTTP(app);
   fillLogServices(app);
   if (appChanged) resetLogsTerminal();
@@ -2803,7 +2838,7 @@ const leaveDetail = async ({ force } = {}) => {
   return true;
 };
 
-const showDetail = async (appID, section) => {
+const showDetail = async (appID, section, composeRevision = composeDraft.revision) => {
   const snapshot = contextSnapshot();
   const previousNavigation = navigationSnapshot();
   if (appID !== selectedAppID && !(await confirmLeaveEditor())) return;
@@ -2819,13 +2854,19 @@ const showDetail = async (appID, section) => {
     if (app.id !== appID || app.agent_id !== snapshot.agent) throw new Error("应用与当前节点不匹配，请刷新列表。");
     view = "detail";
     closeCreate();
-    paintDetail(app);
+    paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
     return true;
   } catch (error) {
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
+    if (view === "detail" && selectedAppID === appID
+      && (composeDraft.revision !== composeRevision || activeDrafts().some((item) => item.active && item.draft?.dirty))) {
+      showFormFeedback(composeForm, "详情刷新失败，已保留当前编辑。", "failed");
+      showStatus(missing ? "应用已不存在，当前编辑已保留。" : "详情刷新失败，当前编辑已保留。", true);
+      return false;
+    }
     await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
     return false;
@@ -2931,6 +2972,7 @@ const renderWorkspace = async () => {
   const snapshot = contextSnapshot();
   const keepDetailID = view === "detail" ? selectedAppID : "";
   const keepDetailApp = detailApp;
+  const composeRevision = composeDraft.revision;
   const keepSection = detailSection;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
@@ -2996,11 +3038,15 @@ const renderWorkspace = async () => {
   if (keepDetailID) {
     const stillThere = (payload.apps || []).some((app) => app.id === keepDetailID);
     if (!stillThere) {
+      if (activeDrafts().some((item) => item.active && item.draft?.dirty)) {
+        showStatus("应用已不存在，当前编辑已保留。", true);
+        return false;
+      }
       showStatus("应用已不存在。", true);
       leaveDetail({ force: true });
       return;
     }
-    return await showDetail(keepDetailID, keepSection);
+    return await showDetail(keepDetailID, keepSection, composeRevision);
   } else {
     syncListPanel();
   }

@@ -3146,7 +3146,7 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 		}
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
-	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app, revision = composeDraft.revision) => {")
 	if renderStart < 0 || renderEnd <= renderStart {
 		t.Fatal("card renderer is missing")
 	}
@@ -3854,7 +3854,7 @@ func assertDetailWorkspacePage(t *testing.T) {
 		t.Fatal("detail still leads with 同一时间只展示一个分区")
 	}
 
-	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintStart := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
@@ -4080,7 +4080,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("update dialog does not send ignore clear")
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
-	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app, revision = composeDraft.revision) => {")
 	if renderStart < 0 || renderEnd < 0 || renderEnd <= renderStart {
 		t.Fatal("card wall renderer is missing")
 	}
@@ -4125,7 +4125,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("logs terminal reset does not clear #logs-view")
 	}
 	leaveStart := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
-	leaveEnd := strings.Index(js, "const showDetail = async (appID, section) => {")
+	leaveEnd := strings.Index(js, "const showDetail = async (appID, section, composeRevision = composeDraft.revision) => {")
 	if leaveStart < 0 || leaveEnd <= leaveStart {
 		t.Fatal("leaveDetail is missing")
 	}
@@ -4133,7 +4133,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(leaveFn, "resetLogsTerminal();") {
 		t.Fatal("leaveDetail does not reset the logs terminal")
 	}
-	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintStart := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
@@ -4171,7 +4171,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("logs section does not display log text")
 	}
 	pollStart := strings.Index(js, "const startLogPolling = () => {")
-	pollEnd := strings.Index(js, "const paintDetail = (app) => {")
+	pollEnd := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	if pollStart < 0 || pollEnd <= pollStart {
 		t.Fatal("startLogPolling is missing")
 	}

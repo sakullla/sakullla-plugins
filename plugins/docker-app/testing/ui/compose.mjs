@@ -12,7 +12,7 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     await page.send("Input.insertText", { text: content });
   };
   const reset = async () => {
-    Object.assign(state, { previewError:"", saveError:"", listError:false, risk:false, fileError:false, fileListError:false });
+    Object.assign(state, { previewError:"", saveError:"", listError:false, detailError:false, risk:false, fileError:false, fileListError:false });
     await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
   };
   const create = async () => { await page.click("#deploy-toggle"); await page.waitVisible("#create-form"); };
@@ -178,6 +178,48 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'succeeded'`), "save success feedback");
     await page.click("#detail-back"); await page.waitVisible("#app-list");
     assert.equal(await page.visible("#confirm-dialog"), false, "successful baseline needs no discard confirmation");
+  });
+
+  await test("edits made during list or detail refresh keep their values and dirty baseline", async () => {
+    for (const [path, failure] of [["/api/apps?agent_id=node-a", false], ["/api/apps/alpha", false], ["/api/apps/alpha", true]]) {
+      await reset(); await detail();
+      const pending = hold(path);
+      await page.click("#workspace-refresh"); await eventually(() => pending.seen, `held refresh ${path}`);
+      const fresh = 'services:\n  freshdraft:\n    image: nginx:1.29\n';
+      const env = "FIXTURE_REFRESH=retain-in-memory";
+      await fill('#compose-form textarea[name="compose"]', fresh);
+      await fill('#compose-form textarea[name="env"]', env);
+      await page.click('#compose-form input[name="auto_update"]');
+      const enabled = await page.evaluate(`document.querySelector('#compose-form input[name="auto_update"]').checked`);
+      const saves = state.saveCount;
+      state.detailError = failure;
+      pending.release(); await delay(150);
+      assert.equal(await value('#compose-form textarea[name="compose"]'), fresh, `YAML remains after ${path}`);
+      assert.equal(await value('#compose-form textarea[name="env"]'), env, `env remains after ${path}`);
+      assert.equal(await page.evaluate(`document.querySelector('#compose-form input[name="auto_update"]').checked`), enabled);
+      assert.ok(await page.visible("#compose-dirty"), "late response must not capture the new draft as saved");
+      assert.equal(await page.visible("#confirm-dialog"), false, "preserving the newer input needs no prompt");
+      assert.equal(state.saveCount, saves);
+      await page.click("#detail-back"); await confirm(false);
+      assert.equal(await value('#compose-form textarea[name="compose"]'), fresh);
+      assert.equal(await value('#compose-form textarea[name="env"]'), env);
+    }
+  });
+
+  await test("late file read cannot replace a newer file draft", async () => {
+    await reset(); await detail();
+    await page.click('#detail-nav [data-section="files"]'); await page.waitVisible('[data-path="config.txt"]');
+    await page.click('[data-path="config.txt"] .files-name');
+    const pending = hold("/api/apps/alpha/files");
+    await page.click("#files-edit"); await eventually(() => pending.seen, "held old file read");
+    await page.click("#files-new-text"); await page.waitVisible("#files-new-dialog");
+    await fill("#files-new-name", "draft.txt");
+    await page.click('#files-new-form button[type="submit"]'); await page.waitVisible("#files-editor");
+    await fill("#files-editor textarea", "new file draft\n");
+    pending.release(); await delay(150);
+    assert.equal(await value("#files-editor textarea"), "new file draft\n");
+    assert.match(await text("#files-editor-name"), /draft.txt/);
+    assert.ok(await page.visible("#files-dirty"));
   });
 
   await test("file editing uses the shared draft guard and failed saves retain input", async () => {

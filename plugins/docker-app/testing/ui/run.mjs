@@ -156,6 +156,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === "POST" && url.pathname === "/api/apps/beta/delete") return json({ error: "应用删除失败，请重试。" }, 500);
     if (/^\/api\/apps\/[^/]+$/.test(url.pathname)) {
+      if (suite === "compose" && composeState.detailError) return json({error:"详情读取失败。"}, 500);
       const app = apps.find((app) => app.id === decodeURIComponent(url.pathname.split("/").pop()));
       return json({ app }, app ? 200 : 404);
     }
