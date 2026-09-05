@@ -9,7 +9,51 @@ import (
 	"testing"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
+	"gopkg.in/yaml.v3"
 )
+
+func TestManifestPermissionsSatisfyHostHandshake(t *testing.T) {
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pluginsdk.Manifest
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	var grants []string
+	for _, permission := range manifest.Permissions {
+		grants = append(grants, permission.Name)
+	}
+	required := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
+	for name, factory := range map[string]func() (pluginsdk.RPCLifecycle, error){
+		"runtime": newRuntimeController,
+		"probe": func() (pluginsdk.RPCLifecycle, error) {
+			return newProbeController(pluginsdk.RPCHandshakeRequest{PackageDigest: "package", ArtifactDigest: "artifact"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			controller, err := factory()
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+				ABI: pluginsdk.RPCABIV1, PluginID: manifest.ID, PluginVersion: manifest.Version,
+				PackageDigest: "package", ArtifactDigest: "artifact", Generation: "generation-1",
+				GrantedScopes: grants, RequiredFeatures: required,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pluginsdk.ValidateRPCFeatures(required, response.Features); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := pluginsdk.ValidateRPCFeatures(required, wafHandshakeDeclaration().SupportedFeatures); err != nil {
+		t.Fatalf("build probe must request the host-required features: %v", err)
+	}
+}
 
 func TestHandshakeDoesNotAdvertiseUngrantedCapabilities(t *testing.T) {
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})

@@ -1,6 +1,6 @@
 schema_version: 1
 id: waf
-version: 0.1.0
+version: 0.1.1
 name: Web 防火墙
 description: 用专用管理页查看 HTTP 入口防护、切换观察拦截，并检查托管规则与有界自定义规则
 compatibility:
