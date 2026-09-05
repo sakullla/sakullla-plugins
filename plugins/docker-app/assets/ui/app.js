@@ -155,9 +155,10 @@ let agentOnline = false;
 let lastEngine = null;
 let workspaceSeq = 0;
 let contextVersion = 0;
+let readVersion = 0;
 let detailRequest = 0;
-const contextSnapshot = () => ({ version: contextVersion, agent: selectedAgentID });
-const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.agent === selectedAgentID;
+const contextSnapshot = () => ({ version: contextVersion, read: readVersion, agent: selectedAgentID });
+const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.read === readVersion && snapshot.agent === selectedAgentID;
 let view = "list";
 let selectedAppID = "";
 let detailSection = "overview";
@@ -333,6 +334,13 @@ const deployComposePayload = async (payload) => {
 };
 
 const setBusy = (next) => {
+  if (next && !busy) {
+    // A mutation owns the target from preview through confirmation and completion.
+    // Reads started before it may not restore pages or replace draft/status state.
+    readVersion += 1;
+    workspaceSeq += 1;
+    detailRequest += 1;
+  }
   busy = next;
   if (next) showStatus("正在执行操作…", false, "running");
   const roots = [workspaceNode, contextNode, document.querySelector(".page-head")].filter(Boolean);
@@ -3392,14 +3400,16 @@ const submitCompose = async (form, updating) => {
     env: String(data.get("env") || ""),
     auto_update: data.get("auto_update") === "on",
   };
-  const navigation = navigationSnapshot();
   const draft = updating ? composeDraft : createDraft;
   setBusy(true);
   showFormFeedback(form, updating ? "正在保存 Compose…" : "正在部署应用…", "running");
   try {
     const saved = await deployComposePayload(nextApp);
     if (!saved) { showFormFeedback(form, "已取消，输入已保留。", "cancelled"); return; }
-    if (!navigationCurrent(navigation)) return;
+    if (selectedAgentID !== nextApp.agent_id || (updating && selectedAppID !== nextApp.id)) {
+      showStatus(`应用 ${nextApp.id} 已保存，请在目标节点刷新查看结果。`, false);
+      return;
+    }
     // Submission succeeded. Clear submitted secrets before any fallible refresh.
     form.elements.namedItem("env").value = "";
     paintCodeEditor(form.elements.namedItem("env"));

@@ -222,6 +222,89 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     assert.ok(await page.visible("#files-dirty"));
   });
 
+  await test("older reads cannot invalidate a pending Compose save or confirmation", async () => {
+    for (const [oldPath, phase, outcome] of [
+      ["/api/apps?agent_id=node-a", "save", "success"],
+      ["/api/apps/alpha", "save", "success"],
+      ["/api/apps?agent_id=node-a", "preview", "success"],
+      ["/api/apps/alpha", "confirmation", "success"],
+      ["/api/apps?agent_id=node-a", "confirmation", "cancel"],
+      ["/api/apps/alpha", "save", "failure"],
+    ]) {
+      await reset(); await detail();
+      const oldRead = hold(oldPath);
+      await page.click("#workspace-refresh"); await eventually(() => oldRead.seen, "old refresh held before save");
+      await fill('#compose-form textarea[name="compose"]', 'services:\n  saved:\n    image: nginx:1.30\n');
+      await fill('#compose-form textarea[name="env"]', "FIXTURE_SAVE=clear-after-success");
+      const saves = state.saveCount;
+      const write = hold("/api/apps");
+      const preview = phase === "preview" ? hold("/api/apps/preview") : null;
+      state.risk = phase === "confirmation";
+      state.saveError = outcome === "failure" ? "保存失败，请稍后重试。" : "";
+      await page.click("#compose-submit");
+      if (phase === "preview") await eventually(() => preview.seen, "save preview held");
+      else if (phase === "confirmation") await page.waitVisible("#confirm-dialog");
+      else await eventually(() => write.seen, "save response held");
+      oldRead.release(); await delay(150);
+      if (preview) preview.release();
+      if (phase === "confirmation") await confirm(outcome !== "cancel");
+      if (outcome !== "cancel") await eventually(() => write.seen, "one save request reached server");
+      write.release();
+      await eventually(() => page.evaluate(`document.querySelector('#compose-submit').disabled === false`), "save controls restored");
+      assert.equal(state.saveCount, saves + (outcome === "cancel" ? 0 : 1));
+      if (outcome === "success") {
+        assert.equal(await value('#compose-form textarea[name="env"]'), "", `successful env cleanup with old ${oldPath} during ${phase}`);
+        assert.equal(await page.visible("#compose-dirty"), false);
+        assert.equal(await page.evaluate(`document.querySelector('#app-status').dataset.state`), "succeeded");
+        assert.match(await text("#app-status"), /已更新/);
+      } else {
+        assert.equal(await value('#compose-form textarea[name="env"]'), "FIXTURE_SAVE=clear-after-success");
+        assert.ok(await page.visible("#compose-dirty"));
+        await formState("#compose-form", outcome === "cancel" ? "cancelled" : "failed");
+      }
+    }
+  });
+
+  await test("deployment and file saves also supersede older workspace reads", async () => {
+    await reset(); await detail();
+    const oldList = hold("/api/apps?agent_id=node-a");
+    await page.click("#workspace-refresh"); await eventually(() => oldList.seen, "old list held before deployment");
+    await page.click("#detail-back");
+    await create();
+    await fill('#create-form input[name="id"]', "overlap-deploy");
+    await fill('#create-form textarea[name="compose"]', yaml);
+    await fill('#create-form textarea[name="env"]', "FIXTURE_SAVE=deployment-memory");
+    const saves = state.saveCount;
+    const deployment = hold("/api/apps");
+    await page.click("#create-submit"); await eventually(() => deployment.seen, "deployment response held");
+    oldList.release(); await delay(150);
+    assert.ok(await page.visible("#create-form"));
+    assert.equal(await page.evaluate(`document.querySelector('#create-submit').disabled`), true);
+    deployment.release(); await page.waitVisible('[data-id="overlap-deploy"]');
+    await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'succeeded'`), "deployment success");
+    assert.equal(state.saveCount, saves + 1);
+    assert.equal(await value('#create-form textarea[name="env"]'), "");
+    assert.equal(await page.visible("#create-dirty"), false);
+
+    await reset(); await detail();
+    await page.click('#detail-nav [data-section="files"]'); await page.waitVisible('[data-path="config.txt"]');
+    await page.click('[data-path="config.txt"] .files-name'); await page.click("#files-edit"); await page.waitVisible("#files-editor");
+    const oldDetail = hold("/api/apps/alpha");
+    await page.click("#workspace-refresh"); await eventually(() => oldDetail.seen, "old detail held before file save");
+    await fill("#files-editor textarea", "file saved during refresh\n");
+    const writes = requests.filter((request) => request.action === "write").length;
+    const fileSave = hold("/api/apps/alpha/files");
+    await page.click("#files-save"); await eventually(() => fileSave.seen, "file save held");
+    oldDetail.release(); await delay(150);
+    fileSave.release();
+    await eventually(() => page.evaluate(`document.querySelector('#files-save').disabled === false`), "file controls restored");
+    assert.equal(state.file, "file saved during refresh\n");
+    assert.equal(requests.filter((request) => request.action === "write").length, writes + 1);
+    assert.equal(await page.visible("#files-dirty"), false);
+    assert.equal(await page.evaluate(`document.querySelector('#app-status').dataset.state`), "succeeded");
+    assert.match(await text("#files-editor-name"), /config.txt/);
+  });
+
   await test("file editing uses the shared draft guard and failed saves retain input", async () => {
     await reset(); await detail();
     await page.click('#detail-nav [data-section="files"]'); await page.waitVisible('[data-path="config.txt"]');
