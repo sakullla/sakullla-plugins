@@ -7,12 +7,11 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="wash" aria-hidden="true"></div>
   <main>
     <header class="page-head">
       <div class="page-head-copy">
         <h1>Docker 应用</h1>
-        <p class="lede">在节点上部署并照看 Compose 应用。</p>
+        <p class="lede">管理当前节点的应用、配置与运行状态。</p>
         <p class="sr-only">有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="page-head-agent">
@@ -22,6 +21,7 @@
             <div class="agent-search-select" data-agent-picker="workspace"></div>
           </label>
           <p id="engine-status" class="engine-status" hidden></p>
+          <button id="workspace-refresh" class="btn-link" type="button">刷新节点状态</button>
         </div>
       </div>
     </header>
@@ -30,6 +30,14 @@
     <p id="app-denied" role="alert" hidden>无权管理 Docker 应用。</p>
     <p id="app-status" role="status" hidden></p>
     <section id="app-context" class="context-region" hidden>
+      <section class="state-panel" id="app-detection-failed" hidden>
+        <h2>无法检测节点状态</h2>
+        <p>本次检测未完成，无法确认 Docker 状态。请重试或检查节点上的插件状态。</p>
+      </section>
+      <section class="state-panel" id="app-node-denied" hidden>
+        <h2>无权管理该节点</h2>
+        <p>请使用具备该节点管理权限的账号后重试。</p>
+      </section>
       <section class="state-panel" id="app-undeployed" hidden>
         <div class="setup-hero">
           <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
@@ -62,7 +70,7 @@
           <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
           <div>
             <h2>该节点暂时无法执行应用</h2>
-            <p>该节点在线，但还不能执行 compose。刷新本页，或检查该节点上的 docker-app 插件状态。不是本机缺 Docker。</p>
+            <p>该节点在线，但暂时不能执行应用操作。请刷新节点状态，或检查该节点上的 docker-app 插件状态。</p>
           </div>
         </div>
       </section>
@@ -188,7 +196,8 @@
         <div id="app-list" class="app-list" data-card-wall="apps"></div>
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
-      <section class="panel" id="app-detail" hidden>
+      <section class="panel" id="app-detail" aria-labelledby="detail-title" hidden>
+        <p id="detail-context"></p>
         <div class="detail-head">
           <button id="detail-back" class="btn-link back-link" type="button">返回列表</button>
           <div class="detail-head-copy">

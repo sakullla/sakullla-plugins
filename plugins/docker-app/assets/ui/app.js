@@ -87,7 +87,29 @@ const updateCopy = document.querySelector("#update-copy");
 const updateServices = document.querySelector("#update-services");
 const updateConfirm = document.querySelector("#update-confirm");
 
-const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
+// All native dialogs reset their result and return focus to the caller.
+const dialogClosures = new WeakMap();
+const openDialog = (dialog, initialFocus) => {
+  if (dialog.open) return false;
+  let closed;
+  dialogClosures.set(dialog, new Promise((resolve) => { closed = resolve; }));
+  const trigger = document.activeElement;
+  dialog.returnValue = "";
+  const cancel = () => { dialog.returnValue = "cancel"; };
+  dialog.addEventListener("cancel", cancel);
+  dialog.addEventListener("close", () => {
+    dialog.removeEventListener("cancel", cancel);
+    if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+    else document.querySelector("#workspace-refresh")?.focus();
+    dialogClosures.delete(dialog);
+    closed();
+  }, { once: true });
+  dialog.showModal();
+  initialFocus?.focus();
+  return true;
+};
+
+const askConfirm = async ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
   if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
     const text = [title, body].filter(Boolean).join("\n");
     if (hideConfirm) {
@@ -96,7 +118,8 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
     }
     return Promise.resolve(window.confirm(text));
   }
-  if (confirmDialog.open) confirmDialog.close("cancel");
+  if (confirmDialog.open) return Promise.resolve(false);
+  if (dialogClosures.has(confirmDialog)) await dialogClosures.get(confirmDialog);
   if (confirmTitle) confirmTitle.textContent = title || "确认";
   if (confirmBody) {
     confirmBody.textContent = body || "";
@@ -112,10 +135,15 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
     confirmCancel.hidden = false;
   }
   return new Promise((resolve) => {
-    const onClose = () => resolve(confirmDialog.returnValue === "ok");
+    const previous = statusNode?.textContent || "";
+    const previousState = statusNode?.dataset.state;
+    showStatus("等待确认操作。", false, "confirming");
+    const onClose = () => {
+      showStatus(previous, previousState === "failed", previousState);
+      resolve(confirmDialog.returnValue === "ok");
+    };
     confirmDialog.addEventListener("close", onClose, { once: true });
-    confirmDialog.showModal();
-    if (confirmCancel) confirmCancel.focus();
+    openDialog(confirmDialog, confirmCancel);
   });
 };
 
@@ -126,6 +154,10 @@ let engineReady = false;
 let agentOnline = false;
 let lastEngine = null;
 let workspaceSeq = 0;
+let contextVersion = 0;
+let detailRequest = 0;
+const contextSnapshot = () => ({ version: contextVersion, agent: selectedAgentID });
+const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.agent === selectedAgentID;
 let view = "list";
 let selectedAppID = "";
 let detailSection = "overview";
@@ -180,7 +212,7 @@ const panelAuthHeaders = () => {
 let statusTimer = null;
 const STATUS_CLEAR_MS = 4000;
 
-const showStatus = (message, isError) => {
+const showStatus = (message, isError, state) => {
   if (!statusNode) return;
   if (statusTimer) {
     clearTimeout(statusTimer);
@@ -191,12 +223,16 @@ const showStatus = (message, isError) => {
   if (!message) {
     delete statusNode.dataset.error;
     delete statusNode.dataset.tone;
+    delete statusNode.dataset.state;
     return;
   }
   const cancelled = !isError && /^已取消/.test(message);
+  state ||= isError ? "failed" : cancelled ? "cancelled" : /^正在/.test(message) ? "running" : "succeeded";
+  if (/已.*(但|，).*刷新失败/.test(message)) state = "partial";
+  statusNode.dataset.state = state;
   statusNode.dataset.error = isError ? "true" : "false";
-  statusNode.dataset.tone = isError ? "error" : (cancelled ? "info" : "success");
-  if (!isError) {
+  statusNode.dataset.tone = state === "failed" ? "error" : state === "succeeded" ? "success" : "info";
+  if (state === "cancelled") {
     statusTimer = setTimeout(() => {
       if (statusNode.textContent === message) showStatus("", false);
     }, STATUS_CLEAR_MS);
@@ -291,15 +327,21 @@ const deployComposePayload = async (payload) => {
 
 const setBusy = (next) => {
   busy = next;
-  const roots = [workspaceNode, contextNode].filter(Boolean);
+  if (next) showStatus("正在执行操作…", false, "running");
+  const roots = [workspaceNode, contextNode, document.querySelector(".page-head")].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
-      if (node === agentSelect || node === copyScript || node === copyDaemon) return;
-      if (agentPickerRoot && agentPickerRoot.contains(node)) return;
-      if (!next && (node.id === "files-edit" || node.id === "files-download" || node.id === "files-delete")) return;
-      node.disabled = next;
+      if (node === copyScript || node === copyDaemon) return;
+      if (next) {
+        if (!node.hasAttribute("data-before-busy")) node.dataset.beforeBusy = String(node.disabled);
+        node.disabled = true;
+      } else if (node.hasAttribute("data-before-busy")) {
+        node.disabled = node.dataset.beforeBusy === "true";
+        delete node.dataset.beforeBusy;
+      }
     });
   });
+  agentPicker.setDisabled(next);
   if (!next) syncSelectionActions();
 };
 
@@ -360,6 +402,7 @@ const rememberEngine = (agentID, engine) => {
   if (!agentID) return null;
   const entry = {
     ready: engine?.ready === true,
+    state: engine?.state || "detection-failed",
     online: engine?.online === true,
     version: engine?.version || "",
     at: Date.now(),
@@ -403,7 +446,7 @@ const engineMark = (state) => {
   const node = document.createElement("span");
   node.className = "agent-search-select__engine";
   node.dataset.ready = state.ready ? "true" : "false";
-  node.textContent = state.ready ? "引擎就绪" : "引擎未就绪";
+  node.textContent = state.state === "detection-failed" ? "检测失败" : state.ready ? "引擎就绪" : "引擎未就绪";
   return node;
 };
 
@@ -534,7 +577,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     if (engine) {
       triggerEngine.hidden = false;
       triggerEngine.dataset.ready = engine.ready ? "true" : "false";
-      triggerEngine.textContent = engine.ready ? "引擎就绪" : "引擎未就绪";
+      triggerEngine.textContent = engine.state === "detection-failed" ? "检测失败" : engine.ready ? "引擎就绪" : "引擎未就绪";
     } else {
       triggerEngine.hidden = true;
     }
@@ -598,6 +641,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       const option = document.createElement("button");
       option.type = "button";
       option.className = "agent-search-select__option";
+      option.dataset.agentId = agent.id;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", agent.id === picker.selected ? "true" : "false");
       const dot = document.createElement("span");
@@ -640,7 +684,19 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   picker.refresh = (selected) => {
     if (selected !== undefined) picker.selected = String(selected || "");
     syncTrigger();
-    if (picker.open) renderList();
+    if (picker.open) refreshEngineMarks();
+  };
+
+  // Probe completion must not replace an option between pointer down and click.
+  const refreshEngineMarks = () => {
+    list.querySelectorAll("[data-agent-id]").forEach((option) => {
+      option.setAttribute("aria-selected", option.dataset.agentId === picker.selected ? "true" : "false");
+      const engine = cachedEngine(option.dataset.agentId);
+      if (!engine) return;
+      const previous = option.querySelector(".agent-search-select__engine");
+      if (previous) previous.replaceWith(engineMark(engine));
+      else option.append(engineMark(engine));
+    });
   };
 
   trigger.addEventListener("click", () => {
@@ -655,7 +711,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     renderList();
     searchInput.focus();
     probeEngines(filteredAgents().slice(0, 12).map((agent) => agent.id), () => {
-      if (picker.open) renderList();
+      if (picker.open) refreshEngineMarks();
       syncTrigger();
     });
   });
@@ -1434,8 +1490,7 @@ const mountAppFiles = () => {
   const openNamedDialog = (dialog, input) => {
     if (!dialog || typeof dialog.showModal !== "function") return;
     if (input) input.value = "";
-    dialog.showModal();
-    if (input) input.focus();
+    openDialog(dialog, input);
   };
   const closeNamedDialog = (dialog) => {
     if (dialog && dialog.open) dialog.close();
@@ -1720,7 +1775,7 @@ const runAppAction = async (app, action) => {
 
 const serviceImages = (app) => (Array.isArray(app.service_images) ? app.service_images.filter((item) => item && item.name) : []);
 
-const askServiceUpdate = (app) => {
+const askServiceUpdate = async (app) => {
   const services = serviceImages(app);
   if (!updateDialog || typeof updateDialog.showModal !== "function") {
     const selected = services.filter((item) => item.update && item.default_tag).map((item) => ({ name: item.name, tag: item.default_tag }));
@@ -1728,7 +1783,8 @@ const askServiceUpdate = (app) => {
     const lines = selected.map((item) => `${item.name} → ${item.tag}`).join("\n");
     return Promise.resolve(window.confirm(`确认更新 ${app.id}？\n${lines}\n取消不会改 compose。`) ? { services: selected } : null);
   }
-  if (updateDialog.open) updateDialog.close("cancel");
+  if (updateDialog.open) return Promise.resolve(null);
+  if (dialogClosures.has(updateDialog)) await dialogClosures.get(updateDialog);
   const digestRefresh = services.some((item) => Array.isArray(item.candidates) && item.candidates.some((candidate) => candidate.digest));
   if (updateCopy) {
     updateCopy.textContent = digestRefresh
@@ -1761,8 +1817,7 @@ const askServiceUpdate = (app) => {
       resolve(payload);
     };
     updateDialog.addEventListener("close", onClose, { once: true });
-    updateDialog.showModal();
-    if (updateConfirm) updateConfirm.focus();
+    openDialog(updateDialog, updateDialog.querySelector('button[value="cancel"]'));
   });
 };
 
@@ -2050,7 +2105,9 @@ const renderApp = (app) => {
   const imageNode = card.querySelector("[data-app-image]");
   if (imageNode) {
     const version = appVersion(app);
-    const shown = cardImage(version);
+    const shown = serviceImages(app).length > 1
+      ? serviceImages(app).map((service) => `${service.name}: ${service.image || service.current || version}`).join(" · ")
+      : version;
     imageNode.textContent = shown;
     imageNode.hidden = !shown;
     imageNode.title = version;
@@ -2112,7 +2169,7 @@ const renderApp = (app) => {
       runAppAction(app, action);
     });
   });
-  const openDetail = () => { showDetail(app.id, "overview"); };
+  const openDetail = () => { if (!busy) showDetail(app.id, "overview"); };
   const detailButton = card.querySelector('[data-action="detail"]');
   if (detailButton) {
     detailButton.textContent = "详情";
@@ -2607,7 +2664,8 @@ const paintDetail = (app) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
   detailApp = app;
   selectedAppID = app.id;
-  if (detailTitle) detailTitle.textContent = app.id;
+  if (detailTitle) detailTitle.textContent = app.name || app.id;
+  document.querySelector("#detail-context").textContent = `节点：${agentDisplayName(selectedAgent())} · 应用：${app.id}`;
   if (detailStatus) {
     const status = app.status && app.status !== "有新版本" ? app.status : "";
     detailStatus.textContent = status;
@@ -2673,6 +2731,7 @@ const setDetailSection = async (section) => {
 
 const leaveDetail = async ({ force } = {}) => {
   if (!force && !(await filesWorkspace.confirmLeave())) return false;
+  detailRequest += 1;
   stopLogPolling();
   resetLogsTerminal();
   if (force) filesWorkspace.discard();
@@ -2690,29 +2749,38 @@ const leaveDetail = async ({ force } = {}) => {
 };
 
 const showDetail = async (appID, section) => {
+  const snapshot = contextSnapshot();
   if (!(await confirmLeaveEditor())) return;
+  if (!contextCurrent(snapshot)) return;
+  const request = ++detailRequest;
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
+    if (!contextCurrent(snapshot) || request !== detailRequest) return;
     const app = payload.app;
     if (!app) throw Object.assign(new Error("应用已不存在。"), { status: 404 });
+    if (app.id !== appID || app.agent_id !== snapshot.agent) throw new Error("应用与当前节点不匹配，请刷新列表。");
     view = "detail";
     closeCreate();
     paintDetail(app);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
   } catch (error) {
+    if (!contextCurrent(snapshot) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
+    await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
-    leaveDetail({ force: true });
   }
 };
 
 const loadEngine = async () => {
   if (!selectedAgentID) return null;
-  const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  const snapshot = contextSnapshot();
+  const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(snapshot.agent)}`);
   const engine = payload.engine || null;
-  rememberEngine(selectedAgentID, engine);
-  agentPicker.refresh();
+  if (contextCurrent(snapshot)) {
+    rememberEngine(snapshot.agent, engine);
+    agentPicker.refresh();
+  }
   return engine;
 };
 
@@ -2725,6 +2793,10 @@ const renderGuide = (engine) => {
 };
 
 const showUnreadyGuide = (engine) => {
+  if (engine?.state !== "missing") {
+    showContext("detection-failed");
+    return;
+  }
   const viewState = engine && engine.ready !== true
     ? engine
     : { ready: false, command: engine?.command || { script: OFFICIAL_INSTALL_SCRIPT } };
@@ -2739,15 +2811,17 @@ const showUnreadyGuide = (engine) => {
   showContext(executionFaceUnavailable(viewState) ? "execution-unavailable" : "unready");
 };
 
-const executionFaceUnavailable = (engine) => agentOnline && engine && engine.online === false && engine.ready !== true;
+const executionFaceUnavailable = (engine) => agentOnline && engine?.state === "report-offline";
 
 const showContext = (which) => {
+  document.querySelector("#app-detection-failed").hidden = which !== "detection-failed";
+  document.querySelector("#app-node-denied").hidden = which !== "denied";
   if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
   if (undeployedNode) undeployedNode.hidden = which !== "undeployed";
   if (offlineNode) offlineNode.hidden = which !== "offline";
   if (executionUnavailableNode) executionUnavailableNode.hidden = which !== "execution-unavailable";
   if (engineGuide) engineGuide.hidden = which !== "unready";
-  if (contextNode) contextNode.hidden = which !== "empty" && which !== "undeployed" && which !== "offline" && which !== "execution-unavailable";
+  if (contextNode) contextNode.hidden = !["empty", "undeployed", "offline", "execution-unavailable", "detection-failed", "denied"].includes(which);
 };
 
 const renderApps = (apps) => {
@@ -2774,28 +2848,35 @@ const renderEngineBadge = (engine) => {
   if (!engine) {
     engineReady = false;
     engineStatus.dataset.ready = "false";
-    engineStatus.textContent = "引擎未就绪";
+    engineStatus.textContent = "无法检测 Docker 状态";
     return;
   }
   engineReady = engine.ready === true;
+  if (engine.state === "detection-failed") {
+    engineStatus.textContent = "无法检测 Docker 状态";
+    return;
+  }
   engineStatus.dataset.ready = engineReady ? "true" : "false";
   if (executionFaceUnavailable(engine)) {
     engineStatus.textContent = "暂时无法执行";
     return;
   }
   engineStatus.textContent = engineReady
-    ? (engine.version ? `引擎 ${engine.version} 已就绪` : "引擎已就绪")
-    : "引擎未就绪";
+    ? (engine.version ? `Docker 引擎 ${engine.version} 已就绪` : "Docker 引擎已就绪")
+    : "尚未安装 Docker";
 };
 
 const renderWorkspace = async () => {
   const seq = ++workspaceSeq;
+  const snapshot = contextSnapshot();
   const keepDetailID = view === "detail" ? selectedAppID : "";
   const keepSection = detailSection;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
   lastEngine = null;
+  deniedNode.hidden = true;
+  unavailableNode.hidden = true;
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
   closeCreate();
@@ -2819,12 +2900,10 @@ const renderWorkspace = async () => {
     engine = await loadEngine();
   } catch (error) {
     if (seq !== workspaceSeq) return;
-    if (error && error.denied) throw error;
-    if (error && error.message === "暂时无法管理 Docker 应用。") throw error;
     leaveDetail({ force: true });
-    renderGuide(null);
     renderEngineBadge(null);
-    showContext("execution-unavailable");
+    showContext(error.denied ? "denied" : "detection-failed");
+    if (error.denied) engineStatus.textContent = "无权管理该节点";
     return;
   }
   if (seq !== workspaceSeq) return;
@@ -2834,12 +2913,18 @@ const renderWorkspace = async () => {
   if (!engineReady) {
     leaveDetail({ force: true });
     renderGuide(engine);
-    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : "unready");
+    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : engine?.state === "missing" ? "unready" : "detection-failed");
     return;
   }
   showContext("");
   workspaceNode.hidden = false;
-  const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  let payload;
+  try {
+    payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(snapshot.agent)}`);
+  } catch (error) {
+    if (seq !== workspaceSeq || !contextCurrent(snapshot)) return;
+    throw error;
+  }
   if (seq !== workspaceSeq) return;
   renderApps(payload.apps);
   if (payload.error) showStatus(payload.error, true);
@@ -2880,11 +2965,13 @@ const loadAgents = async () => {
 };
 
 agentPicker.onChange = async (value) => {
+  if (busy) { agentPicker.setValue(selectedAgentID); return; }
   if (!(await confirmLeaveEditor())) {
     agentPicker.setValue(selectedAgentID);
     return;
   }
   leaveDetail({ force: true });
+  contextVersion += 1;
   selectedAgentID = String(value || "");
   const url = new URL(window.location.href);
   if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
@@ -2897,6 +2984,11 @@ agentPicker.onChange = async (value) => {
     showStatus(error.message, true);
   }
 };
+
+document.querySelector("#workspace-refresh")?.addEventListener("click", async () => {
+  if (busy || !(await confirmLeaveEditor())) return;
+  try { await renderWorkspace(); } catch (error) { showStatus(error.message, true); }
+});
 
 if (deployToggle) {
   deployToggle.addEventListener("click", () => {

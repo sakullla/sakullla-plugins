@@ -1044,7 +1044,7 @@ func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
 	}
 }
 
-func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T) {
+func TestAppUIEngineReportFailureReturnsDetectionFailureWithoutSDKText(t *testing.T) {
 	t.Parallel()
 	sdkText := ErrTypedHandlesUnavailable.Error()
 	cases := []struct {
@@ -1071,7 +1071,7 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 			engine := httptest.NewRecorder()
 			controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
 			body := engine.Body.String()
-			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"online":false`) {
+			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"state":"detection-failed"`) {
 				t.Fatalf("probe failure engine status=%d body=%s", engine.Code, body)
 			}
 			if strings.Contains(body, `"ready":true`) || strings.Contains(body, sdkText) || strings.Contains(body, OfficialInstallScript) {
@@ -1085,6 +1085,39 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 			}
 			if len(controller.Apps()) != 0 {
 				t.Fatalf("probe failure deploy mutated apps: %#v", controller.Apps())
+			}
+		})
+	}
+}
+
+func TestAppUIEngineStatesRequirePositiveInstallationEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		report AgentEngineReport
+		state  string
+		guide  bool
+	}{
+		{"ready", AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"}, "ready", false},
+		{"missing", AgentEngineReport{AgentID: "agent-1", Online: true}, "missing", true},
+		{"offline-stale-installed", AgentEngineReport{AgentID: "agent-1", Online: false, Installed: true}, "report-offline", false},
+		{"offline-missing", AgentEngineReport{AgentID: "agent-1", Online: false}, "report-offline", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller := newUIControllerWithSource(t, AgentEngineSourceFunc(func(context.Context, string) (AgentEngineReport, error) {
+				return tc.report, nil
+			}), `{"apps":[]}`)
+			rec := httptest.NewRecorder()
+			controller.ServeHTTP(rec, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+			var payload appAPIResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusOK || payload.Engine == nil || payload.Engine.State != tc.state {
+				t.Fatalf("state status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if (payload.Engine.Command != nil) != tc.guide {
+				t.Fatalf("installation evidence mismatch: %s", rec.Body.String())
 			}
 		})
 	}
@@ -3274,8 +3307,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form still fills main without a capped operation group")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "auto-fill") && !strings.Contains(appList, "auto-fit") {
-		t.Fatal(".app-list is not a card grid")
+	if !strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
+		t.Fatal("application list must be one scannable column")
 	}
 	if strings.Contains(appList, "flex-direction: column") {
 		t.Fatal(".app-list is still a scannable column")
@@ -3322,8 +3355,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(loadCatch[:endCatch], "showStatus(error.message") {
 		t.Fatal("loadEngine failure still writes the error payload into #app-status")
 	}
-	if !strings.Contains(loadCatch[:endCatch], `showContext("execution-unavailable")`) {
-		t.Fatal("loadEngine failure does not surface execution-face unavailability")
+	if !strings.Contains(loadCatch[:endCatch], `showContext(error.denied ? "denied" : "detection-failed")`) {
+		t.Fatal("engine failure must distinguish explicit permission denial from unknown probe failure")
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, js)
 }
@@ -3572,15 +3605,13 @@ func assertFilesManagerPage(t *testing.T) {
 		t.Fatal("setBusy is missing")
 	}
 	setBusyFn := js[setBusyStart:setBusyEnd]
-	for _, id := range []string{`"files-edit"`, `"files-download"`, `"files-delete"`} {
-		if !strings.Contains(setBusyFn, id) {
-			t.Fatalf("setBusy(false) still enables %s with no file selected", id)
-		}
+	if !strings.Contains(setBusyFn, `node.disabled = node.dataset.beforeBusy === "true"`) {
+		t.Fatal("setBusy(false) must restore controls that were already disabled")
 	}
 	if !strings.Contains(setBusyFn, "if (!next) syncSelectionActions()") {
 		t.Fatal("setBusy(false) does not restore selection-based disabled flags")
 	}
-	if !strings.Contains(setBusyFn, "node.disabled = next") {
+	if !strings.Contains(setBusyFn, "node.disabled = true") {
 		t.Fatal("setBusy no longer toggles workspace controls")
 	}
 
@@ -3804,8 +3835,8 @@ func assertDetailWorkspacePage(t *testing.T) {
 		t.Fatal("paintDetail is missing")
 	}
 	paintFn := js[paintStart:paintEnd]
-	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") {
-		t.Fatal("detail title does not show the app id")
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.name || app.id") || !strings.Contains(paintFn, "应用：${app.id}") {
+		t.Fatal("detail must show the application name and explicit identity")
 	}
 	if !strings.Contains(paintFn, "detailStatus") || !strings.Contains(paintFn, "detailOpen") {
 		t.Fatal("detail head does not paint status or open")
@@ -4086,11 +4117,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(paintFn, "appChanged") || !strings.Contains(paintFn, "resetLogsTerminal();") {
 		t.Fatal("changing apps does not reset the logs terminal")
 	}
-	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") || !strings.Contains(paintFn, "detailStatus") {
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.name || app.id") || !strings.Contains(paintFn, "detailStatus") {
 		t.Fatal("detail head does not keep app id and status across sections")
 	}
 	for _, want := range []string{
-		"detailTitle.textContent = app.id",
+		"detailTitle.textContent = app.name || app.id",
 		"detailStatus.textContent",
 		"firstEnabledRuleURL(app)",
 		"detailOpen.hidden",
