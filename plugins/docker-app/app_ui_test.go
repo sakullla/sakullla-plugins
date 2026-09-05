@@ -573,6 +573,40 @@ func TestAppUIPublishesHTTPBackendOffersAvailableWhenRuntimeOverlayIsMissing(t *
 	}
 }
 
+func TestAppUIDetailReportsIndependentHTTPRuleReadFailure(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{listErr: errors.New("host failed at C:/private/fixture-value " + ErrTypedHandlesUnavailable.Error())}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("seed app status=%d body=%s", created.Code, created.Body.String())
+	}
+	for _, path := range []string{"/api/apps/media", "/api/apps?agent_id=agent-1"} {
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiRequest(http.MethodGet, path, ""))
+		var payload appAPIResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		view := payload.App
+		if view == nil && len(payload.Apps) == 1 {
+			view = &payload.Apps[0]
+			if payload.Error == "" {
+				t.Fatal("partial list omitted its error")
+			}
+		}
+		if rec.Code != http.StatusOK || view == nil || view.ID != "media" || view.RulesError == "" || view.Compose == "" || len(view.Ports) != 1 {
+			t.Fatalf("independent rule error lost useful app data: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		for _, forbidden := range []string{"fixture-value", "C:/private", ErrTypedHandlesUnavailable.Error()} {
+			if strings.Contains(rec.Body.String(), forbidden) {
+				t.Fatalf("rule read failure leaked %q", forbidden)
+			}
+		}
+	}
+}
+
 func TestAppUIHTTPRuleListFailureDoesNotRecordLocalSuccess(t *testing.T) {
 	t.Parallel()
 	handle := &recordingHTTPRuleCreate{listErr: errors.New("host list rejected fixture-value")}
@@ -679,9 +713,9 @@ func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
 	for _, token := range []string{
 		"入口域名",
 		"无发布端口",
-		"没有可挂的端口",
-		"/http-rule",
-		"/http-rule-delete",
+		"没有发布端口，暂不能添加入口",
+		`"http-rule"`,
+		`"http-rule-delete"`,
 		`name = "domain"`,
 		`name = "port"`,
 		"app.rules",
@@ -3915,10 +3949,10 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if strings.Contains(httpFn, `${domain}${port}`) {
 		t.Fatal("HTTP rule rows still glue the backend published port onto the public URL")
 	}
-	if !strings.Contains(httpFn, "后端 ") || !strings.Contains(js, "publicURLFromRule") {
+	if !strings.Contains(httpFn, "发布端口 ") || !strings.Contains(js, "publicURLFromRule") {
 		t.Fatal("HTTP rule rows do not keep the public URL separate from the backend published port")
 	}
-	if !strings.Contains(httpFn, "确认删除入口") {
+	if !strings.Contains(httpFn, "runHTTPAction") || !strings.Contains(js, `title: deleting ? "删除入口" : "添加入口"`) {
 		t.Fatal("HTTP delete is missing confirmation")
 	}
 
@@ -4178,11 +4212,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	pollFn := js[pollStart:pollEnd]
 	fetchCall := strings.Index(pollFn, "fetchLogs();")
 	pauseGate := strings.Index(pollFn, "logsPaused")
-	if fetchCall < 0 || pauseGate < 0 || fetchCall > pauseGate {
-		t.Fatal("paused log polling skips the immediate snapshot fetch")
+	if fetchCall < 0 || pauseGate < 0 || pauseGate > fetchCall {
+		t.Fatal("paused log polling still fetches an automatic snapshot")
 	}
-	if strings.Contains(pollFn, "if (logsPaused || document.visibilityState === \"hidden\" || view !== \"detail\"") {
-		t.Fatal("startLogPolling still returns before fetchLogs when paused")
+	if !strings.Contains(pollFn[:fetchCall], `document.visibilityState === "hidden"`) || !strings.Contains(js, `logsRefresh.addEventListener("click"`) {
+		t.Fatal("hidden polling must stop while manual snapshot refresh remains available")
 	}
 	if !strings.Contains(js, "panelJSON(`api/apps/${encodeURIComponent(appID)}`)") {
 		t.Fatal("detail view does not load GET /api/apps/{id}")
@@ -4290,7 +4324,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(httpFn, `className = "http-rule-open"`) || !strings.Contains(httpFn, `createElement("a")`) || !strings.Contains(httpFn, "link.href") {
 		t.Fatal("existing HTTP entries are not openable in markup")
 	}
-	if !strings.Contains(httpFn, `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`) {
+	if !strings.Contains(httpFn, `runHTTPAction(app, "http-rule-delete"`) || !strings.Contains(js, "取消不会更改规则。") {
 		t.Fatal("HTTP rule delete no longer requires confirmation")
 	}
 	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")

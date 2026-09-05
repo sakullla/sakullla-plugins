@@ -248,6 +248,7 @@
         </section>
         <section id="detail-files" class="detail-section" data-section-panel="files" hidden></section>
         <section id="detail-logs" class="detail-section" data-section-panel="logs" hidden>
+          <p id="logs-context" class="resource-context"></p>
           <div class="logs-panel">
             <div class="logs-toolbar">
               <label>服务 <select id="logs-service" name="service"></select></label>
@@ -255,6 +256,7 @@
               <button id="logs-pause" class="btn-secondary" type="button">暂停</button>
               <p id="logs-status" class="hint">自动刷新</p>
             </div>
+            <p id="logs-empty" class="logs-empty" hidden>当前服务的快照没有日志。</p>
             <pre id="logs-view" class="logs-terminal"></pre>
           </div>
         </section>
@@ -287,10 +289,13 @@
     <template id="app-files-template">
       <section class="app-section app-files" id="app-files">
         <h4>文件</h4>
+        <p class="hint">应用工作区内的相对路径；文本文件最大 1MiB，上传仅支持 UTF-8 文本。</p>
+        <p id="files-status" class="resource-feedback" role="status" hidden></p>
         <div id="files-browser" class="files-browser">
           <nav class="files-path" aria-label="工作区路径">
             <button id="files-up" type="button" class="btn-link" hidden>上一级</button>
             <div id="files-breadcrumb" class="files-breadcrumb"></div>
+            <button id="files-refresh" class="btn-link" type="button">刷新目录</button>
           </nav>
           <div class="files-toolbar">
             <button id="files-mkdir" type="button" class="btn-secondary">新建目录</button>
@@ -310,6 +315,7 @@
         <dialog id="files-mkdir-dialog" class="files-dialog" aria-labelledby="files-mkdir-title">
           <form id="files-mkdir-form" class="files-dialog-form">
             <h3 id="files-mkdir-title">新建目录</h3>
+            <p data-dialog-feedback class="resource-feedback" role="alert" hidden></p>
             <p class="files-dialog-copy">在当前路径下创建一个目录。</p>
             <label>目录名称
               <input id="files-mkdir-name" name="mkdir" autocomplete="off" spellcheck="false" placeholder="config" required>
@@ -323,6 +329,7 @@
         <dialog id="files-new-dialog" class="files-dialog" aria-labelledby="files-new-title">
           <form id="files-new-form" class="files-dialog-form">
             <h3 id="files-new-title">新建文本文件</h3>
+            <p data-dialog-feedback class="resource-feedback" role="alert" hidden></p>
             <p class="files-dialog-copy">在当前路径新建文本文件，保存后写入工作区。</p>
             <label>文本文件名
               <input id="files-new-name" name="new-text" autocomplete="off" spellcheck="false" placeholder="config.yml" required>

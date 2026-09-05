@@ -49,6 +49,8 @@ const logsRefresh = document.querySelector("#logs-refresh");
 const logsPause = document.querySelector("#logs-pause");
 const logsStatus = document.querySelector("#logs-status");
 const logsView = document.querySelector("#logs-view");
+const logsEmpty = document.querySelector("#logs-empty");
+const logsContext = document.querySelector("#logs-context");
 const createForm = document.querySelector("#create-form");
 const createTitle = document.querySelector("#app-create-title");
 const createSubmit = document.querySelector("#create-submit");
@@ -177,6 +179,7 @@ const navigationCurrent = (snapshot) => contextCurrent(snapshot)
 let logsPaused = false;
 let logsTimer = null;
 let logsLoaded = false;
+let logsSnapshotKey = "";
 let logsSeq = 0;
 let filesDirty = false;
 let filesEditorOpen = false;
@@ -1288,6 +1291,17 @@ const mountAppFiles = () => {
     filesPanel.replaceChildren(template.content.cloneNode(true));
   }
   const section = filesPanel.querySelector(".app-files") || filesPanel;
+  const filesStatus = section.querySelector("#files-status");
+  const setFilesStatus = (message, state = "ready") => {
+    if (!filesStatus) return;
+    filesStatus.textContent = message; filesStatus.hidden = !message; filesStatus.dataset.state = state;
+    filesStatus.setAttribute("role", state === "failed" ? "alert" : "status");
+  };
+  const fileError = (message) => { setFilesStatus(message, "failed"); showStatus(message, true); };
+  const dialogError = (dialog, message) => {
+    const feedback = dialog?.querySelector("[data-dialog-feedback]");
+    if (feedback) { feedback.hidden = false; feedback.textContent = message; feedback.dataset.state = "failed"; }
+  };
   const browser = section.querySelector("#files-browser") || section.querySelector(".files-browser");
   const breadcrumb = section.querySelector("#files-breadcrumb") || section.querySelector(".files-breadcrumb");
   const upBtn = section.querySelector("#files-up");
@@ -1444,7 +1458,7 @@ const mountAppFiles = () => {
     if (!(await confirmLeave())) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
-      showStatus(workspacePathError, true);
+      fileError(workspacePathError);
       return;
     }
     const target = app;
@@ -1453,23 +1467,26 @@ const mountAppFiles = () => {
     const request = ++fileReadSequence;
     const current = () => navigationCurrent(navigation) && app?.id === target.id
       && revision === fileDraft.revision && request === fileReadSequence;
+    setFilesStatus(`正在读取文件 ${relative}…`, "loading");
     try {
       const payload = await postAppFiles(target, { action: "read", path: relative });
       if (!current()) return;
       const content = typeof payload.content === "string" ? payload.content : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
+        fileError("文件超过 1MiB 上限");
         return;
       }
       if (!looksLikeText(content)) {
-        showStatus("该文件不适合文本编辑，请下载或重新上传。", true);
+        fileError("该文件不适合文本编辑，请下载或重新上传。");
         if (binaryHint) binaryHint.hidden = false;
         return;
       }
       showEditor(relative, name || relative.split("/").pop(), content);
+      setFilesStatus(`已打开 ${relative}`);
+      showStatus("已打开工作区文件。", false);
     } catch (error) {
       if (!current()) return;
-      showStatus(error.message, true);
+      fileError(`读取文件失败：${error.message}`);
     }
   };
 
@@ -1482,12 +1499,13 @@ const mountAppFiles = () => {
     if (!app) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
-      showStatus(workspacePathError, true);
+      fileError(workspacePathError);
       return;
     }
     const target = app;
     const context = contextSnapshot();
     const request = ++fileListSequence;
+    setFilesStatus(`正在读取目录 ${relative}…`, "loading");
     const current = () => contextCurrent(context) && selectedAppID === target.id
       && view === "detail" && request === fileListSequence;
     try {
@@ -1501,7 +1519,7 @@ const mountAppFiles = () => {
         else paintSelection();
       }
       renderBreadcrumb();
-      if (listEl) listEl.replaceChildren();
+      if (listEl) { listEl.replaceChildren(); listEl.dataset.stale = "false"; }
       let listed = 0;
       entries.forEach((entry) => {
         const entryPath = relativeWorkspacePath(entry.path || entry.name);
@@ -1516,6 +1534,7 @@ const mountAppFiles = () => {
         const open = document.createElement("button");
         open.type = "button";
         open.className = "files-name";
+        open.title = entryPath;
         open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
         open.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1536,12 +1555,13 @@ const mountAppFiles = () => {
         if (listEl) listEl.append(item);
       });
       if (emptyEl) emptyEl.hidden = listed !== 0;
+      setFilesStatus(listed ? `目录已读取 · ${listed} 项` : "此目录为空", listed ? "ready" : "empty");
       return true;
     } catch (error) {
       if (!current()) return;
-      if (listEl) listEl.replaceChildren();
+      if (listEl) listEl.dataset.stale = "true";
       if (emptyEl) emptyEl.hidden = true;
-      showStatus(error.message, true);
+      fileError(`目录 ${relative} 读取失败；显示上次读取的 ${currentPath}。${error.message}`);
       return false;
     }
   };
@@ -1552,38 +1572,32 @@ const mountAppFiles = () => {
   };
 
   const removePath = async (path, name) => {
-    if (!app) return;
+    if (busy || !app) return;
     const relative = relativeWorkspacePath(path);
-    if (!relative || relative === ".") {
-      showStatus(relative === "." ? "不能删除应用工作区根目录" : workspacePathError, true);
-      return;
-    }
-    if (!await askConfirm({
-      title: "删除",
-      body: `确认删除 ${name || relative}？取消不会更改工作区。`,
-      confirm: "删除",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，工作区未更改。", false);
-      return;
-    }
+    if (!relative || relative === ".") { fileError(relative === "." ? "不能删除应用工作区根目录" : workspacePathError); return; }
+    const target = app;
     setBusy(true);
     try {
-      await postAppFiles(app, { action: "delete", path: relative });
+      if (!(await askConfirm({
+        title: "删除工作区文件",
+        body: `节点 ${agentDisplayName(selectedAgent())} · 应用 ${target.id}\n确认删除 ${name || relative}？路径：${relative}。取消不会更改工作区。`,
+        confirm: "删除", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，工作区未更改。", false); return; }
+      await postAppFiles(target, {action:"delete",path:relative});
       if (selectedPath === relative) hideEditor();
       showStatus("已删除工作区文件。", false);
-      await loadList(currentPath);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
+      if (await loadList(currentPath) === false) showStatus("文件已删除，但目录刷新失败。", true, "partial");
+    } catch (error) { fileError(error.message); }
+    finally { setBusy(false); }
   };
 
   const openNamedDialog = (dialog, input) => {
     if (!dialog || typeof dialog.showModal !== "function") return;
     if (input) input.value = "";
+    const feedback = dialog.querySelector("[data-dialog-feedback]");
+    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const copy = dialog.querySelector(".files-dialog-copy");
+    if (copy) copy.textContent = `应用 ${app.id} · 当前目录 ${currentPath}。使用工作区内的相对名称。`;
     openDialog(dialog, input);
   };
   const closeNamedDialog = (dialog) => {
@@ -1612,7 +1626,7 @@ const mountAppFiles = () => {
       }
       const next = joinWorkspacePath(currentPath, name);
       if (!next) {
-        showStatus(workspacePathError, true);
+        dialogError(mkdirDialog, workspacePathError);
         return;
       }
       setBusy(true);
@@ -1623,7 +1637,7 @@ const mountAppFiles = () => {
         showStatus("已新建目录。", false);
         await loadList(currentPath);
       } catch (error) {
-        showStatus(error.message, true);
+        dialogError(mkdirDialog, error.message);
       } finally {
         setBusy(false);
       }
@@ -1648,7 +1662,7 @@ const mountAppFiles = () => {
       }
       const next = joinWorkspacePath(currentPath, name);
       if (!next) {
-        showStatus(workspacePathError, true);
+        dialogError(newDialog, workspacePathError);
         return;
       }
       if (newName) newName.value = "";
@@ -1669,31 +1683,32 @@ const mountAppFiles = () => {
     });
   }
   if (uploadBtn && uploadInput) {
-    uploadBtn.addEventListener("click", () => uploadInput.click());
+    let uploadContext = null;
+    uploadBtn.addEventListener("click", () => {
+      if (busy || !app) return;
+      uploadContext = {navigation:navigationSnapshot(),app,path:currentPath};
+      uploadInput.click();
+    });
     uploadInput.addEventListener("change", async () => {
       const file = uploadInput.files && uploadInput.files[0];
       uploadInput.value = "";
-      if (!file || !app) return;
-      const next = joinWorkspacePath(currentPath, file.name);
-      if (!next) {
-        showStatus(workspacePathError, true);
-        return;
-      }
-      if (file.size > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
-        return;
-      }
-      const content = await file.text();
+      const context = uploadContext || {navigation:navigationSnapshot(),app,path:currentPath};
+      uploadContext = null;
+      if (!file || busy || !context.app || !navigationCurrent(context.navigation)) return;
+      const next = joinWorkspacePath(context.path, file.name);
+      if (!next) { fileError(workspacePathError); return; }
+      if (file.size > MAX_WORKSPACE_FILE_BYTES) { fileError("文件超过 1MiB 上限"); return; }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "write", path: next, content });
+        let content;
+        try { content = new TextDecoder("utf-8", {fatal:true}).decode(await file.arrayBuffer()); }
+        catch { throw new Error("上传仅支持 UTF-8 文本文件。"); }
+        if (!looksLikeText(content)) throw new Error("上传仅支持 UTF-8 文本文件。");
+        await postAppFiles(context.app, {action:"write",path:next,content});
         showStatus("已上传工作区文件。", false);
-        await loadList(currentPath);
-      } catch (error) {
-        showStatus(error.message, true);
-      } finally {
-        setBusy(false);
-      }
+        if (await loadList(context.path) === false) showStatus("文件已上传，但目录刷新失败。", true, "partial");
+      } catch (error) { fileError(error.message); }
+      finally { setBusy(false); }
     });
   }
   if (downloadBtn) {
@@ -1703,9 +1718,13 @@ const mountAppFiles = () => {
         showStatus("请先选择一个文件再下载。", true);
         return;
       }
+      const target = app;
+      const filename = selectedName || selectedPath.split("/").pop();
+      const context = contextSnapshot();
       try {
-        const file = await postAppFiles(app, { action: "read", path: selectedPath });
-        downloadTextFile(selectedName || selectedPath.split("/").pop(), file.content || "");
+        const file = await postAppFiles(target, { action: "read", path: selectedPath });
+        if (!contextCurrent(context)) return;
+        downloadTextFile(filename, file.content || "");
         showStatus("已开始下载。", false);
       } catch (error) {
         showStatus(error.message, true);
@@ -1727,7 +1746,7 @@ const mountAppFiles = () => {
       if (busy || !app || !selectedPath || selectedDir) return;
       const content = editorInput ? editorInput.value : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
+        fileError("文件超过 1MiB 上限");
         return;
       }
       setBusy(true);
@@ -1757,6 +1776,7 @@ const mountAppFiles = () => {
       loadList(currentPath);
     });
   }
+  section.querySelector("#files-refresh")?.addEventListener("click", () => { if (!busy) requestList(currentPath); });
   syncSelectionActions();
   if (editorInput) {
     editorInput.addEventListener("input", () => {
@@ -2117,6 +2137,7 @@ const backendPortFromRule = (rule) => {
 };
 
 const firstEnabledRuleURL = (app) => {
+  if (app.rules_error) return "";
   const rules = Array.isArray(app.rules) ? app.rules : [];
   for (const rule of rules) {
     const openURL = publicURLFromRule(rule);
@@ -2212,8 +2233,8 @@ const renderApp = (app) => {
   const openURL = firstEnabledRuleURL(app);
   const urlNode = card.querySelector("[data-app-url]");
   if (urlNode) {
-    urlNode.hidden = !openURL;
-    urlNode.textContent = openURL ? displayHost(openURL) : "";
+    urlNode.hidden = !openURL && !app.rules_error;
+    urlNode.textContent = app.rules_error ? "入口读取失败" : openURL ? displayHost(openURL) : "";
     urlNode.title = openURL;
   }
   const openButton = card.querySelector('[data-action="open"]');
@@ -2310,7 +2331,7 @@ const renderOverview = (app) => {
     [statusValue, "状态"],
     [String(services.length || 1), "服务"],
     [String(ports.length), "端口"],
-    [String(rules.length), "入口"],
+    [app.rules_error ? "未知" : String(rules.length), "入口"],
   ].forEach(([value, label]) => {
     const item = document.createElement("div");
     item.className = "overview-stat";
@@ -2429,6 +2450,7 @@ const renderOverview = (app) => {
   if (hasUpdate) addRow(run, "更新", "镜像有新版本");
 
   const net = addBlock("入口");
+  if (app.rules_error) addRow(net, "读取状态", app.rules_error);
   if (rules.length) {
     const list = document.createElement("div");
     list.className = "overview-links";
@@ -2450,7 +2472,7 @@ const renderOverview = (app) => {
       }
     });
     addRow(net, "域名", "", { node: list });
-  } else {
+  } else if (!app.rules_error) {
     addRow(net, "域名", "未配置 HTTP 入口");
   }
 
@@ -2494,142 +2516,136 @@ const renderOverview = (app) => {
   });
 };
 
+const runHTTPAction = async (app, action, body, form) => {
+  if (busy || selectedAgentID !== app.agent_id) return;
+  const deleting = action === "http-rule-delete";
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    const target = deleting ? body.domain : `${body.domain} → 发布端口 ${body.port}`;
+    if (!(await askConfirm({
+      title: deleting ? "删除入口" : "添加入口",
+      body: `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}\n${target}\n${deleting ? "删除后此入口停止提供访问。" : "确认将此域名绑定到所选发布端口。"}取消不会更改规则。`,
+      confirm: deleting ? "删除" : "创建", cancel: "取消", danger: deleting,
+    }))) { showStatus("已取消，规则未更改。", false); return; }
+    const payload = deleting ? {rule_ref:body.rule_ref} : {domain:body.domain,port:body.port};
+    await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, payload);
+    form?.reset();
+    const message = deleting ? "已删除 HTTP 规则。" : "已创建 HTTP 规则。";
+    showStatus(message, false);
+    try {
+      if (await renderWorkspace() === false) throw new Error("入口或应用信息未能刷新");
+      showStatus(message, false);
+    } catch (error) { showStatus(`${message}但页面刷新失败：${error.message}`, true, "partial"); }
+  } catch (error) {
+    const feedback = httpPanel.querySelector("#http-feedback");
+    if (feedback) { feedback.hidden = false; feedback.textContent = error.message; }
+    showStatus(error.message, true);
+  } finally { setBusy(false); }
+};
+
 const renderHTTP = (app) => {
   if (!httpPanel) return;
+  const owner = `${app.agent_id}/${app.id}`;
+  const draft = httpPanel.dataset.owner === owner ? {
+    domain:httpPanel.querySelector('input[name="domain"]')?.value || "",
+    port:httpPanel.querySelector('select[name="port"]')?.value || "",
+  } : null;
   httpPanel.replaceChildren();
+  httpPanel.dataset.owner = owner;
   const ports = appPorts(app);
   const rules = Array.isArray(app.rules) ? app.rules : [];
+  const feedback = document.createElement("p");
+  feedback.id = "http-feedback";
+  feedback.className = "resource-error";
+  feedback.setAttribute("role", "alert");
+  feedback.textContent = app.rules_error || "";
+  feedback.hidden = !app.rules_error;
+  httpPanel.append(feedback);
+  const retry = actionButton({id:"refresh-http"}, "btn-secondary", "刷新入口");
+  retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
+  httpPanel.append(retry);
   if (rules.length) {
     const ruleList = document.createElement("ul");
     ruleList.className = "http-rules";
     rules.forEach((rule) => {
       const item = document.createElement("li");
+      item.dataset.ruleRef = rule.ref || "";
       const domain = String(rule.domain || "").trim();
-      const disabled = rule.enabled === false;
-      const openURL = disabled ? "" : publicURLFromRule(rule);
+      const openURL = publicURLFromRule(rule);
       const main = document.createElement("div");
       main.className = "http-rule-main";
+      const label = document.createElement("strong");
+      label.textContent = domain || "未命名入口";
+      main.append(label, chip(rule.enabled === false ? "已停用" : "已启用"));
+      const backendPort = backendPortFromRule(rule);
+      if (backendPort) main.append(chip(`发布端口 ${backendPort}`));
+      const target = document.createElement("p");
+      target.className = "http-rule-target";
+      target.textContent = openURL ? `访问目标：${openURL}` : "已停用，不提供访问链接";
+      main.append(target);
       if (openURL) {
         const link = document.createElement("a");
+        link.className = "http-rule-open";
         link.href = openURL;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.className = "http-rule-open";
-        link.textContent = openURL;
-        link.addEventListener("click", (event) => {
-          event.preventDefault();
-          window.open(openURL, "_blank", "noopener,noreferrer");
-        });
+        link.textContent = "访问";
         main.append(link);
-      } else {
-        const label = document.createElement("span");
-        label.textContent = `${domain || "未命名入口"}${disabled ? "（已停用）" : ""}`;
-        if (disabled) label.className = "http-rule-disabled";
-        main.append(label);
-      }
-      const backendPort = backendPortFromRule(rule);
-      if (backendPort) {
-        const bound = chip(`后端 ${backendPort}`);
-        bound.title = "容器发布端口，不是入口监听端口";
-        main.append(bound);
       }
       item.append(main);
       if (rule.ref) {
-        const deleteRule = document.createElement("button");
-        deleteRule.type = "button";
-        deleteRule.className = "btn-link danger";
-        deleteRule.textContent = "删除";
-        deleteRule.addEventListener("click", async () => {
-          if (busy) return;
-          if (!await askConfirm({
-            title: "删除入口",
-            body: `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`,
-            confirm: "删除",
-            cancel: "取消",
-            danger: true,
-          })) {
-            showStatus("已取消，规则未更改。", false);
-            return;
-          }
-          setBusy(true);
-          try {
-            await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/http-rule-delete`, {
-              rule_ref: rule.ref,
-            });
-            showStatus("已删除 HTTP 规则。", false);
-            await renderWorkspace();
-          } catch (error) {
-            showStatus(error.message, true);
-          } finally {
-            setBusy(false);
-          }
-        });
+        const deleteRule = actionButton({id:"delete-http"}, "btn-link danger", "删除");
+        deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:domain || rule.ref}));
         item.append(deleteRule);
       }
       ruleList.append(item);
     });
     httpPanel.append(ruleList);
-  } else if (ports.length) {
+  } else if (!app.rules_error) {
     const empty = document.createElement("p");
     empty.className = "http-empty";
-    empty.textContent = "还没有入口。把域名绑定到下面的发布端口。";
+    empty.textContent = "还没有 HTTP 入口。";
     httpPanel.append(empty);
   }
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
-    const formTitle = document.createElement("p");
-    formTitle.className = "http-form-title";
-    formTitle.textContent = "添加入口";
-    form.append(formTitle);
+    const title = document.createElement("p");
+    title.className = "http-form-title";
+    title.textContent = "添加入口";
     const portLabel = document.createElement("label");
-    portLabel.append("端口");
+    portLabel.append("发布端口");
     const portSelect = document.createElement("select");
     portSelect.name = "port";
     ports.forEach((port) => {
       const option = document.createElement("option");
-      option.value = String(port);
-      option.textContent = String(port);
+      option.value = String(port); option.textContent = String(port);
       portSelect.append(option);
     });
+    if (draft && ports.some((port) => String(port) === draft.port)) portSelect.value = draft.port;
     portLabel.append(portSelect);
     const domainLabel = document.createElement("label");
     domainLabel.append("入口域名");
     const domain = document.createElement("input");
-    domain.name = "domain";
-    domain.required = true;
-    domain.autocomplete = "off";
-    domain.spellcheck = false;
+    domain.name = "domain"; domain.required = true; domain.autocomplete = "off"; domain.spellcheck = false;
     domain.placeholder = "app.example.com";
+    domain.value = draft?.domain || "";
     domainLabel.append(domain);
     const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "btn-primary";
-    submit.textContent = "添加入口";
-    form.append(portLabel, domainLabel, submit);
-    form.addEventListener("submit", async (event) => {
+    submit.type = "submit"; submit.className = "btn-primary"; submit.textContent = "添加入口";
+    form.append(title,portLabel,domainLabel,submit);
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
-      if (busy) return;
-      setBusy(true);
-      try {
-        await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/http-rule`, {
-          domain: domain.value.trim(),
-          port: Number(portSelect.value),
-        });
-        showStatus("已创建 HTTP 规则。", false);
-        form.reset();
-        await renderWorkspace();
-      } catch (error) {
-        showStatus(error.message, true);
-      } finally {
-        setBusy(false);
-      }
+      if (!domain.value.trim()) { domain.focus(); return; }
+      runHTTPAction(app, "http-rule", {domain:domain.value.trim(),port:Number(portSelect.value)}, form);
     });
     httpPanel.append(form);
   } else {
     const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent = "没有可挂的端口";
+    hint.className = "hint http-no-ports";
+    hint.textContent = "没有发布端口，暂不能添加入口。";
     httpPanel.append(hint);
   }
 };
@@ -2649,6 +2665,7 @@ const fillLogServices = (app) => {
 };
 
 const stopLogPolling = () => {
+  logsSeq += 1;
   if (logsTimer) {
     clearInterval(logsTimer);
     logsTimer = null;
@@ -2691,50 +2708,50 @@ const paintLogsView = () => {
 
 const resetLogsTerminal = () => {
   logsSeq += 1;
-  if (logsView) {
-    logsView.textContent = "";
-    logsView.dataset.error = "false";
-  }
+  logsLoaded = false;
+  logsSnapshotKey = "";
+  if (logsView) { logsView.textContent = ""; logsView.dataset.error = "false"; }
+  if (logsEmpty) logsEmpty.hidden = true;
   setLogsState("", false);
 };
-
 const logsContextCurrent = () => detailApp && view === "detail" && detailSection === "logs";
-
 const fetchLogs = async () => {
-  if (!logsContextCurrent()) return;
+  if (!logsContextCurrent() || document.visibilityState === "hidden") return;
   const service = logsService ? logsService.value : "";
   if (!service) {
-    logsLoaded = true;
     resetLogsTerminal();
     setLogsState("没有可查看的服务", false);
     stopLogPolling();
     return;
   }
-  const seq = ++logsSeq;
   const appID = detailApp.id;
+  const key = `${selectedAgentID}/${appID}/${service}`;
+  if (logsSnapshotKey !== key) { resetLogsTerminal(); logsSnapshotKey = key; }
+  logsContext.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${appID} · 服务 ${service} · 每 4 秒读取快照`;
+  const seq = ++logsSeq;
+  const context = contextSnapshot();
+  const current = () => seq === logsSeq && contextCurrent(context) && logsContextCurrent() && detailApp.id === appID && logsService.value === service;
+  setLogsState(logsLoaded ? "正在刷新，显示上次快照" : "正在读取日志快照…", false);
   try {
     const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(appID)}/logs`, { service });
-    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
-    if (logsView) {
-      logsView.textContent = payload.logs || "";
-      logsView.dataset.error = "false";
-      paintLogsView();
-    }
+    if (!current()) return;
+    logsView.textContent = payload.logs || "";
+    logsView.dataset.error = "false";
+    paintLogsView();
     logsLoaded = true;
-    if (!logsPaused) setLogsState("自动刷新", false);
+    logsEmpty.hidden = !!payload.logs;
+    setLogsState(`${logsPaused ? "已暂停自动刷新" : "自动刷新"} · 最近读取 ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
-    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
-    if (logsView) logsView.dataset.error = "true";
-    setLogsState("自动刷新失败，已保留上次快照", true);
+    if (!current()) return;
+    logsView.dataset.error = "true";
+    setLogsState(logsLoaded ? "自动刷新失败，已保留上次快照" : "日志读取失败，请重试", true);
     if (!logsLoaded) showStatus(error.message, true);
   }
 };
-
 const startLogPolling = () => {
   stopLogPolling();
-  if (view !== "detail" || detailSection !== "logs") return;
+  if (view !== "detail" || detailSection !== "logs" || logsPaused || document.visibilityState === "hidden") return;
   fetchLogs();
-  if (logsPaused || document.visibilityState === "hidden") return;
   if (!(logsService && logsService.value)) return;
   logsTimer = setInterval(fetchLogs, LOG_REFRESH_MS);
 };
@@ -2780,6 +2797,7 @@ const paintDetail = (app, composeRevision) => {
 const setDetailSection = async (section) => {
   const navigation = navigationSnapshot();
   const next = section || "overview";
+  const previousSection = detailSection;
   if (next !== "files" && !(await filesWorkspace.confirmLeave())) return false;
   if (!navigationCurrent(navigation)) return false;
   if (next !== detailSection) advanceNavigation();
@@ -2799,11 +2817,10 @@ const setDetailSection = async (section) => {
     paintCodeEditor(detailEnvInput);
   }
   if (next === "logs") {
-    logsPaused = false;
-    logsLoaded = false;
+    if (previousSection !== "logs") logsPaused = false;
     if (logsPause) {
-      logsPause.textContent = "暂停";
-      logsPause.setAttribute("aria-pressed", "false");
+      logsPause.textContent = logsPaused ? "继续" : "暂停";
+      logsPause.setAttribute("aria-pressed", String(logsPaused));
     }
     if (logsRefresh) logsRefresh.dataset.action = "logs";
     startLogPolling();
@@ -2851,7 +2868,7 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
-    return true;
+    return !app.rules_error;
   } catch (error) {
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
@@ -3296,7 +3313,7 @@ if (logsPause) {
     logsPause.setAttribute("aria-pressed", logsPaused ? "true" : "false");
     if (logsPaused) {
       stopLogPolling();
-      setLogsState("已暂停", false);
+      setLogsState(logsLoaded ? "已暂停，显示上次快照" : "已暂停，尚未获得快照", logsView?.dataset.error === "true");
     } else {
       startLogPolling();
     }

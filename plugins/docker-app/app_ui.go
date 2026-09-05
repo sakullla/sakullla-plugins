@@ -55,6 +55,7 @@ type appView struct {
 	ServiceImages []appServiceView  `json:"service_images,omitempty"`
 	Actions       []OpsAction       `json:"actions,omitempty"`
 	Rules         []appHTTPRuleView `json:"rules,omitempty"`
+	RulesError    string            `json:"rules_error,omitempty"`
 }
 
 type appHTTPRuleView struct {
@@ -359,8 +360,11 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
 			return
 		}
-		listed, _ := controller.listHostHTTPRules(request.Context(), app.AgentID)
+		listed, listErr := controller.listHostHTTPRules(request.Context(), app.AgentID)
 		view := controller.appViewFor(request.Context(), app, listed, false)
+		if listErr != nil {
+			view.RulesError = publicAppActionError(listErr, "http-rule-list")
+		}
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
@@ -959,6 +963,7 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
 	rulesByAgent := map[string][]HostHTTPRule{}
+	ruleErrorsByAgent := map[string]error{}
 	var listErr error
 	for _, app := range apps {
 		if agentID != "" && app.AgentID != agentID {
@@ -971,6 +976,7 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 				var err error
 				cached, err = controller.listHostHTTPRules(ctx, app.AgentID)
 				rulesByAgent[app.AgentID] = cached
+				ruleErrorsByAgent[app.AgentID] = err
 				if err != nil && listErr == nil {
 					listErr = err
 				}
@@ -978,6 +984,9 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 			listed = cached
 		}
 		view := controller.appViewFor(ctx, app, listed, refreshTags)
+		if err := ruleErrorsByAgent[app.AgentID]; err != nil {
+			view.RulesError = publicAppActionError(err, "http-rule-list")
+		}
 		view.Rules = projectOpenHTTPRuleViews(view.Rules)
 		views = append(views, view)
 	}

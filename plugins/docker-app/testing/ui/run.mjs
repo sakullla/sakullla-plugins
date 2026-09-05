@@ -10,13 +10,15 @@ import { createHash } from "node:crypto";
 import { agents, makeApp, longApp, engineFor } from "./fixtures/workspace.mjs";
 import { runCompose } from "./compose.mjs";
 import { runOperations } from "./operations.mjs";
+import { runResources } from "./resources.mjs";
+import { createResourcesState, handleResourcesRequest } from "./fixtures/resources.mjs";
 import { createOperationsState, handleOperationsRequest } from "./fixtures/operations.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const assets = resolve(here, "../../assets/ui");
 const suite = process.argv[process.argv.indexOf("--suite") + 1];
-if (!["workspace", "compose", "operations"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+if (!["workspace", "compose", "operations", "resources"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
 
 async function eventually(check, description, timeout = 10000) {
   const until = Date.now() + timeout;
@@ -101,6 +103,7 @@ class Page {
 
 const requests = [];
 const operationsState = createOperationsState();
+const resourcesState = createResourcesState();
 const composeState = { previewError: "", saveError: "", listError: false, risk: false, previewCount: 0, saveCount: 0, lastSave: null, file: "original\n", fileError: false, fileListError: false };
 const gates = new Map();
 let apps = [makeApp("alpha"), makeApp("beta"), longApp, makeApp("bravo", "node-b")];
@@ -118,6 +121,7 @@ const server = createServer(async (request, response) => {
       const id = record.agent;
       return id === "denied" ? json({ error: "无权访问" }, 403) : json({ engine: engineFor(id) });
     }
+    if (suite === "resources" && await handleResourcesRequest({url, request, json, state:resourcesState, record})) return;
     if (suite === "operations" && await handleOperationsRequest({url, request, json, state:operationsState, record})) return;
     if (suite === "compose" && request.method === "POST") {
       let raw = "";
@@ -175,6 +179,7 @@ const server = createServer(async (request, response) => {
 function hold(path) {
   const gate = { seen: false };
   gate.promise = new Promise((resolve) => { gate.release = () => { gates.delete(path); resolve(); }; });
+  gate.detach = () => gates.delete(path);
   gates.set(path, gate);
   return gate;
 }
@@ -437,8 +442,10 @@ try {
   });
   } else if (suite === "compose") {
     await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
-  } else {
+  } else if (suite === "operations") {
     await runOperations({page, test, navigate, hold, requests, state:operationsState, capture, eventually});
+  } else {
+    await runResources({page, test, navigate, hold, requests, state:resourcesState, capture, eventually, outputDir:resolve(repo,"dist/docker-app-ui-validation/resources")});
   }
   assert.deepEqual(page.errors, [], "no uncaught page exceptions");
   evidence.status = "passed";
