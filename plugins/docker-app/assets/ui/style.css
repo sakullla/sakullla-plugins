@@ -2846,6 +2846,11 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   color: var(--color-text-primary);
 }
 
+@media (max-width: 1023px) {
+  .app-card { grid-template-columns: minmax(0, 1fr); }
+  .app-card-actions { max-width: none; }
+}
+
 @media (max-width: 720px) {
   .app-card { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; padding: 0.75rem; }
   .app-card-identity { grid-template-columns: minmax(0, 1fr); flex-basis: 0; }

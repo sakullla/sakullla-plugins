@@ -20,6 +20,8 @@ export const makeApp = (id, agent = "node-a", overrides = {}) => ({
 export const longApp = makeApp("long-application-" + "identity-".repeat(8), "node-a", {
   version: "registry.example.test/" + "namespace/".repeat(14) + "image:release-2026",
   services: ["web", "database", "cache"], ports: [8080, 8081, 9000, 9001, 9002, 9003],
+  rules: [{ id: "long-entry", enabled: true, domain: "long-app.example.test", port: 8080 }],
+  actions: [{ id: "update", label: "更新" }, { id: "stop", label: "停止" }, { id: "delete", label: "删除" }],
 });
 
 export const engineFor = (id) => ({

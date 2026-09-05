@@ -214,9 +214,29 @@ try {
     assert.equal(await page.visible('[data-id="alpha"]'), false);
   });
 
-  await test("long content remains reachable at desktop and 375px", async () => {
+  await test("late detail cannot replace a deployment page or clear its input", async () => {
     await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');
-    for (const width of [1440, 375]) {
+    const pending = hold("/api/apps/alpha");
+    await page.click('[data-id="alpha"] [data-action="detail"]');
+    await eventually(() => pending.seen, "held detail before deployment navigation");
+    await page.click("#deploy-toggle"); await page.waitVisible("#create-form");
+    const draft = 'services:\n  draft:\n    image: nginx:1.27\n';
+    await page.click('#create-form input[name="id"]');
+    await page.send("Input.insertText", { text: "draft-race" });
+    await page.click('#create-form textarea[name="compose"]');
+    await page.send("Input.insertText", { text: draft });
+    pending.release(); await delay(150);
+    assert.ok(await page.visible("#create-form"), "deployment must remain visible after the old detail responds");
+    assert.equal(await page.visible("#app-detail"), false);
+    assert.equal(await page.evaluate(`document.querySelector('#create-form input[name="id"]').value`), "draft-race");
+    assert.equal(await page.evaluate(`document.querySelector('#create-form textarea[name="compose"]').value`), draft);
+    assert.equal(requests.filter((r) => r.method !== "GET").length, 0);
+    await page.click("#create-cancel");
+  });
+
+  await test("long labels and all actions stay separate across representative widths", async () => {
+    await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');
+    for (const width of [375, 721, 768, 1024, 1440]) {
       await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
       assert.ok(await page.evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`), `no page overflow at ${width}`);
       const bounds = await page.evaluate(`(() => {
@@ -226,6 +246,23 @@ try {
         })};
       })()`);
       assert.ok(bounds.controls.every((r) => r.left >= 0 && r.right <= bounds.client), `all controls within ${width}px: ${JSON.stringify(bounds)}`);
+      const contents = await page.evaluate(`(() => {
+        const card = document.querySelector(${JSON.stringify(`[data-id="${longApp.id}"]`)});
+        const rects = (selector) => Array.from(card.querySelectorAll(selector)).filter(n => n.getClientRects().length).map(n => {
+          const r = n.getBoundingClientRect();
+          return {text:n.textContent, left:r.left, right:r.right, top:r.top, bottom:r.bottom};
+        });
+        return {labels:rects('.app-card-title-row, .app-card-meta, .app-port, .app-card-url'), buttons:rects('.app-card-actions button')};
+      })()`);
+      assert.deepEqual(contents.buttons.map((button) => button.text), ["打开", "更新", "详情"]);
+      const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      for (const label of contents.labels) {
+        for (const button of contents.buttons) assert.equal(overlaps(label, button), false, `label/action overlap at ${width}: ${JSON.stringify({ label, button })}`);
+      }
+      contents.buttons.forEach((button, index) => {
+        for (const other of contents.buttons.slice(index + 1)) assert.equal(overlaps(button, other), false, `actions overlap at ${width}`);
+      });
+      bounds.contents = contents;
       (evidence.layout ||= []).push({ width, ...bounds });
       await page.evaluate("window.scrollTo(0, 0)");
       const screenshot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });

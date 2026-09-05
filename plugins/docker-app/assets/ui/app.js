@@ -923,6 +923,8 @@ const applyCreateTemplate = (name) => {
 const openCreate = async () => {
   if (!engineReady || !agentOnline) return;
   if (view === "detail" && !(await leaveDetail())) return;
+  // Deployment navigation supersedes any detail request still loading from the list.
+  detailRequest += 1;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
   if (idInput) {
