@@ -25,7 +25,6 @@ const workspaceNode = document.querySelector("#app-workspace");
 const listNode = document.querySelector("#listen-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#listen-count");
-const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-bar");
 const createDialog = document.querySelector("#create-dialog");
 const createForm = document.querySelector("#create-form");
@@ -43,8 +42,7 @@ const detailTitle = document.querySelector("#detail-title");
 const detailMeta = document.querySelector("#detail-meta");
 const detailUsers = document.querySelector("#detail-users");
 const detailActions = document.querySelector("#detail-actions");
-const detailBack = document.querySelector("#detail-back");
-const DETAIL_STACK_MQ = window.matchMedia("(max-width: 720px)");
+const detailClose = document.querySelector("#detail-close");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
@@ -220,7 +218,7 @@ const syncSelectionActions = () => {
 
 const setBusy = (next) => {
   busy = next;
-  const roots = [workspaceNode, contextNode, createDialog, appendDialog].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
@@ -690,8 +688,6 @@ const renderExecutionBadge = (execution) => {
   executionStatus.textContent = "暂时无法执行";
 };
 
-const isDetailStacked = () => DETAIL_STACK_MQ.matches;
-
 const markSelectedCards = () => {
   if (!listNode) return;
   listNode.querySelectorAll(".listen-card").forEach((card) => {
@@ -705,21 +701,11 @@ const markSelectedCards = () => {
 const resetDetailPrompt = () => {
   if (detailTitle) detailTitle.textContent = "监听详情";
   if (detailMeta) {
-    detailMeta.textContent = "选择一条监听，查看用户并管理。";
-    detailMeta.hidden = false;
+    detailMeta.textContent = "";
+    detailMeta.hidden = true;
   }
   if (detailUsers) detailUsers.replaceChildren();
   if (detailActions) detailActions.replaceChildren();
-};
-
-const syncDetailLayout = () => {
-  const open = Boolean(openListenID);
-  const stacked = isDetailStacked();
-  const hasListens = listensCache.length > 0;
-  if (workspaceNode) workspaceNode.dataset.detailOpen = open ? "true" : "false";
-  if (listPanel) listPanel.hidden = stacked && open;
-  if (detailPanel) detailPanel.hidden = stacked ? !open : !hasListens;
-  if (detailBack) detailBack.hidden = !(stacked && open);
 };
 
 const syncListPanel = () => {
@@ -727,7 +713,6 @@ const syncListPanel = () => {
   if (emptyNode) emptyNode.hidden = !selectedAgentID || !agentOnline || hasListens;
   if (workspaceHead) workspaceHead.hidden = false;
   if (createToggle) createToggle.hidden = !(selectedAgentID && agentOnline);
-  syncDetailLayout();
 };
 
 const closeCreate = () => {
@@ -985,7 +970,7 @@ const closeDetail = () => {
   openListenID = "";
   resetDetailPrompt();
   markSelectedCards();
-  syncDetailLayout();
+  if (detailPanel && detailPanel.open) detailPanel.close();
 };
 
 const renderDetail = (listen) => {
@@ -1006,7 +991,9 @@ const renderDetail = (listen) => {
     detailActions.replaceChildren(...Array.from(footer.children));
   }
   markSelectedCards();
-  syncDetailLayout();
+  if (typeof detailPanel.showModal === "function") {
+    if (!detailPanel.open) detailPanel.showModal();
+  }
   syncSelectionActions();
 };
 
@@ -1271,9 +1258,17 @@ if (createDialog) {
     if (event.target === createDialog) closeCreate();
   });
 }
-if (detailBack) detailBack.addEventListener("click", closeDetail);
-if (typeof DETAIL_STACK_MQ.addEventListener === "function") {
-  DETAIL_STACK_MQ.addEventListener("change", syncDetailLayout);
+if (detailClose) detailClose.addEventListener("click", closeDetail);
+if (detailPanel) {
+  detailPanel.addEventListener("click", (event) => {
+    if (event.target === detailPanel) closeDetail();
+  });
+  detailPanel.addEventListener("close", () => {
+    if (!openListenID) return;
+    openListenID = "";
+    resetDetailPrompt();
+    markSelectedCards();
+  });
 }
 if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
 if (qrCopy) {
