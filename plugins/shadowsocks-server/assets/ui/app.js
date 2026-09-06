@@ -658,6 +658,24 @@ const showContext = (kind) => {
 
 const methodLabel = (method) => METHOD_LABELS[String(method || "")] || String(method || "");
 
+const defaultUserName = (id) => {
+  const value = String(id || "");
+  const prefix = "acct-";
+  if (!value.startsWith(prefix)) return value;
+  const trimmed = value.slice(prefix.length);
+  if (!trimmed) return value;
+  return `user-${trimmed}`;
+};
+
+const listenTitle = (listen) => {
+  const port = listen && listen.port != null ? String(listen.port) : "";
+  const users = (listen && listen.users) || [];
+  const user = users[0];
+  const name = String((user && user.name) || "").trim();
+  if (!name || name === defaultUserName(user && user.id)) return port;
+  return `${name} · ${port}`;
+};
+
 const listenHostPort = (listen) => {
   if (listen && listen.host_port) return String(listen.host_port);
   const user = ((listen && listen.users) || []).find((item) => item && item.host_port);
@@ -886,8 +904,15 @@ const renderUser = (user, { manage = false, compact = false } = {}) => {
   const identity = document.createElement("strong");
   identity.textContent = user.name || user.id;
   head.append(identity, renderStatusPill(user.enabled ? "启用" : "已停用", user.enabled));
-  article.append(head, renderShare(user));
-  if (manage) article.append(userManageButtons(user));
+  article.append(head);
+  if (manage) {
+    const ops = document.createElement("div");
+    ops.className = "account-ops";
+    ops.append(renderShare(user), userManageButtons(user));
+    article.append(ops);
+  } else {
+    article.append(renderShare(user));
+  }
   return article;
 };
 
@@ -934,7 +959,7 @@ const renderListen = (listen) => {
   const titleRow = document.createElement("div");
   titleRow.className = "listen-card-title-row";
   const title = document.createElement("h3");
-  title.textContent = `端口 ${listen.port}`;
+  title.textContent = listenTitle(listen);
   titleRow.append(title, renderStatusPill(listen.bound ? "运行中" : "未生效", listen.bound));
   const meta = document.createElement("p");
   meta.className = "listen-card-meta";
@@ -976,7 +1001,7 @@ const closeDetail = () => {
 const renderDetail = (listen) => {
   if (!detailPanel || !listen) return;
   openListenID = listen.id;
-  if (detailTitle) detailTitle.textContent = `端口 ${listen.port}`;
+  if (detailTitle) detailTitle.textContent = listenTitle(listen);
   if (detailMeta) {
     const parts = [methodLabel(listen.method), listenShareHost(listen), listen.bound ? "运行中" : "未生效"].filter(Boolean);
     detailMeta.textContent = parts.join(" · ");

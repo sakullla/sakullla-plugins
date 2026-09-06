@@ -99,9 +99,10 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		".setup-mark[data-kind=\"unavailable\"]",
 		"repeat(2, minmax(0, 1fr))",
 		"repeat(3, minmax(18rem, 1fr))",
-		"max-width: 48rem",
+		"max-width: 34rem",
 		".listen-card[data-selected=\"true\"]",
 		"#listen-detail",
+		".account-ops",
 	} {
 		if !strings.Contains(style, fragment) {
 			t.Fatalf("panel stylesheet missing %q", fragment)
@@ -116,8 +117,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	if !strings.Contains(cssRule(style, "dialog"), "max-width: 34rem") {
 		t.Fatal("create-class dialog is no longer 34rem")
 	}
-	if !strings.Contains(cssRule(style, "#listen-detail"), "max-width: 48rem") {
-		t.Fatal("#listen-detail is not a large dialog wider than create-dialog")
+	if !strings.Contains(cssRule(style, "#listen-detail"), "max-width: 34rem") {
+		t.Fatal("#listen-detail is no longer aligned to 34rem dialog width")
 	}
 	if strings.Contains(page, `class="backdrop"`) {
 		t.Fatal("panel still includes decorative body backdrop")
@@ -201,14 +202,32 @@ func jsIdentByte(b byte) bool {
 
 func assertListenCardIsSummary(t *testing.T, page, script string) {
 	t.Helper()
+	titleFn := jsConstFunction(script, "listenTitle")
+	if titleFn == "" {
+		t.Fatal("listenTitle is missing")
+	}
+	for _, want := range []string{"users[0]", "defaultUserName"} {
+		if !strings.Contains(titleFn, want) {
+			t.Fatalf("listenTitle missing %q", want)
+		}
+	}
+	if strings.Contains(titleFn, "端口 ${listen.port}") {
+		t.Fatal("listenTitle still uses 端口 ${listen.port} as title")
+	}
 	card := jsConstFunction(script, "renderListen")
 	if card == "" {
 		t.Fatal("renderListen is missing")
 	}
-	for _, want := range []string{"端口", "运行中", "未生效"} {
+	for _, want := range []string{"运行中", "未生效"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("listen card missing %q", want)
 		}
+	}
+	if !jsContainsIdent(card, "listenTitle") {
+		t.Fatal("renderListen does not use listenTitle")
+	}
+	if strings.Contains(card, "端口 ${listen.port}") {
+		t.Fatal("listen card still uses 端口 ${listen.port} as title")
 	}
 	for _, banned := range []string{"删除监听", "追加用户"} {
 		if strings.Contains(card, banned) {
@@ -278,13 +297,26 @@ func assertListenDetailIsDialog(t *testing.T, page, script string) {
 	if detail == "" {
 		t.Fatal("renderDetail is missing")
 	}
-	for _, want := range []string{"端口", "运行中", "未生效", "listenShareHost", "manage: true", "showModal"} {
+	for _, want := range []string{"运行中", "未生效", "listenShareHost", "manage: true", "showModal"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("listen detail missing %q", want)
 		}
 	}
+	if !jsContainsIdent(detail, "listenTitle") {
+		t.Fatal("renderDetail does not use listenTitle")
+	}
+	if strings.Contains(detail, "端口 ${listen.port}") {
+		t.Fatal("listen detail still uses 端口 ${listen.port} as title")
+	}
 	if !jsContainsIdent(detail, "listenFooterActions") || !jsContainsIdent(detail, "renderUser") {
 		t.Fatal("listen detail no longer composes user management or listenFooterActions")
+	}
+	userFn := jsConstFunction(script, "renderUser")
+	if userFn == "" {
+		t.Fatal("renderUser is missing")
+	}
+	if !strings.Contains(userFn, "account-ops") || !jsContainsIdent(userFn, "renderShare") || !jsContainsIdent(userFn, "userManageButtons") {
+		t.Fatal("renderUser no longer groups share and manage actions")
 	}
 	closeFn := jsConstFunction(script, "closeDetail")
 	if closeFn == "" {
