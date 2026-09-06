@@ -170,6 +170,25 @@ func jsConstFunction(script, name string) string {
 	return ""
 }
 
+func jsContainsIdent(src, name string) bool {
+	for start := 0; start <= len(src); {
+		i := strings.Index(src[start:], name)
+		if i < 0 {
+			return false
+		}
+		i += start
+		if (i == 0 || !jsIdentByte(src[i-1])) && (i+len(name) == len(src) || !jsIdentByte(src[i+len(name)])) {
+			return true
+		}
+		start = i + len(name)
+	}
+	return false
+}
+
+func jsIdentByte(b byte) bool {
+	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
 func assertListenCardIsSummary(t *testing.T, page, script string) {
 	t.Helper()
 	card := jsConstFunction(script, "renderListen")
@@ -185,6 +204,16 @@ func assertListenCardIsSummary(t *testing.T, page, script string) {
 		if strings.Contains(card, banned) {
 			t.Fatalf("listen card still contains %q", banned)
 		}
+	}
+	if !jsContainsIdent(`card.append(listenFooterActions(listen));`, "listenFooterActions") ||
+		!jsContainsIdent(`const account = renderUser(first, { compact: true });`, "renderUser") {
+		t.Fatal("compose check would not fail the baseline listen card path")
+	}
+	if jsContainsIdent(card, "listenFooterActions") {
+		t.Fatal("listen card still composes listenFooterActions")
+	}
+	if jsContainsIdent(card, "renderUser") || strings.Contains(card, "compact: true") || strings.Contains(card, "compact:true") {
+		t.Fatal("listen card still embeds compact renderUser")
 	}
 	if !strings.Contains(page, "新增监听") && !strings.Contains(script, "新增监听") {
 		t.Fatal("workspace missing 新增监听 entry")
