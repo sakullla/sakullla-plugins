@@ -1225,7 +1225,7 @@ const renderRouting = (routing, routeStatus = []) => {
     const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
     const applied = routeStatus.find((item) => item.rule_id === rule.id) || {};
     const issue = applied.failure || routingIssue(rule);
-    detail.textContent = `${rule.source_id} · ${rule.classification.kind}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.version_digest ? ` · ${applied.version_digest}` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issue ? ` · ${issue}` : ""}`;
+    detail.textContent = `${rule.source_id} · ${rule.classification.kind}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.version_digest ? ` · ${applied.version_digest}` : ""}${applied.domain_source ? ` · 域名来源 ${applied.domain_source}` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issue ? ` · ${issue}` : ""}`;
     [
       ["上移", () => moveRoute(index, -1)], ["下移", () => moveRoute(index, 1)], ["删除", () => removeRoute(index)],
     ].forEach(([text, action]) => { const button = document.createElement("button"); button.type = "button"; button.className = "btn-secondary"; button.textContent = text; button.onclick = action; row.append(button); });

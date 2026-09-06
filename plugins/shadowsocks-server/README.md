@@ -66,3 +66,11 @@ separate inputs remain isolated and protocol replay checks remain active.
 Upstream endpoints are dialed directly and are never routed recursively.
 Diagnostics expose rule, source, classification, immutable version, selected
 exit, and stable failure codes. They never expose upstream secret material.
+
+When a TCP request names only an IP target, routing may inspect at most 16 KiB
+for 250 ms before dialing. It recognizes HTTP/1.0 or HTTP/1.1 `Host` and clear
+TLS 1.2/1.3 ClientHello SNI across Shadowsocks chunks and TLS records. The
+original domain always wins. The original IP and port are never rewritten, and
+all bytes consumed during inspection are replayed exactly. HTTP/2 prior
+knowledge, ECH, conflicting or malformed headers, timeout, over-limit input and
+server-first protocols use the IP/default route. UDP is never sniffed.

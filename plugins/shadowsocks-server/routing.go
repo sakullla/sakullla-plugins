@@ -130,6 +130,7 @@ type RouteStatus struct {
 	VersionDigest  string `json:"version_digest,omitempty"`
 	Action         string `json:"action"`
 	Exit           string `json:"exit,omitempty"`
+	DomainSource   string `json:"domain_source"`
 	Failure        string `json:"failure,omitempty"`
 }
 
@@ -145,7 +146,7 @@ func (snapshot *routeSnapshot) statuses() []RouteStatus {
 	}
 	result := make([]RouteStatus, 0, len(snapshot.configuration.Rules))
 	for _, rule := range snapshot.configuration.Rules {
-		status := RouteStatus{RuleID: rule.ID, SourceID: rule.SourceID, Classification: rule.Classification.Name, Action: rule.Action, Exit: rule.Action}
+		status := RouteStatus{RuleID: rule.ID, SourceID: rule.SourceID, Classification: rule.Classification.Name, Action: rule.Action, Exit: rule.Action, DomainSource: "none"}
 		if rule.Action == RouteUpstream {
 			status.Exit = rule.UpstreamID
 		}

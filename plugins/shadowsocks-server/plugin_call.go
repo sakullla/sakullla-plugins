@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +130,7 @@ type boundListen struct {
 	routes        *routeSnapshot
 	udpPacketID   uint64
 	routeFailures map[string]string
+	routeSources  map[string]string
 	flowRoutes    map[string]*routeSnapshot
 	flowOrder     []string
 	cancel        context.CancelFunc
@@ -360,7 +362,7 @@ func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApp
 		return preparedListen{}, ErrListenBind
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
+	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, routeSources: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
 	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx, routes: routes}, nil
 }
 
@@ -390,6 +392,7 @@ func (b *boundListen) replaceRoutes(routes *routeSnapshot) {
 	b.mu.Lock()
 	b.routes = routes
 	b.routeFailures = map[string]string{}
+	b.routeSources = map[string]string{}
 	b.mu.Unlock()
 }
 
@@ -452,18 +455,37 @@ func (b *boundListen) recordRouteFailure(decision routeDecision, failure string)
 	b.mu.Unlock()
 }
 
+func (b *boundListen) recordRouteSource(decision routeDecision, source string) {
+	if decision.RuleID == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.routeSources == nil {
+		b.routeSources = map[string]string{}
+	}
+	b.routeSources[decision.RuleID] = source
+	b.mu.Unlock()
+}
+
 func (b *boundListen) routeStatuses() []RouteStatus {
 	b.mu.Lock()
 	routes := b.routes
 	failures := make(map[string]string, len(b.routeFailures))
+	sources := make(map[string]string, len(b.routeSources))
 	for id, failure := range b.routeFailures {
 		failures[id] = failure
+	}
+	for id, source := range b.routeSources {
+		sources[id] = source
 	}
 	b.mu.Unlock()
 	statuses := routes.statuses()
 	for index := range statuses {
 		if failures[statuses[index].RuleID] != "" {
 			statuses[index].Failure = failures[statuses[index].RuleID]
+		}
+		if sources[statuses[index].RuleID] != "" {
+			statuses[index].DomainSource = sources[statuses[index].RuleID]
 		}
 	}
 	return statuses
@@ -689,7 +711,8 @@ func (b *boundListen) serveUDP(ctx context.Context) {
 
 func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	handshakeDeadline := time.Now().Add(5 * time.Second)
+	_ = conn.SetDeadline(handshakeDeadline)
 	request, session, err := readTCPHandshake(conn, b.snapshotEngines())
 	if session != nil {
 		defer session.Close()
@@ -701,7 +724,27 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 		return
 	}
 	routes := b.snapshotRoutes()
-	decision, err := routes.decide(ctx, "tcp", request.Target)
+	routeTarget := request.Target
+	domainSource := "target-domain"
+	if host, port, splitErr := net.SplitHostPort(request.Target); splitErr == nil {
+		if _, addressErr := netip.ParseAddr(strings.Trim(host, "[]")); addressErr == nil {
+			domainSource = "none"
+			var domain string
+			var replay []byte
+			conn, domain, replay = sniffTargetDomain(ctx, conn, session, request.Payload, handshakeDeadline)
+			request.Payload = replay
+			if domain != "" {
+				routeTarget = net.JoinHostPort(domain, port)
+				if len(replay) > 0 && replay[0] == 0x16 {
+					domainSource = "sniffed-tls-sni"
+				} else {
+					domainSource = "sniffed-http-host"
+				}
+			}
+		}
+	}
+	decision, err := routes.decide(ctx, "tcp", routeTarget)
+	b.recordRouteSource(decision, domainSource)
 	if err != nil || decision.Action == RouteReject {
 		failure := "route-rejected"
 		if err != nil {

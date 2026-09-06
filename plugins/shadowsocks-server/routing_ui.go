@@ -120,7 +120,7 @@ func mergeRouteStatuses(routing RoutingConfiguration, sources []RouteSourceStatu
 	for _, rule := range routing.Rules {
 		status, ok := byRule[rule.ID]
 		if !ok {
-			status = RouteStatus{RuleID: rule.ID, SourceID: rule.SourceID, Classification: rule.Classification.Name, Action: rule.Action, Exit: rule.Action}
+			status = RouteStatus{RuleID: rule.ID, SourceID: rule.SourceID, Classification: rule.Classification.Name, Action: rule.Action, Exit: rule.Action, DomainSource: "none"}
 			if rule.Action == RouteUpstream {
 				status.Exit = rule.UpstreamID
 			}

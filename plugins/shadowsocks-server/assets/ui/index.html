@@ -93,7 +93,7 @@
         <div id="listen-list" class="listen-list"></div>
       </section>
       <section class="panel" id="routing-panel">
-        <div class="workspace-head"><div><h2>数据集分流</h2><p class="hint">按顺序匹配域名或 IP；上游失败不会回退直连。</p></div></div>
+        <div class="workspace-head"><div><h2>数据集分流</h2><p class="hint">按顺序匹配域名或 IP；上游失败不会回退直连。仅 IP 目标的 TCP 可在拨号前用最多 16 KiB / 250 ms 识别 HTTP Host 或明文 TLS SNI；UDP、ECH、HTTP/2 和无法识别的流量按 IP/默认规则处理，原目标与字节不变。</p></div></div>
         <form id="upstream-form" class="field-row">
           <label>ID <input name="id" required placeholder="ai-upstream"></label>
           <label>地址 <input name="host" required placeholder="203.0.113.20"></label>
