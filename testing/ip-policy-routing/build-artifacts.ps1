@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $output = Join-Path $root 'dist/bin'
 $null = New-Item -ItemType Directory -Force -Path $output
+[IO.File]::WriteAllText((Join-Path $root 'dist/.gitignore'), "*`n!.gitignore`n", [Text.UTF8Encoding]::new($false))
 
 Push-Location $root
 try {
