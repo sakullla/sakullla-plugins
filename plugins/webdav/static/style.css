@@ -512,41 +512,57 @@ th { color: var(--color-text-tertiary); font-weight: 650; }
 .file-glyph {
   position: relative;
   flex: 0 0 auto;
-  width: 1.85rem;
-  height: 1.85rem;
-  border-radius: 0.45rem;
+  display: block;
+  pointer-events: none;
 }
 
 .row-dir .file-glyph {
-  background: color-mix(in srgb, var(--accent) 22%, var(--color-bg-sunken));
+  width: 1.22rem;
+  height: 0.96rem;
+  background: color-mix(in srgb, var(--accent) 48%, var(--color-bg-surface));
+  clip-path: polygon(0 30%, 28% 30%, 36% 8%, 100% 8%, 100% 100%, 0 100%);
 }
 
 .row-dir .file-glyph::before {
   content: "";
   position: absolute;
-  top: -0.22rem;
-  left: 0.12rem;
-  width: 0.7rem;
-  height: 0.32rem;
-  border-radius: 0.14rem 0.14rem 0 0;
-  background: color-mix(in srgb, var(--accent) 46%, var(--color-bg-sunken));
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 62%;
+  background: color-mix(in srgb, var(--accent) 26%, var(--color-bg-surface));
 }
 
 .row-file .file-glyph {
-  background: var(--color-bg-sunken);
-  border-radius: 0.28rem 0.55rem 0.28rem 0.28rem;
+  width: 0.9rem;
+  height: 1.16rem;
+  background: color-mix(in srgb, var(--accent) 14%, var(--color-bg-surface));
+  clip-path: polygon(0 0, 62% 0, 100% 26%, 100% 100%, 0 100%);
+}
+
+.row-file .file-glyph::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 38%;
+  height: 26%;
+  background: color-mix(in srgb, var(--accent) 40%, var(--color-bg-sunken));
+  clip-path: polygon(0 0, 100% 100%, 0 100%);
 }
 
 .row-file .file-glyph::after {
   content: "";
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 0.52rem;
-  height: 0.52rem;
+  left: 18%;
+  right: 18%;
+  top: 42%;
+  height: 36%;
   background:
-    linear-gradient(135deg, transparent 50%, color-mix(in srgb, var(--accent) 22%, var(--color-bg-surface)) 50%);
-  border-radius: 0 0.12rem 0 0.35rem;
+    linear-gradient(var(--color-text-tertiary), var(--color-text-tertiary)) 0 0 / 100% 1.5px no-repeat,
+    linear-gradient(var(--color-text-tertiary), var(--color-text-tertiary)) 0 50% / 72% 1.5px no-repeat,
+    linear-gradient(var(--color-text-tertiary), var(--color-text-tertiary)) 0 100% / 88% 1.5px no-repeat;
+  opacity: 0.55;
 }
 
 .type-pill {
@@ -563,6 +579,11 @@ th { color: var(--color-text-tertiary); font-weight: 650; }
 
 .listing td:first-child button,
 .listing td:first-child a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: 100%;
+  min-width: 0;
   min-height: auto;
   padding: 0;
   border: 0;
@@ -571,6 +592,13 @@ th { color: var(--color-text-tertiary); font-weight: 650; }
   background: transparent;
   font-weight: 650;
   text-decoration: none;
+}
+
+.file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .listing td:first-child button:hover,
@@ -769,8 +797,6 @@ button:focus-visible,
   }
   .listing td:first-child button {
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     max-width: 100%;
     text-align: left;
   }

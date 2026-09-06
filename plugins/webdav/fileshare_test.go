@@ -188,6 +188,77 @@ func TestManagerViewportLayout(t *testing.T) {
 	}
 }
 
+func TestManagerFileGlyphs(t *testing.T) {
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	base := cssRule(text, ".file-glyph")
+	if base == "" {
+		t.Fatal("missing .file-glyph rule")
+	}
+	if strings.Contains(base, "width:") || strings.Contains(base, "height:") {
+		t.Fatalf(".file-glyph still uses a shared square size: %s", base)
+	}
+	if strings.Contains(base, "border-radius:") {
+		t.Fatalf(".file-glyph still looks like a rounded checkbox: %s", base)
+	}
+
+	dirGlyph := cssRule(text, ".row-dir .file-glyph")
+	if !strings.Contains(dirGlyph, "width: 1.22rem") || !strings.Contains(dirGlyph, "height: 0.96rem") {
+		t.Fatalf("directory glyph is not a landscape folder: %s", dirGlyph)
+	}
+	if !strings.Contains(dirGlyph, "clip-path: polygon(0 30%, 28% 30%, 36% 8%, 100% 8%, 100% 100%, 0 100%)") {
+		t.Fatalf("directory glyph is not a folder silhouette: %s", dirGlyph)
+	}
+
+	fileGlyph := cssRule(text, ".row-file .file-glyph")
+	if !strings.Contains(fileGlyph, "width: 0.9rem") || !strings.Contains(fileGlyph, "height: 1.16rem") {
+		t.Fatalf("file glyph is not a portrait document: %s", fileGlyph)
+	}
+	if !strings.Contains(fileGlyph, "clip-path: polygon(0 0, 62% 0, 100% 26%, 100% 100%, 0 100%)") {
+		t.Fatalf("file glyph is not a folded-corner document: %s", fileGlyph)
+	}
+
+	fold := cssRule(text, ".row-file .file-glyph::before")
+	if !strings.Contains(fold, "clip-path: polygon(0 0, 100% 100%, 0 100%)") {
+		t.Fatalf("file glyph missing folded corner: %s", fold)
+	}
+	lines := cssRule(text, ".row-file .file-glyph::after")
+	if !strings.Contains(lines, "linear-gradient(var(--color-text-tertiary), var(--color-text-tertiary))") {
+		t.Fatalf("file glyph missing document lines: %s", lines)
+	}
+
+	script, err := os.ReadFile(filepath.Join("static", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+	for _, fragment := range []string{
+		`glyph.className = "file-glyph"`,
+		`glyph.setAttribute("aria-hidden", "true")`,
+		`label.className = "file-name"`,
+		"open.append(glyph, label)",
+		"loadList(joinPath(currentPath, entry.name))",
+		"downloadFile(entry.name)",
+	} {
+		if !strings.Contains(js, fragment) {
+			t.Fatalf("script missing file glyph behavior %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"aria-selected",
+		`type="checkbox"`,
+		"type = \"checkbox\"",
+		"checkbox",
+	} {
+		if strings.Contains(js, fragment) {
+			t.Fatalf("script introduced a select-then-edit control %q", fragment)
+		}
+	}
+}
+
 func TestLoginHeadingSize(t *testing.T) {
 	css, err := os.ReadFile(filepath.Join("static", "style.css"))
 	if err != nil {

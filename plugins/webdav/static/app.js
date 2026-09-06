@@ -257,7 +257,13 @@ const renderListing = (entries) => {
     }
     const open = document.createElement("button");
     open.type = "button";
-    open.textContent = entry.name;
+    const glyph = document.createElement("span");
+    glyph.className = "file-glyph";
+    glyph.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "file-name";
+    label.textContent = entry.name;
+    open.append(glyph, label);
     if (entry.dir) {
       open.addEventListener("click", () => {
         showStatus("", false);
@@ -269,12 +275,9 @@ const renderListing = (entries) => {
         downloadFile(entry.name).catch((error) => showStatus(error.message, true));
       });
     }
-    const glyph = document.createElement("span");
-    glyph.className = "file-glyph";
-    glyph.setAttribute("aria-hidden", "true");
     const nameWrap = document.createElement("div");
     nameWrap.className = "name-wrap";
-    nameWrap.append(glyph, open);
+    nameWrap.append(open);
     nameCell.append(nameWrap);
     const rename = document.createElement("button");
     rename.type = "button";
