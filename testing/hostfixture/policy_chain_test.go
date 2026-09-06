@@ -27,13 +27,14 @@ func TestPolicyChainCanonicalArtifactsFailClosedWithoutCapabilities(t *testing.T
 			session.Close()
 		}
 	}()
-	results := make([]PolicyArtifactInit, 0, 3)
+	ipSession, ipStatus := startWAFArtifact(t, ipArtifact, ipPolicyOptions())
+	sessions = append(sessions, ipSession)
+	results := []PolicyArtifactInit{{Stage: "ip-policy", Status: ipStatus}}
 	for _, stage := range []struct {
 		name     string
 		artifact []byte
 		config   []byte
 	}{
-		{name: "ip-policy", artifact: ipArtifact, config: []byte(`{"default":"allow"}`)},
 		{name: "rate-limit", artifact: rateArtifact, config: []byte(`{"enabled":true}`)},
 		{name: "waf", artifact: wafArtifact, config: []byte(`{"mode":"deny"}`)},
 	} {
@@ -42,8 +43,8 @@ func TestPolicyChainCanonicalArtifactsFailClosedWithoutCapabilities(t *testing.T
 		results = append(results, PolicyArtifactInit{Stage: stage.name, Status: status})
 	}
 	ipStatus, rateStatus, wafStatus := results[0].Status, results[1].Status, results[2].Status
-	if ipStatus != pluginsdk.PolicyStatusIncompatibleABI {
-		t.Fatalf("IP artifact without trusted-source capability status = %d", ipStatus)
+	if ipStatus != pluginsdk.PolicyStatusOK {
+		t.Fatalf("IP artifact with current trusted-source/dataset capabilities status = %d", ipStatus)
 	}
 	if rateStatus != pluginsdk.PolicyStatusIncompatibleABI {
 		t.Fatalf("rate artifact without monotonic/atomic capabilities status = %d", rateStatus)

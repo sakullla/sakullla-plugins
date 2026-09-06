@@ -34,6 +34,19 @@ fn cidr_is_normalized_and_ipv4_ipv6_match() {
 }
 
 #[test]
+fn strict_address_parser_accepts_canonical_ipv4_ipv6_only() {
+    assert!(IpAddress::parse_strict("192.0.2.1").is_ok());
+    assert!(IpAddress::parse_strict("2001:db8::1").is_ok());
+    assert!(IpAddress::parse_strict("::").is_ok());
+    assert!(IpAddress::parse_strict("192.168.001.1").is_err());
+    assert!(IpAddress::parse_strict("2001:0db8::1").is_err());
+    assert!(IpAddress::parse_strict("2001:DB8::1").is_err());
+    assert!(IpAddress::parse_strict("::ffff:192.0.2.1").is_err());
+    assert!(Cidr::parse_strict("2001:db8:1::/48").is_ok());
+    assert!(Cidr::parse_strict("2001:db8:1::1/48").is_err());
+}
+
+#[test]
 fn deny_precedes_allow_across_shared_and_overlay() {
     let mut shared = PolicySet::<300>::new();
     shared

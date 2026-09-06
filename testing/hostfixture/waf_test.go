@@ -189,13 +189,21 @@ func TestWAFArtifactHostCallsAreDemandDriven(t *testing.T) {
 }
 
 type wafArtifactOptions struct {
-	config   []byte
-	path     string
-	query    string
-	headers  []byte
-	body     []byte
-	complete bool
-	overlay  []byte
+	config              []byte
+	path                string
+	query               string
+	headers             []byte
+	body                []byte
+	complete            bool
+	overlay             []byte
+	grants              []string
+	generation          string
+	trustedSource       *pluginsdk.PolicyTrustedSource
+	trustedSourceStatus pluginsdk.PolicyStatus
+	datasetReferences   map[string]pluginsdk.DatasetReference
+	datasetStatus       pluginsdk.DatasetQueryStatus
+	datasetMatches      map[string]pluginsdk.DatasetMatch
+	extensionPoint      string
 }
 
 type policyArtifactSession struct {
@@ -209,8 +217,10 @@ type policyArtifactSession struct {
 	hostCalls      map[string]int
 	fieldCalls     map[string]int
 	lastPayload    []byte
+	securityEvents []pluginsdk.PolicySecurityEvent
 	normalizedHTTP []byte
 	overlay        []byte
+	extensionPoint string
 }
 
 func runWAFArtifact(t *testing.T, artifact, config []byte, path string, body []byte, complete bool) (pluginsdk.PolicyStatus, pluginsdk.PolicyAction) {
@@ -237,7 +247,7 @@ func startWAFArtifact(t *testing.T, artifact []byte, options wafArtifactOptions)
 	t.Helper()
 	ctx := context.Background()
 	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2))
-	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int), overlay: options.overlay}
+	session := &policyArtifactSession{t: t, ctx: ctx, runtime: runtime, hostCalls: make(map[string]int), fieldCalls: make(map[string]int), overlay: options.overlay, extensionPoint: options.extensionPoint}
 	headers := options.headers
 	if headers == nil {
 		headers = []byte("content-type: application/octet-stream")
@@ -290,9 +300,59 @@ func startWAFArtifact(t *testing.T, artifact []byte, options wafArtifactOptions)
 				response = nil
 			case pluginsdk.PolicyHostEmitEvent:
 				session.eventCount++
+				event, decodeErr := pluginsdk.UnmarshalPolicySecurityEvent(request, int(pluginsdk.PolicyV1MaxInputFrameBytes))
+				if decodeErr != nil {
+					stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusInvalidArgument, 0)
+					return
+				}
+				session.securityEvents = append(session.securityEvents, event)
 				response = nil
 			case pluginsdk.PolicyHostAddMetric:
 				response = nil
+			case pluginsdk.PolicyHostReadTrustedSource:
+				if options.trustedSourceStatus != 0 && options.trustedSourceStatus != pluginsdk.PolicyStatusOK {
+					stack[0] = pluginsdk.PackPolicyHostResult(options.trustedSourceStatus, 0)
+					return
+				}
+				if options.trustedSource == nil {
+					stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusUnavailable, 0)
+					return
+				}
+				response, err = pluginsdk.MarshalPolicyTrustedSourceResponse(pluginsdk.PolicyTrustedSourceResponse{Source: options.trustedSource}, int(pluginsdk.PolicyV1MaxOutputFrameBytes))
+			case pluginsdk.PolicyHostDatasetResolve:
+				resolve, decodeErr := pluginsdk.UnmarshalPolicyDatasetResolveRequest(request, int(pluginsdk.PolicyV1MaxInputFrameBytes))
+				if decodeErr != nil {
+					stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusInvalidArgument, 0)
+					return
+				}
+				reference, found := options.datasetReferences[resolve.SourceID]
+				if !found {
+					response, err = pluginsdk.MarshalPolicyDatasetResolveResponse(pluginsdk.PolicyDatasetResolveResponse{Error: &pluginsdk.RuntimeError{Code: pluginsdk.ErrorUnavailable, Message: "binding unavailable"}}, resolve)
+				} else {
+					response, err = pluginsdk.MarshalPolicyDatasetResolveResponse(pluginsdk.PolicyDatasetResolveResponse{Reference: &reference}, resolve)
+				}
+			case pluginsdk.PolicyHostDatasetQuery:
+				query, decodeErr := pluginsdk.UnmarshalPolicyDatasetQueryRequest(request, int(pluginsdk.PolicyV1MaxInputFrameBytes))
+				if decodeErr != nil {
+					stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusInvalidArgument, 0)
+					return
+				}
+				queryStatus := options.datasetStatus
+				if queryStatus == "" {
+					queryStatus = pluginsdk.DatasetQueryOK
+				}
+				queryResponse := pluginsdk.DatasetQueryResponse{Reference: query.Reference, Status: queryStatus}
+				if queryStatus == pluginsdk.DatasetQueryOK {
+					for index, classification := range query.Classifications {
+						match := options.datasetMatches[string(classification.Kind)+":"+classification.Name]
+						match.Index = index
+						queryResponse.Matches = append(queryResponse.Matches, match)
+					}
+				}
+				response, err = pluginsdk.MarshalPolicyDatasetQueryResponse(queryResponse, query)
+				if err != nil {
+					session.t.Errorf("marshal policy dataset response status=%s matches=%+v: %v", queryStatus, queryResponse.Matches, err)
+				}
 			default:
 				stack[0] = pluginsdk.PackPolicyHostResult(pluginsdk.PolicyStatusInvalidArgument, 0)
 				return
@@ -326,12 +386,13 @@ func startWAFArtifact(t *testing.T, artifact []byte, options wafArtifactOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	initWire := marshalWAFInit(t, options.config)
+	initWire := marshalPolicyInit(t, options.config, options.grants, options.generation)
 	initPointer := wafAllocateAndWrite(t, ctx, guest, initWire)
 	result, err := guest.ExportedFunction(pluginsdk.PolicyExportInit).Call(ctx, uint64(initPointer), uint64(len(initWire)))
 	if err != nil || len(result) != 1 {
 		t.Fatalf("init call = %v, %v", result, err)
 	}
+	wafFree(t, ctx, guest, initPointer, uint32(len(initWire)))
 	status := pluginsdk.PolicyStatus(uint32(result[0]))
 	return session, status
 }
@@ -380,7 +441,7 @@ func (session *policyArtifactSession) evaluate(normalizedHTTP []byte) pluginsdk.
 func (session *policyArtifactSession) evaluateResponse(normalizedHTTP []byte) *dynamicpb.Message {
 	session.t.Helper()
 	session.evaluateCount++
-	evaluateWire := marshalWAFEvaluate(session.t, normalizedHTTP, session.overlay)
+	evaluateWire := marshalPolicyEvaluate(session.t, normalizedHTTP, session.overlay, session.extensionPoint)
 	evaluatePointer := wafAllocateAndWrite(session.t, session.ctx, session.guest, evaluateWire)
 	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportEvaluate).Call(session.ctx, uint64(evaluatePointer), uint64(len(evaluateWire)))
 	if err != nil || len(result) != 1 {
@@ -391,11 +452,18 @@ func (session *policyArtifactSession) evaluateResponse(normalizedHTTP []byte) *d
 	if !ok {
 		session.t.Fatal("evaluate returned invalid output range")
 	}
-	return decodeWAFPolicyMessage(session.t, "EvaluateResponse", output)
+	owned := append([]byte(nil), output...)
+	wafFree(session.t, session.ctx, session.guest, evaluatePointer, uint32(len(evaluateWire)))
+	wafFree(session.t, session.ctx, session.guest, outputPointer, outputLength)
+	return decodeWAFPolicyMessage(session.t, "EvaluateResponse", owned)
 }
 
 func (session *policyArtifactSession) HostCalls(name string) int {
 	return session.hostCalls[name]
+}
+
+func (session *policyArtifactSession) SecurityEvents() []pluginsdk.PolicySecurityEvent {
+	return append([]pluginsdk.PolicySecurityEvent(nil), session.securityEvents...)
 }
 
 func (session *policyArtifactSession) FieldCalls(name string) int {
@@ -422,19 +490,36 @@ func (session *policyArtifactSession) Reset() {
 }
 
 func marshalWAFInit(t *testing.T, config []byte) []byte {
+	return marshalPolicyInit(t, config, nil, "")
+}
+
+func marshalPolicyInit(t *testing.T, config []byte, grants []string, generation string) []byte {
 	message := newWAFPolicyMessage(t, "InitRequest")
 	message.ProtoReflect().Set(wafField(t, message, "config"), protoreflect.ValueOfBytes(config))
-	grants := message.ProtoReflect().Mutable(wafField(t, message, "granted_scopes")).List()
-	for _, grant := range []string{"policy.read-normalized-http", "policy.read-body-window", "policy.emit-event", "policy.add-metric"} {
-		grants.Append(protoreflect.ValueOfString(grant))
+	if len(grants) == 0 {
+		grants = []string{"policy.read-normalized-http", "policy.read-body-window", "policy.emit-event", "policy.add-metric"}
 	}
-	message.ProtoReflect().Set(wafField(t, message, "generation"), protoreflect.ValueOfString("waf-test-1"))
+	granted := message.ProtoReflect().Mutable(wafField(t, message, "granted_scopes")).List()
+	for _, grant := range grants {
+		granted.Append(protoreflect.ValueOfString(grant))
+	}
+	if generation == "" {
+		generation = "waf-test-1"
+	}
+	message.ProtoReflect().Set(wafField(t, message, "generation"), protoreflect.ValueOfString(generation))
 	return marshalWAFMessage(t, message)
 }
 
 func marshalWAFEvaluate(t *testing.T, normalizedHTTP, overlay []byte) []byte {
+	return marshalPolicyEvaluate(t, normalizedHTTP, overlay, "")
+}
+
+func marshalPolicyEvaluate(t *testing.T, normalizedHTTP, overlay []byte, extensionPoint string) []byte {
 	message := newWAFPolicyMessage(t, "EvaluateRequest")
-	message.ProtoReflect().Set(wafField(t, message, "extension_point"), protoreflect.ValueOfString("http.request"))
+	if extensionPoint == "" {
+		extensionPoint = "http.request"
+	}
+	message.ProtoReflect().Set(wafField(t, message, "extension_point"), protoreflect.ValueOfString(extensionPoint))
 	message.ProtoReflect().Set(wafField(t, message, "request_id"), protoreflect.ValueOfString("waf-request-1"))
 	if len(normalizedHTTP) != 0 {
 		message.ProtoReflect().Set(
@@ -532,6 +617,13 @@ func wafAllocateAndWrite(t *testing.T, ctx context.Context, guest api.Module, wi
 		t.Fatalf("allocator returned unusable pointer %d", pointer)
 	}
 	return pointer
+}
+
+func wafFree(t *testing.T, ctx context.Context, guest api.Module, pointer, length uint32) {
+	t.Helper()
+	if _, err := guest.ExportedFunction(pluginsdk.PolicyExportFree).Call(ctx, uint64(pointer), uint64(length)); err != nil {
+		t.Fatalf("free pointer=%d length=%d: %v", pointer, length, err)
+	}
 }
 
 func wafValueTypes(t *testing.T, values []pluginsdk.WASMValueType) []api.ValueType {

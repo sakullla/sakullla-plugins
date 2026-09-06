@@ -636,7 +636,7 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 		return pluginArtifactSpec{}, fmt.Errorf("plugin id %q does not match manifest id %q", pluginID, manifest.ID)
 	}
 	wantKind, wantABI, wantEntry := pluginmanifest.RuntimeRPCService, pluginmanifest.RPCABIV1, pluginID
-	if pluginID == "ip-policy" || pluginID == "rate-limit" {
+	if pluginID == "rate-limit" {
 		wantKind, wantABI, wantEntry = pluginmanifest.RuntimeWASMPolicy, pluginmanifest.PolicyABIV1, filepath.ToSlash(filepath.Join("artifacts", pluginID+".wasm"))
 	}
 	if manifest.Runtime.Kind != wantKind {
@@ -653,6 +653,11 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 			return pluginArtifactSpec{}, err
 		}
 	}
+	if pluginID == "ip-policy" {
+		if err := requireOfficialIPPolicyDualFace(manifest); err != nil {
+			return pluginArtifactSpec{}, err
+		}
+	}
 	if err := pluginmanifest.Validate(manifest, pluginID); err != nil {
 		return pluginArtifactSpec{}, fmt.Errorf("validate %s: %w", manifestPath, err)
 	}
@@ -660,8 +665,10 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 		return pluginArtifactSpec{}, fmt.Errorf("validate HTTP backend provider contract in %s: %w", manifestPath, err)
 	}
 	switch pluginID {
-	case "ip-policy", "rate-limit":
+	case "rate-limit":
 		return pluginArtifactSpec{kind: artifactWASMPolicy, packageName: "sakullla-" + pluginID}, nil
+	case "ip-policy":
+		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/ip-policy/cmd/ip-policy", artifactName: "ip-policy", packageName: "sakullla-ip-policy"}, nil
 	case "waf":
 		return pluginArtifactSpec{kind: artifactRPCService, sourcePath: "./plugins/waf/cmd/waf", artifactName: "waf", packageName: "sakullla-waf"}, nil
 	case "reverse-l4", "docker-app", "accelerator-sources", "doh", "cloudflare-dns", "shadowsocks-server", "webdav":
@@ -672,37 +679,54 @@ func pluginArtifactSpecFor(repositoryRoot, pluginID string) (pluginArtifactSpec,
 }
 
 func requireOfficialWAFDualFace(manifest pluginmanifest.Manifest) error {
+	return requireOfficialDualFace(manifest, "waf", "waf", "artifacts/waf.wasm", true)
+}
+
+func requireOfficialIPPolicyDualFace(manifest pluginmanifest.Manifest) error {
+	return requireOfficialDualFace(manifest, "ip-policy", "ip", "artifacts/ip-policy.wasm", false)
+}
+
+func requireOfficialDualFace(manifest pluginmanifest.Manifest, pluginID, policyKind, wasmPath string, httpOnly bool) error {
 	if manifest.Runtime.HostScope != pluginsdk.HostScopeControlPlane {
-		return fmt.Errorf("plugin waf host_scope %q is not control-plane", manifest.Runtime.HostScope)
+		return fmt.Errorf("plugin %s host_scope %q is not control-plane", pluginID, manifest.Runtime.HostScope)
 	}
-	if manifest.Runtime.PolicyKind != "waf" {
-		return fmt.Errorf("plugin waf policy_kind %q is not waf", manifest.Runtime.PolicyKind)
+	if manifest.Runtime.PolicyKind != policyKind {
+		return fmt.Errorf("plugin %s policy_kind %q is not %s", pluginID, manifest.Runtime.PolicyKind, policyKind)
 	}
 	policy := manifest.Runtime.Policy
 	if policy == nil || policy.Kind != pluginmanifest.RuntimeWASMPolicy || policy.ABI != pluginmanifest.PolicyABIV1 || policy.HostScope != pluginsdk.HostScopeAgent {
-		return errors.New("plugin waf requires a nested Agent wasm-policy")
+		return fmt.Errorf("plugin %s requires a nested Agent wasm-policy", pluginID)
 	}
-	if !officialWAFWASMPath(policy.Entry) {
-		return fmt.Errorf("plugin waf nested wasm entry %q is not assets/waf.wasm or artifacts/waf.wasm", policy.Entry)
+	validWASMEntry := policy.Entry == wasmPath
+	wantWASMEntry := wasmPath
+	if pluginID == "waf" {
+		validWASMEntry = officialWAFWASMPath(policy.Entry)
+		wantWASMEntry = "assets/waf.wasm or artifacts/waf.wasm"
+	}
+	if !validWASMEntry {
+		return fmt.Errorf("plugin %s nested wasm entry %q is not %s", pluginID, policy.Entry, wantWASMEntry)
 	}
 	hasNative, hasWASM := false, false
 	for _, artifact := range manifest.Artifacts {
 		if artifact.Mode == "executable" {
 			hasNative = true
 		}
-		if artifact.Mode == "wasm" && officialWAFWASMPath(artifact.Path) {
+		if artifact.Mode == "wasm" && (artifact.Path == wasmPath || pluginID == "waf" && officialWAFWASMPath(artifact.Path)) {
 			hasWASM = true
 		}
 	}
 	if !hasNative || !hasWASM {
-		return errors.New("plugin waf requires native executable plus wasm artifacts")
+		return fmt.Errorf("plugin %s requires native executable plus wasm artifacts", pluginID)
 	}
 	projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
 	if !ok {
-		return errors.New("plugin waf must project an Agent policy face")
+		return fmt.Errorf("plugin %s must project an Agent policy face", pluginID)
 	}
-	if len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
-		return errors.New("plugin waf PolicyStage must keep http.request and omit ui.route")
+	if httpOnly && (len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest) {
+		return fmt.Errorf("plugin %s PolicyStage must keep http.request and omit ui.route", pluginID)
+	}
+	if !httpOnly && (len(projection.ExtensionPoints) != 2 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest || projection.ExtensionPoints[1] != pluginsdk.ExtensionL4Accept) {
+		return fmt.Errorf("plugin %s PolicyStage must keep http.request/l4.accept and omit ui.route", pluginID)
 	}
 	return nil
 }

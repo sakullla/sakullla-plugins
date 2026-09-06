@@ -189,7 +189,7 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 		declaredUI bool
 	}{
 		"accelerator-sources": {name: "资源加速"},
-		"ip-policy":           {name: "IP 策略", declaredUI: true},
+		"ip-policy":           {name: "IP 策略"},
 		"rate-limit":          {name: "速率限制", declaredUI: true},
 		"cloudflare-dns":      {name: "Cloudflare DNS"},
 		"docker-app":          {name: "Docker 应用"},
@@ -225,19 +225,19 @@ func TestOfficialSourcesCarryChineseDisplayCopy(t *testing.T) {
 				t.Fatalf("accelerator-sources provider must stay default/资源加速: %#v", manifest.HTTPBackendProviders)
 			}
 		}
-		if id == "waf" {
+		if id == "waf" || id == "ip-policy" {
 			if !pluginsdk.RuntimeProjectsControlPlaneUIAndAgentPolicy(manifest.Runtime) {
-				t.Fatalf("waf dual-face runtime = %+v", manifest.Runtime)
+				t.Fatalf("%s dual-face runtime = %+v", id, manifest.Runtime)
 			}
 			if manifest.UISchema != "" {
-				t.Fatal("waf must not declare ui.schema.json as the operator path")
+				t.Fatalf("%s must not declare ui.schema.json as the operator path", id)
 			}
-			if manifest.Runtime.PolicyKind != "waf" || manifest.Runtime.Policy == nil || manifest.Runtime.Policy.Kind != RuntimeWASMPolicy || manifest.Runtime.Policy.Entry != "artifacts/waf.wasm" {
-				t.Fatalf("waf nested wasm-policy = %+v", manifest.Runtime)
+			if manifest.Runtime.PolicyKind != map[string]string{"waf": "waf", "ip-policy": "ip"}[id] || manifest.Runtime.Policy == nil || manifest.Runtime.Policy.Kind != RuntimeWASMPolicy || manifest.Runtime.Policy.Entry != "artifacts/"+id+".wasm" {
+				t.Fatalf("%s nested wasm-policy = %+v", id, manifest.Runtime)
 			}
 			projection, ok := pluginsdk.ProjectAgentPolicy(manifest)
-			if !ok || len(projection.ExtensionPoints) != 1 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
-				t.Fatalf("PolicyStage must keep http.request and omit ui.route: %#v ok=%v", projection, ok)
+			if !ok || len(projection.ExtensionPoints) == 0 || projection.ExtensionPoints[0] != pluginsdk.ExtensionHTTPRequest {
+				t.Fatalf("PolicyStage must keep traffic points and omit ui.route: %#v ok=%v", projection, ok)
 			}
 		}
 		if id == "webdav" {

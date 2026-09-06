@@ -1,41 +1,85 @@
 schema_version: 1
 id: ip-policy
-version: 0.1.0
+version: 0.2.0
 name: IP 策略
-description: 按 IP 与 GeoIP 控制 HTTP 和四层访问
+description: 用可信来源、CIDR、GeoIP 国家与中国大陆省份数据保护 HTTP、TCP、UDP 和受管插件入口
 compatibility:
   host: "*"
   agent: "*"
 runtime:
-  kind: wasm-policy
-  abi: nre:policy/v1
-  host_scope: agent
-  entry: artifacts/ip-policy.wasm
+  kind: rpc-service
+  abi: nre:rpc/v1
+  host_scope: control-plane
+  entry: ip-policy
   policy_kind: ip
+  policy:
+    kind: wasm-policy
+    abi: nre:policy/v1
+    host_scope: agent
+    entry: artifacts/ip-policy.wasm
+    resource_budget:
+      timeout_ms: 2
+      memory_bytes: 16777216
+      concurrency: 64
+      input_bytes: 131072
+      output_bytes: 4096
+    failure_policy:
+      on_error: fail-closed
+      on_budget: fail-closed
+      restart: never
+      core_fallback: preserve
 artifacts:
+  - path: artifacts/linux-amd64/ip-policy
+    sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    size: 1
+    mode: executable
+    goos: linux
+    goarch: amd64
   - path: artifacts/ip-policy.wasm
     sha256: 05baa9c64b81023d2fb9acb41edf1254e2d71cec58eabdb0564b38da0b6b3047
     size: 9096
     mode: wasm
 extension_points:
+  - ui.route
   - http.request
   - l4.accept
+ui_route_id: ip-policy
+metadata:
+  ui.nav.group: 安全
+  ui.nav.label: IP 策略
+  policy.mode.handling: raw-decision-v1
+assets:
+  - assets/ui/index.html
+  - assets/ui/app.js
+  - assets/ui/style.css
 permissions:
+  - name: ui.dynamic
+  - name: storage.read
+  - name: storage.write
+  - name: http.rule
+  - name: dataset.manage
+  - name: dataset.bind
+  - name: dataset.query
+  - name: dataset.resolve
+  - name: policy.control
   - name: policy.read
-  - name: event.emit
   - name: policy.trusted-source
+  - name: http.inspect
+  - name: l4.inspect
+  - name: event.emit
 config_schema: config.schema.json
-ui_schema: ui.schema.json
 resource_budget:
-  timeout_ms: 2
-  memory_bytes: 16777216
-  concurrency: 64
-  input_bytes: 131072
-  output_bytes: 4096
+  timeout_ms: 30000
+  memory_bytes: 268435456
+  concurrency: 8
+  input_bytes: 1048576
+  output_bytes: 1048576
+  cpu_millis: 1000
+  restarts: 3
 failure_policy:
   on_error: fail-closed
   on_budget: fail-closed
-  restart: never
+  restart: on-failure
   core_fallback: preserve
 signature:
   algorithm: ed25519

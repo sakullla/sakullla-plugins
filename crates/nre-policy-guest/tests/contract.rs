@@ -1,8 +1,10 @@
 use nre_policy_guest::{
-    ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, EvaluateRequest, FrameWriter,
-    HostClient, HostImport, HostLimits, HostTransport, InitRequest, NormalizedHttpResponse,
-    POLICY_ABI_V1, PolicyAction, PolicyResourceBudget, ReasonCode, RuntimeErrorCode,
-    SecurityEventAction, SecurityEventCode, WireCursor, WireLimits, encode_evaluate_error,
+    ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, DatasetClassification,
+    DatasetClassificationKind, DatasetMatchCoverage, DatasetQueryRequest, DatasetQueryStatus,
+    DatasetReference, DatasetResolveRequest, EvaluateRequest, FrameWriter, HostClient, HostImport,
+    HostLimits, HostTransport, InitRequest, NormalizedHttpResponse, POLICY_ABI_V1, PolicyAction,
+    PolicyResourceBudget, ReasonCode, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
+    SecurityEventReason, TrustedSourceAuthority, WireCursor, WireLimits, encode_evaluate_error,
     encode_evaluate_success, pack_host_result, pack_policy_buffer, unpack_policy_buffer,
 };
 
@@ -12,11 +14,27 @@ fn generated_contract_identity_and_values_match_canonical_sdk() {
     assert_eq!(ABI_MAJOR_VERSION, 1);
     assert_eq!(
         CANONICAL_DESCRIPTOR_SET_SHA256,
-        "47c0dc758ccc30fb596dfe078419aeb1effe8b266ed28d729c64334a09881628"
+        "2abec011209434be336af2a245d10268c891914aa6f12b60c8eea2d71a8d5170"
     );
     assert_eq!(AbiStatus::ResourceExhausted as u32, 3);
     assert_eq!(RuntimeErrorCode::IncompatibleAbi as u32, 6);
     assert_eq!(PolicyAction::Observe as u32, 3);
+    assert_eq!(TrustedSourceAuthority::Relay as u32, 4);
+    assert_eq!(DatasetClassificationKind::Region as u32, 2);
+    assert_eq!(DatasetMatchCoverage::UnsupportedFamily as u32, 3);
+    assert_eq!(DatasetQueryStatus::InvalidData as u32, 7);
+    assert_eq!(SecurityEventCode::IpCheckFailure as u32, 3);
+    assert_eq!(SecurityEventAction::Allow as u32, 3);
+    assert_eq!(SecurityEventReason::CoverageUnknown as u32, 9);
+    assert_eq!(
+        HostImport::ReadTrustedSource.name(),
+        "nre_host_read_trusted_source"
+    );
+    assert_eq!(HostImport::DatasetQuery.name(), "nre_host_dataset_query");
+    assert_eq!(
+        HostImport::DatasetResolve.name(),
+        "nre_host_dataset_resolve"
+    );
     assert_eq!(
         unpack_policy_buffer(pack_policy_buffer(0x1234, 99)),
         (0x1234, 99)
@@ -266,4 +284,112 @@ fn writer_reports_fixed_buffer_exhaustion() {
         writer.write_string_field(1, "long").unwrap_err().reason,
         ReasonCode::OutputBudgetExceeded
     );
+}
+
+const TEST_HANDLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEF";
+const TEST_DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[derive(Default)]
+struct SecurityHost;
+
+impl HostTransport for SecurityHost {
+    fn call(&mut self, import: HostImport, _: &[u8], response: &mut [u8]) -> u64 {
+        let mut nested = [0_u8; 1024];
+        let mut nested_writer = FrameWriter::new(&mut nested);
+        match import {
+            HostImport::ReadTrustedSource => {
+                nested_writer.write_string_field(1, "instance-1").unwrap();
+                nested_writer.write_string_field(2, "generation-1").unwrap();
+                nested_writer.write_string_field(3, "entry-1").unwrap();
+                nested_writer.write_bytes_field(4, &[192, 0, 2, 1]).unwrap();
+                nested_writer
+                    .write_bytes_field(5, &[203, 0, 113, 9])
+                    .unwrap();
+                nested_writer.write_varint_field(6, 3).unwrap();
+                let nested_len = nested_writer.len();
+                let mut writer = FrameWriter::new(response);
+                writer.write_bytes_field(1, &nested[..nested_len]).unwrap();
+                pack_host_result(AbiStatus::Ok, writer.len() as u32)
+            }
+            HostImport::DatasetResolve => {
+                write_reference(&mut nested_writer);
+                let nested_len = nested_writer.len();
+                let mut writer = FrameWriter::new(response);
+                writer.write_bytes_field(1, &nested[..nested_len]).unwrap();
+                pack_host_result(AbiStatus::Ok, writer.len() as u32)
+            }
+            HostImport::DatasetQuery => {
+                write_reference(&mut nested_writer);
+                let reference_len = nested_writer.len();
+                let mut match_frame = [0_u8; 16];
+                let mut match_writer = FrameWriter::new(&mut match_frame);
+                match_writer.write_varint_field(1, 0).unwrap();
+                match_writer.write_varint_field(2, 0).unwrap();
+                match_writer.write_varint_field(3, 2).unwrap();
+                let match_len = match_writer.len();
+                let mut writer = FrameWriter::new(response);
+                writer
+                    .write_bytes_field(1, &nested[..reference_len])
+                    .unwrap();
+                writer.write_varint_field(2, 1).unwrap();
+                writer
+                    .write_bytes_field(3, &match_frame[..match_len])
+                    .unwrap();
+                pack_host_result(AbiStatus::Ok, writer.len() as u32)
+            }
+            _ => pack_host_result(AbiStatus::Unavailable, 0),
+        }
+    }
+}
+
+fn write_reference(writer: &mut FrameWriter<'_>) {
+    writer.write_string_field(1, TEST_HANDLE).unwrap();
+    writer.write_string_field(2, "instance-1").unwrap();
+    writer.write_string_field(3, "generation-1").unwrap();
+    writer.write_string_field(4, "geoip").unwrap();
+    writer.write_string_field(5, TEST_DIGEST).unwrap();
+}
+
+#[test]
+fn security_import_helpers_round_trip_typed_bounded_frames() {
+    let mut host =
+        HostClient::<_, 4096, 4096>::new(SecurityHost, HostLimits::new(3, 4096)).unwrap();
+    let source = host.read_trusted_source().unwrap().source.unwrap();
+    assert_eq!(source.generation, "generation-1");
+    assert_eq!(source.source_address, &[203, 0, 113, 9]);
+    assert_eq!(source.authority, TrustedSourceAuthority::Proxy);
+
+    let resolved = host
+        .dataset_resolve(DatasetResolveRequest {
+            source_id: "geoip",
+            max_duration_micros: 1000,
+            max_response_bytes: 4096,
+        })
+        .unwrap()
+        .reference
+        .unwrap();
+    assert_eq!(resolved.version_digest, TEST_DIGEST);
+
+    let reference = DatasetReference {
+        handle: TEST_HANDLE,
+        instance_id: "instance-1",
+        generation: "generation-1",
+        source_id: "geoip",
+        version_digest: TEST_DIGEST,
+    };
+    let classifications = [DatasetClassification {
+        name: "cn-44",
+        kind: DatasetClassificationKind::Region,
+    }];
+    let response = host
+        .dataset_query(DatasetQueryRequest {
+            reference,
+            classifications: &classifications,
+            max_duration_micros: 1000,
+            max_response_bytes: 4096,
+        })
+        .unwrap();
+    let matched = response.matches().next().unwrap().unwrap();
+    assert!(!matched.matched);
+    assert_eq!(matched.coverage, DatasetMatchCoverage::Unknown);
 }

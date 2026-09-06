@@ -9,18 +9,28 @@
 
 mod abi_generated;
 mod budget;
+mod dataset;
+mod event;
 mod host;
 mod incompatible;
 mod message;
 mod reason;
+mod source;
 mod wire;
 
 pub use abi_generated::{
-    ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, EXPORT_ALLOCATE,
-    EXPORT_EVALUATE, EXPORT_FREE, EXPORT_INIT, EXPORT_MEMORY, EXPORT_RESET, EXPORT_VERSION,
-    POLICY_ABI_V1, PolicyAction, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
+    ABI_MAJOR_VERSION, AbiStatus, CANONICAL_DESCRIPTOR_SET_SHA256, DatasetClassificationKind,
+    DatasetMatchCoverage, DatasetQueryStatus, EXPORT_ALLOCATE, EXPORT_EVALUATE, EXPORT_FREE,
+    EXPORT_INIT, EXPORT_MEMORY, EXPORT_RESET, EXPORT_VERSION, POLICY_ABI_V1, PolicyAction,
+    PolicyDomainSource, RuntimeErrorCode, SecurityEventAction, SecurityEventCode,
+    SecurityEventReason, TrustedSourceAuthority,
 };
 pub use budget::{BudgetDimension, PolicyResourceBudget, WireLimits};
+pub use dataset::{
+    DatasetClassification, DatasetMatch, DatasetQueryRequest, DatasetQueryResponse,
+    DatasetReference, DatasetResolveRequest, DatasetResolveResponse, RuntimeFailure,
+};
+pub use event::PolicySecurityEvent;
 #[cfg(target_arch = "wasm32")]
 pub use host::WasmHost;
 pub use host::{HostClient, HostImport, HostLimits, HostTransport};
@@ -29,6 +39,7 @@ pub use message::{
     encode_evaluate_error, encode_evaluate_success,
 };
 pub use reason::{GuestError, ReasonCode};
+pub use source::{PolicyTrustedSource, PolicyTrustedSourceResponse};
 pub use wire::{Field, FieldValue, FrameWriter, WireCursor, WireType};
 
 /// Pack the guest-owned evaluate response allocation as required by the ABI.

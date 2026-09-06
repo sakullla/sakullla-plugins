@@ -34,6 +34,22 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 			t.Fatalf("management page missing %q", want)
 		}
 	}
+	ipManifest, err := os.ReadFile(filepath.Join(pluginsDir, "ip-policy", "plugin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ipManifest), "ui_schema:") || !strings.Contains(string(ipManifest), "ui_route_id: ip-policy") {
+		t.Fatal("ip-policy must use its dedicated management route")
+	}
+	ipPage, err := os.ReadFile(filepath.Join(pluginsDir, "ip-policy", "assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"IP 策略", "中国大陆省份白名单", "数据源与版本", "诊断事件"} {
+		if !strings.Contains(string(ipPage), want) {
+			t.Fatalf("ip-policy management page missing %q", want)
+		}
+	}
 
 	cases := []struct {
 		rel                string
@@ -42,15 +58,6 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 		absent             []string
 		nanosecondBindings []string
 	}{
-		{
-			rel:   filepath.Join("ip-policy", "ui.schema.json"),
-			title: "IP 策略设置",
-			bindings: map[string][]string{
-				"/default_action":     {"allow", "deny"},
-				"/geo/failure_policy": {"allow", "deny"},
-			},
-			absent: []string{"/geo/mmdb_handle"},
-		},
 		{
 			rel:   filepath.Join("rate-limit", "ui.schema.json"),
 			title: "速率限制设置",
