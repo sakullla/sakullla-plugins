@@ -77,6 +77,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, script)
 	assertListenCardIsSummary(t, page, script)
+	assertListenDetailIsInPage(t, page, script)
+	assertWriteGate(t, script)
 	inactive := httptest.NewRecorder()
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/listens?agent_id=agent-1", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), serviceNotReady) {
@@ -98,6 +100,9 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		".setup-mark[data-kind=\"unavailable\"]",
 		"repeat(2, minmax(0, 1fr))",
 		"repeat(3, minmax(18rem, 1fr))",
+		"minmax(16rem, 22rem)",
+		".listen-card[data-selected=\"true\"]",
+		"#listen-detail",
 	} {
 		if !strings.Contains(style, fragment) {
 			t.Fatalf("panel stylesheet missing %q", fragment)
@@ -227,6 +232,87 @@ func assertListenCardIsSummary(t *testing.T, page, script string) {
 	}
 	if !strings.Contains(detail, "删除监听") || !strings.Contains(detail, "追加用户") {
 		t.Fatal("detail path missing 删除监听 or 追加用户")
+	}
+}
+
+func assertListenDetailIsInPage(t *testing.T, page, script string) {
+	t.Helper()
+	if strings.Contains(page, `id="detail-dialog"`) || strings.Contains(script, "detail-dialog") {
+		t.Fatal("panel still uses #detail-dialog")
+	}
+	if !strings.Contains(page, `id="listen-detail"`) {
+		t.Fatal("panel missing in-page #listen-detail")
+	}
+	for _, want := range []string{
+		`id="detail-title"`,
+		`id="detail-meta"`,
+		`id="detail-users"`,
+		`id="detail-actions"`,
+		`id="detail-back"`,
+		"返回列表",
+		"选择一条监听，查看用户并管理。",
+	} {
+		if !strings.Contains(page, want) && !strings.Contains(script, want) {
+			t.Fatalf("in-page detail missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`id="create-dialog"`,
+		`id="append-dialog"`,
+		`id="confirm-dialog"`,
+		`id="qr-dialog"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("short-task dialog missing %q", want)
+		}
+	}
+	detail := jsConstFunction(script, "renderDetail")
+	if detail == "" {
+		t.Fatal("renderDetail is missing")
+	}
+	for _, want := range []string{"端口", "运行中", "未生效", "listenShareHost", "manage: true"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("in-page detail missing %q", want)
+		}
+	}
+	if !jsContainsIdent(detail, "listenFooterActions") || !jsContainsIdent(detail, "renderUser") {
+		t.Fatal("in-page detail no longer composes user management or listenFooterActions")
+	}
+	refresh := jsConstFunction(script, "refreshOpenDetail")
+	if refresh == "" {
+		t.Fatal("refreshOpenDetail is missing")
+	}
+	if strings.Contains(refresh, "listensCache.length") {
+		t.Fatal("refreshOpenDetail still keeps detail open by selecting another listen")
+	}
+	if !jsContainsIdent(refresh, "closeDetail") {
+		t.Fatal("refreshOpenDetail does not close detail when the listen is gone")
+	}
+}
+
+func assertWriteGate(t *testing.T, script string) {
+	t.Helper()
+	mutate := jsConstFunction(script, "canMutate")
+	if mutate == "" {
+		t.Fatal("canMutate is missing")
+	}
+	for _, want := range []string{"selectedAgentID", "agentOnline", "executionReady !== true"} {
+		if !strings.Contains(mutate, want) {
+			t.Fatalf("canMutate missing %q", want)
+		}
+	}
+	sync := jsConstFunction(script, "syncSelectionActions")
+	if sync == "" {
+		t.Fatal("syncSelectionActions is missing")
+	}
+	if !strings.Contains(sync, "executionReady !== true") {
+		t.Fatal("syncSelectionActions does not disable create/share-host when execution.ready is not true")
+	}
+	if !strings.Contains(sync, "createToggle") || !strings.Contains(sync, "shareHostSave") || !strings.Contains(sync, "shareHostInput") {
+		t.Fatal("syncSelectionActions no longer disables create or share-host controls")
+	}
+	if !strings.Contains(script, "execution?.ready === true") {
+		t.Fatal("workspace no longer records execution.ready")
 	}
 }
 

@@ -431,6 +431,26 @@ main {
   width: 100%;
 }
 
+.workspace-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) {
+  grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) > .panel {
+  max-width: none;
+  margin: 0;
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) .listen-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .empty-state {
   display: grid;
   justify-items: start;
@@ -477,6 +497,16 @@ main {
   transform: translateY(-1px);
 }
 
+.listen-card[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--color-accent) 58%, var(--color-border));
+  box-shadow: var(--shadow-focus), var(--shadow-card);
+  transform: none;
+}
+
+.listen-card[data-selected="true"]:hover {
+  transform: none;
+}
+
 .listen-card-head {
   min-width: 0;
   display: grid;
@@ -519,6 +549,42 @@ main {
   flex-wrap: wrap;
   padding-top: var(--space-3);
   border-top: 1px solid var(--color-border);
+}
+
+/* ---------- in-page listen detail ---------- */
+
+#listen-detail {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  min-width: 0;
+  min-height: 14rem;
+  max-height: min(70vh, 52rem);
+  overflow: auto;
+  padding: var(--space-5);
+  background: var(--gradient-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.detail-head {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.detail-head h3 {
+  min-width: 0;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+#detail-back {
+  justify-self: start;
+  width: fit-content;
+  padding-inline: 0;
 }
 
 /* ---------- accounts ---------- */
@@ -1091,6 +1157,15 @@ dialog > .dialog-head { margin-bottom: var(--space-4); }
   }
 
   .listen-grid { grid-template-columns: minmax(0, 1fr); }
+
+  .workspace-body,
+  .workspace-body:has(#listen-detail:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #listen-detail {
+    max-height: none;
+  }
 
   .field-row { grid-template-columns: minmax(0, 1fr); }
 

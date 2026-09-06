@@ -38,11 +38,13 @@ const shareHostSave = document.querySelector("#share-host-save");
 const shareHostAuto = document.querySelector("#share-host-auto");
 const shareHostSource = document.querySelector("#share-host-source");
 const shareHostBar = document.querySelector(".share-host-bar");
-const detailDialog = document.querySelector("#detail-dialog");
+const detailPanel = document.querySelector("#listen-detail");
 const detailTitle = document.querySelector("#detail-title");
 const detailMeta = document.querySelector("#detail-meta");
 const detailUsers = document.querySelector("#detail-users");
 const detailActions = document.querySelector("#detail-actions");
+const detailBack = document.querySelector("#detail-back");
+const DETAIL_STACK_MQ = window.matchMedia("(max-width: 720px)");
 const agentSelect = document.querySelector("#agent-select");
 const agentPickerRoot = document.querySelector('[data-agent-picker="workspace"]');
 const nodeEmpty = document.querySelector("#app-node-empty");
@@ -205,17 +207,20 @@ const sendPluginJSON = async (path, body) => {
 };
 
 const syncSelectionActions = () => {
-  const blocked = busy || !selectedAgentID || !agentOnline;
+  const blocked = busy || !selectedAgentID || !agentOnline || executionReady !== true;
   if (createToggle) createToggle.disabled = blocked;
   if (emptyCreate) emptyCreate.disabled = blocked;
   if (shareHostSave) shareHostSave.disabled = blocked;
   if (shareHostAuto) shareHostAuto.disabled = blocked;
   if (shareHostInput) shareHostInput.disabled = blocked;
+  document.querySelectorAll("[data-mutate=true]").forEach((node) => {
+    node.disabled = blocked;
+  });
 };
 
 const setBusy = (next) => {
   busy = next;
-  const roots = [workspaceNode, contextNode, createDialog, detailDialog, appendDialog].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createDialog, appendDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
@@ -685,12 +690,44 @@ const renderExecutionBadge = (execution) => {
   executionStatus.textContent = "暂时无法执行";
 };
 
+const isDetailStacked = () => DETAIL_STACK_MQ.matches;
+
+const markSelectedCards = () => {
+  if (!listNode) return;
+  listNode.querySelectorAll(".listen-card").forEach((card) => {
+    const selected = Boolean(openListenID) && card.dataset.id === openListenID;
+    card.dataset.selected = selected ? "true" : "false";
+    if (selected) card.setAttribute("aria-current", "true");
+    else card.removeAttribute("aria-current");
+  });
+};
+
+const resetDetailPrompt = () => {
+  if (detailTitle) detailTitle.textContent = "监听详情";
+  if (detailMeta) {
+    detailMeta.textContent = "选择一条监听，查看用户并管理。";
+    detailMeta.hidden = false;
+  }
+  if (detailUsers) detailUsers.replaceChildren();
+  if (detailActions) detailActions.replaceChildren();
+};
+
+const syncDetailLayout = () => {
+  const open = Boolean(openListenID);
+  const stacked = isDetailStacked();
+  const hasListens = listensCache.length > 0;
+  if (workspaceNode) workspaceNode.dataset.detailOpen = open ? "true" : "false";
+  if (listPanel) listPanel.hidden = stacked && open;
+  if (detailPanel) detailPanel.hidden = stacked ? !open : !hasListens;
+  if (detailBack) detailBack.hidden = !(stacked && open);
+};
+
 const syncListPanel = () => {
   const hasListens = listNode && listNode.children.length > 0;
   if (emptyNode) emptyNode.hidden = !selectedAgentID || !agentOnline || hasListens;
-  if (listPanel) listPanel.hidden = false;
   if (workspaceHead) workspaceHead.hidden = false;
   if (createToggle) createToggle.hidden = !(selectedAgentID && agentOnline);
+  syncDetailLayout();
 };
 
 const closeCreate = () => {
@@ -841,11 +878,13 @@ const userManageButtons = (user) => {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "btn btn--ghost";
+  toggle.dataset.mutate = "true";
   toggle.textContent = user.enabled ? "停用" : "再启用";
   toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "btn btn--text btn--danger";
+  remove.dataset.mutate = "true";
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
   actions.append(toggle, remove);
@@ -872,13 +911,14 @@ const primaryUser = (listen) => {
   return users.find((user) => user && user.enabled && user.share_available && user.uri) || users[0] || null;
 };
 
-const listenFooterActions = (listen, { close = false } = {}) => {
+const listenFooterActions = (listen) => {
   const actions = document.createElement("div");
   actions.className = "dialog-actions";
   if (isSS2022(listen.method)) {
     const append = document.createElement("button");
     append.type = "button";
     append.className = "btn btn--ghost";
+    append.dataset.mutate = "true";
     append.textContent = "追加用户";
     append.addEventListener("click", () => appendUser(listen));
     actions.append(append);
@@ -886,17 +926,10 @@ const listenFooterActions = (listen, { close = false } = {}) => {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "btn btn--text btn--danger";
+  remove.dataset.mutate = "true";
   remove.textContent = "删除监听";
   remove.addEventListener("click", () => deleteListen(listen));
   actions.append(remove);
-  if (close) {
-    const done = document.createElement("button");
-    done.type = "button";
-    done.className = "btn btn--ghost";
-    done.textContent = "关闭";
-    done.addEventListener("click", closeDetail);
-    actions.append(done);
-  }
   return actions;
 };
 
@@ -905,6 +938,9 @@ const renderListen = (listen) => {
   card.className = "listen-card";
   card.dataset.id = listen.id;
   card.dataset.bound = listen.bound ? "true" : "false";
+  const selected = Boolean(openListenID) && listen.id === openListenID;
+  card.dataset.selected = selected ? "true" : "false";
+  if (selected) card.setAttribute("aria-current", "true");
 
   const head = document.createElement("div");
   head.className = "listen-card-head";
@@ -947,11 +983,13 @@ const renderListen = (listen) => {
 
 const closeDetail = () => {
   openListenID = "";
-  if (detailDialog && detailDialog.open) detailDialog.close();
+  resetDetailPrompt();
+  markSelectedCards();
+  syncDetailLayout();
 };
 
 const renderDetail = (listen) => {
-  if (!detailDialog) return;
+  if (!detailPanel || !listen) return;
   openListenID = listen.id;
   if (detailTitle) detailTitle.textContent = `端口 ${listen.port}`;
   if (detailMeta) {
@@ -964,24 +1002,23 @@ const renderDetail = (listen) => {
     (listen.users || []).forEach((user) => detailUsers.append(renderUser(user, { manage: true })));
   }
   if (detailActions) {
-    const footer = listenFooterActions(listen, { close: true });
+    const footer = listenFooterActions(listen);
     detailActions.replaceChildren(...Array.from(footer.children));
   }
+  markSelectedCards();
+  syncDetailLayout();
+  syncSelectionActions();
 };
 
 const openDetail = (listen) => {
   renderDetail(listen);
-  if (detailDialog && typeof detailDialog.showModal === "function") {
-    if (detailDialog.open) return;
-    detailDialog.showModal();
-  }
 };
 
 const refreshOpenDetail = () => {
-  if (!openListenID || !detailDialog || !detailDialog.open) return;
+  if (!openListenID) return;
   const listen = listensCache.find((item) => item && item.id === openListenID);
   if (listen) renderDetail(listen);
-  else if (listensCache.length) closeDetail();
+  else closeDetail();
 };
 
 const renderListens = (listens) => {
@@ -995,6 +1032,7 @@ const renderListens = (listens) => {
   }
   syncListPanel();
   refreshOpenDetail();
+  syncSelectionActions();
   if (busy) setBusy(true);
 };
 
@@ -1066,6 +1104,10 @@ const canMutate = () => {
   }
   if (!agentOnline) {
     showStatus("该节点离线，不能新增或改动监听。", true);
+    return false;
+  }
+  if (executionReady !== true) {
+    showStatus("该节点暂时无法执行监听。", true);
     return false;
   }
   return true;
@@ -1229,13 +1271,9 @@ if (createDialog) {
     if (event.target === createDialog) closeCreate();
   });
 }
-if (detailDialog) {
-  detailDialog.addEventListener("click", (event) => {
-    if (event.target === detailDialog) closeDetail();
-  });
-  detailDialog.addEventListener("close", () => {
-    openListenID = "";
-  });
+if (detailBack) detailBack.addEventListener("click", closeDetail);
+if (typeof DETAIL_STACK_MQ.addEventListener === "function") {
+  DETAIL_STACK_MQ.addEventListener("change", syncDetailLayout);
 }
 if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
 if (qrCopy) {
