@@ -211,6 +211,9 @@ func assertListenCardIsSummary(t *testing.T, page, script string) {
 			t.Fatalf("listenTitle missing %q", want)
 		}
 	}
+	if strings.Contains(titleFn, ".sort(") || strings.Contains(titleFn, ".find(") {
+		t.Fatal("listenTitle must keep users[0] as the insertion-order title source")
+	}
 	if strings.Contains(titleFn, "端口 ${listen.port}") {
 		t.Fatal("listenTitle still uses 端口 ${listen.port} as title")
 	}

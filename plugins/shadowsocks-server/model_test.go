@@ -79,6 +79,9 @@ func TestCreateListenDefaultsAndAppendDelete(t *testing.T) {
 	if err != nil || created.ID != "user-2" || len(listener.Users) != 2 {
 		t.Fatalf("append=%+v err=%v", listener, err)
 	}
+	if listener.Users[0].Name != "alice" || listener.Users[1].Name != "bob" {
+		t.Fatalf("append reordered users: %+v", listener.Users)
+	}
 	next, _, err = next.DeleteUser("user-1")
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +100,42 @@ func TestCreateListenDefaultsAndAppendDelete(t *testing.T) {
 	}
 	if _, ok = next.Listen(listenID); ok {
 		t.Fatal("deleted listen still present")
+	}
+}
+
+func TestClonePreservesUserInsertionOrder(t *testing.T) {
+	cfg := Configuration{Generation: "gen-1"}
+	next, listener, created, err := cfg.CreateListen(
+		ListenSpec{AgentID: "agent-1", Method: DefaultSS2022Method},
+		User{ID: "acct-zzzzzzzzzzzzzzzz", Name: "alice", SecretRef: "secret/acct-zzzzzzzzzzzzzzzz", SecretVersion: "v1"},
+		"secret/server-1",
+		"v1",
+	)
+	if err != nil || created.Name != "alice" || len(listener.Users) != 1 || listener.Users[0].Name != "alice" {
+		t.Fatalf("create=%+v user=%+v err=%v", listener, created, err)
+	}
+	next, listener, created, err = next.AppendListenUser(listener.ID, User{
+		ID: "acct-0000000000000000", Name: "bob", SecretRef: "secret/acct-0000000000000000", SecretVersion: "v1",
+	})
+	if err != nil || created.Name != "bob" || len(listener.Users) != 2 {
+		t.Fatalf("append=%+v err=%v", listener, err)
+	}
+	if listener.Users[0].Name != "alice" || listener.Users[1].Name != "bob" {
+		t.Fatalf("append title source drifted: %+v", listener.Users)
+	}
+	cloned, ok := clone(next).Listen(listener.ID)
+	if !ok || len(cloned.Users) != 2 || cloned.Users[0].Name != "alice" || cloned.Users[1].Name != "bob" {
+		t.Fatalf("clone reordered users by ID: %+v", cloned.Users)
+	}
+	if cloned.Users[0].ID < cloned.Users[1].ID {
+		t.Fatal("test IDs no longer reverse dictionary order")
+	}
+	next, listener, err = next.DeleteUser("acct-zzzzzzzzzzzzzzzz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listener.Users) != 1 || listener.Users[0].Name != "bob" {
+		t.Fatalf("after deleting creator: %+v", listener.Users)
 	}
 }
 

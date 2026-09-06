@@ -281,13 +281,10 @@ func TestControlAPIDefaultCreateAppendDisableDelete(t *testing.T) {
 		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
 	}
 	two := decodeListenAPI(t, appended).Listen
-	if two == nil || len(two.Users) != 2 {
+	if two == nil || len(two.Users) != 2 || two.Users[0].ID != userA.ID {
 		t.Fatalf("append listen=%#v", two)
 	}
-	userB := two.Users[0]
-	if userB.ID == userA.ID {
-		userB = two.Users[1]
-	}
+	userB := two.Users[1]
 	if userB.Name != "手机" || !userB.ShareAvailable || userB.URI == "" || userB.QRContent != userB.URI || !strings.HasSuffix(userB.URI, "#%E6%89%8B%E6%9C%BA") || strings.Contains(userB.URI, "手机") {
 		t.Fatalf("user B share=%#v", userB)
 	}
@@ -350,6 +347,39 @@ func TestControlAPIDefaultCreateAppendDisableDelete(t *testing.T) {
 	host.mu.Unlock()
 	if last.AgentID != "agent-1" {
 		t.Fatalf("apply agent=%#v", last)
+	}
+}
+
+func TestControlAPIListenProjectionKeepsCreatorFirst(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := newUITestController(t, host, NodeAddresses{DDNS: "ss.example.com"})
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","name":"alice"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	first := decodeListenAPI(t, created).Listen
+	if first == nil || len(first.Users) != 1 || first.Users[0].Name != "alice" {
+		t.Fatalf("create listen=%#v", first)
+	}
+	appended := uiJSON(t, controller, http.MethodPost, "/api/listens/"+first.ID+"/users", `{"agent_id":"agent-1","name":"bob"}`)
+	if appended.Code != http.StatusOK {
+		t.Fatalf("append=%d %s", appended.Code, appended.Body.String())
+	}
+	two := decodeListenAPI(t, appended).Listen
+	if two == nil || len(two.Users) != 2 || two.Users[0].Name != "alice" || two.Users[1].Name != "bob" {
+		t.Fatalf("append title source drifted: %#v", two)
+	}
+	listed := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(listed.Listens) != 1 || len(listed.Listens[0].Users) != 2 || listed.Listens[0].Users[0].Name != "alice" || listed.Listens[0].Users[1].Name != "bob" {
+		t.Fatalf("list title source drifted: %#v", listed.Listens)
+	}
+	deleted := uiJSON(t, controller, http.MethodPost, "/api/users/"+first.Users[0].ID+"/delete", `{"agent_id":"agent-1"}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete creator=%d %s", deleted.Code, deleted.Body.String())
+	}
+	afterDelete := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/listens?agent_id=agent-1", ""))
+	if len(afterDelete.Listens) != 1 || len(afterDelete.Listens[0].Users) != 1 || afterDelete.Listens[0].Users[0].Name != "bob" {
+		t.Fatalf("after deleting creator: %#v", afterDelete.Listens)
 	}
 }
 

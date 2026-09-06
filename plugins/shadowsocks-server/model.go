@@ -985,8 +985,8 @@ func cloneListeners(listeners []ListenRule) []ListenRule {
 func clone(c Configuration) Configuration {
 	listeners := make([]ListenRule, len(c.Listeners))
 	for i, listener := range c.Listeners {
+		// Keep insertion order so the creating user stays first for listen titles.
 		listener.Users = append([]User(nil), listener.Users...)
-		sort.Slice(listener.Users, func(a, b int) bool { return listener.Users[a].ID < listener.Users[b].ID })
 		listeners[i] = listener
 	}
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].ID < listeners[j].ID })
