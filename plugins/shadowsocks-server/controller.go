@@ -25,9 +25,12 @@ type ListenCatalogStore interface {
 
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
+	InstanceID                                                 string
+	RuntimeError                                               error
 	Admission                                                  TypedHandleAdmission
 	PrepareTimeout, ActivateTimeout, StopTimeout, DrainTimeout time.Duration
 	ListenRuntime                                              *hostCapabilityRuntime
+	ManagedRuntime                                             *hostCapabilityRuntime
 	ListenState                                                ListenCatalogStore
 	ListenBinder                                               listenBinder
 }
@@ -48,24 +51,32 @@ type Controller struct {
 	listenState    ListenCatalogStore
 	listenExec     *listenExecutor
 	controlSecrets *issuedSecrets
+	instanceID     string
+	managedRuntime *hostCapabilityRuntime
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
+	if config.RuntimeError != nil {
+		return nil, config.RuntimeError
+	}
 	if config.Admission == nil {
 		config.Admission = unavailableAdmission{}
 	}
 	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(time.Second))
 	c := &Controller{
-		admission:   config.Admission,
-		listenHost:  config.ListenRuntime,
-		listenState: config.ListenState,
-		listenExec:  newListenExecutor(config.ListenBinder),
+		admission:      config.Admission,
+		listenHost:     config.ListenRuntime,
+		listenState:    config.ListenState,
+		listenExec:     newListenExecutor(config.ListenBinder),
+		instanceID:     config.InstanceID,
+		managedRuntime: config.ManagedRuntime,
 	}
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:      requiredGrants(),
 		RequiredGrants:    requiredGrants(),
 		SupportedFeatures: supportedFeatures(),
+		RequiredFeatures:  requiredFeatures(),
 		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: c.prepare, ActivateFunc: c.activate, StopFunc: c.stop})
 	if err != nil {
@@ -211,6 +222,14 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 	// RPC lifecycle is fenced by the Agent's runtime generation. Bind all
 	// process-local state to the latter after validating the projected config.
 	configuration.Generation = generation.ID()
+	if c.managedRuntime != nil {
+		if err := c.managedRuntime.bind(c.instanceID, generation.ID()); err != nil {
+			return err
+		}
+		if c.listenExec != nil {
+			c.listenExec.managed = c.managedRuntime
+		}
+	}
 	var restoredListeners []ListenRule
 	var restoredSecrets map[string]string
 	if c.listenState != nil {
@@ -237,6 +256,26 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 				c.listenHost.SetAgentNode(agentID, node)
 			}
 		}
+	}
+	if len(restoredSecrets) > 0 && c.managedRuntime != nil && c.listenState != nil {
+		base := configuration
+		if restoredListeners != nil {
+			base.Listeners = restoredListeners
+		}
+		migrated, created, migrateErr := c.managedRuntime.migrateLegacySecrets(ctx, base, restoredSecrets)
+		if migrateErr != nil {
+			return migrateErr
+		}
+		if storeErr := c.listenState.StoreListens(ctx, migrated.Listeners); storeErr != nil {
+			c.managedRuntime.revokeReferences(ctx, created)
+			return storeErr
+		}
+		if clearErr := c.listenState.StoreSecrets(ctx, map[string]string{}); clearErr != nil {
+			_ = c.listenState.StoreListens(ctx, base.Listeners)
+			c.managedRuntime.revokeReferences(ctx, created)
+			return clearErr
+		}
+		restoredListeners, restoredSecrets = migrated.Listeners, nil
 	}
 	epoch := &controllerEpoch{}
 	epoch.live.Store(true)
@@ -292,6 +331,9 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 		}
 		if value != epoch || !value.live.Load() {
 			return rpcplugin.ErrRevoked
+		}
+		if c.managedRuntime != nil {
+			return nil
 		}
 		prepared, err := c.admission.Prepare(ctx, request, configuration)
 		if err != nil {
@@ -401,11 +443,16 @@ func safeControllerError(err error) error {
 const generationHandleScope = "service.revocable-resource-handle"
 
 func requiredGrants() []string {
-	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionNetworkFull}
+	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite}
 }
 
 func supportedFeatures() []string {
-	return []string{pluginsdk.RPCFeatureDurableActionsV1}
+	features := pluginsdk.RequiredRPCFeatures(requiredGrants())
+	return pluginsdk.RPCFeaturesWithExecutionScope(features)
+}
+
+func requiredFeatures() []string {
+	return []string{pluginsdk.RPCFeatureManagedNetworkV1, pluginsdk.RPCFeatureScopedSecretsV1, pluginsdk.RPCFeatureRuntimeIdentityV1, pluginsdk.RPCFeatureExecutionScopeV1}
 }
 
 type issuedSecrets struct {

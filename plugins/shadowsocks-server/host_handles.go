@@ -29,11 +29,13 @@ type hostRuntimeCaller interface {
 }
 
 type hostCapabilityRuntime struct {
-	client hostRuntimeCaller
-	mu     sync.Mutex
-	live   map[string][]ListenPortStatus
-	nodes  map[string]NodeAddresses
-	hints  map[string]NodeAddresses
+	client  hostRuntimeCaller
+	managed managedHostClient
+	mu      sync.Mutex
+	binding pluginsdk.ManagedBinding
+	live    map[string][]ListenPortStatus
+	nodes   map[string]NodeAddresses
+	hints   map[string]NodeAddresses
 }
 
 func (c *Controller) ReportListen(ctx context.Context, agentID string) (ListenReport, error) {
@@ -70,12 +72,14 @@ func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 	if client == nil {
 		return nil
 	}
-	return &hostCapabilityRuntime{
+	runtime := &hostCapabilityRuntime{
 		client: client,
 		live:   map[string][]ListenPortStatus{},
 		nodes:  map[string]NodeAddresses{},
 		hints:  map[string]NodeAddresses{},
 	}
+	runtime.managed, _ = client.(managedHostClient)
+	return runtime
 }
 
 func (runtime *hostCapabilityRuntime) LoadListens(ctx context.Context) ([]ListenRule, bool, error) {
@@ -450,29 +454,45 @@ func (runtime *hostCapabilityRuntime) pluginCall(ctx context.Context, agentID, n
 }
 
 func bindProductionHostCapabilities(config ControllerConfig) ControllerConfig {
+	instanceID, err := pluginsdk.PluginInstanceIDFromEnvironment()
+	if err != nil {
+		config.RuntimeError = err
+		return config
+	}
+	config.InstanceID = instanceID
 	return bindHostCapabilityClient(config, func() (hostRuntimeCaller, error) {
 		return pluginsdk.NewHostRuntimeClientFromEnvironment()
 	})
 }
 
 func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRuntimeCaller, error)) ControllerConfig {
-	if config.Admission == nil {
-		config.Admission = TypedHandleAdmissionFunc(func(context.Context, pluginsdk.RPCHandshakeRequest, Configuration) (PreparedAdmission, error) {
-			return PreparedAdmissionFuncs{CommitFunc: func(context.Context) (RuntimeAdapters, error) {
-				return RuntimeAdapters{}, nil
-			}}, nil
-		})
-	}
 	if factory == nil {
 		return config
 	}
 	client, err := factory()
-	if err != nil || client == nil {
+	if err != nil {
+		config.RuntimeError = err
+		return config
+	}
+	if client == nil {
+		config.RuntimeError = ErrTypedHandlesUnavailable
 		return config
 	}
 	runtime := newHostCapabilityRuntime(client)
-	config.ListenRuntime = runtime
-	config.ListenState = runtime
+	if runtime.managed == nil {
+		config.RuntimeError = ErrTypedHandlesUnavailable
+		return config
+	}
+	config.ManagedRuntime = runtime
+	scope, scopeErr := pluginsdk.ExecutionScopeFromEnvironment()
+	if scopeErr != nil {
+		config.RuntimeError = scopeErr
+		return config
+	}
+	if scope == pluginsdk.HostScopeControlPlane {
+		config.ListenRuntime = runtime
+		config.ListenState = runtime
+	}
 	return config
 }
 
@@ -508,9 +528,9 @@ func (c *Controller) BindLoopbackListenHost() {
 		return
 	}
 	c.listenHost = newHostCapabilityRuntime(loopbackRuntimeCaller{controller: c})
-	if c.listenExec != nil {
-		c.listenExec.bindHost = "127.0.0.1"
-	}
+	c.listenExec = newListenExecutor(netListenBinder{})
+	c.listenExec.bindHost = "127.0.0.1"
+	c.listenExec.secrets = c.secrets()
 }
 
 func callHost(ctx context.Context, client hostRuntimeCaller, operation string, payload any, result any) error {

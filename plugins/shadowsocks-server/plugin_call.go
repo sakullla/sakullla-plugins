@@ -1,6 +1,7 @@
 package shadowsocksserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -40,6 +41,12 @@ func (netListenBinder) ListenPacket(network, address string) (net.PacketConn, er
 	return net.ListenPacket(network, address)
 }
 
+type networkDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+}
+
+type nativeNetworkDialer struct{ net.Dialer }
+
 // ListenReport is the execution-face presence plus bound port summary.
 // It never includes secret material.
 type ListenReport struct {
@@ -59,20 +66,22 @@ type ListenPortStatus struct {
 	UDP  bool   `json:"udp"`
 }
 
-// ListenApplyUser is the one-time secret envelope for one enabled user.
+// ListenApplyUser carries only a scoped Host secret reference.
 type ListenApplyUser struct {
-	ID       string `json:"id"`
-	Enabled  bool   `json:"enabled"`
-	Password string `json:"password,omitempty"`
+	ID            string `json:"id"`
+	Enabled       bool   `json:"enabled"`
+	SecretRef     string `json:"secret_ref,omitempty"`
+	SecretVersion string `json:"secret_version,omitempty"`
 }
 
-// ListenApplyItem is the desired listen on one Agent, including engine material.
+// ListenApplyItem is the desired managed listen on one Agent.
 type ListenApplyItem struct {
-	ID        string            `json:"id"`
-	Port      int               `json:"port"`
-	Method    string            `json:"method"`
-	ServerPSK string            `json:"server_psk,omitempty"`
-	Users     []ListenApplyUser `json:"users"`
+	ID                  string            `json:"id"`
+	Port                int               `json:"port"`
+	Method              string            `json:"method"`
+	ServerSecretRef     string            `json:"server_secret_ref,omitempty"`
+	ServerSecretVersion string            `json:"server_secret_version,omitempty"`
+	Users               []ListenApplyUser `json:"users"`
 }
 
 type listenApplyRequest struct {
@@ -94,6 +103,8 @@ type listenApplyResult struct {
 type listenExecutor struct {
 	mu       sync.Mutex
 	binder   listenBinder
+	managed  *hostCapabilityRuntime
+	secrets  SecretVerifier
 	bound    map[string]*boundListen
 	bindHost string
 }
@@ -111,8 +122,17 @@ type boundListen struct {
 	tcp     net.Listener
 	udp     net.PacketConn
 	engines []*boundUserEngine
+	dialer  networkDialer
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+}
+
+type preparedListen struct {
+	item     ListenApplyItem
+	existing *boundListen
+	bound    *boundListen
+	engines  []*boundUserEngine
+	ctx      context.Context
 }
 
 type prefixConn struct {
@@ -129,9 +149,6 @@ func (c *prefixConn) Read(p []byte) (int, error) {
 }
 
 func newListenExecutor(binder listenBinder) *listenExecutor {
-	if binder == nil {
-		binder = netListenBinder{}
-	}
 	return &listenExecutor{binder: binder, bound: map[string]*boundListen{}}
 }
 
@@ -179,7 +196,13 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 		return nil, err
 	}
 	var request listenApplyRequest
-	if err := json.Unmarshal(payload, &request); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return nil, errors.New("listen payload is invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("listen payload is invalid")
 	}
 	desired := make(map[string]struct{}, len(request.Listens))
@@ -191,24 +214,25 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
+	prepared := make([]preparedListen, 0, len(request.Listens))
+	for _, item := range request.Listens {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		candidate, err := exec.prepareOneLocked(ctx, item)
+		if err != nil {
+			exec.abortPrepared(prepared)
+			return nil, err
+		}
+		prepared = append(prepared, candidate)
+	}
 	for id := range exec.bound {
 		if _, ok := desired[id]; !ok {
 			exec.unbindLocked(id)
 		}
 	}
-	var applyErr error
-	for _, item := range request.Listens {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := exec.bindOneLocked(item); err != nil {
-			if applyErr == nil {
-				applyErr = err
-			}
-		}
-	}
-	if applyErr != nil {
-		return nil, applyErr
+	for _, candidate := range prepared {
+		exec.commitPrepared(candidate)
 	}
 	return json.Marshal(listenApplyResult{Accepted: true, AgentID: agentID, Listens: exec.viewsLocked()})
 }
@@ -259,58 +283,100 @@ func (exec *listenExecutor) viewsLocked() []ListenPortStatus {
 	return out
 }
 
-func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
+func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApplyItem) (preparedListen, error) {
 	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
-		return ErrInvalid
+		return preparedListen{}, ErrInvalid
 	}
 	existing := exec.bound[item.ID]
 	var current []*boundUserEngine
 	if existing != nil && existing.port == item.Port {
 		current = existing.snapshotUserEngines()
 	}
-	engines, err := assembleUserEngines(item, current)
+	resolver := exec.secrets
+	if exec.managed != nil {
+		resolver = exec.managed
+	}
+	engines, err := assembleUserEngines(ctx, item, current, resolver)
 	if err != nil {
-		return err
+		return preparedListen{}, err
 	}
 	if existing != nil && existing.port == item.Port {
-		existing.replaceUserEngines(engines)
-		return nil
+		return preparedListen{item: item, existing: existing, engines: engines}, nil
 	}
 	host := exec.bindHost
 	if host == "" {
 		host = "0.0.0.0"
 	}
 	address := net.JoinHostPort(host, strconv.Itoa(item.Port))
-	tcp, err := exec.binder.Listen("tcp", address)
+	var tcp net.Listener
+	var udp net.PacketConn
+	var dialer networkDialer
+	if exec.managed != nil {
+		tcp, err = exec.managed.listenTCP(ctx, item.Port)
+		dialer = managedNetworkDialer{runtime: exec.managed}
+	} else if exec.binder != nil {
+		tcp, err = exec.binder.Listen("tcp", address)
+		dialer = &nativeNetworkDialer{net.Dialer{Timeout: 5 * time.Second}}
+	} else {
+		err = ErrTypedHandlesUnavailable
+	}
 	if err != nil {
 		destroyUserEngines(engines, nil)
-		return ErrListenBind
+		return preparedListen{}, ErrListenBind
 	}
-	udp, err := exec.binder.ListenPacket("udp", address)
+	if exec.managed != nil {
+		udp, err = exec.managed.listenUDP(ctx, item.Port)
+	} else {
+		udp, err = exec.binder.ListenPacket("udp", address)
+	}
 	if err != nil {
 		_ = tcp.Close()
 		destroyUserEngines(engines, nil)
-		return ErrListenBind
-	}
-	if existing != nil {
-		exec.unbindLocked(item.ID)
+		return preparedListen{}, ErrListenBind
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, cancel: cancel}
+	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, cancel: cancel}
+	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx}, nil
+}
+
+func (exec *listenExecutor) commitPrepared(candidate preparedListen) {
+	if candidate.bound == nil {
+		candidate.existing.replaceUserEngines(candidate.engines)
+		return
+	}
+	if candidate.existing != nil {
+		exec.unbindLocked(candidate.item.ID)
+	}
+	bound := candidate.bound
 	bound.wg.Add(2)
 	go func() {
 		defer bound.wg.Done()
-		bound.serveTCP(ctx)
+		bound.serveTCP(candidate.ctx)
 	}()
 	go func() {
 		defer bound.wg.Done()
-		bound.serveUDP(ctx)
+		bound.serveUDP(candidate.ctx)
 	}()
-	exec.bound[item.ID] = bound
-	return nil
+	exec.bound[candidate.item.ID] = bound
 }
 
-func assembleUserEngines(item ListenApplyItem, current []*boundUserEngine) ([]*boundUserEngine, error) {
+func (exec *listenExecutor) abortPrepared(prepared []preparedListen) {
+	keep := map[*ProtocolEngine]struct{}{}
+	for _, listener := range exec.bound {
+		for _, engine := range listener.snapshotEngines() {
+			keep[engine] = struct{}{}
+		}
+	}
+	for _, candidate := range prepared {
+		if candidate.bound != nil {
+			candidate.bound.close()
+			continue
+		}
+		destroyUserEngines(candidate.engines, keep)
+	}
+}
+
+func assembleUserEngines(ctx context.Context, item ListenApplyItem, current []*boundUserEngine, resolver SecretVerifier) ([]*boundUserEngine, error) {
 	byID := make(map[string]*ProtocolEngine, len(current))
 	for _, existing := range current {
 		if existing == nil || existing.engine == nil || existing.id == "" {
@@ -320,11 +386,38 @@ func assembleUserEngines(item ListenApplyItem, current []*boundUserEngine) ([]*b
 	}
 	next := make([]*boundUserEngine, 0, len(item.Users))
 	created := make([]*ProtocolEngine, 0, len(item.Users))
+	serverPSK := ""
+	if item.ServerSecretRef != "" {
+		if resolver == nil {
+			return nil, ErrTypedHandlesUnavailable
+		}
+		material, err := resolver.Resolve(ctx, item.ServerSecretRef, item.ServerSecretVersion)
+		if err != nil {
+			return nil, err
+		}
+		serverPSK = string(material)
+		clear(material)
+	}
 	for _, user := range item.Users {
-		if !user.Enabled || strings.TrimSpace(user.Password) == "" {
+		if !user.Enabled {
 			continue
 		}
-		engine, err := engineFromMaterial(item.Method, []byte(user.Password), item.ServerPSK)
+		if user.SecretRef == "" || user.SecretVersion == "" || resolver == nil {
+			destroyListenEngines(created)
+			return nil, ErrInvalid
+		}
+		password, err := resolver.Resolve(ctx, user.SecretRef, user.SecretVersion)
+		if err != nil {
+			destroyListenEngines(created)
+			return nil, err
+		}
+		if len(password) == 0 {
+			clear(password)
+			destroyListenEngines(created)
+			return nil, ErrInvalid
+		}
+		engine, err := engineFromMaterial(item.Method, password, serverPSK)
+		clear(password)
 		if err != nil {
 			destroyListenEngines(created)
 			return nil, err
@@ -496,8 +589,10 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	if err != nil {
 		return
 	}
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	target, err := dialer.DialContext(ctx, "tcp", request.Target)
+	if b.dialer == nil {
+		return
+	}
+	target, err := b.dialer.DialContext(ctx, "tcp", request.Target)
 	if err != nil {
 		return
 	}
@@ -551,8 +646,10 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 	if matched == nil {
 		return
 	}
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "udp", request.Target)
+	if b.dialer == nil {
+		return
+	}
+	conn, err := b.dialer.DialContext(ctx, "udp", request.Target)
 	if err != nil {
 		return
 	}

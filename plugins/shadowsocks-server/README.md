@@ -1,8 +1,11 @@
 # Shadowsocks Server
 
-This Go RPC plugin models regulated TCP and UDP Shadowsocks admission. Listener,
-secret verification and rotation, replay protection, monotonic time,
-traffic accounting, and audit are exclusively brokered through typed adapters.
+This Go RPC plugin provides regulated TCP and UDP Shadowsocks admission. Production
+listeners, accepted flows, direct outbound connections, and source admission use
+the public Host managed-network runtime. Host admission completes before encrypted
+client bytes reach the plugin. Secret creation, delivery, rotation, and revocation
+use scoped Host storage; normal plugin state contains references only.
+Replay protection, monotonic time, traffic accounting, and audit use typed adapters.
 It never registers an HTTP or generic L4 egress provider.
 
 Administrators manage accounts from the plugin's simple panel: generate a
@@ -27,11 +30,15 @@ from `assets/ui/`; the Agent face does not serve the management page. This
 plugin does not declare `ui.schema.json`, `tunnel.provider`, or
 `http.backend-provider`.
 
-Production startup uses the canonical SDK runtime lifecycle. Missing Host
-endpoints fail closed at SDK validation. Integration tests inject the business
-adapters without defining another Host RPC or wire ABI. The Host starts the RPC
-plugin itself; there is deliberately no business-level child-process callback
-and no Host-owned Shadowsocks implementation.
+Production startup uses the canonical SDK runtime lifecycle and requires the
+Host-authored runtime instance identity plus managed-network and scoped-secret
+features. The control-plane face sends only listener and secret references to the
+Agent face. A previous `secrets` state record is imported once into scoped Host
+storage; listener references are committed before that legacy value is cleared.
+Migration failure preserves the prior listener catalog and material for retry.
+The native socket binder remains an explicit test fixture and is never selected
+by the production entrypoint. The Host owns sockets and admission, while the
+plugin continues to own Shadowsocks framing and cryptography.
 
 Transport cryptography and wire framing are implemented in this repository with
 the Go standard library. Supported methods are `aes-128-gcm`, `aes-256-gcm`,

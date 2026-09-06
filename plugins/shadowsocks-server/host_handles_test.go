@@ -52,7 +52,7 @@ func TestHostListenRuntimeUsesPluginCall(t *testing.T) {
 	}
 	if err := runtime.Apply(context.Background(), "agent-1", []ListenApplyItem{{
 		ID: "listen-1", Port: 8388, Method: "aes-256-gcm",
-		Users: []ListenApplyUser{{ID: "alice", Enabled: true, Password: "alice-password"}},
+		Users: []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "secret-version-000000000001"}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -225,45 +225,23 @@ func TestHostListenRuntimeFailClosedWithoutClient(t *testing.T) {
 	}
 }
 
-func TestHostProductionRuntimeBindsPluginCallWithoutTypedListener(t *testing.T) {
+func TestHostProductionRuntimeFailsClosedWithoutManagedHost(t *testing.T) {
 	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
+	t.Setenv(pluginsdk.EnvPluginInstanceID, "shadowsocks-server")
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeControlPlane)
 
 	config := productionControllerConfig()
-	if config.ListenRuntime != nil {
-		t.Fatal("missing host runtime still bound plugin.call")
+	if config.RuntimeError == nil {
+		t.Fatal("missing managed HostRuntime was accepted")
 	}
-	if config.Admission == nil {
-		t.Fatal("production admission must not require typed Listener.Register")
-	}
-	controller, err := NewController(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
-		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact",
-		GrantedScopes: requiredGrants(), Generation: "generation-1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	wire, err := json.Marshal(Configuration{Generation: "generation-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire}); result.Error != nil {
-		t.Fatalf("prepare: %#v", result.Error)
-	}
-	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); result.Error != nil {
-		t.Fatalf("activate without typed listener: %#v", result.Error)
-	}
-	if err := controller.Use(context.Background(), func(context.Context, *Service) error { return nil }); !errors.Is(err, ErrRevoked) {
-		t.Fatalf("production activate published a typed Service: %v", err)
+	if _, err := NewController(config); err == nil {
+		t.Fatal("controller accepted missing managed HostRuntime")
 	}
 }
 
-func TestHostProductionBindsHostCapabilityWhenClientExists(t *testing.T) {
-	t.Parallel()
+func TestHostProductionRejectsCallOnlyHostClient(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeControlPlane)
 	client := hostCallFunc(func(context.Context, pluginsdk.HostRuntimeCall, any) error {
 		t.Fatal("production bind must not call the host while constructing")
 		return nil
@@ -271,11 +249,8 @@ func TestHostProductionBindsHostCapabilityWhenClientExists(t *testing.T) {
 	config := bindHostCapabilityClient(ControllerConfig{}, func() (hostRuntimeCaller, error) {
 		return client, nil
 	})
-	if config.ListenRuntime == nil || config.ListenRuntime.client == nil {
-		t.Fatalf("listen runtime = %#v", config.ListenRuntime)
-	}
-	if config.ListenState == nil {
-		t.Fatal("production bind omitted listen catalog state")
+	if config.RuntimeError == nil || config.ManagedRuntime != nil || config.ListenRuntime != nil {
+		t.Fatalf("call-only HostRuntime config=%+v", config)
 	}
 }
 
@@ -362,7 +337,7 @@ func TestHostListenShareUsesCatalogNodeWithoutPluginCallIdentity(t *testing.T) {
 	}
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}

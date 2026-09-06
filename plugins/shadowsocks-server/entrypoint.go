@@ -33,6 +33,7 @@ func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		RequiredCapabilities: requiredGrants(),
 		SupportedFeatures:    supportedFeatures(),
+		RequiredFeatures:     requiredFeatures(),
 	}
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
 		Declaration: declaration,

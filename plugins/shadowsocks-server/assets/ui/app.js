@@ -843,12 +843,17 @@ const userManageButtons = (user) => {
   toggle.className = "btn-secondary";
   toggle.textContent = user.enabled ? "停用" : "再启用";
   toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
+  const rotate = document.createElement("button");
+  rotate.type = "button";
+  rotate.className = "btn-secondary";
+  rotate.textContent = "轮换密钥";
+  rotate.addEventListener("click", () => mutateUser(user, "rotate", true));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "btn-link danger";
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
-  actions.append(toggle, remove);
+  actions.append(toggle, rotate, remove);
   return actions;
 };
 
@@ -890,6 +895,12 @@ const listenFooterActions = (listen, { detail = false, close = false } = {}) => 
     append.textContent = "追加用户";
     append.addEventListener("click", () => appendUser(listen));
     actions.append(append);
+    const rotateServer = document.createElement("button");
+    rotateServer.type = "button";
+    rotateServer.className = "btn-secondary";
+    rotateServer.textContent = "轮换 Server PSK";
+    rotateServer.addEventListener("click", () => rotateServerPSK(listen));
+    actions.append(rotateServer);
   }
   const remove = document.createElement("button");
   remove.type = "button";
@@ -1008,15 +1019,18 @@ const renderListens = (listens) => {
 
 const mutateUser = async (user, action, confirmDelete = false) => {
   if (!canMutate()) return;
-  if (confirmDelete) {
-    const ok = await askConfirm({ title: "删除用户", body: "删掉后不能恢复。同一端口的其他人不受影响。", confirm: "删除", danger: true });
+  if (confirmDelete || action === "rotate") {
+    const rotating = action === "rotate";
+    const ok = await askConfirm(rotating
+      ? { title: "轮换用户密钥", body: "轮换后该用户的旧分享将立即失效。", confirm: "轮换" }
+      : { title: "删除用户", body: "删掉后不能恢复。同一端口的其他人不受影响。", confirm: "删除", danger: true });
     if (!ok) return;
   }
   setBusy(true);
   try {
     await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, mutateBody());
     await renderWorkspace();
-    const message = action === "enable" ? "已启用该用户。" : action === "disable" ? "已停用该用户。" : "已删除用户。";
+    const message = action === "enable" ? "已启用该用户。" : action === "disable" ? "已停用该用户。" : action === "rotate" ? "已轮换用户密钥。" : "已删除用户。";
     showStatus(message, false);
   } catch (error) {
     showStatus(error.message, true);
@@ -1060,6 +1074,22 @@ const deleteListen = async (listen) => {
     await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, mutateBody());
     await renderWorkspace();
     showStatus("已删除监听。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const rotateServerPSK = async (listen) => {
+  if (!canMutate()) return;
+  const ok = await askConfirm({ title: "轮换 Server PSK", body: "轮换后该端口的旧分享将立即失效。", confirm: "轮换" });
+  if (!ok) return;
+  setBusy(true);
+  try {
+    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/rotate-server`, mutateBody());
+    await renderWorkspace();
+    showStatus("已轮换 Server PSK。", false);
   } catch (error) {
     showStatus(error.message, true);
   } finally {

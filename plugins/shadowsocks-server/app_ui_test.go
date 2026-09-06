@@ -133,7 +133,7 @@ func startUITestController(t *testing.T, setup uiTestSetup) *Controller {
 	}
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestControlAPICreateApplyBindsAndHandshakes(t *testing.T) {
 	})
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,18 @@ func TestControlAPICreateApplyBindsAndHandshakes(t *testing.T) {
 	if err != nil || len(items) != 1 || len(items[0].Users) != 1 {
 		t.Fatalf("apply items=%#v err=%v", items, err)
 	}
-	client, err := engineFromMaterial(view.Method, []byte(items[0].Users[0].Password), items[0].ServerPSK)
+	userMaterial, ok := controller.secrets().lookup(items[0].Users[0].SecretRef, items[0].Users[0].SecretVersion)
+	if !ok {
+		t.Fatal("user scoped reference did not resolve")
+	}
+	serverMaterial := ""
+	if items[0].ServerSecretRef != "" {
+		serverMaterial, ok = controller.secrets().lookup(items[0].ServerSecretRef, items[0].ServerSecretVersion)
+		if !ok {
+			t.Fatal("server scoped reference did not resolve")
+		}
+	}
+	client, err := engineFromMaterial(view.Method, []byte(userMaterial), serverMaterial)
 	if err != nil {
 		t.Fatal(err)
 	}

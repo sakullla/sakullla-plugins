@@ -81,10 +81,11 @@ func wire(t *testing.T) []byte {
 	return b
 }
 func grants() []string {
-	return []string{"secret.use", "storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionNetworkFull}
+	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite}
 }
 func handshake(scopes []string) pluginsdk.RPCHandshakeRequest {
-	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: ss.PluginID, PluginVersion: ss.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: scopes, Generation: "generation-1"}
+	features := pluginsdk.RPCFeaturesWithExecutionScope(pluginsdk.RequiredRPCFeatures(grants()))
+	return pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: ss.PluginID, PluginVersion: ss.PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: scopes, Generation: "generation-1", RequiredFeatures: features}
 }
 
 func TestShadowsocksRPCGenerationGrantsAndDefaultFailClosed(t *testing.T) {
@@ -93,7 +94,7 @@ func TestShadowsocksRPCGenerationGrantsAndDefaultFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = c.Handshake(context.Background(), handshake(grants()[:len(grants())-1])); err == nil {
-		t.Fatal("missing network.full grant accepted")
+		t.Fatal("missing managed capability grant accepted")
 	}
 	c, _ = ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if _, err = c.Handshake(context.Background(), handshake(grants())); err != nil {
@@ -198,6 +199,8 @@ func TestShadowsocksCanonicalRPCEntrypointAndSecretRedact(t *testing.T) {
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
 	t.Setenv("NRE_PLUGIN_HTTP_ENDPOINT", "")
 	t.Setenv("NRE_PLUGIN_HTTP_COOKIE_FILE", "")
+	t.Setenv(pluginsdk.EnvPluginInstanceID, "shadowsocks-server")
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeControlPlane)
 	err := ss.RunEntrypoint(context.Background(), nil, &output)
 	if err == nil {
 		t.Fatal("RunEntrypoint() unexpectedly succeeded without host endpoints")
@@ -205,7 +208,7 @@ func TestShadowsocksCanonicalRPCEntrypointAndSecretRedact(t *testing.T) {
 	if errors.Is(err, ss.ErrTypedHandlesUnavailable) {
 		t.Fatalf("RunEntrypoint() returned the old startup sentinel: %v", err)
 	}
-	if !strings.Contains(err.Error(), "NRE_PLUGIN_") {
+	if !strings.Contains(err.Error(), "NRE_PLUGIN_") && !strings.Contains(err.Error(), "plugin host runtime endpoint") {
 		t.Fatalf("RunEntrypoint() error = %v, want canonical SDK endpoint validation", err)
 	}
 	c, _ := ss.NewController(ss.ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
