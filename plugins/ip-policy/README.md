@@ -4,6 +4,8 @@
 
 管理面只调用公开 SDK 0.11 的 `dataset.control`、`dataset.binding`、`dataset.resolve/query` 与 `policy.control`。入口仅从 Host `list-entries` 列表选择，用 Host 签发的 token 调用 `inspect`/`replace-entry`/`reset-entry`；模式与完整 IP overlay 通过同一次双 CAS 原子更新。数据绑定、guest Config 和默认模式需要一起变化时，管理面使用 `DatasetBindingInstanceUpdate` 一次提交，避免发布任何中间快照。失败的下载、摘要、分类、预算或节点候选不会替换 `applied`/`last_good`。
 
+入口 token 只用于管理授权，不写入插件 Config、可信来源或 WASM 输入。入口删除、重建或 TCP/UDP 协议替换后，页面必须重新读取 Host 列表；旧 token 不能继续检查或修改新入口。
+
 ## Configuration contract
 
 唯一 guest Config 是一个不超过 64 KiB 的严格 JSON object：
