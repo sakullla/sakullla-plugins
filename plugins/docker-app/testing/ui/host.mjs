@@ -183,6 +183,18 @@ export async function runHost({Page,eventually,findBrowser,repo,assets}) {
       const result=await api(appURL(`api/apps/${appID}`));return {id:result.app.id,agent_id:result.app.agent_id,status:result.app.status,version:result.app.version};
     });
     const appState=async()=> (await api(appURL(`api/apps/${appID}`))).app;
+    const docker=async(args,input)=>{
+      if (!config.agentContainer) throw new Error("Explicit agentContainer is required for isolated runtime inspection and cleanup preparation.");
+      const result=spawnSync("docker",["exec",...(input ? ["-i"] : []),config.agentContainer,"docker",...args],{input,encoding:"utf8",windowsHide:true,timeout:120000,maxBuffer:8*1024*1024});
+      if(result.status!==0) throw new Error(`Dedicated Agent Docker command failed: ${args[0]}`);
+      return result.stdout;
+    };
+    const runtimeImage=async()=>{
+      const ids=(await docker(["ps","-aq","--filter",`label=com.docker.compose.project=${appID}`,"--filter","label=com.docker.compose.service=web"])).trim().split(/\s+/).filter(Boolean);
+      assert.equal(ids.length,1,"exactly the test application's web container must exist");
+      const container=JSON.parse(await docker(["inspect",ids[0]]))[0];
+      return {id:container.Id,image_id:container.Image,running:container.State.Running,project:container.Config.Labels["com.docker.compose.project"],service:container.Config.Labels["com.docker.compose.service"]};
+    };
     await scene("compose",async()=>{
       await page.click('#detail-nav [data-section="compose"]');
       const before=await appState();
@@ -198,8 +210,11 @@ export async function runHost({Page,eventually,findBrowser,repo,assets}) {
     });
     await scene("lifecycle",async()=>{
       const transitions=[];
-      for(const [action,label] of [["stop","已停止应用"],["start","已启动应用"],["restart","已重启应用"]]) {
-        await page.click(`#detail-${action}`);await outcome(label);const state=await appState();transitions.push({action,status:state.status});
+      for(const [action,label,expectedStatus,expectedRunning] of [["stop","已停止应用","已停止",false],["start","已启动应用","运行中",true],["restart","已重启应用","运行中",true]]) {
+        await page.click(`#detail-${action}`);await outcome(label);
+        const state=await appState();assert.equal(state.status,expectedStatus,`${action} must report the expected application status`);
+        const runtime=await runtimeImage();assert.equal(runtime.project,appID,`${action} must inspect the exact test project`);assert.equal(runtime.service,"web",`${action} must inspect the exact web service`);assert.equal(runtime.running,expectedRunning,`${action} must change the actual dedicated-Agent container state`);
+        transitions.push({action,status:state.status,runtime});
       }
       return {transitions};
     });
@@ -259,18 +274,6 @@ export async function runHost({Page,eventually,findBrowser,repo,assets}) {
       await eventually(()=>requests.filter((request)=>request.path.endsWith("/logs")).length>count,"host log polling resumes",10000);
       return {service:await page.evaluate("document.querySelector('#logs-service').value"),snapshot_nonempty:true,pause_verified:true,resume_verified:true};
     });
-    const docker=async(args,input)=>{
-      if (!config.agentContainer) throw new Error("Explicit agentContainer is required for isolated runtime inspection and cleanup preparation.");
-      const result=spawnSync("docker",["exec",...(input ? ["-i"] : []),config.agentContainer,"docker",...args],{input,encoding:"utf8",windowsHide:true,timeout:120000,maxBuffer:8*1024*1024});
-      if(result.status!==0) throw new Error(`Dedicated Agent Docker command failed: ${args[0]}`);
-      return result.stdout;
-    };
-    const runtimeImage=async()=>{
-      const ids=(await docker(["ps","-aq","--filter",`label=com.docker.compose.project=${appID}`,"--filter","label=com.docker.compose.service=web"])).trim().split(/\s+/).filter(Boolean);
-      assert.equal(ids.length,1,"exactly the test application's web container must exist");
-      const container=JSON.parse(await docker(["inspect",ids[0]]))[0];
-      return {id:container.Id,image_id:container.Image,running:container.State.Running,project:container.Config.Labels["com.docker.compose.project"],service:container.Config.Labels["com.docker.compose.service"]};
-    };
     let originalRuntime;
     await scene("update",async()=>{
       if(!config.updateTag) throw new Error("An explicit pre-pulled updateTag is required.");
