@@ -1987,11 +1987,10 @@ func TestControllerCallImageObserveComparesRepoDigestWithRegistryManifest(t *tes
 func TestControllerCallImageObserveUsesNodeArchitectureDigest(t *testing.T) {
 	t.Parallel()
 	index := "sha256:" + strings.Repeat("a", 64)
-	amd64Old := "sha256:" + strings.Repeat("b", 64)
-	amd64New := "sha256:" + strings.Repeat("c", 64)
+	amd64 := "sha256:" + strings.Repeat("b", 64)
 	arm64 := "sha256:" + strings.Repeat("d", 64)
-	current := "miaospeed@" + amd64Old
-	verbose := `[{"Descriptor":{"digest":"` + amd64New + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"` + arm64 + `","platform":{"architecture":"arm64","os":"linux"}}}]`
+	current := "miaospeed@" + amd64
+	verbose := `[{"Descriptor":{"digest":"` + amd64 + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"` + arm64 + `","platform":{"architecture":"arm64","os":"linux"}}}]`
 
 	var argv [][]string
 	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
@@ -2009,7 +2008,7 @@ func TestControllerCallImageObserveUsesNodeArchitectureDigest(t *testing.T) {
 		}
 	})
 	decoded := callImageObserve(t, runner, "airportr/miaospeed:latest")
-	wantLatest := sameFormDigest(current, amd64New)
+	wantLatest := sameFormDigest(current, amd64)
 	if decoded["current_digest"] != current {
 		t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
 	}
@@ -2020,6 +2019,72 @@ func TestControllerCallImageObserveUsesNodeArchitectureDigest(t *testing.T) {
 		t.Fatal("latest_digest used index or another Hub architecture")
 	}
 	assertNoImageMutation(t, argv)
+}
+
+func TestControllerCallImageObserveProductionArchitectureAndIndexRepoDigest(t *testing.T) {
+	t.Parallel()
+	index := "sha256:" + strings.Repeat("a", 64)
+	amd64 := "sha256:" + strings.Repeat("b", 64)
+	arm64 := "sha256:" + strings.Repeat("c", 64)
+	movedIndex := "sha256:" + strings.Repeat("d", 64)
+	arm64Moved := "sha256:" + strings.Repeat("e", 64)
+	current := "miaospeed@" + index
+	verbose := `[{"Descriptor":{"digest":"` + amd64 + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"` + arm64 + `","platform":{"architecture":"arm64","os":"linux"}}}]`
+	verboseOtherArchMoved := `[{"Descriptor":{"digest":"` + amd64 + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"` + arm64Moved + `","platform":{"architecture":"arm64","os":"linux"}}}]`
+
+	observe := func(t *testing.T, platforms string, imagetools []byte, imagetoolsErr error) (map[string]any, [][]string) {
+		t.Helper()
+		var argv [][]string
+		runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			switch dockerObserveCommand(name, args) {
+			case "image-inspect":
+				if !strings.Contains(strings.Join(args, " "), "Architecture") || !strings.Contains(strings.Join(args, " "), "RepoDigests") {
+					t.Fatalf("production inspect must print Architecture then RepoDigests, args=%q", args)
+				}
+				return []byte("amd64\n" + current + "\n"), nil
+			case "manifest-inspect":
+				return []byte(platforms), nil
+			case "imagetools":
+				if imagetoolsErr != nil {
+					return nil, imagetoolsErr
+				}
+				return imagetools, nil
+			default:
+				t.Fatalf("unexpected command %s %q", name, args)
+				return nil, errors.New("unexpected command")
+			}
+		})
+		return callImageObserve(t, runner, "airportr/miaospeed:latest"), argv
+	}
+
+	t.Run("imagetools failure keeps index current", func(t *testing.T) {
+		t.Parallel()
+		decoded, argv := observe(t, verbose, nil, errors.New("docker: unknown command imagetools"))
+		if decoded["current_digest"] != current {
+			t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
+		}
+		if decoded["latest_digest"] != current {
+			t.Fatalf("latest_digest=%q mixed index RepoDigest with platform %q", decoded["latest_digest"], sameFormDigest(current, amd64))
+		}
+		assertNoImageMutation(t, argv)
+	})
+
+	t.Run("other-arch-only index change keeps index comparison", func(t *testing.T) {
+		t.Parallel()
+		decoded, argv := observe(t, verboseOtherArchMoved, []byte(`{"Manifest":{"Digest":"`+movedIndex+`"}}`), nil)
+		wantLatest := sameFormDigest(current, movedIndex)
+		if decoded["current_digest"] != current {
+			t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
+		}
+		if decoded["latest_digest"] == sameFormDigest(current, amd64) {
+			t.Fatal("latest_digest mixed index RepoDigest with unchanged node-arch platform")
+		}
+		if decoded["latest_digest"] != wantLatest {
+			t.Fatalf("latest_digest=%q want index-to-index %q", decoded["latest_digest"], wantLatest)
+		}
+		assertNoImageMutation(t, argv)
+	})
 }
 
 func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T) {

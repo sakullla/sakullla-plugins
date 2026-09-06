@@ -2796,6 +2796,50 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	if serviceImageRef(controller.Apps()[0].Compose, "frpc") != "fatedier/frpc:v0.68.1" {
 		t.Fatalf("frpc tag rewritten: %q", controller.Apps()[0].Compose)
 	}
+
+	after := httptest.NewRecorder()
+	controller.ServeHTTP(after, uiRequest(http.MethodGet, "/api/apps/proxy", ""))
+	confirmed := decodeAppDetail(t, after.Body.Bytes())
+	if after.Code != http.StatusOK {
+		t.Fatalf("after-confirm status=%d body=%s", after.Code, after.Body.String())
+	}
+	miaospeed = serviceViewByName(t, confirmed.ServiceImages, "miaospeed")
+	if miaospeed.Update || len(miaospeed.Candidates) != 0 || miaospeed.Message != serviceDigestCurrentMessage {
+		t.Fatalf("miaospeed after confirm still advertised: %#v", miaospeed)
+	}
+}
+
+func TestAppUIDetailFailedDigestCompareIsTemporary(t *testing.T) {
+	t.Parallel()
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{
+			observeErr: errors.New("inspect unavailable"),
+			tagsByImage: map[string][]string{
+				"fatedier/frpc:v0.68.1": {"v0.68.1", "v0.71.1"},
+			},
+		},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	controller.mu.Lock()
+	delete(controller.imageCache, "proxy")
+	controller.mu.Unlock()
+	detail := httptest.NewRecorder()
+	controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/proxy", ""))
+	app := decodeAppDetail(t, detail.Body.Bytes())
+	if detail.Code != http.StatusOK || len(app.ServiceImages) != 2 {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	miaospeed := serviceViewByName(t, app.ServiceImages, "miaospeed")
+	if miaospeed.Unknown || miaospeed.Update || miaospeed.Listing != serviceListingFailed || miaospeed.Message != serviceListingFailedMessage {
+		t.Fatalf("failed digest view=%#v", miaospeed)
+	}
+	if strings.Contains(detail.Body.String(), "候选未知") {
+		t.Fatalf("failed digest still used unknown copy: %s", detail.Body.String())
+	}
 }
 
 func TestAppUIDetailFailedTagListingIsTemporary(t *testing.T) {
@@ -2848,6 +2892,10 @@ func TestProjectServiceViewFloatingDigestCandidate(t *testing.T) {
 	current, currentUpdate := projectServiceViews(app, nil, map[string]serviceDigestState{"web": {Current: true}})
 	if currentUpdate || current[0].Update || current[0].Message != serviceDigestCurrentMessage {
 		t.Fatalf("current digest view=%#v hasUpdate=%v", current, currentUpdate)
+	}
+	failed, failedUpdate := projectServiceViews(app, nil, map[string]serviceDigestState{"web": {Failed: true}})
+	if failedUpdate || failed[0].Update || failed[0].Unknown || failed[0].Listing != serviceListingFailed || failed[0].Message != serviceListingFailedMessage {
+		t.Fatalf("failed digest view=%#v hasUpdate=%v", failed, failedUpdate)
 	}
 	ignored := app
 	ignored.IgnoredUpdates = map[string][]string{"web": {"latest"}}
@@ -5233,15 +5281,25 @@ type uiTestDigest struct {
 }
 
 type uiTestObserver struct {
-	current, latest string
-	tags            []string
-	tagsByImage     map[string][]string
-	digestByImage   map[string]uiTestDigest
-	listErr         error
-	listErrByImage  map[string]error
+	current, latest   string
+	tags              []string
+	tagsByImage       map[string][]string
+	digestByImage     map[string]uiTestDigest
+	listErr           error
+	listErrByImage    map[string]error
+	observeErr        error
+	observeErrByImage map[string]error
 }
 
 func (observer *uiTestObserver) ObserveImage(_ context.Context, app App) (UpdateObservation, error) {
+	if observer.observeErrByImage != nil {
+		if err, ok := observer.observeErrByImage[app.Image]; ok {
+			return UpdateObservation{}, err
+		}
+	}
+	if observer.observeErr != nil {
+		return UpdateObservation{}, observer.observeErr
+	}
 	if observer.digestByImage != nil {
 		if pair, ok := observer.digestByImage[app.Image]; ok {
 			return UpdateObservation{CurrentDigest: pair.current, LatestDigest: pair.latest}, nil

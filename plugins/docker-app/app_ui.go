@@ -664,6 +664,9 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 		return err
 	}
+	if digestRequested {
+		controller.markFloatingDigestPublished(app, serviceTags)
+	}
 	if err := controller.setAppRunning(ctx, app.ID, true); err != nil {
 		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
 		return err
@@ -1134,11 +1137,13 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 		current, latest, ok := controller.cachedServiceDigest(app.ID, service.Image)
 		if !ok && refresh && controller.uiImageObserver != nil {
 			observed, err := controller.uiImageObserver.ObserveImage(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
-			if err == nil {
-				current, latest = observed.CurrentDigest, observed.LatestDigest
-				controller.storeServiceDigest(app.ID, service.Image, current, latest)
-				ok = current != "" && latest != ""
+			if err != nil {
+				result[service.Name] = serviceDigestState{Failed: true}
+				continue
 			}
+			current, latest = observed.CurrentDigest, observed.LatestDigest
+			controller.storeServiceDigest(app.ID, service.Image, current, latest)
+			ok = current != "" && latest != ""
 		}
 		if service.Image == app.Image {
 			appLatest := controller.cachedLatestDigest(app)
@@ -1198,6 +1203,23 @@ func (controller *Controller) rememberFloatingDigest(ctx context.Context, app Ap
 		return app
 	}
 	return app
+}
+
+func (controller *Controller) markFloatingDigestPublished(app App, serviceTags map[string]string) {
+	for _, service := range appServiceImages(app) {
+		want, ok := serviceTags[service.Name]
+		if !ok || extractDockerTag(service.Image) != extractDockerTag(want) {
+			continue
+		}
+		if _, _, semver := ParseSemverTag(service.Image); semver {
+			continue
+		}
+		_, latest, cached := controller.cachedServiceDigest(app.ID, service.Image)
+		if !cached || latest == "" {
+			continue
+		}
+		controller.storeServiceDigest(app.ID, service.Image, latest, latest)
+	}
 }
 
 func appServiceImages(app App) []ServiceImage {

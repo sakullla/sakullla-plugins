@@ -1488,6 +1488,19 @@ func resolveRegistryDigest(current, index string, platforms []registryPlatformDi
 	if indexCore := digestCore(index); indexCore != "" && indexCore == currentCore {
 		return sameFormDigest(current, index)
 	}
+	// Production inspect always prints Architecture before RepoDigests[0] (the
+	// multi-arch index). Compare a platform digest only when current already is
+	// one; otherwise keep index-to-index so an index is not mixed with a child.
+	matchedPlatform := false
+	for _, platform := range platforms {
+		if digestCore(platform.Digest) == currentCore {
+			matchedPlatform = true
+			break
+		}
+	}
+	if !matchedPlatform {
+		return sameFormDigest(current, index)
+	}
 	arch = normalizeDockerArch(arch)
 	if arch != "" {
 		for _, platform := range platforms {

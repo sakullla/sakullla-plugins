@@ -56,6 +56,7 @@ type serviceTagListing struct {
 type serviceDigestState struct {
 	Available bool
 	Current   bool
+	Failed    bool
 }
 
 type appCandidate struct {
@@ -104,6 +105,11 @@ func projectServiceView(app App, service ServiceImage, listing serviceTagListing
 	}
 	_, _, semver := ParseSemverTag(service.Image)
 	if !semver {
+		if digest.Failed {
+			view.Listing = serviceListingFailed
+			view.Message = serviceListingFailedMessage
+			return view
+		}
 		if digest.Available && tag != "" && !ignoredUpdateTag(tag, ignored) {
 			view.Update = true
 			view.DefaultTag = tag
