@@ -95,6 +95,7 @@ function Invoke-DockerPerformanceSelection([string]$Image, [string[]]$Mounts, [s
   $sortedSamples = @($samples | Sort-Object)
   if ($metrics.p95_ns -ne $sortedSamples[18] -or $metrics.p99_ns -ne $sortedSamples[19]) { throw 'performance percentile evidence does not match raw latency samples' }
   if ($metrics.rss_bytes -gt 256MB -or $metrics.p99_ns -gt 500000000) { throw 'performance workload exceeded RSS or p99 bound' }
+  if ($metrics.retry_count -lt 0 -or $metrics.retry_count -gt 2) { throw 'performance workload exceeded bounded retry count' }
   if ($metrics.dataset_count -ne 2 -or @($metrics.candidate_refs).Count -ne 2) { throw 'performance workload omitted dataset or candidate identity evidence' }
   if (-not $metrics.dataset_digests.'dlc.dat' -or -not $metrics.dataset_digests.'loyalsoldier-geoip.dat') { throw 'performance workload omitted pinned dataset digests' }
   Write-Host ("ss-route-performance=" + ($metrics | ConvertTo-Json -Compress))
