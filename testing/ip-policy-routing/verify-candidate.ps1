@@ -5,12 +5,22 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$HostRoot,
   [string]$PluginCommit = '',
-  [string]$HostCommit = ''
+  [string]$HostCommit = '',
+  [string]$DatasetCache = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $pluginRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $hostPath = (Resolve-Path $HostRoot).Path
+$datasetSources = @(
+  [pscustomobject]@{ Name = 'geoip.dat'; URL = 'https://github.com/v2fly/geoip/releases/download/202609040609/geoip.dat'; SHA256 = '1cba1f0982cf62502fa079c66047c3d0c608196da5b3305671e68f60e917a482' },
+  [pscustomobject]@{ Name = 'dlc.dat'; URL = 'https://github.com/v2fly/domain-list-community/releases/download/20260904020013/dlc.dat'; SHA256 = 'f82f26c015f9726c763d96a5f658e5b31b285dc094a985e718051e421f350ed6' },
+  [pscustomobject]@{ Name = 'dlc.tar.gz'; URL = 'https://codeload.github.com/v2fly/domain-list-community/tar.gz/cb663f66025ef3be1c1c7eb367dfac5f46645ffc'; SHA256 = 'ce78b02633037eb64b034564bb7c8244e90d9b1335298b7b91057ff9f8d5ab25' },
+  [pscustomobject]@{ Name = 'dlc.zip'; URL = 'https://codeload.github.com/v2fly/domain-list-community/zip/cb663f66025ef3be1c1c7eb367dfac5f46645ffc'; SHA256 = '842ab69a418901bfa34c32c465bdf5cb8af935a474fcbc6854dc0325ab381a30' },
+  [pscustomobject]@{ Name = 'loyalsoldier-geoip.dat'; URL = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202609042338/geoip.dat'; SHA256 = '4149e607530f91da697bad4696f8c59f0a475af38e69405e4124438c9886c721' },
+  [pscustomobject]@{ Name = 'loyalsoldier-geosite.dat'; URL = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202609042338/geosite.dat'; SHA256 = 'bca29c80611ee4b909ecc0bd531cf05901b1502998d88bf01580152ffc9e260b' },
+  [pscustomobject]@{ Name = 'dbip-city-lite-2026-09.mmdb.gz'; URL = 'https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz'; SHA256 = 'c5d05b35a45c3eea0cadc728c8f5ad751693d4e270529b731442172a73f05954' }
+)
 
 function Require-Tool([string]$Name) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) { throw "required tool is missing: $Name" }
@@ -90,14 +100,35 @@ function Invoke-DockerPerformanceSelection([string]$Image, [string[]]$Mounts, [s
 }
 
 function Resolve-DatasetCache([string[]]$RequiredFiles) {
-  $configured = [Environment]::GetEnvironmentVariable('NRE_DATASET_SOURCE_CACHE')
-  if (-not $configured) { throw 'NRE_DATASET_SOURCE_CACHE is required for this suite' }
-  if (-not (Test-Path -LiteralPath $configured -PathType Container)) { throw 'NRE_DATASET_SOURCE_CACHE is not a directory' }
+  $configured = $DatasetCache
+  if (-not $configured) {
+    $temporaryRoot = if ($env:TEMP) { $env:TEMP } else { [IO.Path]::GetTempPath() }
+    $configured = Join-Path $temporaryRoot 'nre-dataset-source-cache'
+  }
+  $null = New-Item -ItemType Directory -Force -Path $configured
   $resolved = (Resolve-Path -LiteralPath $configured).Path
   foreach ($name in $RequiredFiles) {
-    if (-not (Test-Path -LiteralPath (Join-Path $resolved $name) -PathType Leaf)) {
-      throw "required pinned dataset is missing from NRE_DATASET_SOURCE_CACHE: $name"
+    $source = @($datasetSources | Where-Object { $_.Name -eq $name })
+    if ($source.Count -ne 1) { throw "unknown pinned dataset: $name" }
+    $path = Join-Path $resolved $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      $partial = "$path.partial-$([guid]::NewGuid().ToString('N'))"
+      try {
+        Write-Host "download pinned dataset $name"
+        Invoke-WebRequest -Uri $source[0].URL -OutFile $partial -MaximumRedirection 5 -TimeoutSec 300
+        $length = (Get-Item -LiteralPath $partial).Length
+        $digest = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($length -le 0 -or $length -gt 128MB) { throw "pinned dataset size is invalid for ${name}: $length" }
+        if ($digest -ne $source[0].SHA256) { throw "pinned dataset digest mismatch for ${name}: $digest" }
+        Move-Item -LiteralPath $partial -Destination $path
+      } finally {
+        if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+      }
     }
+    $length = (Get-Item -LiteralPath $path).Length
+    $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($length -le 0 -or $length -gt 128MB) { throw "cached dataset size is invalid for ${name}: $length" }
+    if ($digest -ne $source[0].SHA256) { throw "cached dataset digest mismatch for ${name}: $digest" }
   }
   return $resolved
 }
@@ -112,8 +143,8 @@ function Build-IPPolicyArtifact {
 
 Require-Tool git
 Require-Tool go
-if (-not $IsLinux) { throw 'candidate verification requires Linux amd64' }
-if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'candidate verification requires Linux amd64' }
+if (-not ($IsLinux -or $IsWindows)) { throw 'candidate verification requires Linux or Windows x64' }
+if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'candidate verification requires x64' }
 Require-Tool docker
 Invoke-Checked $pluginRoot docker @('info')
 $drive = [System.IO.DriveInfo]::new((Get-Item -LiteralPath $pluginRoot).PSDrive.Root)
@@ -124,14 +155,28 @@ Write-Host "plugins=$pluginOID host=$hostOID suite=$Suite"
 
 switch ($Suite) {
   'plugins-ci' {
-    Require-Tool make
-    Invoke-Checked $pluginRoot make @('ci')
+    if ($IsLinux) {
+      Require-Tool make
+      Invoke-Checked $pluginRoot make @('ci')
+    } else {
+      Require-Tool cargo
+      Require-Tool pwsh
+      Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'sdk', '--require-host-capabilities')
+      Invoke-Checked $pluginRoot go @('test', './...')
+      Invoke-Checked $pluginRoot cargo @('test', '--workspace', '--locked')
+      Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'reproducible', '--root', '.', '--output', 'dist', '--', 'pwsh', '-NoProfile', '-File', 'testing/ip-policy-routing/build-artifacts.ps1')
+      Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'repository', '--root', '.')
+    }
     Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'plugin', '--id', 'ip-policy')
     Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'plugin', '--id', 'shadowsocks-server')
   }
   'host-ci' {
     Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-p=16', '-count=1', '-timeout=30s', './internal/app', './internal/control', './internal/core', './internal/generation', './internal/model', './internal/module', './internal/modules/http', './internal/modules/l4', './internal/modules/relay', './internal/observability', './internal/plugins/hostapi', './internal/plugins/policy', './internal/plugins/process', './internal/plugins/rpc', './internal/plugins/wasm')
-    Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-p=16', '-tags=integration', '-count=1', '-timeout=180s', '-run', '^TestIntegration', './embedded', './internal/app', './internal/core', './internal/plugins/process', './internal/plugins/rpc')
+    if ($IsWindows) {
+      Invoke-DockerGoSelection -Image 'golang:1.27.0-trixie' -Mounts @("${hostPath}:/host:ro") -WorkDir '/host/go-agent' -Environment @() -Prefix @('-p=16', '-tags=integration', '-count=1', '-timeout=180s') -Pattern '^TestIntegration' -Packages @('./embedded', './internal/app', './internal/core', './internal/plugins/process', './internal/plugins/rpc')
+    } else {
+      Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-p=16', '-tags=integration', '-count=1', '-timeout=180s', '-run', '^TestIntegration', './embedded', './internal/app', './internal/core', './internal/plugins/process', './internal/plugins/rpc')
+    }
     Invoke-Checked (Join-Path $hostPath 'panel/backend-go') go @('test', '-p=16', '-count=1', '-timeout=30s', './cmd/nre-control-plane', './internal/controlplane/config', './internal/controlplane/http', './internal/controlplane/localagent', './internal/controlplane/pluginhost', './internal/controlplane/service', './internal/controlplane/storage')
     Require-Tool npm
     Invoke-Checked (Join-Path $hostPath 'panel/frontend') npm @('test')
