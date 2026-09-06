@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	dockerapp "github.com/sakullla/sakullla-plugins/plugins/docker-app"
@@ -14,10 +15,21 @@ import (
 
 func TestExecutionFaceCallComposeApplyWritesWorkspace(t *testing.T) {
 	root := t.TempDir()
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n    volumes:\n      - ./data:/data\n"
+	environment := "DATABASE_PASSWORD=fixture-value\n"
 	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		UIWorkDirRoot: root,
-		CommandRunner: dockerapp.CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		CommandRunner: dockerapp.CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+			if name != "docker" || len(args) != 3 || args[0] != "compose" || args[1] != "up" || args[2] != "-d" {
+				t.Fatalf("command=%s %v", name, args)
+			}
+			if value, readErr := os.ReadFile(filepath.Join(dir, dockerapp.ComposeFileName)); readErr != nil || string(value) != compose {
+				t.Fatalf("executed compose=%q err=%v", value, readErr)
+			}
+			if value, readErr := os.ReadFile(filepath.Join(dir, ".env")); readErr != nil || string(value) != environment {
+				t.Fatalf("executed env=%q err=%v", value, readErr)
+			}
 			return []byte("ok"), nil
 		}),
 	})
@@ -26,7 +38,7 @@ func TestExecutionFaceCallComposeApplyWritesWorkspace(t *testing.T) {
 	}
 	payload, err := json.Marshal(map[string]any{
 		"action": "apply", "app_id": "media",
-		"compose": "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n",
+		"compose": compose, "env": environment,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -36,6 +48,9 @@ func TestExecutionFaceCallComposeApplyWritesWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "media", dockerapp.ComposeFileName)); err != nil {
 		t.Fatalf("execution-face compose file: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "media", ".env")); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("execution-face env mode=%v err=%v", info, err)
 	}
 	if info, err := os.Stat(filepath.Join(root, "media", "data")); err != nil || !info.IsDir() {
 		t.Fatalf("execution-face relative bind: %#v err=%v", info, err)

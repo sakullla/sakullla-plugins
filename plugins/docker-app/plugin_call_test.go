@@ -86,7 +86,7 @@ func TestControllerCallComposeApplyWritesWorkspace(t *testing.T) {
 		return []byte("ok"), nil
 	})
 	controller := newCallController(t, root, runner, nil)
-	compose := "services:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n"
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n    volumes:\n      - ./data:/data\n"
 	environment := "DATABASE_PASSWORD=fixture-value\n"
 	payload, err := json.Marshal(map[string]any{
 		"action": "apply", "app_id": "media", "compose": compose, "env": environment,
@@ -99,8 +99,9 @@ func TestControllerCallComposeApplyWritesWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	workdir := filepath.Join(root, "media")
-	if _, err := os.Stat(filepath.Join(workdir, ComposeFileName)); err != nil {
-		t.Fatalf("compose file: %v", err)
+	composePath := filepath.Join(workdir, ComposeFileName)
+	if value, err := os.ReadFile(composePath); err != nil || string(value) != compose {
+		t.Fatalf("compose file=%q err=%v", value, err)
 	}
 	envPath := filepath.Join(workdir, ".env")
 	if value, err := os.ReadFile(envPath); err != nil || string(value) != environment {
@@ -127,6 +128,41 @@ func TestControllerCallComposeApplyWritesWorkspace(t *testing.T) {
 	}
 	if strings.Contains(string(result), "fixture-value") {
 		t.Fatal("compose environment leaked into call response")
+	}
+}
+
+func TestControllerCallComposeApplyBlankEnvironmentReusesExistingFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workdir := filepath.Join(root, "media")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	environment := "DATABASE_PASSWORD=fixture-existing-value\n"
+	if err := writeAppEnvironment(workdir, environment); err != nil {
+		t.Fatal(err)
+	}
+	controller := newCallController(t, root, CommandRunnerFunc(func(_ context.Context, dir, name string, args ...string) ([]byte, error) {
+		if dir != workdir || name != "docker" || strings.Join(args, " ") != "compose up -d" {
+			t.Fatalf("command dir=%q name=%q args=%q", dir, name, args)
+		}
+		value, err := os.ReadFile(filepath.Join(dir, ".env"))
+		if err != nil || string(value) != environment {
+			t.Fatalf("reused env=%q err=%v", value, err)
+		}
+		return []byte("ok"), nil
+	}), nil)
+	compose := "services:\n  web:\n    image: nginx:1.28\n"
+	payload, err := json.Marshal(map[string]any{"action": "apply", "app_id": "media", "compose": compose, "env": ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-2", pluginCallComposeName, payload); err != nil {
+		t.Fatal(err)
+	}
+	value, err := os.ReadFile(filepath.Join(workdir, ".env"))
+	if err != nil || string(value) != environment {
+		t.Fatalf("blank update changed env=%q err=%v", value, err)
 	}
 }
 

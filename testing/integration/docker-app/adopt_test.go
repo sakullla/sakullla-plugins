@@ -37,7 +37,10 @@ services:
 	assertAdoptPlan(t, plan, "media", dockerapp.ComposeService{
 		Name: "web", Privileged: true, HostMounts: []string{"/host:/data"}, AddCapabilities: []string{"NET_ADMIN"}, Networks: []string{"front"}, Volumes: []string{"data"},
 	})
-	assertNoSecretMaterial(t, adoptSecret, plan, app)
+	assertNoSecretMaterial(t, adoptSecret, plan)
+	if app.Compose != document || !strings.Contains(app.Compose, adoptSecret) {
+		t.Fatalf("compose configuration was not preserved: %q", app.Compose)
+	}
 
 	if view := projectCatalog(t, nil, nil, nil); len(view.Managed) != 0 {
 		t.Fatalf("unapplied compose already managed: %#v", view)
@@ -50,7 +53,9 @@ services:
 	observations, runtimes := labeledRunning("ctr-media", app.ID, 8080)
 	view := projectCatalog(t, observations, runtimes, apps)
 	assertRunningManaged(t, view, app)
-	assertNoSecretMaterial(t, adoptSecret, view)
+	if !strings.Contains(findManaged(view, "media").App.Compose, adoptSecret) {
+		t.Fatalf("managed compose dropped configuration: %#v", view)
+	}
 }
 
 func TestDockerRunPreviewAuthorizationBecomesManagedWithRuntimeStatus(t *testing.T) {
@@ -205,7 +210,10 @@ func TestDockerAdoptAndDockerRunKeepSecretRefsAndRedactUnsafeErrors(t *testing.T
 		t.Fatal(err)
 	}
 	assertAdoptedApp(t, composeApp, "media", "nginx:latest", "REGISTRY_TOKEN")
-	assertNoSecretMaterial(t, adoptSecret, composePlan, composeApp)
+	assertNoSecretMaterial(t, adoptSecret, composePlan)
+	if composeApp.Compose != document || !strings.Contains(composeApp.Compose, adoptSecret) {
+		t.Fatalf("compose configuration was not preserved: %q", composeApp.Compose)
+	}
 
 	if _, _, err := dockerapp.ParseDockerRun("docker run --name Bad_Name -e REGISTRY_TOKEN="+adoptSecret+" nginx:latest", "generation-1", "rule-media"); err == nil || strings.Contains(err.Error(), adoptSecret) {
 		t.Fatalf("invalid docker run leaked or accepted: %v", err)
@@ -231,7 +239,7 @@ func TestDockerAdoptAndDockerRunKeepSecretRefsAndRedactUnsafeErrors(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(wire), adoptSecret) || !strings.Contains(string(wire), "secret_refs") || !strings.Contains(string(wire), "REGISTRY_TOKEN") {
+	if !strings.Contains(string(wire), adoptSecret) || !strings.Contains(string(wire), "secret_refs") || !strings.Contains(string(wire), "REGISTRY_TOKEN") {
 		t.Fatalf("configuration wire = %s", wire)
 	}
 	if _, err := dockerapp.ParseConfiguration(wire); err != nil {

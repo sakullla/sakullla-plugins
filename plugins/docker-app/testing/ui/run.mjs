@@ -124,6 +124,7 @@ const resourcesState = createResourcesState();
 const composeState = { previewError: "", saveError: "", listError: false, risk: false, previewCount: 0, saveCount: 0, lastSave: null, file: "original\n", fileError: false, fileListError: false };
 const gates = new Map();
 let apps = [makeApp("alpha"), makeApp("beta"), longApp, makeApp("bravo", "node-b")];
+const appSummary = ({compose: _compose, env: _env, ...summary}) => summary;
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -154,9 +155,12 @@ const server = createServer(async (request, response) => {
         composeState.lastSave = body;
         if (composeState.saveError) return json({error:composeState.saveError}, 422);
         if (body.compose.includes("REQUIRED_VALUE") && !body.env.includes("REQUIRED_VALUE=")) return json({error:"缺少必需环境变量，请填写 .env。"}, 422);
-        const app = makeApp(body.id, body.agent_id, {compose:body.compose, auto_update:body.auto_update});
+        const existing = apps.find((item) => item.id === body.id);
+        const app = makeApp(body.id, body.agent_id, {
+          compose:body.compose, env:body.env || existing?.env || "", auto_update:body.auto_update,
+        });
         apps = [...apps.filter((item) => item.id !== body.id), app];
-        return json({app});
+        return json({apps:[appSummary(app)]});
       }
       if (url.pathname.endsWith("/files")) {
         record.action = body.action;
@@ -172,7 +176,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/api/apps") {
       if (suite === "compose" && composeState.listError) return json({error:"列表读取失败。"}, 500);
-      return json({ apps: apps.filter((app) => app.agent_id === record.agent) });
+      return json({ apps: apps.filter((app) => app.agent_id === record.agent).map(appSummary) });
     }
     if (url.pathname === "/api/disk-cleanup") return json({ cleanup: { steps: [] } });
     if (request.method === "POST" && url.pathname === "/api/apps/alpha/delete") {

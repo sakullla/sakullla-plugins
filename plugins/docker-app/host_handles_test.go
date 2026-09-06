@@ -51,7 +51,9 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 		t.Fatal("generic engine report did not project ready")
 	}
 
-	app := App{ID: "media", AgentID: "agent-1", Compose: "services:\n  web:\n    image: nginx:1.27\n", WorkDir: "/apps/media"}
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n"
+	environment := "DATABASE_PASSWORD=fixture-value\n"
+	app := App{ID: "media", AgentID: "agent-1", Compose: compose, WorkDir: "/apps/media", Env: environment}
 	if err := runtime.ApplyApp(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +83,7 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 		t.Fatalf("engine call = %#v", calls[0])
 	}
 	apply := decodePluginCallInner(t, decodePluginCallRequest(t, calls[1]))
-	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" {
+	if calls[1].Operation != pluginsdk.HostRuntimePluginCall || apply["action"] != "apply" || apply["agent_id"] != "agent-1" || apply["app_id"] != "media" || apply["compose"] != compose || apply["env"] != environment {
 		t.Fatalf("compose apply call = %#v payload=%#v", calls[1], apply)
 	}
 	for _, call := range calls[2:6] {
@@ -91,7 +93,7 @@ func TestHostCapabilityRuntimeConsumesGenericAgentHandles(t *testing.T) {
 		}
 	}
 	remove := decodePluginCallInner(t, decodePluginCallRequest(t, calls[6]))
-	if remove["action"] != "remove" || remove["compose"] == nil {
+	if remove["action"] != "remove" || remove["compose"] != compose || remove["env"] != environment {
 		t.Fatalf("remove omitted compose restage: %#v", remove)
 	}
 	for index, call := range calls[1:] {
@@ -140,12 +142,12 @@ func TestHostCapabilityRuntimePersistsAppsThroughHostState(t *testing.T) {
 		}
 	})
 	runtime := newHostCapabilityRuntime(client)
-	want := []App{{ID: "hubproxy", AgentID: "agent-1", Generation: "generation-1", Compose: "services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n"}}
+	want := []App{{ID: "hubproxy", AgentID: "agent-1", Generation: "generation-1", Compose: "services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n", Env: "DATABASE_PASSWORD=fixture-value\n"}}
 	if err := runtime.StoreApps(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := runtime.LoadApps(context.Background())
-	if err != nil || !found || len(got) != 1 || got[0].ID != want[0].ID || got[0].AgentID != want[0].AgentID {
+	if err != nil || !found || len(got) != 1 || got[0].ID != want[0].ID || got[0].AgentID != want[0].AgentID || got[0].Env != want[0].Env {
 		t.Fatalf("LoadApps()=(%#v,%t,%v)", got, found, err)
 	}
 	if err := runtime.StoreRuntime(context.Background(), map[string]bool{"hubproxy": false}); err != nil {
@@ -862,7 +864,7 @@ func TestHostRolloutRuntimePullAndStartSendCompose(t *testing.T) {
 		}
 		return copyHostResult(map[string]any{"accepted": true}, target)
 	})
-	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest@sha256:current", Compose: "services:\n  web:\n    image: nginx:latest@sha256:current\n"}
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest@sha256:current", Compose: "services:\n  web:\n    image: nginx:latest@sha256:current\n", Env: "APP_MODE=production\n"}
 	rollout := hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}
 	if err := rollout.Pull(context.Background(), 1, app); err != nil {
 		t.Fatal(err)
@@ -874,10 +876,10 @@ func TestHostRolloutRuntimePullAndStartSendCompose(t *testing.T) {
 	if len(payloads) != 2 {
 		t.Fatalf("payloads=%#v", payloads)
 	}
-	if payloads[0]["action"] != "pull" || payloads[0]["compose"] != app.Compose || payloads[0]["image"] != app.Image {
+	if payloads[0]["action"] != "pull" || payloads[0]["compose"] != app.Compose || payloads[0]["env"] != app.Env || payloads[0]["image"] != app.Image {
 		t.Fatalf("pull payload=%#v", payloads[0])
 	}
-	if payloads[1]["action"] != "start-instance" || payloads[1]["compose"] != app.Compose || payloads[1]["image"] != app.Image {
+	if payloads[1]["action"] != "start-instance" || payloads[1]["compose"] != app.Compose || payloads[1]["env"] != app.Env || payloads[1]["image"] != app.Image {
 		t.Fatalf("start payload=%#v", payloads[1])
 	}
 }

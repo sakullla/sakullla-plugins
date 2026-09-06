@@ -184,7 +184,7 @@
               <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="可选：VARIABLE=value"></textarea>
             </span>
           </label>
-          <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
+          <p class="hint">.env 会保存在应用配置和目标 Agent，并在编辑时回显；已有应用留空保存会复用当前值。</p>
           <div class="form-footer">
             <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
             <div class="form-footer-actions">
@@ -239,7 +239,7 @@
                 <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="留空表示复用已有文件"></textarea>
               </span>
             </label>
-            <p class="hint">.env 仅发送并保存在目标 Agent；编辑时留空会复用已有文件，页面不会回显。</p>
+            <p class="hint">.env 会保存在应用配置和目标 Agent，并在编辑时回显；已有应用留空保存会复用当前值。</p>
             <div class="form-footer">
               <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
               <button type="submit" class="btn-primary" id="compose-submit">保存 Compose</button>

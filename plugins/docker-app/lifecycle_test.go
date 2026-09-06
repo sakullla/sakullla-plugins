@@ -15,16 +15,18 @@ func TestDeployComposeAppForAgentBindsAgentBeforeApplyAndRejectsForeignID(t *tes
 		return nil
 	})
 	report := AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"}
-	spec := ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: "services:\n  web:\n    image: nginx:1.27\n"}
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n      FEATURE_FLAG: enabled\n"
+	environment := "DATABASE_PASSWORD=fixture-value\n"
+	spec := ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: compose, Env: environment}
 
 	apps, err := DeployComposeAppForAgent(context.Background(), nil, spec, report, executor, auditor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied.ID != "media" || applied.AgentID != "agent-1" {
+	if applied.ID != "media" || applied.AgentID != "agent-1" || applied.Compose != compose || applied.Env != environment {
 		t.Fatalf("apply saw %#v", applied)
 	}
-	if len(apps) != 1 || apps[0].ID != "media" || apps[0].AgentID != "agent-1" {
+	if len(apps) != 1 || apps[0].ID != "media" || apps[0].AgentID != "agent-1" || apps[0].Compose != compose || apps[0].Env != environment {
 		t.Fatalf("upserted apps=%#v", apps)
 	}
 

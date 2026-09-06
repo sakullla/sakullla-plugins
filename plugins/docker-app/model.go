@@ -68,7 +68,7 @@ type App struct {
 	ServiceImages  []ServiceImage      `json:"-"`
 	RuleRef        string              `json:"-"`
 	WorkDir        string              `json:"-"`
-	Env            string              `json:"-"`
+	Env            string              `json:"env,omitempty"`
 }
 
 func (app App) Validate() error {

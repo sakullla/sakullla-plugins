@@ -489,6 +489,7 @@ func (runtime *hostCapabilityRuntime) composeApp(ctx context.Context, app App, p
 	action, _ := payload["action"].(string)
 	if composeRestageAction(action) {
 		payload["compose"] = app.Compose
+		payload["env"] = app.Env
 	}
 	return runtime.compose(ctx, payload, result)
 }

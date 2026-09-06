@@ -2391,7 +2391,7 @@ const fillCompose = (app, revision = composeDraft.revision) => {
     paintCodeEditor(detailComposeInput);
   }
   if (detailEnvInput) {
-    detailEnvInput.value = "";
+    detailEnvInput.value = app.env || "";
     paintCodeEditor(detailEnvInput);
   }
   if (detailAutoUpdateInput) detailAutoUpdateInput.checked = app.auto_update === true;
@@ -3496,9 +3496,8 @@ const submitCompose = async (form, updating) => {
       showStatus(`应用 ${nextApp.id} 已保存，请在目标节点刷新查看结果。`, false);
       return;
     }
-    // Submission succeeded. Clear submitted secrets before any fallible refresh.
-    form.elements.namedItem("env").value = "";
-    paintCodeEditor(form.elements.namedItem("env"));
+    // Submission succeeded. The persisted configuration becomes the draft
+    // baseline before any fallible refresh.
     draft.capture();
     updateDraftIndicators();
     if (updating) composeFilledFor = "";

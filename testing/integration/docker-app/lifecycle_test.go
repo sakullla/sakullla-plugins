@@ -65,13 +65,15 @@ func TestComposeAppDeployStartStopRestartLogsAndConfirmedDelete(t *testing.T) {
 		t.Fatalf("engine-not-ready mutated state apps=%#v err=%v", apps, err)
 	}
 
-	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: testComposeYAML("nginx:1.27")}
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n"
+	environment := "DATABASE_PASSWORD=fixture-value\n"
+	spec := dockerapp.ComposeDeploySpec{AppID: "media", Generation: "generation-1", Compose: compose, Env: environment}
 	apps, err = dockerapp.DeployComposeApp(context.Background(), original, spec, engine, runtime, auditor)
 	if err != nil || len(apps) != 2 {
 		t.Fatalf("deploy err=%v apps=%#v", err, apps)
 	}
 	media := findApp(apps, "media")
-	if media.Image != "nginx:1.27" || media.Compose == "" || !runtime.running["media"] || !runtime.containerExists("media") {
+	if media.Image != "nginx:1.27" || media.Compose != compose || media.Env != environment || runtime.applied["media"].Compose != compose || runtime.applied["media"].Env != environment || !runtime.running["media"] || !runtime.containerExists("media") {
 		t.Fatalf("deployed app=%#v runtime=%#v", media, runtime)
 	}
 	view := projectCatalog(t, runtime.observations(), runtime.runtimes(), apps)

@@ -53,8 +53,8 @@ func (function StopExecutorFunc) Stop(ctx context.Context, app App) error {
 }
 
 // ParseComposeDocument turns pasted compose YAML into a risk plan and app.
-// Sensitive environment values become secret_refs via BindSecretRefs. All
-// environment values are wiped from the stored compose document.
+// Sensitive environment names become secret_refs via BindSecretRefs while the
+// original compose document remains the application configuration.
 func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposePlan, App, error) {
 	if len(document) > MaxConfigBytes {
 		return ComposePlan{}, App{}, fmt.Errorf("%w: adopt source exceeds %d bytes", ErrBoundExceeded, MaxConfigBytes)
@@ -98,12 +98,7 @@ func ParseComposeDocument(document, appID, generation, ruleRef string) (ComposeP
 	}
 	sort.Slice(images, func(i, j int) bool { return images[i].Name < images[j].Name })
 	image := images[0].Image
-	redacted, err := redactComposeYAML(document)
-	if err != nil {
-		wipeCredentials(credentials)
-		return ComposePlan{}, App{}, err
-	}
-	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, ServiceImages: images, RuleRef: ruleRef, Generation: generation, Compose: redacted}, credentials)
+	app, err := AppWithBoundSecrets(App{ID: appID, Image: image, ServiceImages: images, RuleRef: ruleRef, Generation: generation, Compose: document}, credentials)
 	if err != nil {
 		return ComposePlan{}, App{}, err
 	}
@@ -597,42 +592,6 @@ func materialBytes(value any) []byte {
 	default:
 		return []byte(fmt.Sprint(typed))
 	}
-}
-
-func redactComposeYAML(document string) (string, error) {
-	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(document), &raw); err != nil || raw == nil {
-		return "", ErrInvalidCompose
-	}
-	services, _ := raw["services"].(map[string]any)
-	for _, service := range services {
-		body, ok := service.(map[string]any)
-		if !ok {
-			continue
-		}
-		switch env := body["environment"].(type) {
-		case map[string]any:
-			for key := range env {
-				env[key] = ""
-			}
-		case []any:
-			for index, item := range env {
-				text, ok := item.(string)
-				if !ok {
-					continue
-				}
-				name, _, found := strings.Cut(text, "=")
-				if found {
-					env[index] = name
-				}
-			}
-		}
-	}
-	encoded, err := yaml.Marshal(raw)
-	if err != nil {
-		return "", ErrInvalidCompose
-	}
-	return string(encoded), nil
 }
 
 func ComposeServiceNames(document string) []string {

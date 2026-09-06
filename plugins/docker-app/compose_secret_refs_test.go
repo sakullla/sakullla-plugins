@@ -20,8 +20,8 @@ func TestParseComposeDocumentAcceptsBoundedLargeEnvironment(t *testing.T) {
 	if len(app.SecretRefs) != 0 {
 		t.Fatalf("ordinary environment settings produced secret refs: %v", app.SecretRefs)
 	}
-	if strings.Contains(app.Compose, "value-") {
-		t.Fatal("ordinary environment values remained in persisted compose")
+	if app.Compose != document.String() || !strings.Contains(app.Compose, "SETTING_39=value-39") {
+		t.Fatal("ordinary environment values were not preserved in persisted compose")
 	}
 }
 
@@ -47,9 +47,12 @@ func TestParseComposeDocumentTracksOnlySensitiveEnvironment(t *testing.T) {
 	if fmt.Sprint(app.SecretRefs) != fmt.Sprint(want) {
 		t.Fatalf("secret refs = %v, want %v", app.SecretRefs, want)
 	}
+	if app.Compose != document {
+		t.Fatalf("persisted compose changed:\n%s", app.Compose)
+	}
 	for _, material := range []string{"database-material", "token-material", "oauth-material", "totp-material", "public-material"} {
-		if strings.Contains(app.Compose, material) {
-			t.Fatalf("persisted compose retained environment material %q", material)
+		if !strings.Contains(app.Compose, material) {
+			t.Fatalf("persisted compose dropped environment material %q", material)
 		}
 	}
 }

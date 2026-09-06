@@ -49,6 +49,7 @@ type appView struct {
 	Notice        string            `json:"notice,omitempty"`
 	Version       string            `json:"version"`
 	Compose       string            `json:"compose,omitempty"`
+	Env           string            `json:"env,omitempty"`
 	AutoUpdate    bool              `json:"auto_update,omitempty"`
 	Ports         []uint16          `json:"ports,omitempty"`
 	Services      []string          `json:"services,omitempty"`
@@ -259,8 +260,12 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			return
 		}
 		existingApp, existing := controller.appByID(body.ID)
-		if !existing || strings.TrimSpace(body.Env) != "" {
-			if err := validateRequiredComposeVariables(body.Compose, body.Env); err != nil {
+		environment := body.Env
+		if existing && strings.TrimSpace(environment) == "" {
+			environment = existingApp.Env
+		}
+		if !existing || strings.TrimSpace(environment) != "" {
+			if err := validateRequiredComposeVariables(body.Compose, environment); err != nil {
 				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
 				return
 			}
@@ -290,7 +295,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		controller.pinComposeSaveObservation(body.ID)
 		next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
-			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: body.Env, Confirm: body.Confirm,
+			AppID: body.ID, Generation: generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: environment, Confirm: body.Confirm,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
 			controller.allowImageObservation(body.ID)
@@ -308,7 +313,6 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 					return
 				}
 			}
-			next[index].Env = ""
 		}
 		if err := controller.replaceApps(request.Context(), next); err != nil {
 			controller.allowImageObservation(body.ID)
@@ -362,6 +366,8 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		}
 		listed, listErr := controller.listHostHTTPRules(request.Context(), app.AgentID)
 		view := controller.appViewFor(request.Context(), app, listed, false)
+		view.Compose = app.Compose
+		view.Env = app.Env
 		if listErr != nil {
 			view.RulesError = publicAppActionError(listErr, "http-rule-list")
 		}
@@ -588,7 +594,7 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 		controller.pinComposeSaveObservation(app.ID)
 		next, err := DeployComposeAppForAgent(ctx, controller.Apps(), ComposeDeploySpec{
 			AppID: app.ID, AgentID: app.AgentID, Generation: app.Generation, Compose: nextCompose,
-			WorkDirRoot: controller.uiWorkDirRoot, Confirm: body.Confirm,
+			WorkDirRoot: controller.uiWorkDirRoot, Env: app.Env, Confirm: body.Confirm,
 		}, report, controller.uiApply, controller.uiAuditor)
 		if err != nil {
 			controller.allowImageObservation(app.ID)
@@ -602,7 +608,6 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 			next[index].ImageLocks = cloneStringMap(updated.ImageLocks)
 			next[index].IgnoredUpdates = cloneStringSlicesMap(updated.IgnoredUpdates)
 			next[index].AutoUpdate = cloneBool(app.AutoUpdate)
-			next[index].Env = ""
 			if err := next[index].normalizeServicePolicies(); err != nil {
 				controller.allowImageObservation(app.ID)
 				writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
@@ -1354,9 +1359,9 @@ func projectAppView(app App, running bool, deployment Deployment, latestDigest s
 	ports, _ := ListPublishedPorts(app, nil)
 	return appView{
 		ID: app.ID, AgentID: app.AgentID, Name: name, Status: status, Notice: notice,
-		Version: displayAppVersion(app, deployment.ImageDigest, hasUpdate),
-		Compose: app.Compose, AutoUpdate: AutoUpdateEnabled(app.AutoUpdate),
-		Ports: ports, Services: composeServiceNames(app.Compose),
+		Version:    displayAppVersion(app, deployment.ImageDigest, hasUpdate),
+		AutoUpdate: AutoUpdateEnabled(app.AutoUpdate),
+		Ports:      ports, Services: composeServiceNames(app.Compose),
 		ServiceImages: services,
 		Actions:       appViewActions(status, notice, deployment),
 	}

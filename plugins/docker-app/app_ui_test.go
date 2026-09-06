@@ -160,8 +160,11 @@ func TestAppUIRejectsMissingRequiredComposeEnvironmentBeforeDeploy(t *testing.T)
 	if corrected.Code != http.StatusOK || len(controller.Apps()) != 1 {
 		t.Fatalf("corrected draft could not deploy: status=%d body=%s", corrected.Code, corrected.Body.String())
 	}
-	if strings.Contains(corrected.Body.String(), "fixture-corrected-value") {
-		t.Fatal("successful deployment response echoed submitted environment contents")
+	if controller.Apps()[0].Env != "DATABASE_PASSWORD=fixture-corrected-value" {
+		t.Fatalf("successful deployment did not persist env: %#v", controller.Apps()[0])
+	}
+	if strings.Contains(corrected.Body.String(), "fixture-corrected-value") || strings.Contains(corrected.Body.String(), `"compose"`) || strings.Contains(corrected.Body.String(), `"env"`) {
+		t.Fatal("application collection response exposed detail-only configuration")
 	}
 }
 
@@ -218,12 +221,16 @@ func TestAppUIRestoresPersistedAppsAfterControllerRestart(t *testing.T) {
 	state := &uiMemoryAppState{}
 	first := newUIControllerWithOptions(t, uiControllerOptions{appState: state})
 	created := httptest.NewRecorder()
-	first.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"hubproxy","agent_id":"agent-1","compose":"services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n    ports:\n      - \"5000:5000\"\n","env":"DATABASE_PASSWORD=fixture-value\n"}`))
+	compose := "services:\n  hubproxy:\n    image: registry.example.test/hubproxy:latest\n    environment:\n      APP_TOKEN: inline-fixture-value\n    ports:\n      - \"5000:5000\"\n"
+	first.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"hubproxy","agent_id":"agent-1","compose":`+jsonString(compose)+`,"env":"DATABASE_PASSWORD=dotenv-fixture-value\n"}`))
 	if created.Code != http.StatusOK || state.stores != 1 || len(state.apps) != 1 {
 		t.Fatalf("create status=%d stores=%d apps=%#v body=%s", created.Code, state.stores, state.apps, created.Body.String())
 	}
-	if state.apps[0].Env != "" || strings.Contains(created.Body.String(), "fixture-value") {
-		t.Fatalf("compose environment leaked into persisted/UI state: app=%#v body=%s", state.apps[0], created.Body.String())
+	if state.apps[0].Compose != compose || state.apps[0].Env != "DATABASE_PASSWORD=dotenv-fixture-value\n" {
+		t.Fatalf("compose environment was not persisted: app=%#v", state.apps[0])
+	}
+	if strings.Contains(created.Body.String(), "fixture-value") || strings.Contains(created.Body.String(), `"compose"`) || strings.Contains(created.Body.String(), `"env"`) {
+		t.Fatalf("application collection response exposed detail-only configuration: %s", created.Body.String())
 	}
 	stopped := httptest.NewRecorder()
 	first.ServeHTTP(stopped, uiJSONRequest(http.MethodPost, "/api/apps/hubproxy/stop", `{}`))
@@ -240,6 +247,21 @@ func TestAppUIRestoresPersistedAppsAfterControllerRestart(t *testing.T) {
 	}
 	if restarted.Apps()[0].Generation != "generation-1" {
 		t.Fatalf("restored generation=%q", restarted.Apps()[0].Generation)
+	}
+	if strings.Contains(listed.Body.String(), "fixture-value") || strings.Contains(listed.Body.String(), `"compose"`) || strings.Contains(listed.Body.String(), `"env"`) {
+		t.Fatalf("application list exposed detail-only configuration: %s", listed.Body.String())
+	}
+	detail := httptest.NewRecorder()
+	restarted.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/hubproxy", ""))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "inline-fixture-value") || !strings.Contains(detail.Body.String(), "dotenv-fixture-value") || !strings.Contains(detail.Body.String(), `"compose"`) || !strings.Contains(detail.Body.String(), `"env"`) {
+		t.Fatalf("detail did not restore compose and env: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+
+	updatedCompose := "services:\n  hubproxy:\n    image: registry.example.test/hubproxy:stable\n    ports:\n      - \"5000:5000\"\n"
+	updated := httptest.NewRecorder()
+	restarted.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"hubproxy","agent_id":"agent-1","compose":`+jsonString(updatedCompose)+`,"env":""}`))
+	if updated.Code != http.StatusOK || state.apps[0].Env != "DATABASE_PASSWORD=dotenv-fixture-value\n" || state.apps[0].Compose != updatedCompose {
+		t.Fatalf("blank env update did not reuse persisted value: status=%d app=%#v body=%s", updated.Code, state.apps[0], updated.Body.String())
 	}
 }
 
@@ -596,7 +618,8 @@ func TestAppUIDetailReportsIndependentHTTPRuleReadFailure(t *testing.T) {
 				t.Fatal("partial list omitted its error")
 			}
 		}
-		if rec.Code != http.StatusOK || view == nil || view.ID != "media" || view.RulesError == "" || view.Compose == "" || len(view.Ports) != 1 {
+		wantCompose := strings.Contains(path, "/api/apps/media")
+		if rec.Code != http.StatusOK || view == nil || view.ID != "media" || view.RulesError == "" || (view.Compose != "") != wantCompose || len(view.Ports) != 1 {
 			t.Fatalf("independent rule error lost useful app data: status=%d body=%s", rec.Code, rec.Body.String())
 		}
 		for _, forbidden := range []string{"fixture-value", "C:/private", ErrTypedHandlesUnavailable.Error()} {
@@ -1812,10 +1835,12 @@ func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
 	if success < 0 || refresh < 0 || failure < 0 || success > refresh {
 		t.Fatalf("deploy success/refresh ordering is missing: success=%d refresh=%d failure=%d", success, refresh, failure)
 	}
-	clearEnv := strings.Index(text, `form.elements.namedItem("env").value = ""`)
 	baseline := strings.Index(text, "draft.capture();")
-	if clearEnv < 0 || baseline < clearEnv || baseline > success {
-		t.Fatal("submitted env must be cleared and the successful baseline recorded before refresh")
+	if baseline < 0 || baseline > success {
+		t.Fatal("successful persisted configuration must become the draft baseline before refresh")
+	}
+	if strings.Contains(text, `form.elements.namedItem("env").value = ""`) || !strings.Contains(text, `detailEnvInput.value = app.env || ""`) {
+		t.Fatal("saved env must remain visible and be restored from app detail")
 	}
 	if !strings.Contains(text, "confirmDiscardDrafts") || !strings.Contains(text, "beforeunload") {
 		t.Fatal("Compose drafts lack shared navigation and document-unload protection")
@@ -1826,6 +1851,9 @@ func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
 	}
 	if !strings.Contains(string(page), `textarea name="env"`) || !strings.Contains(text, `env: String(data.get("env") || "")`) {
 		t.Fatal("Compose .env input is not wired through the deployment form")
+	}
+	if !strings.Contains(string(page), ".env 会保存在应用配置和目标 Agent，并在编辑时回显") {
+		t.Fatal("Compose .env persistence copy is missing")
 	}
 }
 

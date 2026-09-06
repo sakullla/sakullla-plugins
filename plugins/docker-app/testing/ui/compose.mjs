@@ -158,7 +158,7 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     await eventually(() => value('#compose-form textarea[name="compose"]').then((v) => v !== draftYAML), "confirmed refresh replaces draft");
   });
 
-  await test("Compose failures retain env; successful save clears env and resets baseline", async () => {
+  await test("Compose failures retain env; successful save persists env and resets baseline", async () => {
     await reset(); await detail();
     await fill('#compose-form textarea[name="compose"]', draftYAML);
     await fill('#compose-form textarea[name="env"]', "FIXTURE_VALUE=compose-memory-marker");
@@ -169,13 +169,15 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     const saves = state.saveCount;
     await page.click("#compose-submit"); await formState("#compose-form", "partial");
     assert.equal(state.saveCount, saves + 1);
-    assert.equal(await value('#compose-form textarea[name="env"]'), "");
+    assert.equal(await value('#compose-form textarea[name="env"]'), "FIXTURE_VALUE=compose-memory-marker");
     assert.equal(await page.visible("#compose-dirty"), false);
     state.listError = false;
     await page.click("#workspace-refresh"); await page.waitVisible("#compose-form");
+    await fill('#compose-form textarea[name="env"]', "");
     await page.click("#compose-submit"); await eventually(() => state.saveCount === saves + 2, "second save with blank env");
     assert.equal(state.lastSave.env, "", "blank env is forwarded for server-side reuse");
     await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'succeeded'`), "save success feedback");
+    assert.equal(await value('#compose-form textarea[name="env"]'), "FIXTURE_VALUE=compose-memory-marker", "detail refresh restores reused env");
     await page.click("#detail-back"); await page.waitVisible("#app-list");
     assert.equal(await page.visible("#confirm-dialog"), false, "successful baseline needs no discard confirmation");
   });
@@ -235,7 +237,8 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
       const oldRead = hold(oldPath);
       await page.click("#workspace-refresh"); await eventually(() => oldRead.seen, "old refresh held before save");
       await fill('#compose-form textarea[name="compose"]', 'services:\n  saved:\n    image: nginx:1.30\n');
-      await fill('#compose-form textarea[name="env"]', "FIXTURE_SAVE=clear-after-success");
+      const draftEnv = `FIXTURE_SAVE=${phase}-${outcome}-${oldPath}`;
+      await fill('#compose-form textarea[name="env"]', draftEnv);
       const saves = state.saveCount;
       const write = hold("/api/apps");
       const preview = phase === "preview" ? hold("/api/apps/preview") : null;
@@ -253,13 +256,13 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
       await eventually(() => page.evaluate(`document.querySelector('#compose-submit').disabled === false`), "save controls restored");
       assert.equal(state.saveCount, saves + (outcome === "cancel" ? 0 : 1));
       if (outcome === "success") {
-        assert.equal(await value('#compose-form textarea[name="env"]'), "", `successful env cleanup with old ${oldPath} during ${phase}`);
+        assert.equal(await value('#compose-form textarea[name="env"]'), draftEnv, `successful env restore with old ${oldPath} during ${phase}`);
         assert.equal(await page.visible("#compose-dirty"), false);
         assert.equal(await page.evaluate(`document.querySelector('#app-status').dataset.state`), "succeeded");
         assert.match(await text("#app-status"), /已更新/);
       } else {
-        assert.equal(await value('#compose-form textarea[name="env"]'), "FIXTURE_SAVE=clear-after-success");
-        assert.ok(await page.visible("#compose-dirty"));
+        assert.equal(await value('#compose-form textarea[name="env"]'), draftEnv);
+        assert.ok(await page.visible("#compose-dirty"), `unsaved env stays dirty with old ${oldPath} during ${phase}/${outcome}`);
         await formState("#compose-form", outcome === "cancel" ? "cancelled" : "failed");
       }
     }
