@@ -172,7 +172,8 @@ switch ($Suite) {
     Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'plugin', '--id', 'shadowsocks-server')
   }
   'host-ci' {
-    Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-p=4', '-count=1', '-timeout=30s', './internal/app', './internal/control', './internal/core', './internal/generation', './internal/model', './internal/module', './internal/modules/http', './internal/modules/l4', './internal/modules/relay', './internal/observability', './internal/plugins/hostapi', './internal/plugins/policy', './internal/plugins/process', './internal/plugins/rpc', './internal/plugins/wasm')
+    Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-p=4', '-count=1', '-timeout=30s', './internal/app', './internal/control', './internal/core', './internal/generation', './internal/model', './internal/module', './internal/modules/http', './internal/modules/l4', './internal/modules/relay', './internal/observability', './internal/plugins/hostapi', './internal/plugins/policy', './internal/plugins/process', './internal/plugins/rpc')
+    Invoke-Checked (Join-Path $hostPath 'go-agent') go @('test', '-count=1', '-timeout=30s', './internal/plugins/wasm')
     if ($IsWindows) {
       Invoke-DockerGoSelection -Image 'golang:1.27.0-trixie' -Mounts @("${hostPath}:/host:ro") -WorkDir '/host/go-agent' -Environment @('CGO_ENABLED=0') -Prefix @('-p=4', '-tags=integration', '-count=1', '-timeout=180s') -Pattern '^TestIntegration' -Packages @('./embedded', './internal/app', './internal/core', './internal/plugins/process', './internal/plugins/rpc')
     } else {
