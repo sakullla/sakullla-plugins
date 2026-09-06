@@ -3,7 +3,7 @@ import { makeApp } from "./workspace.mjs";
 export function createResourcesState() {
   const state = { reset() {
     Object.assign(this, {
-      files:new Map([[".",null],["docs",null],["docs/config.txt","initial text\n"],["root.txt","root text\n"],["binary.bin","\u0000binary"],["large.txt","x".repeat(1048577)]]),
+      files:new Map([[".",null],["docs",null],["docs/config.txt","initial text\n"],["compose.yaml","services:\n  web:\n    image: nginx:1.27\n"],["root.txt","root text\n"],["binary.bin","\u0000binary"],["large.txt","x".repeat(1048577)]]),
       calls:[], logsCalls:[], readError:false, writeError:false, listError:false, listErrorOwner:"", listErrorAfterMkdir:false, rulesError:false, rulesWriteError:false, rulesErrorAfterWrite:false,
       logs:{web:"web ready\n",worker:"worker ready\n"}, logsError:false,
       apps:[

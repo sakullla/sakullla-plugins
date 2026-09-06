@@ -158,6 +158,28 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     await eventually(() => value('#compose-form textarea[name="compose"]').then((v) => v !== draftYAML), "confirmed refresh replaces draft");
   });
 
+  await test("code editors indent with Tab and save Compose with Ctrl+S", async () => {
+    await reset(); await create();
+    await fill('#create-form textarea[name="compose"]', yaml);
+    await page.evaluate(`(() => {
+      const node = document.querySelector('#create-form textarea[name="compose"]');
+      node.focus();
+      node.setSelectionRange(0, 0);
+    })()`);
+    await page.key("Tab");
+    assert.equal(await value('#create-form textarea[name="compose"]'), `  ${yaml}`, "Tab inserts a two-space indent");
+    assert.ok(await page.evaluate(`document.activeElement.matches('#create-form textarea[name="compose"]')`), "Tab keeps focus in the editor");
+    await page.key("Tab", {shift:true});
+    assert.equal(await value('#create-form textarea[name="compose"]'), yaml);
+    assert.ok(await page.evaluate(`document.activeElement.matches('#create-form textarea[name="compose"]')`), "Shift+Tab keeps focus in the editor");
+    await page.click("#create-cancel"); await confirm(true); await page.waitVisible("#app-list");
+    await detail();
+    await fill('#compose-form textarea[name="compose"]', draftYAML);
+    await page.key("s", {ctrl:true});
+    await formState("#compose-form", "succeeded");
+    assert.equal(state.lastSave.compose, draftYAML);
+  });
+
   await test("Compose failures retain env; successful save persists env and resets baseline", async () => {
     await reset(); await detail();
     await fill('#compose-form textarea[name="compose"]', draftYAML);

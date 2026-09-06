@@ -3506,10 +3506,19 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if !strings.Contains(page, `data-lang="yaml"`) || !strings.Contains(page, `data-lang="env"`) {
 		t.Fatal("compose YAML/.env editors are missing highlighter shells")
 	}
-	for _, want := range []string{"highlightYaml", "highlightEnv", "mountCodeEditor"} {
+	for _, want := range []string{"highlightYaml", "highlightEnv", "mountCodeEditor", "indentCodeEditor", `event.key !== "Tab"`, "ctrlKey", "metaKey"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing syntax highlighter %q", want)
 		}
+	}
+	if !strings.Contains(js, "indentCodeEditor(textarea, event.shiftKey)") {
+		t.Fatal("code editors do not intercept Tab indent")
+	}
+	if !strings.Contains(js, `event.key !== "s"`) || !strings.Contains(js, "composeForm.requestSubmit") || !strings.Contains(js, `#files-save`) {
+		t.Fatal("Ctrl/Cmd+S does not save the file or Compose editor")
+	}
+	if strings.Contains(js, "候选未知") {
+		t.Fatal("script still hardcodes 候选未知")
 	}
 	if !strings.Contains(stylesheet, "tok-key") || !strings.Contains(stylesheet, ".code-editor") {
 		t.Fatal("stylesheet missing syntax highlighter colors")
@@ -3592,11 +3601,25 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form does not offer the full editor width")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
-		t.Fatal("application list must be one scannable column")
+	if !strings.Contains(appList, "repeat(auto-fill, minmax(") {
+		t.Fatal("wide application list must be a multi-column card grid")
 	}
-	if strings.Contains(appList, "flex-direction: column") {
-		t.Fatal(".app-list is still a scannable column")
+	if strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
+		t.Fatal("wide application list is still one scannable column")
+	}
+	if !strings.Contains(stylesheet, ".app-list { grid-template-columns: minmax(0, 1fr); }") {
+		t.Fatal("narrow application list must be a single card column")
+	}
+	refresh := cssRule(stylesheet, "#workspace-refresh")
+	if !strings.Contains(refresh, "justify-self: start") || !strings.Contains(refresh, "width: auto") {
+		t.Fatal("refresh is still a stretched node-grid child")
+	}
+	if !strings.Contains(page, `class="node-strip"`) {
+		t.Fatal("refresh is not beside the node picker")
+	}
+	selectedMark := cssRule(stylesheet, `.files-list li[aria-selected="true"] .files-list-name::before`)
+	if !strings.Contains(selectedMark, "var(--color-primary") || !strings.Contains(selectedMark, "background-image") {
+		t.Fatal("selected file row does not check the leading control")
 	}
 	for _, want := range []string{
 		"html { margin: 0; min-height: 100%; font-size: 15px; }",
@@ -4323,6 +4346,12 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	overview := js[overviewStart:overviewEnd]
 	if !strings.Contains(overview, "service-policy-summary") || !strings.Contains(overview, "persistedIgnoredTags") || !strings.Contains(overview, "saveServicePolicy") {
 		t.Fatal("详情 overview must show lock/ignore state and provide confirmed policy editing")
+	}
+	if !strings.Contains(overview, "if (service.lock)") || !strings.Contains(overview, "if (ignored.length)") || !strings.Contains(overview, "if (candidateTags.length)") {
+		t.Fatal("service image cards still show empty lock/ignore/candidate lines")
+	}
+	if !strings.Contains(js, "serviceImageStatus") || !strings.Contains(js, "暂时无法列出仓库版本") || !strings.Contains(js, "正在列出仓库版本") || !strings.Contains(js, "已是该 tag 当前镜像") {
+		t.Fatal("service image cards do not use listing/digest copy from the API")
 	}
 	collectStart := strings.Index(js, "const collectUpdatePayload = () => {")
 	collectEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")

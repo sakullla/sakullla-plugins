@@ -16,12 +16,14 @@
       </div>
       <div class="page-head-agent">
         <div class="node-card">
-          <label class="agent-field">节点
-            <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
-            <div class="agent-search-select" data-agent-picker="workspace"></div>
-          </label>
+          <div class="node-strip">
+            <label class="agent-field">节点
+              <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
+              <div class="agent-search-select" data-agent-picker="workspace"></div>
+            </label>
+            <button id="workspace-refresh" class="btn-link" type="button">刷新节点状态</button>
+          </div>
           <p id="engine-status" class="engine-status" hidden></p>
-          <button id="workspace-refresh" class="btn-link" type="button">刷新节点状态</button>
         </div>
       </div>
     </header>

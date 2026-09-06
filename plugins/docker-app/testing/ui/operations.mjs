@@ -46,7 +46,9 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
   await test("version and policy edits are drafts until confirmation", async () => {
     await reset();
     const overview = await text("#detail-overview");
-    for (const word of ["nginx:1.27","候选","锁定","忽略"]) assert.ok(overview.includes(word));
+    for (const word of ["nginx:1.27","候选","忽略"]) assert.ok(overview.includes(word), `overview missing ${word}`);
+    assert.equal(overview.includes("锁定：未锁定"), false, "empty lock line is hidden");
+    assert.equal(overview.includes("忽略：无"), false, "empty ignore line is hidden");
     assert.equal(await page.evaluate(`document.querySelectorAll('#detail-overview select[name^="lock-"]').length`),0,"overview does not mutate policy on selection");
     await update(); await dialog("update");
     await page.click('input[name="update-db"]');

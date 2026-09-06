@@ -94,11 +94,12 @@ class Page {
     await this.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
     await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   }
-  async key(key, {shift = false} = {}) {
-    const code = key === " " ? "Space" : key;
-    const keyCode = {Escape:27,Enter:13,Tab:9,ArrowDown:40,ArrowUp:38," ":32}[key] || 0;
-    await this.send("Input.dispatchKeyEvent", {type:"keyDown",key,code,windowsVirtualKeyCode:keyCode,modifiers:shift ? 8 : 0});
-    await this.send("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode:keyCode});
+  async key(key, {shift = false, ctrl = false, meta = false} = {}) {
+    const code = key === " " ? "Space" : key === "s" || key === "S" ? "KeyS" : key;
+    const keyCode = {Escape:27,Enter:13,Tab:9,ArrowDown:40,ArrowUp:38," ":32,s:83,S:83}[key] || 0;
+    const modifiers = (ctrl ? 2 : 0) | (meta ? 4 : 0) | (shift ? 8 : 0);
+    await this.send("Input.dispatchKeyEvent", {type:"keyDown",key,code,windowsVirtualKeyCode:keyCode,modifiers});
+    await this.send("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode:keyCode,modifiers});
   }
   visible(selector) { return this.evaluate(`!!document.querySelector(${JSON.stringify(selector)})?.getClientRects().length`); }
   waitVisible(selector) { return eventually(() => this.visible(selector), `visible ${selector}`); }
@@ -283,7 +284,9 @@ try {
     await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');
     assert.equal(await page.evaluate(`document.querySelectorAll('#app-list .app-card').length`), 3);
     assert.ok(await page.visible("#deploy-toggle"));
-    assert.match(await page.evaluate(`document.querySelector('#engine-status').textContent`), /Docker.*27.1.1/);
+    assert.equal(await page.evaluate(`document.querySelector('#engine-status').hidden`), true);
+    assert.equal(await page.evaluate(`document.querySelector('#engine-status').dataset.ready`), "true");
+    assert.ok(await page.evaluate(`document.querySelector('.agent-search-select__engine')?.textContent === '引擎就绪'`), "ready engine stays on the picker");
     assert.equal(await page.evaluate(`document.querySelector('#app-list').textContent.includes('27.1.1')`), false);
     await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
     assert.match(await page.evaluate(`document.querySelector('#detail-context').textContent`), /节点 A.*alpha/);
@@ -353,9 +356,19 @@ try {
     for (const width of [375, 721, 768, 1024, 1440]) {
       await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
       assert.ok(await page.evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`), `no page overflow at ${width}`);
+      const grid = await page.evaluate(`(() => {
+        const cards = Array.from(document.querySelectorAll('#app-list .app-card')).map((node) => Math.round(node.getBoundingClientRect().top));
+        const rows = new Set(cards).size;
+        const refresh = document.querySelector('#workspace-refresh').getBoundingClientRect();
+        const picker = document.querySelector('.agent-search-select__trigger').getBoundingClientRect();
+        return {count: cards.length, rows, refreshWidth: refresh.width, pickerWidth: picker.width};
+      })()`);
+      assert.ok(grid.refreshWidth < grid.pickerWidth, `refresh is not a stretched primary at ${width}: ${JSON.stringify(grid)}`);
+      if (width <= 375) assert.equal(grid.rows, grid.count, `narrow list is a single card column at ${width}: ${JSON.stringify(grid)}`);
+      if (width >= 1440) assert.ok(grid.rows < grid.count, `wide list is a card grid at ${width}: ${JSON.stringify(grid)}`);
       const bounds = await page.evaluate(`(() => {
         const client = document.documentElement.clientWidth;
-        return {client, scroll: document.documentElement.scrollWidth, controls: Array.from(document.querySelectorAll('.agent-search-select__trigger, #deploy-toggle, #app-list .app-card')).map(n => {
+        return {client, scroll: document.documentElement.scrollWidth, controls: Array.from(document.querySelectorAll('.agent-search-select__trigger, #deploy-toggle, #workspace-refresh, #app-list .app-card')).map(n => {
           const r = n.getBoundingClientRect(); return {id:n.id || n.className, left:r.left, right:r.right, height:r.height};
         })};
       })()`);

@@ -911,12 +911,58 @@ const paintCodeEditor = (textarea) => {
   layer.scrollLeft = textarea.scrollLeft;
 };
 
+const CODE_INDENT = "  ";
+
+const indentCodeEditor = (textarea, unindent) => {
+  const value = textarea.value;
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  if (start !== end || unindent) {
+    const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+    const rangeEnd = end > start && value[end - 1] === "\n" ? end - 1 : end;
+    const lineEnd = value.indexOf("\n", rangeEnd);
+    const blockEnd = lineEnd === -1 ? value.length : lineEnd;
+    const lines = value.slice(lineStart, blockEnd).split("\n");
+    let deltaStart = 0;
+    let deltaEnd = 0;
+    const next = lines.map((line, index) => {
+      if (unindent) {
+        const cut = line.startsWith(CODE_INDENT) ? CODE_INDENT.length : line.startsWith(" ") ? 1 : 0;
+        if (index === 0) deltaStart = -cut;
+        deltaEnd -= cut;
+        return line.slice(cut);
+      }
+      if (index === 0) deltaStart = CODE_INDENT.length;
+      deltaEnd += CODE_INDENT.length;
+      return CODE_INDENT + line;
+    }).join("\n");
+    textarea.value = value.slice(0, lineStart) + next + value.slice(blockEnd);
+    textarea.setSelectionRange(Math.max(lineStart, start + deltaStart), Math.max(lineStart, end + deltaEnd));
+  } else {
+    textarea.value = value.slice(0, start) + CODE_INDENT + value.slice(end);
+    const caret = start + CODE_INDENT.length;
+    textarea.setSelectionRange(caret, caret);
+  }
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+};
+
 const mountCodeEditor = (textarea) => {
   if (!textarea) return;
   const wrap = textarea.closest(".code-editor");
   if (!wrap) return;
+  if (textarea.dataset.codeEditorMounted === "true") {
+    paintCodeEditor(textarea);
+    return;
+  }
+  textarea.dataset.codeEditorMounted = "true";
   textarea.addEventListener("input", () => paintCodeEditor(textarea));
   textarea.addEventListener("scroll", () => paintCodeEditor(textarea));
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab" || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (textarea.closest("dialog")) return;
+    event.preventDefault();
+    indentCodeEditor(textarea, event.shiftKey);
+  });
   if (typeof ResizeObserver === "function") {
     new ResizeObserver(() => paintCodeEditor(textarea)).observe(textarea);
   }
@@ -2040,6 +2086,27 @@ const renderServiceLockSelect = (service) => {
 
 const persistedIgnoredTags = (service) => (Array.isArray(service.ignored) ? service.ignored.filter(Boolean) : []);
 
+const serviceListingCopy = {
+  pending: "正在列出仓库版本",
+  failed: "暂时无法列出仓库版本",
+  current: "已是该 tag 当前镜像",
+};
+
+const serviceImageStatus = (service) => {
+  const candidates = Array.isArray(service.candidates) ? service.candidates : [];
+  if (candidates.some((candidate) => candidate.digest)) return { state: "ready", text: "镜像有新 digest" };
+  if (service.update) return { state: "ready", text: "有允许候选" };
+  const message = String(service.message || "").trim();
+  if (message) {
+    const pending = service.listing === "pending" || message === serviceListingCopy.pending;
+    const failed = service.listing === "failed" || message === serviceListingCopy.failed;
+    return { state: pending ? "pending" : (failed || service.unknown ? "unknown" : "empty"), text: message };
+  }
+  if (service.listing === "pending") return { state: "pending", text: serviceListingCopy.pending };
+  if (service.listing === "failed" || service.unknown) return { state: "unknown", text: serviceListingCopy.failed };
+  return { state: "empty", text: "" };
+};
+
 const renderIgnoredClearControls = (service, { buttons = false } = {}) => persistedIgnoredTags(service).map((tag) => {
   if (buttons) {
     const button = document.createElement("button");
@@ -2105,7 +2172,7 @@ const renderUpdateServiceRow = (service, options = {}) => {
   if (!candidates.length) {
     const empty = document.createElement("p");
     empty.className = "update-empty";
-    empty.textContent = service.unknown ? "无法列出仓库 tag" : "没有允许的候选";
+    empty.textContent = serviceImageStatus(service).text || "没有允许的候选";
     target.append(targetLabel, empty);
   } else {
     const select = document.createElement("select");
@@ -2495,33 +2562,38 @@ const renderOverview = (app) => {
       item.append(head);
       const tools = document.createElement("div");
       tools.className = "overview-service-tools";
-      const flag = document.createElement("p");
-      flag.className = "overview-service-flag";
-      const digestRefresh = Array.isArray(service.candidates) && service.candidates.some((candidate) => candidate.digest);
-      if (digestRefresh) {
-        flag.dataset.state = "ready";
-        flag.textContent = "镜像有新 digest";
-      } else if (service.update) {
-        flag.dataset.state = "ready";
-        flag.textContent = "有允许候选";
-      } else if (service.unknown) {
-        flag.dataset.state = "unknown";
-        flag.textContent = "候选未知";
-      } else {
-        flag.dataset.state = "empty";
-        flag.textContent = "无允许候选";
+      const status = serviceImageStatus(service);
+      if (status.text) {
+        const flag = document.createElement("p");
+        flag.className = "overview-service-flag";
+        flag.dataset.state = status.state;
+        flag.textContent = status.text;
+        tools.append(flag);
       }
-      tools.append(flag);
-      const currentPolicy = document.createElement("p");
-      currentPolicy.className = "service-policy-summary";
-      currentPolicy.textContent = `锁定：${service.lock || "未锁定"} · 忽略：${persistedIgnoredTags(service).join("、") || "无"}`;
-      const candidates = document.createElement("p");
-      candidates.className = "service-candidates";
-      candidates.textContent = `候选：${(service.candidates || []).map((candidate) => candidate.tag).join("、") || "无允许的候选"}`;
+      const ignored = persistedIgnoredTags(service);
+      if (service.lock) {
+        const currentPolicy = document.createElement("p");
+        currentPolicy.className = "service-policy-summary";
+        currentPolicy.textContent = `锁定：${service.lock}`;
+        tools.append(currentPolicy);
+      }
+      if (ignored.length) {
+        const ignoreLine = document.createElement("p");
+        ignoreLine.className = "service-policy-summary";
+        ignoreLine.textContent = `忽略：${ignored.join("、")}`;
+        tools.append(ignoreLine);
+      }
+      const candidateTags = (service.candidates || []).map((candidate) => candidate.tag).filter(Boolean);
+      if (candidateTags.length) {
+        const candidates = document.createElement("p");
+        candidates.className = "service-candidates";
+        candidates.textContent = `候选：${candidateTags.join("、")}`;
+        tools.append(candidates);
+      }
       const manage = actionButton({ id: "service-policy" }, "btn-secondary", "管理版本策略");
       manage.dataset.service = service.name;
       manage.addEventListener("click", () => saveServicePolicy(app, service.name));
-      tools.append(currentPolicy, candidates, manage);
+      tools.append(manage);
       item.append(tools);
       list.append(item);
     });
@@ -3075,9 +3147,12 @@ const renderEngineBadge = (engine) => {
     engineStatus.textContent = "暂时无法执行";
     return;
   }
-  engineStatus.textContent = engineReady
-    ? (engine.version ? `Docker 引擎 ${engine.version} 已就绪` : "Docker 引擎已就绪")
-    : "尚未安装 Docker";
+  if (engineReady) {
+    engineStatus.textContent = engine.version ? `Docker 引擎 ${engine.version} 已就绪` : "Docker 引擎已就绪";
+    engineStatus.hidden = true;
+    return;
+  }
+  engineStatus.textContent = "尚未安装 Docker";
 };
 
 const renderWorkspace = async () => {
@@ -3522,6 +3597,25 @@ const submitCompose = async (form, updating) => {
 [ [composeForm, true], [createForm, false] ].forEach(([form, updating]) => {
   form.noValidate = true;
   form.addEventListener("submit", (event) => { event.preventDefault(); submitCompose(form, updating); });
+});
+document.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing) return;
+  if (event.key !== "s" && event.key !== "S") return;
+  const filesEditor = document.querySelector("#files-editor");
+  if (filesEditor && !filesEditor.hidden) {
+    event.preventDefault();
+    if (!busy) document.querySelector("#files-save")?.click();
+    return;
+  }
+  if (createPanel && !createPanel.hidden) {
+    event.preventDefault();
+    if (!busy) createForm?.requestSubmit();
+    return;
+  }
+  if (view === "detail" && detailSection === "compose" && composeForm) {
+    event.preventDefault();
+    if (!busy) composeForm.requestSubmit();
+  }
 });
 
 (async () => {

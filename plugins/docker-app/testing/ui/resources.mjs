@@ -47,7 +47,16 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     await fill("#files-editor textarea","changed text\n");
     await page.click("#files-editor-close"); await close(false);
     assert.equal(await value("#files-editor textarea"),"changed text\n");
-    await page.click("#files-save"); await status("succeeded"); await idle();
+    await page.evaluate(`(() => {
+      const node = document.querySelector("#files-editor textarea");
+      node.focus();
+      node.setSelectionRange(0, 0);
+    })()`);
+    await page.key("Tab");
+    assert.equal((await value("#files-editor textarea")).startsWith("  changed"), true, "Tab indents the file editor");
+    await page.key("Tab", {shift:true});
+    assert.equal(await value("#files-editor textarea"), "changed text\n");
+    await page.key("s", {ctrl:true}); await status("succeeded"); await idle();
     assert.equal(state.files.get("docs/config.txt"),"changed text\n");
     await capture("file-editor",1440); await capture("file-editor",375);
     await page.click("#files-editor-close"); await page.waitVisible("#files-browser");
@@ -55,6 +64,22 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     await eventually(async () => {try{return (await readFile(join(downloads,"config.txt"),"utf8")) === "changed text\n";}catch{return false;}},"downloaded actual file content");
     await page.click("#files-up"); await page.waitVisible('[data-path="root.txt"]');
     assert.equal(await text("#files-breadcrumb"),"工作区");
+    await page.click(file("compose.yaml"));
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="compose.yaml"]').getAttribute("aria-selected")`),"true");
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="root.txt"]').getAttribute("aria-selected")`),"false");
+    assert.match(await text("#files-selected"), /compose.yaml/);
+    const marks = await page.evaluate(`(() => {
+      const paint = (path) => {
+        const style = getComputedStyle(document.querySelector('[data-path="' + path + '"] .files-list-name'), "::before");
+        return {image:style.backgroundImage, color:style.backgroundColor};
+      };
+      return {selected:paint("compose.yaml"), other:paint("root.txt")};
+    })()`);
+    assert.notEqual(marks.selected.image, "none", "selected compose.yaml checks the leading control");
+    assert.equal(marks.other.image, "none", "unselected rows stay unchecked");
+    await page.evaluate(`document.querySelector('[data-path="docs"]').click()`);
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="docs"]').getAttribute("aria-selected")`),"true");
+    assert.ok(await page.evaluate(`getComputedStyle(document.querySelector('[data-path="docs"] .files-list-name'), "::before").backgroundImage !== "none"`), "selected directory checks the leading control");
   });
 
   await test("file creation, upload, deletion and cancellation keep relative targets", async () => {
