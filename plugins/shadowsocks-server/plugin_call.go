@@ -56,6 +56,7 @@ type ListenReport struct {
 	DDNS    string             `json:"ddns_domain,omitempty"`
 	IPv4    string             `json:"ipv4,omitempty"`
 	IPv6    string             `json:"ipv6,omitempty"`
+	Routes  []RouteStatus      `json:"routes,omitempty"`
 }
 
 // ListenPortStatus is one bound TCP+UDP port without keys or passwords.
@@ -85,8 +86,9 @@ type ListenApplyItem struct {
 }
 
 type listenApplyRequest struct {
-	AgentID string            `json:"agent_id"`
-	Listens []ListenApplyItem `json:"listens"`
+	AgentID string               `json:"agent_id"`
+	Listens []ListenApplyItem    `json:"listens"`
+	Routing RoutingConfiguration `json:"routing"`
 }
 
 type listenStopRequest struct {
@@ -115,16 +117,22 @@ type boundUserEngine struct {
 }
 
 type boundListen struct {
-	mu      sync.Mutex
-	closed  bool
-	id      string
-	port    int
-	tcp     net.Listener
-	udp     net.PacketConn
-	engines []*boundUserEngine
-	dialer  networkDialer
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu            sync.Mutex
+	closed        bool
+	id            string
+	port          int
+	tcp           net.Listener
+	udp           net.PacketConn
+	engines       []*boundUserEngine
+	dialer        networkDialer
+	secrets       SecretVerifier
+	routes        *routeSnapshot
+	udpPacketID   uint64
+	routeFailures map[string]string
+	flowRoutes    map[string]*routeSnapshot
+	flowOrder     []string
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 type preparedListen struct {
@@ -133,6 +141,7 @@ type preparedListen struct {
 	bound    *boundListen
 	engines  []*boundUserEngine
 	ctx      context.Context
+	routes   *routeSnapshot
 }
 
 type prefixConn struct {
@@ -187,7 +196,14 @@ func (exec *listenExecutor) report(payload []byte) ([]byte, error) {
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
-	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked()})
+	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked(), Routes: exec.routeStatusesLocked()})
+}
+
+func (exec *listenExecutor) routeStatusesLocked() []RouteStatus {
+	for _, listener := range exec.bound {
+		return listener.routeStatuses()
+	}
+	return []RouteStatus{}
 }
 
 func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, error) {
@@ -205,6 +221,15 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("listen payload is invalid")
 	}
+	var route *routeSnapshot
+	var routeClient datasetRoutingClient
+	if exec.managed != nil {
+		routeClient = exec.managed.datasets
+	}
+	route, err = prepareRouteSnapshot(ctx, request.Routing, routeClient)
+	if err != nil {
+		return nil, err
+	}
 	desired := make(map[string]struct{}, len(request.Listens))
 	for _, item := range request.Listens {
 		if strings.TrimSpace(item.ID) == "" {
@@ -219,7 +244,7 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		candidate, err := exec.prepareOneLocked(ctx, item)
+		candidate, err := exec.prepareOneLocked(ctx, item, route)
 		if err != nil {
 			exec.abortPrepared(prepared)
 			return nil, err
@@ -283,7 +308,7 @@ func (exec *listenExecutor) viewsLocked() []ListenPortStatus {
 	return out
 }
 
-func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApplyItem) (preparedListen, error) {
+func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApplyItem, routes *routeSnapshot) (preparedListen, error) {
 	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
 		return preparedListen{}, ErrInvalid
 	}
@@ -301,7 +326,7 @@ func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApp
 		return preparedListen{}, err
 	}
 	if existing != nil && existing.port == item.Port {
-		return preparedListen{item: item, existing: existing, engines: engines}, nil
+		return preparedListen{item: item, existing: existing, engines: engines, routes: routes}, nil
 	}
 	host := exec.bindHost
 	if host == "" {
@@ -335,13 +360,14 @@ func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApp
 		return preparedListen{}, ErrListenBind
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, cancel: cancel}
-	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx}, nil
+	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
+	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx, routes: routes}, nil
 }
 
 func (exec *listenExecutor) commitPrepared(candidate preparedListen) {
 	if candidate.bound == nil {
 		candidate.existing.replaceUserEngines(candidate.engines)
+		candidate.existing.replaceRoutes(candidate.routes)
 		return
 	}
 	if candidate.existing != nil {
@@ -358,6 +384,89 @@ func (exec *listenExecutor) commitPrepared(candidate preparedListen) {
 		bound.serveUDP(candidate.ctx)
 	}()
 	exec.bound[candidate.item.ID] = bound
+}
+
+func (b *boundListen) replaceRoutes(routes *routeSnapshot) {
+	b.mu.Lock()
+	b.routes = routes
+	b.routeFailures = map[string]string{}
+	b.mu.Unlock()
+}
+
+func (b *boundListen) snapshotRoutes() *routeSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.routes
+}
+
+func (b *boundListen) snapshotRoutesForFlow(address net.Addr) *routeSnapshot {
+	if address == nil {
+		return b.snapshotRoutes()
+	}
+	key := address.Network() + "\x00" + address.String()
+	b.mu.Lock()
+	if routes := b.flowRoutes[key]; routes != nil {
+		b.mu.Unlock()
+		return routes
+	}
+	if b.flowRoutes == nil {
+		b.flowRoutes = map[string]*routeSnapshot{}
+	}
+	if managed, ok := b.udp.(*managedPacketConn); ok {
+		kept := b.flowOrder[:0]
+		for _, candidate := range b.flowOrder {
+			token := strings.TrimPrefix(candidate, "udp\x00")
+			if managed.hasFlow(token) {
+				kept = append(kept, candidate)
+			} else {
+				delete(b.flowRoutes, candidate)
+			}
+		}
+		b.flowOrder = kept
+	}
+	for len(b.flowOrder) >= 256 {
+		oldest := b.flowOrder[0]
+		b.flowOrder = b.flowOrder[1:]
+		delete(b.flowRoutes, oldest)
+	}
+	routes := b.routes
+	b.flowRoutes[key] = routes
+	b.flowOrder = append(b.flowOrder, key)
+	b.mu.Unlock()
+	return routes
+}
+
+func (b *boundListen) recordRouteFailure(decision routeDecision, failure string) {
+	if decision.RuleID == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.routeFailures == nil {
+		b.routeFailures = map[string]string{}
+	}
+	if failure == "" {
+		delete(b.routeFailures, decision.RuleID)
+	} else {
+		b.routeFailures[decision.RuleID] = failure
+	}
+	b.mu.Unlock()
+}
+
+func (b *boundListen) routeStatuses() []RouteStatus {
+	b.mu.Lock()
+	routes := b.routes
+	failures := make(map[string]string, len(b.routeFailures))
+	for id, failure := range b.routeFailures {
+		failures[id] = failure
+	}
+	b.mu.Unlock()
+	statuses := routes.statuses()
+	for index := range statuses {
+		if failures[statuses[index].RuleID] != "" {
+			statuses[index].Failure = failures[statuses[index].RuleID]
+		}
+	}
+	return statuses
 }
 
 func (exec *listenExecutor) abortPrepared(prepared []preparedListen) {
@@ -462,6 +571,8 @@ func (b *boundListen) close() {
 	b.mu.Lock()
 	engines := b.engines
 	b.engines = nil
+	b.flowRoutes = nil
+	b.flowOrder = nil
 	b.mu.Unlock()
 	destroyUserEngines(engines, nil)
 }
@@ -589,19 +700,41 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	if err != nil {
 		return
 	}
+	routes := b.snapshotRoutes()
+	decision, err := routes.decide(ctx, "tcp", request.Target)
+	if err != nil || decision.Action == RouteReject {
+		failure := "route-rejected"
+		if err != nil {
+			failure = "dataset-or-upstream-unavailable"
+		}
+		b.recordRouteFailure(decision, failure)
+		return
+	}
 	if b.dialer == nil {
 		return
 	}
-	target, err := b.dialer.DialContext(ctx, "tcp", request.Target)
+	dialTarget := request.Target
+	if decision.Action == RouteUpstream {
+		dialTarget = net.JoinHostPort(decision.Upstream.Host, strconv.Itoa(decision.Upstream.Port))
+	}
+	target, err := b.dialer.DialContext(ctx, "tcp", dialTarget)
 	if err != nil {
+		b.recordRouteFailure(decision, "dial-failed")
 		return
 	}
 	defer target.Close()
-	if len(request.Payload) > 0 {
+	if decision.Action == RouteUpstream {
+		target, err = b.wrapUpstreamTCP(ctx, target, *decision.Upstream, request)
+		if err != nil {
+			b.recordRouteFailure(decision, "upstream-auth-failed")
+			return
+		}
+	} else if len(request.Payload) > 0 {
 		if _, err := target.Write(request.Payload); err != nil {
 			return
 		}
 	}
+	b.recordRouteFailure(decision, "")
 	_ = conn.SetDeadline(time.Time{})
 	_ = target.SetDeadline(time.Time{})
 
@@ -646,25 +779,52 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 	if matched == nil {
 		return
 	}
+	decision, err := b.snapshotRoutesForFlow(clientAddr).decide(ctx, "udp", request.Target)
+	if err != nil || decision.Action == RouteReject {
+		failure := "route-rejected"
+		if err != nil {
+			failure = "dataset-or-upstream-unavailable"
+		}
+		b.recordRouteFailure(decision, failure)
+		return
+	}
 	if b.dialer == nil {
 		return
 	}
-	conn, err := b.dialer.DialContext(ctx, "udp", request.Target)
+	dialTarget := request.Target
+	if decision.Action == RouteUpstream {
+		dialTarget = net.JoinHostPort(decision.Upstream.Host, strconv.Itoa(decision.Upstream.Port))
+	}
+	conn, err := b.dialer.DialContext(ctx, "udp", dialTarget)
 	if err != nil {
+		b.recordRouteFailure(decision, "dial-failed")
 		return
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if len(request.Payload) > 0 {
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	var responses [][]byte
+	if decision.Action == RouteUpstream {
+		var upstreamErr error
+		responses, upstreamErr = b.roundTripUpstreamUDPResponses(ctx, conn, *decision.Upstream, request)
+		if upstreamErr != nil {
+			b.recordRouteFailure(decision, "upstream-auth-failed")
+			return
+		}
+	} else if len(request.Payload) > 0 {
 		if _, err := conn.Write(request.Payload); err != nil {
 			return
 		}
+		responses, err = collectUDPAssociationResponses(conn, func(payload []byte) ([]byte, error) { return payload, nil })
+		if err != nil {
+			b.recordRouteFailure(decision, "response-budget")
+			return
+		}
 	}
-	buf := make([]byte, maxUDPPacket)
-	n, err := conn.Read(buf)
-	if err != nil || n == 0 {
+	if len(responses) == 0 {
+		b.recordRouteFailure(decision, "no-response")
 		return
 	}
+	b.recordRouteFailure(decision, "")
 	saltSize := 8
 	if !matched.modern {
 		saltSize = matched.SaltSize()
@@ -673,15 +833,34 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 	if _, err := rand.Read(responseSalt); err != nil {
 		return
 	}
-	sealed, err := matched.SealUDPResponse(responseSalt, 0, request.SessionID, request.Target, buf[:n], time.Now(), nil)
-	if err != nil {
-		return
-	}
 	udp := b.packetConn()
 	if udp == nil {
 		return
 	}
-	_, _ = udp.WriteTo(sealed, clientAddr)
+	for _, response := range responses {
+		if _, err := rand.Read(responseSalt); err != nil {
+			return
+		}
+		packetID := uint64(0)
+		if matched.modern {
+			packetID = b.nextUDPPacketID()
+		}
+		sealed, err := matched.SealUDPResponse(responseSalt, packetID, request.SessionID, request.Target, response, time.Now(), nil)
+		if err != nil {
+			return
+		}
+		if _, err := udp.WriteTo(sealed, clientAddr); err != nil {
+			return
+		}
+	}
+}
+
+func (b *boundListen) nextUDPPacketID() uint64 {
+	b.mu.Lock()
+	b.udpPacketID++
+	value := b.udpPacketID
+	b.mu.Unlock()
+	return value
 }
 
 func relayTCPClientToTarget(conn, target net.Conn, session *TCPServerSession) {

@@ -27,9 +27,24 @@ type managedRuntimeFake struct {
 	reads           map[string][]byte
 	writes          map[string][]byte
 	nextRead        []byte
+	datasetError    bool
 }
 
 func (*managedRuntimeFake) Call(context.Context, pluginsdk.HostRuntimeCall, any) error { return nil }
+
+func (fake *managedRuntimeFake) ResolveDataset(_ context.Context, request pluginsdk.DatasetResolveRequest) (pluginsdk.DatasetReference, error) {
+	if fake.datasetError {
+		return pluginsdk.DatasetReference{}, ErrRouteDatasetUnavailable
+	}
+	return pluginsdk.DatasetReference{Handle: strings.Repeat("d", 43), InstanceID: "instance-a", Generation: "generation-a", SourceID: request.SourceID, VersionDigest: "sha256:" + strings.Repeat("2", 64)}, nil
+}
+
+func (fake *managedRuntimeFake) QueryDatasets(_ context.Context, request pluginsdk.DatasetQueryRequest) (pluginsdk.DatasetQueryResponse, error) {
+	if fake.datasetError {
+		return pluginsdk.DatasetQueryResponse{}, ErrRouteDatasetUnavailable
+	}
+	return pluginsdk.DatasetQueryResponse{Reference: request.Reference, Status: pluginsdk.DatasetQueryOK, Matches: []pluginsdk.DatasetMatch{{Index: 0, Matched: true, Coverage: pluginsdk.DatasetCovered}}}, nil
+}
 
 func (fake *managedRuntimeFake) ManagedNetwork(ctx context.Context, request pluginsdk.ManagedNetworkRequest) (pluginsdk.ManagedNetworkResponse, error) {
 	fake.mu.Lock()

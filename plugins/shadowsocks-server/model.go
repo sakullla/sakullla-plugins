@@ -76,9 +76,10 @@ type ListenRule struct {
 }
 
 type Configuration struct {
-	Generation       string       `json:"generation,omitempty"`
-	ResourceGroupRef string       `json:"resource_group_ref,omitempty"`
-	Listeners        []ListenRule `json:"listeners"`
+	Generation       string               `json:"generation,omitempty"`
+	ResourceGroupRef string               `json:"resource_group_ref,omitempty"`
+	Listeners        []ListenRule         `json:"listeners"`
+	Routing          RoutingConfiguration `json:"routing,omitempty"`
 }
 
 // AccountSpec creates one account without quota or expiry. Family selects
@@ -122,6 +123,9 @@ func (c Configuration) Validate() error {
 	}
 	if len(c.Listeners) > MaxListeners {
 		return ErrInvalid
+	}
+	if err := c.Routing.Validate(); err != nil {
+		return err
 	}
 	listenerIDs := map[string]struct{}{}
 	userIDs := map[string]struct{}{}
@@ -991,5 +995,6 @@ func clone(c Configuration) Configuration {
 	}
 	sort.Slice(listeners, func(i, j int) bool { return listeners[i].ID < listeners[j].ID })
 	c.Listeners = listeners
+	c.Routing = cloneRouting(c.Routing)
 	return c
 }

@@ -62,6 +62,14 @@ const qrCaption = document.querySelector("#qr-caption");
 const qrImage = document.querySelector("#qr-image");
 const qrCopy = document.querySelector("#qr-copy");
 const advancedKeys = document.querySelector("#advanced-keys");
+const upstreamForm = document.querySelector("#upstream-form");
+const upstreamList = document.querySelector("#route-upstreams");
+const routeForm = document.querySelector("#route-form");
+const routeList = document.querySelector("#route-rules");
+const routeUpstreamSelect = document.querySelector("#route-upstream-select");
+const routeDefaultAction = document.querySelector("#route-default-action");
+const routeDefaultUpstream = document.querySelector("#route-default-upstream");
+const routeSaveDefault = document.querySelector("#route-save-default");
 const appendDialog = document.querySelector("#append-dialog");
 const appendForm = document.querySelector("#append-form");
 const appendName = document.querySelector("#append-name");
@@ -102,6 +110,7 @@ let busy = false;
 let selectedAgentID = "";
 let agentsCache = [];
 let listensCache = [];
+let routingCache = { upstreams: [], rules: [], default_action: "direct" };
 let openListenID = "";
 let pendingAppendListen = null;
 let executionReady = false;
@@ -1167,6 +1176,119 @@ const clearWorkspace = (kind) => {
   syncShareHostBar(Boolean(selectedAgentID));
 };
 
+const escapeHTML = (value) => String(value || "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
+const upstreamOptions = () => `<option value="">请选择上游</option>` + (routingCache.upstreams || []).map((upstream) => `<option value="${escapeHTML(upstream.id)}">${escapeHTML(upstream.id)}</option>`).join("");
+
+const routingIssue = (rule) => {
+  if (rule.action !== "upstream") return "";
+  const upstream = (routingCache.upstreams || []).find((item) => item.id === rule.upstream_id);
+  if (!upstream) return "上游不存在";
+  if (!upstream.enabled) return "上游已停用";
+  if (!upstream.tcp && !upstream.udp) return "上游不支持 TCP/UDP";
+  return "";
+};
+
+const renderRouting = (routing, routeStatus = []) => {
+  routingCache = routing || { upstreams: [], rules: [], default_action: "direct" };
+  routingCache.upstreams ||= [];
+  routingCache.rules ||= [];
+  upstreamList.innerHTML = "";
+  routingCache.upstreams.forEach((upstream) => {
+    const row = document.createElement("article");
+    row.className = "account";
+    const label = document.createElement("strong");
+    label.textContent = `${upstream.id} · ${upstream.host}:${upstream.port}`;
+    const detail = document.createElement("p");
+    detail.className = "hint";
+    detail.textContent = `${methodLabel(upstream.method)} · ${upstream.tcp ? "TCP" : ""}${upstream.tcp && upstream.udp ? "/" : ""}${upstream.udp ? "UDP" : ""} · ${upstream.enabled ? "启用" : "停用"} · ${upstream.secret_ref}@${upstream.secret_version}`;
+    const toggle = document.createElement("button");
+    toggle.type = "button"; toggle.className = "btn-secondary"; toggle.textContent = upstream.enabled ? "停用" : "启用";
+    toggle.onclick = () => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable");
+    const remove = document.createElement("button");
+    remove.type = "button"; remove.className = "btn-link danger"; remove.textContent = "删除";
+    remove.onclick = () => mutateUpstream(upstream.id, "delete");
+    row.append(label, detail, toggle, remove);
+    upstreamList.append(row);
+  });
+  const options = upstreamOptions();
+  routeUpstreamSelect.innerHTML = options;
+  routeDefaultUpstream.innerHTML = options;
+  routeDefaultAction.value = routingCache.default_action || "direct";
+  routeDefaultUpstream.value = routingCache.default_upstream_id || "";
+  routeList.innerHTML = "";
+  routingCache.rules.forEach((rule, index) => {
+    const row = document.createElement("article");
+    row.className = "account";
+    const label = document.createElement("strong");
+    label.textContent = `${index + 1}. ${rule.id} · ${rule.action}${rule.upstream_id ? ` → ${rule.upstream_id}` : ""}`;
+    const detail = document.createElement("p"); detail.className = "hint";
+    const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
+    const applied = routeStatus.find((item) => item.rule_id === rule.id) || {};
+    const issue = applied.failure || routingIssue(rule);
+    detail.textContent = `${rule.source_id} · ${rule.classification.kind}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.version_digest ? ` · ${applied.version_digest}` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issue ? ` · ${issue}` : ""}`;
+    [
+      ["上移", () => moveRoute(index, -1)], ["下移", () => moveRoute(index, 1)], ["删除", () => removeRoute(index)],
+    ].forEach(([text, action]) => { const button = document.createElement("button"); button.type = "button"; button.className = "btn-secondary"; button.textContent = text; button.onclick = action; row.append(button); });
+    row.prepend(label, detail);
+    routeList.append(row);
+  });
+};
+
+const loadRouting = async () => {
+  const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
+  renderRouting(payload.routing, payload.route_status || []);
+};
+
+const saveRoutingRules = async () => {
+  const payload = await sendPluginJSON("api/routing", { rules: routingCache.rules, default_action: routingCache.default_action || "direct", default_upstream_id: routingCache.default_upstream_id || "" });
+  renderRouting(payload.routing);
+};
+
+const moveRoute = async (index, delta) => {
+  const next = index + delta;
+  if (next < 0 || next >= routingCache.rules.length) return;
+  [routingCache.rules[index], routingCache.rules[next]] = [routingCache.rules[next], routingCache.rules[index]];
+  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+};
+
+const removeRoute = async (index) => {
+  routingCache.rules.splice(index, 1);
+  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+};
+
+const mutateUpstream = async (id, action) => {
+  try {
+    const payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/${action}`, {});
+    renderRouting(payload.routing);
+  } catch (error) { showStatus(error.message, true); }
+};
+
+if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(upstreamForm);
+  try {
+    const payload = await sendPluginJSON("api/upstreams", { id: String(form.get("id") || ""), host: String(form.get("host") || ""), port: Number(form.get("port") || 0), method: String(form.get("method") || ""), password: String(form.get("password") || ""), tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
+    upstreamForm.reset(); renderRouting(payload.routing);
+  } catch (error) { showStatus(error.message, true); }
+});
+
+if (routeForm) routeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(routeForm);
+  const attribute = String(form.get("attribute") || "").trim();
+  const classification = { name: String(form.get("classification") || ""), kind: String(form.get("kind") || "") };
+  if (attribute) classification.attributes = [{ name: attribute, boolean: true }];
+  const action = String(form.get("action") || "");
+  routingCache.rules.push({ id: String(form.get("id") || ""), source_id: String(form.get("source_id") || ""), classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
+  try { await saveRoutingRules(); routeForm.reset(); } catch (error) { routingCache.rules.pop(); showStatus(error.message, true); }
+});
+
+if (routeSaveDefault) routeSaveDefault.addEventListener("click", async () => {
+  routingCache.default_action = routeDefaultAction.value;
+  routingCache.default_upstream_id = routeDefaultAction.value === "upstream" ? routeDefaultUpstream.value : "";
+  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+});
+
 const renderWorkspace = async () => {
   const seq = workspaceSeq + 1;
   workspaceSeq = seq;
@@ -1208,6 +1330,7 @@ const renderWorkspace = async () => {
   const payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
   if (seq !== workspaceSeq) return;
   renderListens(payload.listens);
+  await loadRouting();
   fillShareHost(execution, payload.listens);
   syncShareHostBar(true);
   if (payload.error) showStatus(payload.error, true);

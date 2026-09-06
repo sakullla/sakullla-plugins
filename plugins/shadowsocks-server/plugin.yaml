@@ -2,7 +2,7 @@ schema_version: 1
 id: shadowsocks-server
 version: 0.1.15
 name: Shadowsocks 服务
-description: 通过简单面板管理账号，并分享宿主受管入口的 Shadowsocks 服务
+description: 管理宿主受管 Shadowsocks 入口，并按 GeoSite、GeoIP 或 CIDR 数据集选择直连、拒绝和上游
 compatibility:
   host: "*"
   agent: "*"
@@ -48,6 +48,8 @@ permissions:
     resource: secret-scope:shadowsocks-inbound
   - name: secret.scoped.write
     resource: secret-scope:shadowsocks-inbound
+  - name: dataset.query
+  - name: dataset.resolve
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

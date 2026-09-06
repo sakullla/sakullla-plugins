@@ -14,6 +14,7 @@ const (
 	pluginListensStateKey = "listens"
 	pluginSecretsStateKey = "secrets"
 	pluginNodesStateKey   = "agent-nodes"
+	pluginRoutingStateKey = "routing"
 	pluginNodeAddressesOp = "node.addresses"
 	maxAgentNodes         = 512
 )
@@ -24,18 +25,60 @@ type persistedSecret struct {
 	Material string `json:"material"`
 }
 
+func (runtime *hostCapabilityRuntime) LoadRouting(ctx context.Context) (RoutingConfiguration, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return RoutingConfiguration{}, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginRoutingStateKey}, &response); err != nil {
+		return RoutingConfiguration{}, false, err
+	}
+	if !response.Found {
+		return RoutingConfiguration{}, false, nil
+	}
+	var routing RoutingConfiguration
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &routing) != nil || routing.Validate() != nil {
+		return RoutingConfiguration{}, false, ErrTypedHandlesUnavailable
+	}
+	return cloneRouting(routing), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreRouting(ctx context.Context, routing RoutingConfiguration) error {
+	if runtime == nil || runtime.client == nil || routing.Validate() != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	value, err := json.Marshal(cloneRouting(routing))
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginRoutingStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
 type hostRuntimeCaller interface {
 	Call(context.Context, pluginsdk.HostRuntimeCall, any) error
 }
 
 type hostCapabilityRuntime struct {
-	client  hostRuntimeCaller
-	managed managedHostClient
-	mu      sync.Mutex
-	binding pluginsdk.ManagedBinding
-	live    map[string][]ListenPortStatus
-	nodes   map[string]NodeAddresses
-	hints   map[string]NodeAddresses
+	client   hostRuntimeCaller
+	managed  managedHostClient
+	datasets datasetRoutingClient
+	mu       sync.Mutex
+	binding  pluginsdk.ManagedBinding
+	live     map[string][]ListenPortStatus
+	nodes    map[string]NodeAddresses
+	hints    map[string]NodeAddresses
 }
 
 func (c *Controller) ReportListen(ctx context.Context, agentID string) (ListenReport, error) {
@@ -49,13 +92,17 @@ func (c *Controller) ReportListen(ctx context.Context, agentID string) (ListenRe
 }
 
 func (c *Controller) ApplyListen(ctx context.Context, agentID string, listens []ListenApplyItem) error {
+	return c.ApplyListenRouting(ctx, agentID, listens, RoutingConfiguration{})
+}
+
+func (c *Controller) ApplyListenRouting(ctx context.Context, agentID string, listens []ListenApplyItem, routing RoutingConfiguration) error {
 	if !validAgentID(agentID) {
 		return ErrAgentOffline
 	}
 	if c == nil || c.listenHost == nil {
 		return ErrTypedHandlesUnavailable
 	}
-	return c.listenHost.Apply(ctx, agentID, listens)
+	return c.listenHost.ApplyRouting(ctx, agentID, listens, routing)
 }
 
 func (c *Controller) StopListen(ctx context.Context, agentID string, listenIDs []string) error {
@@ -79,6 +126,7 @@ func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 		hints:  map[string]NodeAddresses{},
 	}
 	runtime.managed, _ = client.(managedHostClient)
+	runtime.datasets, _ = client.(datasetRoutingClient)
 	return runtime
 }
 
@@ -357,6 +405,10 @@ func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string
 }
 
 func (runtime *hostCapabilityRuntime) Apply(ctx context.Context, agentID string, listens []ListenApplyItem) error {
+	return runtime.ApplyRouting(ctx, agentID, listens, RoutingConfiguration{})
+}
+
+func (runtime *hostCapabilityRuntime) ApplyRouting(ctx context.Context, agentID string, listens []ListenApplyItem, routing RoutingConfiguration) error {
 	if !validAgentID(agentID) {
 		return ErrAgentOffline
 	}
@@ -367,6 +419,7 @@ func (runtime *hostCapabilityRuntime) Apply(ctx context.Context, agentID string,
 	if err := runtime.pluginCall(ctx, agentID, pluginCallListenApply, map[string]any{
 		"agent_id": agentID,
 		"listens":  listens,
+		"routing":  routing,
 	}, &result); err != nil {
 		runtime.refreshLive(ctx, agentID)
 		return err

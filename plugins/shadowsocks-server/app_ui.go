@@ -79,14 +79,17 @@ type listenWriteRequest struct {
 }
 
 type listenAPIResponse struct {
-	Ready     bool                `json:"ready"`
-	Listens   []listenAPIView     `json:"listens,omitempty"`
-	Listen    *listenAPIView      `json:"listen,omitempty"`
-	User      *listenUserView     `json:"user,omitempty"`
-	Defaults  *listenDefaultsView `json:"defaults,omitempty"`
-	Execution *executionView      `json:"execution,omitempty"`
-	Error     string              `json:"error,omitempty"`
-	Access    struct {
+	Ready        bool                  `json:"ready"`
+	Listens      []listenAPIView       `json:"listens,omitempty"`
+	Listen       *listenAPIView        `json:"listen,omitempty"`
+	User         *listenUserView       `json:"user,omitempty"`
+	Defaults     *listenDefaultsView   `json:"defaults,omitempty"`
+	Execution    *executionView        `json:"execution,omitempty"`
+	Routing      *RoutingConfiguration `json:"routing,omitempty"`
+	RouteStatus  []RouteStatus         `json:"route_status,omitempty"`
+	RouteSources []RouteSourceStatus   `json:"route_sources,omitempty"`
+	Error        string                `json:"error,omitempty"`
+	Access       struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -109,6 +112,21 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	if path == "/api/listens" {
 		c.serveListenCollection(writer, request)
 		return true
+	}
+	if path == "/api/routing" {
+		c.serveRouting(writer, request)
+		return true
+	}
+	if path == "/api/upstreams" {
+		c.serveUpstreamCollection(writer, request)
+		return true
+	}
+	if rest, found := strings.CutPrefix(path, "/api/upstreams/"); found {
+		id, action, cut := strings.Cut(rest, "/")
+		if cut && (action == "enable" || action == "disable" || action == "delete") {
+			c.serveUpstreamItem(writer, request, id, action)
+			return true
+		}
 	}
 	if listenID, action, ok := parseListenAPI(path); ok {
 		c.serveListenItem(writer, request, listenID, action)
@@ -994,7 +1012,7 @@ func (c *Controller) applyAgentListens(ctx context.Context, agentID string) erro
 	if err != nil {
 		return err
 	}
-	if err = c.ApplyListen(ctx, agentID, items); err != nil {
+	if err = c.ApplyListenRouting(ctx, agentID, items, c.directory().Routing); err != nil {
 		if errors.Is(err, ErrAgentOffline) || errors.Is(err, ErrListenBind) || errors.Is(err, ErrExecutionUnavailable) {
 			return err
 		}
@@ -1056,7 +1074,7 @@ func (c *Controller) reconcileAgentListens(ctx context.Context, agentID string) 
 	if err != nil {
 		return
 	}
-	_ = c.ApplyListen(ctx, agentID, items)
+	_ = c.ApplyListenRouting(ctx, agentID, items, c.directory().Routing)
 }
 
 func listenRuntimeMatchesDesired(desired []ListenRule, live []ListenPortStatus) bool {
@@ -1347,6 +1365,8 @@ func listenStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrPortConflict), errors.Is(err, ErrListenBind):
 		return http.StatusConflict
+	case errors.Is(err, ErrRouteDatasetUnavailable), errors.Is(err, ErrRouteUpstreamUnavailable):
+		return http.StatusConflict
 	case errors.Is(err, ErrInvalid), errors.Is(err, ErrTraditionalMultiUser):
 		return http.StatusBadRequest
 	default:
@@ -1372,6 +1392,12 @@ func publicListenError(err error) string {
 		return "账号不存在或操作被拒绝"
 	case errors.Is(err, ErrMissingShareHost):
 		return missingPublicHost
+	case errors.Is(err, ErrRouteDatasetUnavailable):
+		return "数据集或分类不可用"
+	case errors.Is(err, ErrRouteUpstreamUnavailable):
+		return "上游不可用或协议未启用"
+	case errors.Is(err, ErrRouteRejected):
+		return "路由已拒绝"
 	case errors.Is(err, ErrInvalid):
 		return "请求无效"
 	default:

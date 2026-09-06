@@ -151,11 +151,13 @@ func startUITestController(t *testing.T, setup uiTestSetup) *Controller {
 }
 
 type uiMemoryListenState struct {
-	mu      sync.Mutex
-	listens []ListenRule
-	secrets map[string]string
-	nodes   map[string]NodeAddresses
-	found   bool
+	mu           sync.Mutex
+	listens      []ListenRule
+	secrets      map[string]string
+	nodes        map[string]NodeAddresses
+	found        bool
+	routing      RoutingConfiguration
+	routingFound bool
 }
 
 func (state *uiMemoryListenState) LoadListens(context.Context) ([]ListenRule, bool, error) {
@@ -197,6 +199,20 @@ func (state *uiMemoryListenState) StoreNodes(_ context.Context, nodes map[string
 	defer state.mu.Unlock()
 	state.nodes = cloneAgentNodes(nodes)
 	state.found = true
+	return nil
+}
+
+func (state *uiMemoryListenState) LoadRouting(context.Context) (RoutingConfiguration, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return cloneRouting(state.routing), state.routingFound, nil
+}
+
+func (state *uiMemoryListenState) StoreRouting(_ context.Context, routing RoutingConfiguration) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.routing = cloneRouting(routing)
+	state.routingFound = true
 	return nil
 }
 

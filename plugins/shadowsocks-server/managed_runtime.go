@@ -602,6 +602,13 @@ func (conn *managedPacketConn) WriteTo(value []byte, address net.Addr) (int, err
 	_ = flow.SetWriteDeadline(deadline)
 	return flow.Write(value)
 }
+
+func (conn *managedPacketConn) hasFlow(token string) bool {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	return conn.flows[token] != nil
+}
+
 func (conn *managedPacketConn) Close() error {
 	conn.once.Do(func() {
 		conn.cancel()

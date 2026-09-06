@@ -48,3 +48,21 @@ derive-key mode, TCP and UDP framing, SOCKS addresses, AEAD authentication,
 timestamp validation, and replay tokens. Shadowsocks 2022 accepts canonical
 standard-base64 PSKs of exactly 16 or 32 bytes and never uses the legacy password
 KDF. Missing Host runtime endpoints fail closed at SDK validation.
+
+## Dataset routing
+
+The management page stores up to 16 scoped-secret upstreams and 64 ordered
+rules. Each rule selects one Host-managed dataset source and classification,
+including GeoSite attributes such as `category-ai` with `!cn`, then chooses
+`direct`, `reject`, or one upstream. The first match wins and the explicit
+default action applies after ordinary non-matches. A missing classification,
+unavailable dataset, disabled or protocol-incompatible upstream, failed dial,
+or failed upstream authentication stops the flow without a direct fallback.
+
+The Agent resolves immutable dataset references when applying a listener
+snapshot. TCP sessions retain that snapshot for their lifetime. Each UDP input
+uses one bounded 500 ms outbound association and may return multiple datagrams;
+separate inputs remain isolated and protocol replay checks remain active.
+Upstream endpoints are dialed directly and are never routed recursively.
+Diagnostics expose rule, source, classification, immutable version, selected
+exit, and stable failure codes. They never expose upstream secret material.

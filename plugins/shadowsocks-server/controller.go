@@ -23,6 +23,11 @@ type ListenCatalogStore interface {
 	StoreNodes(context.Context, map[string]NodeAddresses) error
 }
 
+type RoutingCatalogStore interface {
+	LoadRouting(context.Context) (RoutingConfiguration, bool, error)
+	StoreRouting(context.Context, RoutingConfiguration) error
+}
+
 type ControllerConfig struct {
 	PackageDigest, ArtifactDigest                              string
 	InstanceID                                                 string
@@ -257,6 +262,15 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 			}
 		}
 	}
+	if routingStore, ok := c.listenState.(RoutingCatalogStore); ok {
+		routing, found, routeErr := routingStore.LoadRouting(ctx)
+		if routeErr != nil {
+			return routeErr
+		}
+		if found {
+			configuration.Routing = routing
+		}
+	}
 	if len(restoredSecrets) > 0 && c.managedRuntime != nil && c.listenState != nil {
 		base := configuration
 		if restoredListeners != nil {
@@ -443,7 +457,7 @@ func safeControllerError(err error) error {
 const generationHandleScope = "service.revocable-resource-handle"
 
 func requiredGrants() []string {
-	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite}
+	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite, string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve)}
 }
 
 func supportedFeatures() []string {
@@ -452,7 +466,7 @@ func supportedFeatures() []string {
 }
 
 func requiredFeatures() []string {
-	return []string{pluginsdk.RPCFeatureManagedNetworkV1, pluginsdk.RPCFeatureScopedSecretsV1, pluginsdk.RPCFeatureRuntimeIdentityV1, pluginsdk.RPCFeatureExecutionScopeV1}
+	return []string{pluginsdk.RPCFeatureManagedNetworkV1, pluginsdk.RPCFeatureScopedSecretsV1, pluginsdk.RPCFeatureRuntimeIdentityV1, pluginsdk.RPCFeatureDatasetsV1, pluginsdk.RPCFeatureDatasetResolveV1, pluginsdk.RPCFeatureExecutionScopeV1}
 }
 
 type issuedSecrets struct {

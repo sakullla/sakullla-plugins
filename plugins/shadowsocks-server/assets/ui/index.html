@@ -92,6 +92,31 @@
         </div>
         <div id="listen-list" class="listen-list"></div>
       </section>
+      <section class="panel" id="routing-panel">
+        <div class="workspace-head"><div><h2>数据集分流</h2><p class="hint">按顺序匹配域名或 IP；上游失败不会回退直连。</p></div></div>
+        <form id="upstream-form" class="field-row">
+          <label>ID <input name="id" required placeholder="ai-upstream"></label>
+          <label>地址 <input name="host" required placeholder="203.0.113.20"></label>
+          <label>端口 <input name="port" type="number" min="1" max="65535" required value="8388"></label>
+          <label>加密 <select name="method"><option>2022-blake3-aes-128-gcm</option><option>2022-blake3-aes-256-gcm</option><option>aes-128-gcm</option><option>aes-256-gcm</option></select></label>
+          <label>客户端密码 <input name="password" type="password" required autocomplete="new-password"></label>
+          <label><input name="tcp" type="checkbox" checked> TCP</label><label><input name="udp" type="checkbox" checked> UDP</label>
+          <button class="btn-primary" type="submit">添加上游</button>
+        </form>
+        <div id="route-upstreams" class="listen-list"></div>
+        <form id="route-form" class="field-row">
+          <label>规则 ID <input name="id" required placeholder="ai-not-cn"></label>
+          <label>数据源 <input name="source_id" required placeholder="geosite"></label>
+          <label>分类 <input name="classification" required value="category-ai"></label>
+          <label>类型 <select name="kind"><option value="domain">域名</option><option value="cidr">CIDR</option><option value="country">国家</option><option value="region">地区</option></select></label>
+          <label>属性 <input name="attribute" placeholder="!cn"></label>
+          <label>动作 <select name="action"><option value="upstream">指定上游</option><option value="direct">直连</option><option value="reject">拒绝</option></select></label>
+          <label>上游 <select name="upstream_id" id="route-upstream-select"></select></label>
+          <button class="btn-primary" type="submit">添加规则</button>
+        </form>
+        <div id="route-rules" class="listen-list"></div>
+        <div class="field-row"><label>默认动作 <select id="route-default-action"><option value="direct">直连</option><option value="reject">拒绝</option><option value="upstream">指定上游</option></select></label><label>默认上游 <select id="route-default-upstream"></select></label><button id="route-save-default" class="btn-primary" type="button">保存默认路由</button></div>
+      </section>
     </section>
   </main>
   <dialog id="create-dialog" aria-labelledby="app-create-title">
