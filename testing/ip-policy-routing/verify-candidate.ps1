@@ -170,7 +170,7 @@ switch ($Suite) {
       Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'sdk', '--require-host-capabilities')
       Invoke-Checked $pluginRoot go @('test', './...')
       Invoke-Checked $pluginRoot cargo @('test', '--workspace', '--locked')
-      Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'reproducible', '--root', '.', '--output', 'dist', '--', 'pwsh', '-NoProfile', '-File', 'testing/ip-policy-routing/build-artifacts.ps1')
+      Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'reproducible', '--root', '.', '--output', 'dist/bin', '--', 'pwsh', '-NoProfile', '-File', 'testing/ip-policy-routing/build-artifacts.ps1')
       Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'repository', '--root', '.')
     }
     Invoke-Checked $pluginRoot go @('run', './cmd/nre-ci', 'plugin', '--id', 'ip-policy')
