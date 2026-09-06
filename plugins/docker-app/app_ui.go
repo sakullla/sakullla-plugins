@@ -235,7 +235,7 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 		}
 		agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
 		controller.publishHTTPBackendOffers(request.Context())
-		views, listErr := controller.projectAppViews(request.Context(), agentID, false)
+		views, listErr := controller.projectAppViews(request.Context(), agentID, false, false)
 		response := appAPIResponse{Apps: views, Access: struct {
 			CanRead  bool `json:"can_read"`
 			CanWrite bool `json:"can_write"`
@@ -365,7 +365,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			return
 		}
 		listed, listErr := controller.listHostHTTPRules(request.Context(), app.AgentID)
-		view := controller.appViewFor(request.Context(), app, listed, false)
+		view := controller.appViewFor(request.Context(), app, listed, true, true)
 		view.Compose = app.Compose
 		view.Env = app.Env
 		if listErr != nil {
@@ -568,6 +568,9 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 	composeChanged := nextCompose != updated.Compose
 	policyChanged := !mapsEqualString(updated.ImageLocks, app.ImageLocks) || !ignoredUpdatesEqual(updated.IgnoredUpdates, app.IgnoredUpdates)
 	digestRequested := floatingDigestUpdateRequested(updated, serviceTags)
+	if digestRequested {
+		app = controller.rememberFloatingDigest(ctx, app, serviceTags)
+	}
 	if !composeChanged && !policyChanged && !digestRequested {
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
 		return nil
@@ -956,7 +959,7 @@ func (controller *Controller) appByID(appID string) (App, bool) {
 }
 
 func (controller *Controller) appCollectionResponse(ctx context.Context, agentID string) appAPIResponse {
-	views, listErr := controller.projectAppViews(ctx, agentID, true)
+	views, listErr := controller.projectAppViews(ctx, agentID, true, false)
 	response := appAPIResponse{Apps: views}
 	if listErr != nil {
 		response.Error = publicAppActionError(listErr, "http-rule-list")
@@ -964,7 +967,7 @@ func (controller *Controller) appCollectionResponse(ctx context.Context, agentID
 	return response
 }
 
-func (controller *Controller) projectAppViews(ctx context.Context, agentID string, refreshTags bool) ([]appView, error) {
+func (controller *Controller) projectAppViews(ctx context.Context, agentID string, refreshTags, refreshDigests bool) ([]appView, error) {
 	apps := controller.Apps()
 	views := make([]appView, 0, len(apps))
 	rulesByAgent := map[string][]HostHTTPRule{}
@@ -988,7 +991,7 @@ func (controller *Controller) projectAppViews(ctx context.Context, agentID strin
 			}
 			listed = cached
 		}
-		view := controller.appViewFor(ctx, app, listed, refreshTags)
+		view := controller.appViewFor(ctx, app, listed, refreshTags, refreshDigests)
 		if err := ruleErrorsByAgent[app.AgentID]; err != nil {
 			view.RulesError = publicAppActionError(err, "http-rule-list")
 		}
@@ -1023,7 +1026,7 @@ func (controller *Controller) publishHTTPBackendOffers(ctx context.Context) {
 	_ = controller.uiHTTPBackendOffer.ReplaceHTTPBackendOffers(ctx, offers)
 }
 
-func (controller *Controller) appViewFor(ctx context.Context, app App, listed []HostHTTPRule, refreshTags bool) appView {
+func (controller *Controller) appViewFor(ctx context.Context, app App, listed []HostHTTPRule, refreshTags, refreshDigests bool) appView {
 	running := controller.appIsRunning(app.ID)
 	latest := controller.cachedLatestDigest(app)
 	controller.scheduleImageObservation(app)
@@ -1033,7 +1036,7 @@ func (controller *Controller) appViewFor(ctx context.Context, app App, listed []
 			deployment = record.Value
 		}
 	}
-	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app, refreshTags))
+	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app, refreshTags), controller.serviceDigestAvailability(ctx, app, deployment, refreshDigests))
 	ports := view.Ports
 	if len(ports) == 0 {
 		ports, _ = ListPublishedPorts(app, nil)
@@ -1084,29 +1087,117 @@ func (controller *Controller) cachedLatestDigest(app App) string {
 	return cached.LatestDigest
 }
 
-func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh bool) map[string][]string {
+func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh bool) map[string]serviceTagListing {
 	images := appServiceImages(app)
 	if len(images) == 0 {
 		return nil
 	}
 	lister := asImageTagLister(controller.uiImageObserver)
-	result := make(map[string][]string, len(images))
+	result := make(map[string]serviceTagListing, len(images))
 	for _, service := range images {
 		if tags, ok := controller.cachedImageTags(app.ID, service.Image); ok {
-			result[service.Name] = tags
+			result[service.Name] = serviceTagListing{Tags: tags, Known: true}
 			continue
 		}
+		failed := controller.cachedImageTagFailed(app.ID, service.Image)
 		if !refresh || lister == nil {
+			if failed {
+				result[service.Name] = serviceTagListing{Failed: true}
+			}
 			continue
 		}
 		listed, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
 		if err != nil {
+			controller.storeImageTagFailure(app.ID, service.Image)
+			result[service.Name] = serviceTagListing{Failed: true}
 			continue
 		}
+		if listed == nil {
+			listed = []string{}
+		}
 		controller.storeImageTags(app.ID, service.Image, listed)
-		result[service.Name] = listed
+		result[service.Name] = serviceTagListing{Tags: listed, Known: true}
 	}
 	return result
+}
+
+func (controller *Controller) serviceDigestAvailability(ctx context.Context, app App, deployment Deployment, refresh bool) map[string]serviceDigestState {
+	images := appServiceImages(app)
+	if len(images) == 0 {
+		return nil
+	}
+	result := make(map[string]serviceDigestState, len(images))
+	for _, service := range images {
+		if _, _, ok := ParseSemverTag(service.Image); ok {
+			continue
+		}
+		current, latest, ok := controller.cachedServiceDigest(app.ID, service.Image)
+		if !ok && refresh && controller.uiImageObserver != nil {
+			observed, err := controller.uiImageObserver.ObserveImage(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
+			if err == nil {
+				current, latest = observed.CurrentDigest, observed.LatestDigest
+				controller.storeServiceDigest(app.ID, service.Image, current, latest)
+				ok = current != "" && latest != ""
+			}
+		}
+		if service.Image == app.Image {
+			appLatest := controller.cachedLatestDigest(app)
+			if appLatest == "" {
+				appLatest = latest
+			}
+			if appImageUpdateAvailable(deployment, appLatest) {
+				result[service.Name] = serviceDigestState{Available: true}
+				continue
+			}
+			if ok && current != "" && latest != "" && current == latest {
+				result[service.Name] = serviceDigestState{Current: true}
+			} else if deployment.ImageDigest != "" && (appLatest == "" || deployment.ImageDigest == appLatest) {
+				result[service.Name] = serviceDigestState{Current: true}
+			}
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if current != "" && latest != "" && current != latest {
+			result[service.Name] = serviceDigestState{Available: true}
+			continue
+		}
+		if current != "" && latest != "" {
+			result[service.Name] = serviceDigestState{Current: true}
+		}
+	}
+	return result
+}
+
+func (controller *Controller) rememberFloatingDigest(ctx context.Context, app App, serviceTags map[string]string) App {
+	if controller.uiRollout.Store == nil {
+		return app
+	}
+	for _, service := range appServiceImages(app) {
+		want, ok := serviceTags[service.Name]
+		if !ok || extractDockerTag(service.Image) != extractDockerTag(want) {
+			continue
+		}
+		if _, _, semver := ParseSemverTag(service.Image); semver {
+			continue
+		}
+		app.Image = service.Image
+		current, latest, cached := controller.cachedServiceDigest(app.ID, service.Image)
+		if !cached && controller.uiImageObserver != nil {
+			if observed, err := controller.uiImageObserver.ObserveImage(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image}); err == nil {
+				current, latest = observed.CurrentDigest, observed.LatestDigest
+				controller.storeServiceDigest(app.ID, service.Image, current, latest)
+			}
+		}
+		if current == "" || latest == "" || current == latest {
+			return app
+		}
+		disabled := false
+		_, _ = controller.uiRollout.AutoUpdate(ctx, app, &disabled, UpdateObservation{CurrentDigest: current, LatestDigest: latest})
+		return app
+	}
+	return app
 }
 
 func appServiceImages(app App) []ServiceImage {
@@ -1201,6 +1292,16 @@ func (controller *Controller) cachedImageTags(appID, image string) ([]string, bo
 	return append([]string(nil), tags...), true
 }
 
+func (controller *Controller) cachedImageTagFailed(appID, image string) bool {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached, ok := controller.imageCache[appID]
+	if !ok || imageObservationExpired(cached.ObservedAt) {
+		return false
+	}
+	return cached.FailedByImage[image]
+}
+
 func (controller *Controller) storeImageTags(appID, image string, tags []string) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
@@ -1209,6 +1310,54 @@ func (controller *Controller) storeImageTags(appID, image string, tags []string)
 		cached.TagsByImage = map[string][]string{}
 	}
 	cached.TagsByImage[image] = append([]string(nil), tags...)
+	if cached.FailedByImage != nil {
+		delete(cached.FailedByImage, image)
+	}
+	if cached.ObservedAt.IsZero() {
+		cached.ObservedAt = time.Now()
+	}
+	controller.imageCache[appID] = cached
+}
+
+func (controller *Controller) storeImageTagFailure(appID, image string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached := controller.imageCache[appID]
+	if cached.TagsByImage != nil {
+		delete(cached.TagsByImage, image)
+	}
+	if cached.FailedByImage == nil {
+		cached.FailedByImage = map[string]bool{}
+	}
+	cached.FailedByImage[image] = true
+	if cached.ObservedAt.IsZero() {
+		cached.ObservedAt = time.Now()
+	}
+	controller.imageCache[appID] = cached
+}
+
+func (controller *Controller) cachedServiceDigest(appID, image string) (current, latest string, ok bool) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached, cachedOK := controller.imageCache[appID]
+	if !cachedOK || cached.DigestsByImage == nil || imageObservationExpired(cached.ObservedAt) {
+		return "", "", false
+	}
+	digest, ok := cached.DigestsByImage[image]
+	if !ok || digest.Current == "" || digest.Latest == "" {
+		return "", "", false
+	}
+	return digest.Current, digest.Latest, true
+}
+
+func (controller *Controller) storeServiceDigest(appID, image, current, latest string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	cached := controller.imageCache[appID]
+	if cached.DigestsByImage == nil {
+		cached.DigestsByImage = map[string]cachedImageDigest{}
+	}
+	cached.DigestsByImage[image] = cachedImageDigest{Current: current, Latest: latest}
 	if cached.ObservedAt.IsZero() {
 		cached.ObservedAt = time.Now()
 	}
@@ -1249,9 +1398,13 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	observed, err := controller.uiImageObserver.ObserveImage(ctx, app)
+	observeOK := err == nil
+	if !observeOK {
+		observed = UpdateObservation{}
+	}
 	controller.mu.Lock()
-	_, ok := controller.snapshotObservationLocked(app, token, epoch)
-	if err != nil || !ok {
+	live, ok := controller.snapshotObservationLocked(app, token, epoch)
+	if !ok {
 		controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 		controller.mu.Unlock()
 		return
@@ -1263,7 +1416,7 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		return controller.snapshotObservationLocked(app, token, epoch)
 	})
 	controller.mu.Lock()
-	live, ok := controller.snapshotObservationLocked(app, token, epoch)
+	live, ok = controller.snapshotObservationLocked(app, token, epoch)
 	controller.mu.Unlock()
 	if !ok {
 		controller.mu.Lock()
@@ -1275,7 +1428,12 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	if tags := tagsByServiceName(live, listed); len(tags) > 0 {
 		observed.TagsByService = tags
 	}
-	view, autoErr := controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
+	extraDigests := controller.observeFloatingServiceDigests(ctx, live)
+	var view UpdateView
+	var autoErr error
+	if observeOK {
+		view, autoErr = controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
+	}
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)
 	_, still := controller.snapshotObservationLocked(app, token, epoch)
@@ -1285,15 +1443,29 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		cached.Image = live.Image
 		cached.LatestDigest = observed.LatestDigest
 		cached.ObservedAt = time.Now()
+		if cached.DigestsByImage == nil {
+			cached.DigestsByImage = map[string]cachedImageDigest{}
+		}
+		if observeOK && (observed.CurrentDigest != "" || observed.LatestDigest != "") {
+			cached.DigestsByImage[live.Image] = cachedImageDigest{Current: observed.CurrentDigest, Latest: observed.LatestDigest}
+		}
+		for image, digest := range extraDigests {
+			cached.DigestsByImage[image] = digest
+		}
 		if listed != nil || len(failed) > 0 {
 			if cached.TagsByImage == nil {
 				cached.TagsByImage = map[string][]string{}
 			}
+			if cached.FailedByImage == nil {
+				cached.FailedByImage = map[string]bool{}
+			}
 			for image, tags := range listed {
 				cached.TagsByImage[image] = append([]string(nil), tags...)
+				delete(cached.FailedByImage, image)
 			}
 			for _, image := range failed {
 				delete(cached.TagsByImage, image)
+				cached.FailedByImage[image] = true
 			}
 		}
 		controller.imageCache[app.ID] = cached
@@ -1308,6 +1480,31 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		_ = controller.setAppRunning(ctx, live.ID, true)
 		controller.publishHTTPBackendOffers(ctx)
 	}
+}
+
+func (controller *Controller) observeFloatingServiceDigests(ctx context.Context, app App) map[string]cachedImageDigest {
+	if controller.uiImageObserver == nil {
+		return nil
+	}
+	result := map[string]cachedImageDigest{}
+	for _, service := range appServiceImages(app) {
+		image := strings.TrimSpace(service.Image)
+		if image == "" || image == app.Image {
+			continue
+		}
+		if _, _, ok := ParseSemverTag(image); ok {
+			continue
+		}
+		observed, err := controller.uiImageObserver.ObserveImage(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: image})
+		if err != nil || (observed.CurrentDigest == "" && observed.LatestDigest == "") {
+			continue
+		}
+		result[image] = cachedImageDigest{Current: observed.CurrentDigest, Latest: observed.LatestDigest}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (controller *Controller) snapshotObservationLocked(app App, token, epoch uint64) (App, bool) {
@@ -1341,14 +1538,14 @@ func (controller *Controller) catalogHasAppIDLocked(appID string) bool {
 	return false
 }
 
-func projectAppView(app App, running bool, deployment Deployment, latestDigest string, tagsByService map[string][]string) appView {
+func projectAppView(app App, running bool, deployment Deployment, latestDigest string, tagsByService map[string]serviceTagListing, digestByService map[string]serviceDigestState) appView {
 	name := app.ID
 	if name == "" {
 		name = "未命名应用"
 	}
 	status := ProjectPopularStatus(appLifecycleStatus(running, false, deployment))
 	digestAvailable := appImageUpdateAvailable(deployment, latestDigest)
-	services, hasUpdate := projectServiceViews(app, tagsByService, digestAvailable)
+	services, hasUpdate := projectServiceViews(app, tagsByService, digestByService)
 	if !hasUpdate && len(services) == 0 && appHasFloatingImage(app) && digestAvailable {
 		hasUpdate = true
 	}
@@ -1436,7 +1633,7 @@ func (controller *Controller) deleteListedAppHTTPRules(ctx context.Context, app 
 	if err != nil {
 		return false, err
 	}
-	view := controller.appViewFor(ctx, app, listed, false)
+	view := controller.appViewFor(ctx, app, listed, false, false)
 	refs := make([]string, 0, len(view.Rules))
 	for _, rule := range view.Rules {
 		if strings.TrimSpace(rule.Ref) != "" {

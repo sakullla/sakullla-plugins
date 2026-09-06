@@ -23,6 +23,15 @@ type appIgnoredUpdate struct {
 	Clear   bool   `json:"clear"`
 }
 
+const (
+	serviceListingPending = "pending"
+	serviceListingFailed  = "failed"
+
+	serviceListingPendingMessage = "正在列出仓库版本"
+	serviceListingFailedMessage  = "暂时无法列出仓库版本"
+	serviceDigestCurrentMessage  = "已是该 tag 当前镜像"
+)
+
 type appServiceView struct {
 	Name        string          `json:"name"`
 	Image       string          `json:"image,omitempty"`
@@ -34,6 +43,19 @@ type appServiceView struct {
 	Candidates  []appCandidate  `json:"candidates,omitempty"`
 	LockOptions []appLockOption `json:"lock_options,omitempty"`
 	Unknown     bool            `json:"unknown,omitempty"`
+	Listing     string          `json:"listing,omitempty"`
+	Message     string          `json:"message,omitempty"`
+}
+
+type serviceTagListing struct {
+	Tags   []string
+	Failed bool
+	Known  bool
+}
+
+type serviceDigestState struct {
+	Available bool
+	Current   bool
 }
 
 type appCandidate struct {
@@ -48,7 +70,7 @@ type appLockOption struct {
 	Constraint string `json:"constraint,omitempty"`
 }
 
-func projectServiceViews(app App, tagsByService map[string][]string, digestAvailable bool) ([]appServiceView, bool) {
+func projectServiceViews(app App, tagsByService map[string]serviceTagListing, digestByService map[string]serviceDigestState) ([]appServiceView, bool) {
 	images := app.ServiceImages
 	if len(images) == 0 {
 		images = composeServiceImages(app.Compose)
@@ -59,7 +81,7 @@ func projectServiceViews(app App, tagsByService map[string][]string, digestAvail
 	views := make([]appServiceView, 0, len(images))
 	hasUpdate := false
 	for _, service := range images {
-		view := projectServiceView(app, service, tagsByService[service.Name], digestAvailable)
+		view := projectServiceView(app, service, tagsByService[service.Name], digestByService[service.Name])
 		if view.Update {
 			hasUpdate = true
 		}
@@ -68,7 +90,7 @@ func projectServiceViews(app App, tagsByService map[string][]string, digestAvail
 	return views, hasUpdate
 }
 
-func projectServiceView(app App, service ServiceImage, tags []string, digestAvailable bool) appServiceView {
+func projectServiceView(app App, service ServiceImage, listing serviceTagListing, digest serviceDigestState) appServiceView {
 	tag := extractDockerTag(service.Image)
 	ignored := append([]string(nil), app.IgnoredUpdates[service.Name]...)
 	lock := strings.TrimSpace(app.ImageLocks[service.Name])
@@ -82,18 +104,28 @@ func projectServiceView(app App, service ServiceImage, tags []string, digestAvai
 	}
 	_, _, semver := ParseSemverTag(service.Image)
 	if !semver {
-		if digestAvailable && tag != "" && !ignoredUpdateTag(tag, ignored) {
+		if digest.Available && tag != "" && !ignoredUpdateTag(tag, ignored) {
 			view.Update = true
 			view.DefaultTag = tag
 			view.Candidates = []appCandidate{{Tag: tag, Digest: true}}
+			return view
+		}
+		if digest.Current {
+			view.Message = serviceDigestCurrentMessage
 		}
 		return view
 	}
-	if tags == nil {
-		view.Unknown = true
+	if !listing.Known {
+		if listing.Failed {
+			view.Listing = serviceListingFailed
+			view.Message = serviceListingFailedMessage
+			return view
+		}
+		view.Listing = serviceListingPending
+		view.Message = serviceListingPendingMessage
 		return view
 	}
-	allowed := allowedServiceCandidates(service.Image, tags, lock, ignored)
+	allowed := allowedServiceCandidates(service.Image, listing.Tags, lock, ignored)
 	if len(allowed) == 0 {
 		return view
 	}

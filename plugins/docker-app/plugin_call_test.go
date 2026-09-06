@@ -1984,6 +1984,44 @@ func TestControllerCallImageObserveComparesRepoDigestWithRegistryManifest(t *tes
 	})
 }
 
+func TestControllerCallImageObserveUsesNodeArchitectureDigest(t *testing.T) {
+	t.Parallel()
+	index := "sha256:" + strings.Repeat("a", 64)
+	amd64Old := "sha256:" + strings.Repeat("b", 64)
+	amd64New := "sha256:" + strings.Repeat("c", 64)
+	arm64 := "sha256:" + strings.Repeat("d", 64)
+	current := "miaospeed@" + amd64Old
+	verbose := `[{"Descriptor":{"digest":"` + amd64New + `","platform":{"architecture":"amd64","os":"linux"}}},{"Descriptor":{"digest":"` + arm64 + `","platform":{"architecture":"arm64","os":"linux"}}}]`
+
+	var argv [][]string
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		argv = append(argv, append([]string{name}, args...))
+		switch dockerObserveCommand(name, args) {
+		case "image-inspect":
+			return []byte("amd64\n" + current + "\n"), nil
+		case "manifest-inspect":
+			return []byte(verbose), nil
+		case "imagetools":
+			return []byte(`{"Manifest":{"Digest":"` + index + `"}}`), nil
+		default:
+			t.Fatalf("unexpected command %s %q", name, args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	decoded := callImageObserve(t, runner, "airportr/miaospeed:latest")
+	wantLatest := sameFormDigest(current, amd64New)
+	if decoded["current_digest"] != current {
+		t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
+	}
+	if decoded["latest_digest"] != wantLatest {
+		t.Fatalf("latest_digest=%q want node-arch %q, not index %q or arm64 %q", decoded["latest_digest"], wantLatest, sameFormDigest(current, index), sameFormDigest(current, arm64))
+	}
+	if decoded["latest_digest"] == sameFormDigest(current, index) || decoded["latest_digest"] == sameFormDigest(current, arm64) {
+		t.Fatal("latest_digest used index or another Hub architecture")
+	}
+	assertNoImageMutation(t, argv)
+}
+
 func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T) {
 	t.Parallel()
 	current := "nginx@sha256:" + strings.Repeat("c", 64)

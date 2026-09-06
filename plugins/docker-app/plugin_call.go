@@ -85,7 +85,7 @@ type fileListEntry struct {
 }
 
 const (
-	localImageDigestFormat      = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}"
+	localImageDigestFormat      = "{{.Architecture}}\n{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}"
 	registryImagetoolsFormat    = "{{.Manifest.Digest}}"
 	emptyImageDigestMessage     = "image digest is empty"
 	imageObserveRequiredMessage = "image is required"
@@ -914,12 +914,12 @@ func (controller *Controller) callImageObserve(ctx context.Context, request imag
 	if strings.TrimSpace(request.Image) == "" {
 		return nil, errors.New(imageObserveRequiredMessage)
 	}
-	current, err := controller.dockerImageDigest(ctx, request.Image)
+	current, arch, err := controller.dockerImageInspect(ctx, request.Image)
 	if err != nil {
 		return nil, err
 	}
 	latest := current
-	if registry := controller.dockerRegistryDigest(ctx, request.Image); registry != "" {
+	if registry := controller.dockerRegistryDigest(ctx, request.Image, current, arch); registry != "" {
 		if formed := sameFormDigest(current, registry); formed != "" {
 			latest = formed
 		}
@@ -1174,31 +1174,40 @@ func unusableDockerVersion(line string) bool {
 }
 
 func (controller *Controller) dockerImageDigest(ctx context.Context, image string) (string, error) {
-	output, err := controller.runCommand(ctx, "", "docker", "image", "inspect", "--format", localImageDigestFormat, image)
-	if err != nil {
-		return "", sanitizeDockerError(err, emptyImageDigestMessage)
-	}
-	digest := parseLocalImageDigest(output)
-	if digest == "" {
-		return "", errors.New(emptyImageDigestMessage)
-	}
-	return digest, nil
+	digest, _, err := controller.dockerImageInspect(ctx, image)
+	return digest, err
 }
 
-func (controller *Controller) dockerRegistryDigest(ctx context.Context, image string) string {
+func (controller *Controller) dockerImageInspect(ctx context.Context, image string) (digest, arch string, err error) {
+	output, err := controller.runCommand(ctx, "", "docker", "image", "inspect", "--format", localImageDigestFormat, image)
+	if err != nil {
+		return "", "", sanitizeDockerError(err, emptyImageDigestMessage)
+	}
+	digest, arch = parseLocalImageInspect(output)
+	if digest == "" {
+		return "", "", errors.New(emptyImageDigestMessage)
+	}
+	return digest, arch, nil
+}
+
+func (controller *Controller) dockerRegistryDigest(ctx context.Context, image, current, arch string) string {
+	var index string
 	output, err := controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image)
 	if err == nil {
-		if digest := parseRegistryDigest(output); digest != "" {
-			return digest
-		}
+		index = parseRegistryDigest(output)
 	}
+	var platforms []registryPlatformDigest
 	output, err = controller.runCommand(ctx, "", "docker", "manifest", "inspect", "--verbose", image)
 	if err == nil {
-		if digest := parseRegistryDigest(output); digest != "" {
-			return digest
+		platforms = parseRegistryPlatforms(output)
+		if index == "" {
+			index = parseRegistryDigest(output)
 		}
 	}
-	return ""
+	if resolved := resolveRegistryDigest(current, index, platforms, arch); resolved != "" {
+		return resolved
+	}
+	return index
 }
 
 func (controller *Controller) runCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
@@ -1356,17 +1365,145 @@ func agentIDFromPayload(payload []byte) (string, error) {
 }
 
 func parseLocalImageDigest(output []byte) string {
+	digest, _ := parseLocalImageInspect(output)
+	return digest
+}
+
+func parseLocalImageInspect(output []byte) (digest, arch string) {
 	text := normalizeCommandOutput(output)
-	if digest := imageDigestValue(text); digest != "" {
-		return digest
-	}
 	var payload any
 	if json.Unmarshal([]byte(text), &payload) == nil {
-		if digest := localDigestFromInspectJSON(payload); digest != "" {
-			return digest
+		return localDigestFromInspectJSON(payload), architectureFromInspectJSON(payload)
+	}
+	lines := strings.Split(text, "\n")
+	rest := text
+	if len(lines) > 1 {
+		first := strings.TrimSpace(lines[0])
+		if first != "" && first != "<no value>" && imageDigestValue(first) == "" {
+			arch = normalizeDockerArch(first)
+			rest = strings.TrimSpace(strings.Join(lines[1:], "\n"))
 		}
 	}
-	return firstLineDigest(text)
+	if digest = imageDigestValue(rest); digest != "" {
+		return digest, arch
+	}
+	return firstLineDigest(rest), arch
+}
+
+type registryPlatformDigest struct {
+	Arch   string
+	Digest string
+}
+
+func parseRegistryPlatforms(output []byte) []registryPlatformDigest {
+	text := normalizeCommandOutput(output)
+	var payload any
+	if json.Unmarshal([]byte(text), &payload) != nil {
+		return nil
+	}
+	return registryPlatformsFromJSON(payload)
+}
+
+func registryPlatformsFromJSON(payload any) []registryPlatformDigest {
+	switch typed := payload.(type) {
+	case []any:
+		out := make([]registryPlatformDigest, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, registryPlatformsFromJSON(item)...)
+		}
+		return out
+	case map[string]any:
+		if manifests, ok := typed["manifests"].([]any); ok {
+			return registryPlatformsFromJSON(manifests)
+		}
+		if nested, ok := typed["Descriptor"].(map[string]any); ok {
+			if platform := registryPlatformFromDescriptor(nested); platform.Digest != "" {
+				return []registryPlatformDigest{platform}
+			}
+		}
+		if nested, ok := typed["descriptor"].(map[string]any); ok {
+			if platform := registryPlatformFromDescriptor(nested); platform.Digest != "" {
+				return []registryPlatformDigest{platform}
+			}
+		}
+		if platform := registryPlatformFromDescriptor(typed); platform.Digest != "" && platform.Arch != "" {
+			return []registryPlatformDigest{platform}
+		}
+	}
+	return nil
+}
+
+func registryPlatformFromDescriptor(payload map[string]any) registryPlatformDigest {
+	digest := imageDigestValue(stringField(payload, "digest"))
+	if digest == "" {
+		digest = imageDigestValue(stringField(payload, "Digest"))
+	}
+	arch := architectureFromInspectJSON(payload)
+	if nested, ok := payload["platform"].(map[string]any); ok {
+		if value := architectureFromInspectJSON(nested); value != "" {
+			arch = value
+		}
+	}
+	if nested, ok := payload["Platform"].(map[string]any); ok {
+		if value := architectureFromInspectJSON(nested); value != "" {
+			arch = value
+		}
+	}
+	return registryPlatformDigest{Arch: arch, Digest: digest}
+}
+
+func architectureFromInspectJSON(payload any) string {
+	typed, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"Architecture", "architecture", "Arch", "arch"} {
+		if arch := normalizeDockerArch(stringField(typed, key)); arch != "" {
+			return arch
+		}
+	}
+	return ""
+}
+
+func normalizeDockerArch(arch string) string {
+	switch strings.ToLower(strings.TrimSpace(arch)) {
+	case "":
+		return ""
+	case "x86_64", "x86-64", "amd64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	case "armhf", "armv7l", "arm/v7":
+		return "arm"
+	default:
+		return strings.ToLower(strings.TrimSpace(arch))
+	}
+}
+
+func resolveRegistryDigest(current, index string, platforms []registryPlatformDigest, arch string) string {
+	currentCore := digestCore(current)
+	if currentCore == "" {
+		return ""
+	}
+	if indexCore := digestCore(index); indexCore != "" && indexCore == currentCore {
+		return sameFormDigest(current, index)
+	}
+	arch = normalizeDockerArch(arch)
+	if arch != "" {
+		for _, platform := range platforms {
+			if platform.Arch == arch {
+				if formed := sameFormDigest(current, platform.Digest); formed != "" {
+					return formed
+				}
+			}
+		}
+	}
+	for _, platform := range platforms {
+		if digestCore(platform.Digest) == currentCore {
+			return sameFormDigest(current, platform.Digest)
+		}
+	}
+	return sameFormDigest(current, index)
 }
 
 func parseRegistryDigest(output []byte) string {

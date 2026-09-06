@@ -655,3 +655,89 @@ func updateHarness(t *testing.T, fail string) (*dockerapp.DeploymentStore, *roll
 func boolPtr(value bool) *bool {
 	return &value
 }
+
+func TestDockerUnlockedFrpcHubTagsIncludeZeroMinorBump(t *testing.T) {
+	t.Parallel()
+	tags := []string{"v0.68.1", "v0.71.0", "v0.71.1", "latest"}
+	got := dockerapp.SelectSemverCandidates("fatedier/frpc:v0.68.1", tags, "")
+	if strings.Join(got, ",") != "v0.71.1,v0.71.0" {
+		t.Fatalf("unlocked candidates=%v", got)
+	}
+	caret := dockerapp.SelectSemverCandidates("fatedier/frpc:v0.68.1", tags, "^0.68.1")
+	if len(caret) != 0 {
+		t.Fatalf("caret auto-update jumped 0.x: %v", caret)
+	}
+}
+
+func TestDockerFrpcMiaospeedComposeProjectsIndependentImages(t *testing.T) {
+	t.Parallel()
+	document := []byte(`{"apps":[{"id":"proxy","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n","generation":"generation-1"}]}`)
+	got, err := dockerapp.ParseConfiguration(document)
+	if err != nil || len(got.Apps) != 1 {
+		t.Fatalf("parse=%#v err=%v", got, err)
+	}
+	app := got.Apps[0]
+	if app.AutoUpdate != nil || dockerapp.AutoUpdateEnabled(app.AutoUpdate) || dockerapp.DefaultAutoUpdate {
+		t.Fatalf("auto_update must default off: %#v", app)
+	}
+	if app.Image != "fatedier/frpc:v0.68.1" {
+		t.Fatalf("lexically first image=%q", app.Image)
+	}
+	images := dockerapp.ComposeServiceImages(app.Compose)
+	if len(images) != 2 || images[0].Name != "frpc" || images[0].Image != "fatedier/frpc:v0.68.1" || images[1].Name != "miaospeed" || images[1].Image != "airportr/miaospeed:latest" {
+		t.Fatalf("service images=%#v", images)
+	}
+
+	store := dockerapp.NewDeploymentStore()
+	fake := &rolloutFake{}
+	rollout := dockerapp.Rollout{
+		Store:    store,
+		Executor: fake,
+		Auditor:  dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {}),
+	}
+	view, err := rollout.AutoUpdate(context.Background(), app, boolPtr(true), dockerapp.UpdateObservation{
+		CurrentDigest: "sha256:frpc",
+		LatestDigest:  "sha256:frpc",
+		TagsByService: map[string][]string{"frpc": {"v0.71.0", "v0.71.1"}},
+	})
+	if err != nil || view.Published || strings.Contains(view.Compose, "v0.71") {
+		t.Fatalf("auto_update jumped 0.x: view=%#v err=%v", view, err)
+	}
+	if !strings.Contains(app.Compose, "fatedier/frpc:v0.68.1") || strings.Contains(app.Compose, "v0.71") {
+		t.Fatalf("catalog frpc rewritten without confirm: %q", app.Compose)
+	}
+}
+
+func TestDockerMiaospeedLatestDigestConfirmKeepsFloatingTag(t *testing.T) {
+	t.Parallel()
+	compose := "services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"
+	app := dockerapp.App{
+		ID:         "proxy",
+		Image:      "airportr/miaospeed:latest",
+		Compose:    compose,
+		Generation: "generation-1",
+	}
+	store := dockerapp.NewDeploymentStore()
+	fake := &rolloutFake{}
+	rollout := dockerapp.Rollout{
+		Store:    store,
+		Executor: fake,
+		Auditor:  dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {}),
+	}
+	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{
+		CurrentDigest: "sha256:0123456789abcdef0123456789abcdef",
+		LatestDigest:  "sha256:c170021a597490ffd29c96426440c394b65333bc67ac557d8a0e30569765bba9",
+	})
+	if err != nil || view.AutoUpdate || !view.HasUpdate || view.Published || len(fake.calls) != 0 {
+		t.Fatalf("digest projection view=%#v calls=%v err=%v", view, fake.calls, err)
+	}
+	if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(app.Compose, "airportr/miaospeed:latest") || strings.Contains(app.Compose, "4.7.4") {
+		t.Fatalf("confirm rewrote latest: %q", app.Compose)
+	}
+	if !strings.Contains(app.Compose, "fatedier/frpc:v0.68.1") {
+		t.Fatalf("confirm rewrote frpc: %q", app.Compose)
+	}
+}

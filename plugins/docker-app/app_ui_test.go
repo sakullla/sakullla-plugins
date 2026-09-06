@@ -2732,6 +2732,100 @@ func TestAppUIManualUpdateFollowsFloatingDigest(t *testing.T) {
 	}
 }
 
+func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
+	t.Parallel()
+	miaospeedCurrent := "sha256:0123456789abcdef0123456789abcdef"
+	miaospeedLatest := "sha256:c170021a597490ffd29c96426440c394b65333bc67ac557d8a0e30569765bba9"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{
+			tagsByImage: map[string][]string{
+				"fatedier/frpc:v0.68.1": {"v0.68.1", "v0.71.0", "v0.71.1", "latest"},
+			},
+			digestByImage: map[string]uiTestDigest{
+				"fatedier/frpc:v0.68.1":     {current: "sha256:frpc", latest: "sha256:frpc"},
+				"airportr/miaospeed:latest": {current: miaospeedCurrent, latest: miaospeedLatest},
+			},
+		},
+		rollout: &uiTestRollout{},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	if len(controller.Apps()) != 1 || AutoUpdateEnabled(controller.Apps()[0].AutoUpdate) {
+		t.Fatalf("auto_update must default off: %#v", controller.Apps()[0].AutoUpdate)
+	}
+	controller.mu.Lock()
+	delete(controller.imageCache, "proxy")
+	controller.mu.Unlock()
+
+	detail := httptest.NewRecorder()
+	controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/proxy", ""))
+	app := decodeAppDetail(t, detail.Body.Bytes())
+	if detail.Code != http.StatusOK || app.Notice != OpsStatusUpdateAvailable {
+		t.Fatalf("detail view=%#v body=%s", app, detail.Body.String())
+	}
+	if len(app.ServiceImages) != 2 {
+		t.Fatalf("services=%#v", app.ServiceImages)
+	}
+	frpc := serviceViewByName(t, app.ServiceImages, "frpc")
+	if frpc.Unknown || frpc.Listing != "" || frpc.DefaultTag != "v0.71.1" {
+		t.Fatalf("frpc view=%#v", frpc)
+	}
+	got := make([]string, 0, len(frpc.Candidates))
+	for _, candidate := range frpc.Candidates {
+		got = append(got, candidate.Tag)
+	}
+	if strings.Join(got, ",") != "v0.71.1,v0.71.0" {
+		t.Fatalf("frpc candidates=%v", got)
+	}
+	miaospeed := serviceViewByName(t, app.ServiceImages, "miaospeed")
+	if !miaospeed.Update || len(miaospeed.Candidates) != 1 || !miaospeed.Candidates[0].Digest || miaospeed.Candidates[0].Tag != "latest" {
+		t.Fatalf("miaospeed view=%#v", miaospeed)
+	}
+
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/proxy/update", `{"services":[{"name":"miaospeed","tag":"latest"}]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("miaospeed digest update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "miaospeed") != "airportr/miaospeed:latest" {
+		t.Fatalf("floating tag rewritten: %q", controller.Apps()[0].Compose)
+	}
+	if serviceImageRef(controller.Apps()[0].Compose, "frpc") != "fatedier/frpc:v0.68.1" {
+		t.Fatalf("frpc tag rewritten: %q", controller.Apps()[0].Compose)
+	}
+}
+
+func TestAppUIDetailFailedTagListingIsTemporary(t *testing.T) {
+	t.Parallel()
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{listErr: errors.New("hub unavailable")},
+	})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27.1\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	controller.mu.Lock()
+	delete(controller.imageCache, "media")
+	controller.mu.Unlock()
+	detail := httptest.NewRecorder()
+	controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/media", ""))
+	app := decodeAppDetail(t, detail.Body.Bytes())
+	if detail.Code != http.StatusOK || len(app.ServiceImages) != 1 {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	view := app.ServiceImages[0]
+	if view.Unknown || view.Listing != serviceListingFailed || view.Message != serviceListingFailedMessage {
+		t.Fatalf("failed listing view=%#v", view)
+	}
+	if strings.Contains(detail.Body.String(), "候选未知") {
+		t.Fatalf("failed listing still used unknown copy: %s", detail.Body.String())
+	}
+}
+
 func TestProjectServiceViewFloatingDigestCandidate(t *testing.T) {
 	t.Parallel()
 	app := App{
@@ -2740,22 +2834,78 @@ func TestProjectServiceViewFloatingDigestCandidate(t *testing.T) {
 		ServiceImages: []ServiceImage{{Name: "web", Image: "nginx:latest"}},
 		Compose:       "services:\n  web:\n    image: nginx:latest\n",
 	}
-	views, hasUpdate := projectServiceViews(app, nil, true)
+	views, hasUpdate := projectServiceViews(app, nil, map[string]serviceDigestState{"web": {Available: true}})
 	if !hasUpdate || len(views) != 1 || !views[0].Update || views[0].DefaultTag != "latest" {
 		t.Fatalf("digest-available view=%#v hasUpdate=%v", views, hasUpdate)
 	}
 	if len(views[0].Candidates) != 1 || !views[0].Candidates[0].Digest || views[0].Candidates[0].Tag != "latest" {
 		t.Fatalf("digest candidate=%#v", views[0].Candidates)
 	}
-	hidden, noUpdate := projectServiceViews(app, nil, false)
+	hidden, noUpdate := projectServiceViews(app, nil, nil)
 	if noUpdate || hidden[0].Update || len(hidden[0].Candidates) != 0 {
 		t.Fatalf("digest-unavailable still advertised: %#v hasUpdate=%v", hidden, noUpdate)
 	}
+	current, currentUpdate := projectServiceViews(app, nil, map[string]serviceDigestState{"web": {Current: true}})
+	if currentUpdate || current[0].Update || current[0].Message != serviceDigestCurrentMessage {
+		t.Fatalf("current digest view=%#v hasUpdate=%v", current, currentUpdate)
+	}
 	ignored := app
 	ignored.IgnoredUpdates = map[string][]string{"web": {"latest"}}
-	skipped, skippedUpdate := projectServiceViews(ignored, nil, true)
+	skipped, skippedUpdate := projectServiceViews(ignored, nil, map[string]serviceDigestState{"web": {Available: true}})
 	if skippedUpdate || skipped[0].Update {
 		t.Fatalf("ignored latest still advertised: %#v hasUpdate=%v", skipped, skippedUpdate)
+	}
+}
+
+func TestProjectServiceViewUnlockedFrpcIncludesHubMinorBump(t *testing.T) {
+	t.Parallel()
+	app := App{
+		ID:    "proxy",
+		Image: "fatedier/frpc:v0.68.1",
+		ServiceImages: []ServiceImage{
+			{Name: "frpc", Image: "fatedier/frpc:v0.68.1"},
+			{Name: "miaospeed", Image: "airportr/miaospeed:latest"},
+		},
+		Compose: "services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n",
+	}
+	tags := map[string]serviceTagListing{
+		"frpc": {Tags: []string{"v0.68.1", "v0.71.0", "v0.71.1", "latest"}, Known: true},
+	}
+	views, hasUpdate := projectServiceViews(app, tags, map[string]serviceDigestState{
+		"miaospeed": {Available: true},
+	})
+	if !hasUpdate || len(views) != 2 {
+		t.Fatalf("mixed view=%#v hasUpdate=%v", views, hasUpdate)
+	}
+	if views[0].Name != "frpc" || !views[0].Update || views[0].Unknown || views[0].Listing != "" {
+		t.Fatalf("frpc view=%#v", views[0])
+	}
+	got := make([]string, 0, len(views[0].Candidates))
+	for _, candidate := range views[0].Candidates {
+		got = append(got, candidate.Tag)
+	}
+	if strings.Join(got, ",") != "v0.71.1,v0.71.0" {
+		t.Fatalf("frpc candidates=%v", got)
+	}
+	if views[1].Name != "miaospeed" || !views[1].Update || len(views[1].Candidates) != 1 || !views[1].Candidates[0].Digest || views[1].Candidates[0].Tag != "latest" {
+		t.Fatalf("miaospeed view=%#v", views[1])
+	}
+}
+
+func TestProjectServiceViewFailedListingIsTemporary(t *testing.T) {
+	t.Parallel()
+	app := App{
+		ID:            "media",
+		Image:         "nginx:1.27.1",
+		ServiceImages: []ServiceImage{{Name: "web", Image: "nginx:1.27.1"}},
+	}
+	failed, hasUpdate := projectServiceViews(app, map[string]serviceTagListing{"web": {Failed: true}}, nil)
+	if hasUpdate || failed[0].Unknown || failed[0].Listing != serviceListingFailed || failed[0].Message != serviceListingFailedMessage {
+		t.Fatalf("failed listing view=%#v hasUpdate=%v", failed, hasUpdate)
+	}
+	pending, pendingUpdate := projectServiceViews(app, nil, nil)
+	if pendingUpdate || pending[0].Unknown || pending[0].Listing != serviceListingPending || pending[0].Message != serviceListingPendingMessage {
+		t.Fatalf("pending listing view=%#v hasUpdate=%v", pending, pendingUpdate)
 	}
 }
 
@@ -3061,13 +3211,13 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 		ServiceImages: []ServiceImage{{Name: "web", Image: "nginx:1.27.1"}},
 		Compose:       "services:\n  web:\n    image: nginx:1.27.1\n",
 	}
-	tags := map[string][]string{"web": nginxSemverTags()}
+	tags := map[string]serviceTagListing{"web": {Tags: nginxSemverTags(), Known: true}}
 	deployment := Deployment{
 		Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest",
 		History: []DeploymentRevision{{InstanceID: "old", Image: "old-image"}},
 	}
 
-	running := projectAppView(app, true, deployment, "sha256:latest", tags)
+	running := projectAppView(app, true, deployment, "sha256:latest", tags, nil)
 	if running.Status != OpsStatusRunning || running.Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("running update view=%#v", running)
 	}
@@ -3078,7 +3228,7 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 		t.Fatalf("running update omitted rollback: %#v", running.Actions)
 	}
 
-	stopped := projectAppView(app, false, deployment, "sha256:latest", tags)
+	stopped := projectAppView(app, false, deployment, "sha256:latest", tags, nil)
 	if stopped.Status != OpsStatusStopped || stopped.Notice != OpsStatusUpdateAvailable {
 		t.Fatalf("stopped update view=%#v", stopped)
 	}
@@ -3089,7 +3239,7 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 		t.Fatalf("stopped update omitted rollback: %#v", stopped.Actions)
 	}
 
-	withoutHistory := projectAppView(app, true, Deployment{Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest"}, "sha256:latest", tags)
+	withoutHistory := projectAppView(app, true, Deployment{Phase: PhaseActive, ImageDigest: "sha256:current", AvailableDigest: "sha256:latest"}, "sha256:latest", tags, nil)
 	if hasOpsAction(withoutHistory.Actions, OpsActionRollback) {
 		t.Fatalf("view without history offered rollback: %#v", withoutHistory.Actions)
 	}
@@ -3097,14 +3247,14 @@ func TestProjectAppViewKeepsLifecycleOpsAlongsideUpdateNotice(t *testing.T) {
 	enabled := true
 	auto := app
 	auto.AutoUpdate = &enabled
-	ignored := projectAppView(auto, true, deployment, "sha256:latest", tags)
+	ignored := projectAppView(auto, true, deployment, "sha256:latest", tags, nil)
 	if ignored.Notice != OpsStatusUpdateAvailable || !hasOpsAction(ignored.Actions, OpsActionUpdate) {
 		t.Fatalf("auto_update hid 有新版本: %#v", ignored)
 	}
 
 	pinned := app
 	pinned.IgnoredUpdates = map[string][]string{"web": {"1.27.2", "1.28.0", "2.0.0"}}
-	hidden := projectAppView(pinned, true, deployment, "sha256:latest", tags)
+	hidden := projectAppView(pinned, true, deployment, "sha256:latest", tags, nil)
 	if hidden.Notice == OpsStatusUpdateAvailable || hasOpsAction(hidden.Actions, OpsActionUpdate) {
 		t.Fatalf("ignored candidates still advertised: %#v", hidden)
 	}
@@ -4790,6 +4940,29 @@ func decodeAppList(t *testing.T, payload []byte) []uiAppView {
 	return decoded.Apps
 }
 
+func decodeAppDetail(t *testing.T, payload []byte) appView {
+	t.Helper()
+	var decoded appAPIResponse
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode app: %v body=%s", err, payload)
+	}
+	if decoded.App == nil {
+		t.Fatalf("missing app: %s", payload)
+	}
+	return *decoded.App
+}
+
+func serviceViewByName(t *testing.T, views []appServiceView, name string) appServiceView {
+	t.Helper()
+	for _, view := range views {
+		if view.Name == name {
+			return view
+		}
+	}
+	t.Fatalf("service %s missing: %#v", name, views)
+	return appServiceView{}
+}
+
 func hasAppAction(view uiAppView, id string) bool {
 	for _, action := range view.Actions {
 		if action.ID == id {
@@ -5055,17 +5228,37 @@ func assertDiskCleanupHandleIdle(t *testing.T, handle *recordingDiskCleanup) {
 	}
 }
 
+type uiTestDigest struct {
+	current, latest string
+}
+
 type uiTestObserver struct {
 	current, latest string
 	tags            []string
 	tagsByImage     map[string][]string
+	digestByImage   map[string]uiTestDigest
+	listErr         error
+	listErrByImage  map[string]error
 }
 
-func (observer *uiTestObserver) ObserveImage(context.Context, App) (UpdateObservation, error) {
+func (observer *uiTestObserver) ObserveImage(_ context.Context, app App) (UpdateObservation, error) {
+	if observer.digestByImage != nil {
+		if pair, ok := observer.digestByImage[app.Image]; ok {
+			return UpdateObservation{CurrentDigest: pair.current, LatestDigest: pair.latest}, nil
+		}
+	}
 	return UpdateObservation{CurrentDigest: observer.current, LatestDigest: observer.latest}, nil
 }
 
 func (observer *uiTestObserver) ListImageTags(_ context.Context, app App) ([]string, error) {
+	if observer.listErrByImage != nil {
+		if err, ok := observer.listErrByImage[app.Image]; ok {
+			return nil, err
+		}
+	}
+	if observer.listErr != nil {
+		return nil, observer.listErr
+	}
 	if observer.tagsByImage != nil {
 		if tags, ok := observer.tagsByImage[app.Image]; ok {
 			return append([]string(nil), tags...), nil

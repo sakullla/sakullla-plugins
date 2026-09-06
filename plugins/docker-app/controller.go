@@ -128,10 +128,17 @@ type Controller struct {
 }
 
 type cachedImageObservation struct {
-	Image        string
-	LatestDigest string
-	TagsByImage  map[string][]string
-	ObservedAt   time.Time
+	Image          string
+	LatestDigest   string
+	TagsByImage    map[string][]string
+	FailedByImage  map[string]bool
+	DigestsByImage map[string]cachedImageDigest
+	ObservedAt     time.Time
+}
+
+type cachedImageDigest struct {
+	Current string
+	Latest  string
 }
 
 type commitEpoch struct {
