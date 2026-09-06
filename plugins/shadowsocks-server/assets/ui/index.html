@@ -94,18 +94,20 @@
           </div>
           <div id="listen-list" class="listen-grid"></div>
         </section>
-        <section class="panel" id="listen-detail" hidden aria-labelledby="detail-title">
-          <header class="detail-head">
-            <button id="detail-back" class="btn btn--text" type="button" hidden>返回列表</button>
-            <h3 id="detail-title">监听详情</h3>
-            <p id="detail-meta" class="hint">选择一条监听，查看用户并管理。</p>
-          </header>
-          <div id="detail-users" class="account-stack"></div>
-          <footer id="detail-actions" class="dialog-actions"></footer>
-        </section>
       </div>
     </section>
   </main>
+  <dialog id="listen-detail" aria-labelledby="detail-title">
+    <header class="detail-head">
+      <div class="detail-head-copy">
+        <h3 id="detail-title">监听详情</h3>
+        <p id="detail-meta" class="hint" hidden></p>
+      </div>
+      <button id="detail-close" class="btn btn--ghost" type="button">关闭</button>
+    </header>
+    <div id="detail-users" class="account-stack"></div>
+    <footer id="detail-actions" class="dialog-actions"></footer>
+  </dialog>
   <dialog id="create-dialog" aria-labelledby="app-create-title">
     <form id="create-form" method="post">
       <header class="dialog-head">

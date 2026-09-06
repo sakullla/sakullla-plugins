@@ -77,7 +77,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, script)
 	assertListenCardIsSummary(t, page, script)
-	assertListenDetailIsInPage(t, page, script)
+	assertListenDetailIsDialog(t, page, script)
 	assertWriteGate(t, script)
 	inactive := httptest.NewRecorder()
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/listens?agent_id=agent-1", nil))
@@ -87,7 +87,6 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	style := bodies["/style.css"]
 	for _, fragment := range []string{
 		"width: calc(100% - 2.5rem)",
-		"max-width: min(46rem, 100%)",
 		"@media (max-width: 720px)",
 		"@media (min-width: 1920px)",
 		"@media (min-width: 2560px)",
@@ -100,7 +99,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		".setup-mark[data-kind=\"unavailable\"]",
 		"repeat(2, minmax(0, 1fr))",
 		"repeat(3, minmax(18rem, 1fr))",
-		"minmax(16rem, 22rem)",
+		"max-width: 48rem",
 		".listen-card[data-selected=\"true\"]",
 		"#listen-detail",
 	} {
@@ -108,11 +107,17 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 			t.Fatalf("panel stylesheet missing %q", fragment)
 		}
 	}
+	if strings.Contains(style, "minmax(16rem, 22rem)") {
+		t.Fatal("panel stylesheet still uses two-column inspector")
+	}
 	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
 		t.Fatal("panel stylesheet still caps main at 52rem, 64rem, or 880px")
 	}
-	if !strings.Contains(cssRule(style, ".panel"), "max-width: min(46rem, 100%)") {
-		t.Fatal(".panel still fills main without a capped operation group")
+	if !strings.Contains(cssRule(style, "dialog"), "max-width: 34rem") {
+		t.Fatal("create-class dialog is no longer 34rem")
+	}
+	if !strings.Contains(cssRule(style, "#listen-detail"), "max-width: 48rem") {
+		t.Fatal("#listen-detail is not a large dialog wider than create-dialog")
 	}
 	if strings.Contains(page, `class="backdrop"`) {
 		t.Fatal("panel still includes decorative body backdrop")
@@ -235,25 +240,28 @@ func assertListenCardIsSummary(t *testing.T, page, script string) {
 	}
 }
 
-func assertListenDetailIsInPage(t *testing.T, page, script string) {
+func assertListenDetailIsDialog(t *testing.T, page, script string) {
 	t.Helper()
 	if strings.Contains(page, `id="detail-dialog"`) || strings.Contains(script, "detail-dialog") {
 		t.Fatal("panel still uses #detail-dialog")
 	}
-	if !strings.Contains(page, `id="listen-detail"`) {
-		t.Fatal("panel missing in-page #listen-detail")
+	if !strings.Contains(page, `<dialog id="listen-detail"`) {
+		t.Fatal("panel missing dialog#listen-detail")
+	}
+	if strings.Contains(page, `id="detail-back"`) || strings.Contains(page, "返回列表") || strings.Contains(script, "返回列表") {
+		t.Fatal("panel still uses 返回列表 as in-page nav")
+	}
+	if jsContainsIdent(script, "syncDetailLayout") {
+		t.Fatal("panel still uses syncDetailLayout")
 	}
 	for _, want := range []string{
 		`id="detail-title"`,
 		`id="detail-meta"`,
 		`id="detail-users"`,
 		`id="detail-actions"`,
-		`id="detail-back"`,
-		"返回列表",
-		"选择一条监听，查看用户并管理。",
 	} {
 		if !strings.Contains(page, want) && !strings.Contains(script, want) {
-			t.Fatalf("in-page detail missing %q", want)
+			t.Fatalf("listen detail missing %q", want)
 		}
 	}
 	for _, want := range []string{
@@ -270,13 +278,20 @@ func assertListenDetailIsInPage(t *testing.T, page, script string) {
 	if detail == "" {
 		t.Fatal("renderDetail is missing")
 	}
-	for _, want := range []string{"端口", "运行中", "未生效", "listenShareHost", "manage: true"} {
+	for _, want := range []string{"端口", "运行中", "未生效", "listenShareHost", "manage: true", "showModal"} {
 		if !strings.Contains(detail, want) {
-			t.Fatalf("in-page detail missing %q", want)
+			t.Fatalf("listen detail missing %q", want)
 		}
 	}
 	if !jsContainsIdent(detail, "listenFooterActions") || !jsContainsIdent(detail, "renderUser") {
-		t.Fatal("in-page detail no longer composes user management or listenFooterActions")
+		t.Fatal("listen detail no longer composes user management or listenFooterActions")
+	}
+	closeFn := jsConstFunction(script, "closeDetail")
+	if closeFn == "" {
+		t.Fatal("closeDetail is missing")
+	}
+	if !strings.Contains(closeFn, ".close()") {
+		t.Fatal("closeDetail does not close the dialog")
 	}
 	refresh := jsConstFunction(script, "refreshOpenDetail")
 	if refresh == "" {
