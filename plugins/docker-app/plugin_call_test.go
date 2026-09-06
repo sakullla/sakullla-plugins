@@ -53,11 +53,12 @@ func TestDefaultExecutionWorkDirRootUsesTempForSandboxHome(t *testing.T) {
 func TestControllerCallComposeApplySanitizesDockerError(t *testing.T) {
 	t.Parallel()
 	runner := CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
-		return []byte("failed to pull: password=fixture-value\nunix:///var/run/docker.sock"), errors.New("exit status 1")
+		return []byte("failed with APP_MODE=production OPAQUE_VALUE=from-dotenv password=fixture-value\nunix:///var/run/docker.sock"), errors.New("compose failed with APP_MODE=production")
 	})
 	controller := newCallController(t, t.TempDir(), runner, nil)
+	compose := "services:\n  web:\n    image: nginx:1.27\n    environment:\n      APP_MODE: production\n"
 	payload, err := json.Marshal(map[string]any{
-		"action": "apply", "app_id": "media", "compose": "services:\n  web:\n    image: nginx:1.27\n",
+		"action": "apply", "app_id": "media", "compose": compose, "env": "OPAQUE_VALUE=from-dotenv\n",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,8 +71,10 @@ func TestControllerCallComposeApplySanitizesDockerError(t *testing.T) {
 	if !strings.Contains(message, "compose apply failed") {
 		t.Fatalf("missing compose stage: %q", message)
 	}
-	if strings.Contains(message, "fixture-value") || strings.Contains(message, "docker.sock") {
-		t.Fatalf("compose failure leaked secret or socket: %q", message)
+	for _, value := range []string{"production", "from-dotenv", "fixture-value", "docker.sock"} {
+		if strings.Contains(message, value) {
+			t.Fatalf("compose failure leaked submitted or local value %q: %q", value, message)
+		}
 	}
 }
 
@@ -2123,7 +2126,7 @@ func TestControllerCallComposeInspectReportsLiveInstance(t *testing.T) {
 		if err == nil {
 			t.Fatal("inspect succeeded when compose ps failed")
 		}
-		if !strings.Contains(err.Error(), "compose inspect failed") || !strings.Contains(err.Error(), composeErr.Error()) {
+		if err.Error() != "compose inspect failed" || strings.Contains(err.Error(), composeErr.Error()) {
 			t.Fatalf("inspect err=%v want staged compose inspect failure", err)
 		}
 		if len(raw) == 0 {

@@ -491,7 +491,8 @@ func TestHostCapabilityRuntimeSendsComposeVolumeBindWithoutTreatingItAsLocalEngi
 		return copyHostResult(map[string]any{"accepted": true}, target)
 	})
 	compose := "services:\n  dind:\n    image: docker:27\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"
-	if err := newHostCapabilityRuntime(client).ApplyApp(context.Background(), App{ID: "dind", AgentID: "agent-1", Compose: compose}); err != nil {
+	environment := "DOCKER_HOST=unix:///var/run/docker.sock\n"
+	if err := newHostCapabilityRuntime(client).ApplyApp(context.Background(), App{ID: "dind", AgentID: "agent-1", Compose: compose, Env: environment}); err != nil {
 		t.Fatal(err)
 	}
 	if request.Name != pluginCallComposeName || request.AgentID != "agent-1" {
@@ -503,6 +504,40 @@ func TestHostCapabilityRuntimeSendsComposeVolumeBindWithoutTreatingItAsLocalEngi
 	}
 	if !strings.Contains(payload["compose"].(string), "/var/run/docker.sock") {
 		t.Fatalf("compose YAML was stripped: %#v", payload)
+	}
+	if payload["env"] != environment {
+		t.Fatalf("compose env was stripped: %#v", payload)
+	}
+}
+
+func TestLocalDockerEngineTargetTreatsEnvAsOpaqueButRejectsRoutingMetadata(t *testing.T) {
+	t.Parallel()
+	environment, err := json.Marshal(map[string]any{
+		"agent_id": "agent-1",
+		"payload": map[string]any{
+			"action": "apply",
+			"env":    "DOCKER_HOST=unix:///var/run/docker.sock\n",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localDockerEngineTarget(environment) {
+		t.Fatal("opaque compose env was treated as local Docker routing metadata")
+	}
+
+	routing, err := json.Marshal(map[string]any{
+		"agent_id": "agent-1",
+		"payload": map[string]any{
+			"action":      "apply",
+			"docker_host": "unix:///var/run/docker.sock",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !localDockerEngineTarget(routing) {
+		t.Fatal("local Docker routing metadata was accepted")
 	}
 }
 
@@ -864,7 +899,7 @@ func TestHostRolloutRuntimePullAndStartSendCompose(t *testing.T) {
 		}
 		return copyHostResult(map[string]any{"accepted": true}, target)
 	})
-	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest@sha256:current", Compose: "services:\n  web:\n    image: nginx:latest@sha256:current\n", Env: "APP_MODE=production\n"}
+	app := App{ID: "media", AgentID: "agent-1", Image: "nginx:latest@sha256:current", Compose: "services:\n  web:\n    image: nginx:latest@sha256:current\n", Env: "DOCKER_HOST=unix:///var/run/docker.sock\n"}
 	rollout := hostRolloutRuntime{runtime: newHostCapabilityRuntime(client)}
 	if err := rollout.Pull(context.Background(), 1, app); err != nil {
 		t.Fatal(err)

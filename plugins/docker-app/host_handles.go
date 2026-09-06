@@ -713,7 +713,7 @@ func decodePluginCallPayload(node any) any {
 
 func skipLocalDockerValueKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "compose", "content", "path", "name", "entries", "images", "keep_images", "builder_cache":
+	case "compose", "env", "content", "path", "name", "entries", "images", "keep_images", "builder_cache":
 		return true
 	default:
 		return false

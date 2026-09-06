@@ -1260,15 +1260,10 @@ func sandboxExecutionWorkDirRoot(goos, home, temporary string) (string, bool) {
 	return filepath.Join(temporary, "nre-docker-app"), true
 }
 
-func composeCallFailure(action string, output []byte, err error) error {
-	cause := sanitizePublicText(string(output))
-	if cause == "" {
-		cause = publicCause(err)
-	}
-	if cause == "" {
-		return fmt.Errorf("compose %s failed", action)
-	}
-	return fmt.Errorf("compose %s failed: %s", action, cause)
+func composeCallFailure(action string, _ []byte, _ error) error {
+	// Docker output and runner errors may echo values resolved from the submitted
+	// Compose document or .env. Keep only the validated operation stage public.
+	return fmt.Errorf("compose %s failed", action)
 }
 
 func filesCallFailure(action string, err error) error {
