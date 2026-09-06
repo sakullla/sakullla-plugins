@@ -11,8 +11,15 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
   };
   const dialog = async (id = "confirm") => page.waitVisible(`#${id}-dialog`);
   const close = async (ok, id = "confirm") => {
-    await dialog(id); await page.click(`#${id}-${ok ? (id === "update" ? "confirm" : "ok") : "cancel"}`);
-    await eventually(async () => !(await page.visible(`#${id}-dialog`)), "dialog closed");
+    await dialog(id);
+    const sequence = await page.evaluate(`(() => {
+      const dialog = document.querySelector(${JSON.stringify(`#${id}-dialog`)});
+      const next = Number(dialog.dataset.testCloseSequence || 0) + 1;
+      dialog.addEventListener("close", () => { dialog.dataset.testCloseSequence = String(next); }, {once:true});
+      return next;
+    })()`);
+    await page.click(`#${id}-${ok ? (id === "update" ? "confirm" : "ok") : "cancel"}`);
+    await eventually(() => page.evaluate(`Number(document.querySelector(${JSON.stringify(`#${id}-dialog`)}).dataset.testCloseSequence || 0) >= ${sequence}`), "dialog close event");
     await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
   };
   const choose = async (selector, value) => {
