@@ -76,6 +76,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		}
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, script)
+	assertListenCardIsSummary(t, page, script)
 	inactive := httptest.NewRecorder()
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/listens?agent_id=agent-1", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), serviceNotReady) {
@@ -135,6 +136,68 @@ func TestPanelAssetsMatchManifestTree(t *testing.T) {
 		if !bytes.Equal(want, got) {
 			t.Fatalf("assets/ui/%s drifted from embedded panel asset", name)
 		}
+	}
+}
+
+func jsConstFunction(script, name string) string {
+	sig := "const " + name + " = "
+	start := strings.Index(script, sig)
+	if start < 0 {
+		return ""
+	}
+	rest := script[start:]
+	arrow := strings.Index(rest, "=>")
+	if arrow < 0 {
+		return ""
+	}
+	body := rest[arrow:]
+	open := strings.Index(body, "{")
+	if open < 0 {
+		return ""
+	}
+	depth := 0
+	for i := open; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:arrow+i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func assertListenCardIsSummary(t *testing.T, page, script string) {
+	t.Helper()
+	card := jsConstFunction(script, "renderListen")
+	if card == "" {
+		t.Fatal("renderListen is missing")
+	}
+	for _, want := range []string{"端口", "运行中", "未生效"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("listen card missing %q", want)
+		}
+	}
+	for _, banned := range []string{"删除监听", "追加用户"} {
+		if strings.Contains(card, banned) {
+			t.Fatalf("listen card still contains %q", banned)
+		}
+	}
+	if !strings.Contains(page, "新增监听") && !strings.Contains(script, "新增监听") {
+		t.Fatal("workspace missing 新增监听 entry")
+	}
+	if !strings.Contains(page, `id="create-toggle"`) || !strings.Contains(page, `id="empty-create"`) {
+		t.Fatal("workspace missing create entry")
+	}
+	detail := jsConstFunction(script, "listenFooterActions")
+	if detail == "" {
+		t.Fatal("listenFooterActions is missing")
+	}
+	if !strings.Contains(detail, "删除监听") || !strings.Contains(detail, "追加用户") {
+		t.Fatal("detail path missing 删除监听 or 追加用户")
 	}
 }
 

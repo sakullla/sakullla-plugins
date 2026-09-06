@@ -461,11 +461,13 @@ main {
 .listen-card {
   display: grid;
   gap: var(--space-4);
+  min-width: 0;
   padding: var(--space-5);
   background: var(--gradient-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
+  cursor: pointer;
   transition: border-color var(--dur-med) var(--ease), box-shadow var(--dur-med) var(--ease), transform var(--dur-med) var(--ease);
 }
 
@@ -476,56 +478,9 @@ main {
 }
 
 .listen-card-head {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-.listen-card-mark {
-  flex: none;
+  min-width: 0;
   display: grid;
-  place-items: center;
-  width: 2.75rem;
-  height: 2.75rem;
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border: 1px solid color-mix(in srgb, var(--color-accent) 26%, transparent);
-}
-
-.listen-card-mark[data-tone="1"] {
-  color: var(--color-success);
-  background: var(--color-success-soft);
-  border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
-}
-
-.listen-card-mark[data-tone="2"] {
-  color: var(--color-warning);
-  background: var(--color-warning-soft);
-  border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
-}
-
-.listen-card-mark[data-tone="3"] {
-  color: var(--color-text-secondary);
-  background: var(--color-hover);
-  border-color: var(--color-border-strong);
-}
-
-.listen-card-mark[data-tone="4"] {
-  color: var(--color-iris);
-  background: var(--color-iris-soft);
-  border-color: color-mix(in srgb, var(--color-iris) 28%, transparent);
-}
-
-.listen-card-mark[data-tone="5"] {
-  color: var(--color-coral);
-  background: var(--color-coral-soft);
-  border-color: color-mix(in srgb, var(--color-coral) 30%, transparent);
+  gap: var(--space-1);
 }
 
 .listen-card-identity {
@@ -539,17 +494,22 @@ main {
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .listen-card-title-row h3 {
+  min-width: 0;
   font-size: var(--text-base);
   font-weight: 650;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .listen-card-meta {
+  min-width: 0;
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
 }
 
 .listen-actions {
@@ -612,8 +572,6 @@ main {
   align-items: center;
   flex-wrap: wrap;
 }
-
-.more-users { padding-inline: var(--space-1); }
 
 /* ---------- pills & status dots ---------- */
 

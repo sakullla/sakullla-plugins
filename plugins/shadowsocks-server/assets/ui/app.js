@@ -872,17 +872,9 @@ const primaryUser = (listen) => {
   return users.find((user) => user && user.enabled && user.share_available && user.uri) || users[0] || null;
 };
 
-const listenFooterActions = (listen, { detail = false, close = false } = {}) => {
+const listenFooterActions = (listen, { close = false } = {}) => {
   const actions = document.createElement("div");
-  actions.className = detail ? "dialog-actions" : "listen-actions";
-  if (!detail) {
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "btn btn--ghost";
-    open.textContent = "详情";
-    open.addEventListener("click", () => openDetail(listen));
-    actions.append(open);
-  }
+  actions.className = "dialog-actions";
   if (isSS2022(listen.method)) {
     const append = document.createElement("button");
     append.type = "button";
@@ -916,10 +908,6 @@ const renderListen = (listen) => {
 
   const head = document.createElement("div");
   head.className = "listen-card-head";
-  const mark = document.createElement("span");
-  mark.className = "listen-card-mark";
-  mark.dataset.tone = String((Number(listen.port) || 0) % 6);
-  mark.textContent = String(listen.port || "");
   const identity = document.createElement("div");
   identity.className = "listen-card-identity";
   const titleRow = document.createElement("div");
@@ -930,26 +918,30 @@ const renderListen = (listen) => {
   const meta = document.createElement("p");
   meta.className = "listen-card-meta";
   const users = listen.users || [];
-  meta.textContent = [methodLabel(listen.method), users.length ? `${users.length} 个用户` : ""].filter(Boolean).join(" · ");
+  meta.textContent = [methodLabel(listen.method), `${users.length} 个用户`].filter(Boolean).join(" · ");
   identity.append(titleRow, meta);
-  head.append(mark, identity);
+  head.append(identity);
   card.append(head);
+
+  const actions = document.createElement("div");
+  actions.className = "listen-actions";
   const first = primaryUser(listen);
-  if (first) {
-    const account = renderUser(first, { compact: true });
-    if (users.length > 1) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "btn btn--text more-users";
-      more.textContent = `还有 ${users.length - 1} 个用户`;
-      more.addEventListener("click", () => openDetail(listen));
-      const share = account.querySelector(".share-strip");
-      if (share) share.append(more);
-      else account.append(more);
-    }
-    card.append(account);
+  if (first && first.share_available && first.uri) {
+    const copy = copyURIButton(first);
+    copy.addEventListener("click", (event) => event.stopPropagation());
+    actions.append(copy);
   }
-  card.append(listenFooterActions(listen));
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "btn btn--ghost";
+  open.textContent = "详情";
+  open.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openDetail(listen);
+  });
+  actions.append(open);
+  card.append(actions);
+  card.addEventListener("click", () => openDetail(listen));
   return card;
 };
 
@@ -972,7 +964,7 @@ const renderDetail = (listen) => {
     (listen.users || []).forEach((user) => detailUsers.append(renderUser(user, { manage: true })));
   }
   if (detailActions) {
-    const footer = listenFooterActions(listen, { detail: true, close: true });
+    const footer = listenFooterActions(listen, { close: true });
     detailActions.replaceChildren(...Array.from(footer.children));
   }
 };
