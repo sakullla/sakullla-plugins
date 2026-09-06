@@ -263,6 +263,10 @@ try {
     };
   await test("no selection and explicit node states", async () => {
     await navigate(); await page.waitVisible("#app-node-empty");
+    await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');
+    assert.equal(await page.evaluate(`document.querySelector('#engine-status').dataset.ready`), "true");
+    await page.selectAgent("failed"); await page.waitVisible("#app-detection-failed");
+    assert.equal(await page.evaluate(`document.querySelector('#engine-status').dataset.ready`), "false", "ready-to-failed transition clears the success state");
     for (const [id, panel] of [["offline", "#app-offline"], ["unavailable", "#app-execution-unavailable"], ["failed", "#app-detection-failed"], ["denied", "#app-node-denied"], ["missing", "#engine-guide"]]) {
       await page.selectAgent(id); await page.waitVisible(panel);
       assert.equal(await page.visible("#engine-guide"), id === "missing", `install guide only for confirmed missing: ${id}`);

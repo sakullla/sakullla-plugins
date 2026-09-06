@@ -3066,6 +3066,7 @@ const renderEngineBadge = (engine) => {
   }
   engineReady = engine.ready === true;
   if (engine.state === "detection-failed") {
+    engineStatus.dataset.ready = "false";
     engineStatus.textContent = "无法检测 Docker 状态";
     return;
   }
