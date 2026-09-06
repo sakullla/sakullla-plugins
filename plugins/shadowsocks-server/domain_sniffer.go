@@ -42,7 +42,12 @@ func sniffTCPDomain(payload []byte) (string, sniffState) {
 
 func sniffHTTPHost(payload []byte) (string, sniffState) {
 	text := string(payload)
-	for index, value := range payload {
+	end := strings.Index(text, "\r\n\r\n")
+	headerEnd := len(payload)
+	if end >= 0 {
+		headerEnd = end + len("\r\n\r\n")
+	}
+	for index, value := range payload[:headerEnd] {
 		if value == '\n' && (index == 0 || payload[index-1] != '\r') {
 			return "", sniffDone
 		}
@@ -50,7 +55,6 @@ func sniffHTTPHost(payload []byte) (string, sniffState) {
 			return "", sniffDone
 		}
 	}
-	end := strings.Index(text, "\r\n\r\n")
 	if end < 0 {
 		if strings.ContainsRune(text, '\x00') || len(payload) == maxSniffBytes {
 			return "", sniffDone

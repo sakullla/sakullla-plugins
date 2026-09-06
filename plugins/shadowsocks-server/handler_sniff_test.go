@@ -12,6 +12,7 @@ import (
 func TestTCPHandlerSniffsHTTPAndTLSAcrossSSChunksWithoutChangingTarget(t *testing.T) {
 	for _, application := range [][]byte{
 		[]byte("GET /v1/chat HTTP/1.1\r\nHost: ai.example.com\r\n\r\nbody"),
+		[]byte("POST /v1/chat HTTP/1.1\r\nHost: ai.example.com\r\nContent-Length: 3\r\n\r\n\x00\nx"),
 		tlsClientHello("ai.example.com", false, 17),
 	} {
 		source := "sniffed-http-host"

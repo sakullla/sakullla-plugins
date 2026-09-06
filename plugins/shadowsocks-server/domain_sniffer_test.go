@@ -41,6 +41,8 @@ func TestSniffHTTPHostAndFallbacks(t *testing.T) {
 		{"obs-fold", "GET / HTTP/1.1\r\nHost: ai.example\r\n folded\r\n\r\n", "", sniffDone},
 		{"bare-lf", "GET / HTTP/1.1\nHost: ai.example\n\n", "", sniffDone},
 		{"control", "GET / HTTP/1.1\r\nHost: ai.example\x01\r\n\r\n", "", sniffDone},
+		{"binary-body", "POST / HTTP/1.1\r\nHost: ai.example\r\nContent-Length: 3\r\n\r\n\x00\nx", "ai.example", sniffDone},
+		{"bare-lf-body", "POST / HTTP/1.1\r\nHost: ai.example\r\n\r\nline-one\nline-two", "ai.example", sniffDone},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			domain, state := sniffTCPDomain([]byte(test.payload))
