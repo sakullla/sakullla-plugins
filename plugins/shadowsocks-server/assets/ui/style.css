@@ -1,4 +1,4 @@
-/* shadowsocks-server panel — 墨青隧道 (ink-teal tunnel) visual identity.
+/* shadowsocks-server panel — restrained admin chrome with teal accent.
    Two isomorphic token sets (light / dark) drive every component;
    all derived colors come from color-mix() on the base tokens. */
 
@@ -170,22 +170,10 @@ button { font: inherit; }
 
 [hidden] { display: none !important; }
 
-/* ambient tunnel-glow backdrop */
-.backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(42rem 26rem at 12% -8%, var(--color-accent-soft), transparent 70%),
-    radial-gradient(36rem 24rem at 96% 4%, color-mix(in srgb, var(--color-accent) 6%, transparent), transparent 72%);
-}
-
 /* ---------- layout shell ---------- */
 
 main {
   position: relative;
-  z-index: 1;
   width: calc(100% - 2.5rem);
   max-width: 72rem;
   margin: 0 auto;
@@ -218,10 +206,10 @@ main {
   display: grid;
   gap: var(--space-3);
   padding: var(--space-4);
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-hairline);
 }
 
 .share-host-bar {
@@ -308,28 +296,26 @@ main {
 .state-region { margin-bottom: var(--space-6); }
 
 .state-panel {
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hairline);
 }
 
 .setup-hero {
   display: flex;
-  gap: var(--space-5);
-  align-items: center;
-  padding: var(--space-8) var(--space-6);
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-6);
 }
 
 .setup-mark {
   position: relative;
   flex: none;
-  width: 3.25rem;
-  height: 3.25rem;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-accent) 26%, transparent), transparent 62%),
-    var(--color-accent-soft);
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
   border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
 
@@ -342,35 +328,33 @@ main {
 }
 
 .setup-mark[data-kind="node"]::before {
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 0.9rem;
+  height: 0.9rem;
   border-radius: 50%;
   border: 2px solid var(--color-accent);
 }
 
 .setup-mark[data-kind="node"]::after {
-  width: 0.45rem;
-  height: 0.45rem;
+  width: 0.35rem;
+  height: 0.35rem;
   border-radius: 50%;
   background: var(--color-accent);
 }
 
 .setup-mark[data-kind="offline"] {
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-text-tertiary) 22%, transparent), transparent 62%),
-    var(--color-hover);
+  background: var(--color-hover);
   border-color: var(--color-border-strong);
 }
 
 .setup-mark[data-kind="offline"]::before {
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 0.9rem;
+  height: 0.9rem;
   border-radius: 50%;
   border: 2px solid var(--color-text-tertiary);
 }
 
 .setup-mark[data-kind="offline"]::after {
-  width: 1.5rem;
+  width: 1.2rem;
   height: 2px;
   border-radius: 1px;
   background: var(--color-text-tertiary);
@@ -378,26 +362,24 @@ main {
 }
 
 .setup-mark[data-kind="unavailable"] {
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-warning) 24%, transparent), transparent 62%),
-    var(--color-warning-soft);
+  background: var(--color-warning-soft);
   border-color: color-mix(in srgb, var(--color-warning) 34%, transparent);
 }
 
 .setup-mark[data-kind="unavailable"]::before {
-  width: 0.28rem;
-  height: 1.05rem;
+  width: 0.22rem;
+  height: 0.8rem;
   border-radius: var(--radius-pill);
   background: var(--color-warning);
-  transform: translateY(-0.22rem);
+  transform: translateY(-0.16rem);
 }
 
 .setup-mark[data-kind="unavailable"]::after {
-  width: 0.32rem;
-  height: 0.32rem;
+  width: 0.28rem;
+  height: 0.28rem;
   border-radius: 50%;
   background: var(--color-warning);
-  transform: translateY(0.62rem);
+  transform: translateY(0.5rem);
 }
 
 .setup-copy h2 {
@@ -451,14 +433,21 @@ main {
 
 .empty-state {
   display: grid;
-  justify-items: center;
+  justify-items: start;
   gap: var(--space-3);
-  padding: var(--space-8) var(--space-6);
-  text-align: center;
+  padding: var(--space-6);
+  text-align: left;
   color: var(--color-text-secondary);
-  background: var(--gradient-surface);
-  border: 1px dashed var(--color-border-strong);
-  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hairline);
+}
+
+.empty-state h2 {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--color-text);
 }
 
 .listen-grid {
@@ -805,9 +794,9 @@ dialog {
   margin: auto;
   padding: var(--space-6);
   color: var(--color-text);
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
 }
 
@@ -1147,11 +1136,9 @@ dialog > .dialog-head { margin-bottom: var(--space-4); }
 
   .field-row { grid-template-columns: minmax(0, 1fr); }
 
-  .setup-hero {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-4);
-    padding: var(--space-6) var(--space-4);
+  .setup-hero,
+  .empty-state {
+    padding: var(--space-5) var(--space-4);
   }
 
   .workspace-bar {

@@ -108,6 +108,18 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	if !strings.Contains(cssRule(style, ".panel"), "max-width: min(46rem, 100%)") {
 		t.Fatal(".panel still fills main without a capped operation group")
 	}
+	if strings.Contains(page, `class="backdrop"`) {
+		t.Fatal("panel still includes decorative body backdrop")
+	}
+	if strings.Contains(style, "tunnel-glow") || strings.Contains(style, "radial-gradient(42rem 26rem") || strings.Contains(style, "radial-gradient(36rem 24rem") {
+		t.Fatal("panel stylesheet still contains tunnel-glow backdrop")
+	}
+	if strings.Contains(style, "radial-gradient(circle at 32% 28%") {
+		t.Fatal("setup-mark still uses radial highlight placeholders")
+	}
+	if !strings.Contains(style, "dialog::backdrop") {
+		t.Fatal("panel stylesheet missing dialog::backdrop")
+	}
 }
 
 func TestPanelAssetsMatchManifestTree(t *testing.T) {
