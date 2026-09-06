@@ -1,4 +1,4 @@
-/* shadowsocks-server panel — 墨青隧道 (ink-teal tunnel) visual identity.
+/* shadowsocks-server panel — restrained admin chrome with teal accent.
    Two isomorphic token sets (light / dark) drive every component;
    all derived colors come from color-mix() on the base tokens. */
 
@@ -170,22 +170,10 @@ button { font: inherit; }
 
 [hidden] { display: none !important; }
 
-/* ambient tunnel-glow backdrop */
-.backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(42rem 26rem at 12% -8%, var(--color-accent-soft), transparent 70%),
-    radial-gradient(36rem 24rem at 96% 4%, color-mix(in srgb, var(--color-accent) 6%, transparent), transparent 72%);
-}
-
 /* ---------- layout shell ---------- */
 
 main {
   position: relative;
-  z-index: 1;
   width: calc(100% - 2.5rem);
   max-width: 72rem;
   margin: 0 auto;
@@ -218,10 +206,10 @@ main {
   display: grid;
   gap: var(--space-3);
   padding: var(--space-4);
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-hairline);
 }
 
 .share-host-bar {
@@ -308,28 +296,26 @@ main {
 .state-region { margin-bottom: var(--space-6); }
 
 .state-panel {
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hairline);
 }
 
 .setup-hero {
   display: flex;
-  gap: var(--space-5);
-  align-items: center;
-  padding: var(--space-8) var(--space-6);
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-6);
 }
 
 .setup-mark {
   position: relative;
   flex: none;
-  width: 3.25rem;
-  height: 3.25rem;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-accent) 26%, transparent), transparent 62%),
-    var(--color-accent-soft);
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
   border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
 
@@ -342,35 +328,33 @@ main {
 }
 
 .setup-mark[data-kind="node"]::before {
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 0.9rem;
+  height: 0.9rem;
   border-radius: 50%;
   border: 2px solid var(--color-accent);
 }
 
 .setup-mark[data-kind="node"]::after {
-  width: 0.45rem;
-  height: 0.45rem;
+  width: 0.35rem;
+  height: 0.35rem;
   border-radius: 50%;
   background: var(--color-accent);
 }
 
 .setup-mark[data-kind="offline"] {
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-text-tertiary) 22%, transparent), transparent 62%),
-    var(--color-hover);
+  background: var(--color-hover);
   border-color: var(--color-border-strong);
 }
 
 .setup-mark[data-kind="offline"]::before {
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 0.9rem;
+  height: 0.9rem;
   border-radius: 50%;
   border: 2px solid var(--color-text-tertiary);
 }
 
 .setup-mark[data-kind="offline"]::after {
-  width: 1.5rem;
+  width: 1.2rem;
   height: 2px;
   border-radius: 1px;
   background: var(--color-text-tertiary);
@@ -378,26 +362,24 @@ main {
 }
 
 .setup-mark[data-kind="unavailable"] {
-  background:
-    radial-gradient(circle at 32% 28%, color-mix(in srgb, var(--color-warning) 24%, transparent), transparent 62%),
-    var(--color-warning-soft);
+  background: var(--color-warning-soft);
   border-color: color-mix(in srgb, var(--color-warning) 34%, transparent);
 }
 
 .setup-mark[data-kind="unavailable"]::before {
-  width: 0.28rem;
-  height: 1.05rem;
+  width: 0.22rem;
+  height: 0.8rem;
   border-radius: var(--radius-pill);
   background: var(--color-warning);
-  transform: translateY(-0.22rem);
+  transform: translateY(-0.16rem);
 }
 
 .setup-mark[data-kind="unavailable"]::after {
-  width: 0.32rem;
-  height: 0.32rem;
+  width: 0.28rem;
+  height: 0.28rem;
   border-radius: 50%;
   background: var(--color-warning);
-  transform: translateY(0.62rem);
+  transform: translateY(0.5rem);
 }
 
 .setup-copy h2 {
@@ -449,16 +431,43 @@ main {
   width: 100%;
 }
 
+.workspace-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) {
+  grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) > .panel {
+  max-width: none;
+  margin: 0;
+}
+
+.workspace-body:has(#listen-detail:not([hidden])) .listen-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .empty-state {
   display: grid;
-  justify-items: center;
+  justify-items: start;
   gap: var(--space-3);
-  padding: var(--space-8) var(--space-6);
-  text-align: center;
+  padding: var(--space-6);
+  text-align: left;
   color: var(--color-text-secondary);
-  background: var(--gradient-surface);
-  border: 1px dashed var(--color-border-strong);
-  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hairline);
+}
+
+.empty-state h2 {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--color-text);
 }
 
 .listen-grid {
@@ -472,11 +481,13 @@ main {
 .listen-card {
   display: grid;
   gap: var(--space-4);
+  min-width: 0;
   padding: var(--space-5);
   background: var(--gradient-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
+  cursor: pointer;
   transition: border-color var(--dur-med) var(--ease), box-shadow var(--dur-med) var(--ease), transform var(--dur-med) var(--ease);
 }
 
@@ -486,57 +497,20 @@ main {
   transform: translateY(-1px);
 }
 
+.listen-card[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--color-accent) 58%, var(--color-border));
+  box-shadow: var(--shadow-focus), var(--shadow-card);
+  transform: none;
+}
+
+.listen-card[data-selected="true"]:hover {
+  transform: none;
+}
+
 .listen-card-head {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-.listen-card-mark {
-  flex: none;
+  min-width: 0;
   display: grid;
-  place-items: center;
-  width: 2.75rem;
-  height: 2.75rem;
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border: 1px solid color-mix(in srgb, var(--color-accent) 26%, transparent);
-}
-
-.listen-card-mark[data-tone="1"] {
-  color: var(--color-success);
-  background: var(--color-success-soft);
-  border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
-}
-
-.listen-card-mark[data-tone="2"] {
-  color: var(--color-warning);
-  background: var(--color-warning-soft);
-  border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
-}
-
-.listen-card-mark[data-tone="3"] {
-  color: var(--color-text-secondary);
-  background: var(--color-hover);
-  border-color: var(--color-border-strong);
-}
-
-.listen-card-mark[data-tone="4"] {
-  color: var(--color-iris);
-  background: var(--color-iris-soft);
-  border-color: color-mix(in srgb, var(--color-iris) 28%, transparent);
-}
-
-.listen-card-mark[data-tone="5"] {
-  color: var(--color-coral);
-  background: var(--color-coral-soft);
-  border-color: color-mix(in srgb, var(--color-coral) 30%, transparent);
+  gap: var(--space-1);
 }
 
 .listen-card-identity {
@@ -550,17 +524,22 @@ main {
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .listen-card-title-row h3 {
+  min-width: 0;
   font-size: var(--text-base);
   font-weight: 650;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .listen-card-meta {
+  min-width: 0;
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
 }
 
 .listen-actions {
@@ -570,6 +549,42 @@ main {
   flex-wrap: wrap;
   padding-top: var(--space-3);
   border-top: 1px solid var(--color-border);
+}
+
+/* ---------- in-page listen detail ---------- */
+
+#listen-detail {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  min-width: 0;
+  min-height: 14rem;
+  max-height: min(70vh, 52rem);
+  overflow: auto;
+  padding: var(--space-5);
+  background: var(--gradient-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.detail-head {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.detail-head h3 {
+  min-width: 0;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+#detail-back {
+  justify-self: start;
+  width: fit-content;
+  padding-inline: 0;
 }
 
 /* ---------- accounts ---------- */
@@ -623,8 +638,6 @@ main {
   align-items: center;
   flex-wrap: wrap;
 }
-
-.more-users { padding-inline: var(--space-1); }
 
 /* ---------- pills & status dots ---------- */
 
@@ -805,9 +818,9 @@ dialog {
   margin: auto;
   padding: var(--space-6);
   color: var(--color-text);
-  background: var(--gradient-surface);
+  background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
 }
 
@@ -1145,13 +1158,20 @@ dialog > .dialog-head { margin-bottom: var(--space-4); }
 
   .listen-grid { grid-template-columns: minmax(0, 1fr); }
 
+  .workspace-body,
+  .workspace-body:has(#listen-detail:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #listen-detail {
+    max-height: none;
+  }
+
   .field-row { grid-template-columns: minmax(0, 1fr); }
 
-  .setup-hero {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-4);
-    padding: var(--space-6) var(--space-4);
+  .setup-hero,
+  .empty-state {
+    padding: var(--space-5) var(--space-4);
   }
 
   .workspace-bar {

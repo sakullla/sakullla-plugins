@@ -7,7 +7,6 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="backdrop" aria-hidden="true"></div>
   <main class="shell">
     <header class="masthead">
       <div class="masthead-copy">
@@ -86,14 +85,25 @@
         </div>
         <button id="create-toggle" class="btn btn--primary" type="button">新增监听</button>
       </header>
-      <section class="panel" id="app-list-panel">
-        <div id="app-empty" class="empty-state" hidden>
-          <p>这台节点还没有监听。</p>
-          <p class="hint">保存一条后就能复制链接或二维码给客户端。</p>
-          <button id="empty-create" class="btn btn--primary" type="button">新增监听</button>
-        </div>
-        <div id="listen-list" class="listen-grid"></div>
-      </section>
+      <div class="workspace-body">
+        <section class="panel" id="app-list-panel">
+          <div id="app-empty" class="empty-state" hidden>
+            <h2>这台节点还没有监听</h2>
+            <p class="hint">保存一条后就能复制链接或二维码给客户端。</p>
+            <button id="empty-create" class="btn btn--primary" type="button">新增监听</button>
+          </div>
+          <div id="listen-list" class="listen-grid"></div>
+        </section>
+        <section class="panel" id="listen-detail" hidden aria-labelledby="detail-title">
+          <header class="detail-head">
+            <button id="detail-back" class="btn btn--text" type="button" hidden>返回列表</button>
+            <h3 id="detail-title">监听详情</h3>
+            <p id="detail-meta" class="hint">选择一条监听，查看用户并管理。</p>
+          </header>
+          <div id="detail-users" class="account-stack"></div>
+          <footer id="detail-actions" class="dialog-actions"></footer>
+        </section>
+      </div>
     </section>
   </main>
   <dialog id="create-dialog" aria-labelledby="app-create-title">
@@ -138,14 +148,6 @@
         <button id="create-submit" class="btn btn--primary" type="submit">保存</button>
       </footer>
     </form>
-  </dialog>
-  <dialog id="detail-dialog" aria-labelledby="detail-title">
-    <header class="dialog-head">
-      <h3 id="detail-title">监听详情</h3>
-      <p id="detail-meta" class="hint"></p>
-    </header>
-    <div id="detail-users" class="account-stack"></div>
-    <footer id="detail-actions" class="dialog-actions"></footer>
   </dialog>
   <dialog id="append-dialog" aria-labelledby="append-title">
     <form id="append-form" method="post">
