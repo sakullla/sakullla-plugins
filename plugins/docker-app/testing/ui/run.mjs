@@ -11,6 +11,9 @@ import { agents, makeApp, longApp, engineFor } from "./fixtures/workspace.mjs";
 import { runCompose } from "./compose.mjs";
 import { runOperations } from "./operations.mjs";
 import { runResources } from "./resources.mjs";
+import { runExperience } from "./experience.mjs";
+import { runAll } from "./all.mjs";
+import { runHost } from "./host.mjs";
 import { createResourcesState, handleResourcesRequest } from "./fixtures/resources.mjs";
 import { createOperationsState, handleOperationsRequest } from "./fixtures/operations.mjs";
 
@@ -18,7 +21,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const assets = resolve(here, "../../assets/ui");
 const suite = process.argv[process.argv.indexOf("--suite") + 1];
-if (!["workspace", "compose", "operations", "resources"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+if (!["workspace", "compose", "operations", "resources", "experience", "all", "host"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+
+if (suite === "all") {
+  try { await runAll({runner:fileURLToPath(import.meta.url),repo,assets}); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+  process.exit(process.exitCode || 0);
+}
 
 async function eventually(check, description, timeout = 10000) {
   const until = Date.now() + timeout;
@@ -61,12 +70,12 @@ class Page {
       }
     });
   }
-  send(method, params = {}) {
+  send(method, params = {}, sessionId) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, 15000);
       this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? {sessionId} : {}) }));
     });
   }
   async evaluate(expression) {
@@ -85,9 +94,11 @@ class Page {
     await this.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
     await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   }
-  async key(key) {
-    await this.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: key === "Escape" ? 27 : 13 });
-    await this.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key });
+  async key(key, {shift = false} = {}) {
+    const code = key === " " ? "Space" : key;
+    const keyCode = {Escape:27,Enter:13,Tab:9,ArrowDown:40,ArrowUp:38," ":32}[key] || 0;
+    await this.send("Input.dispatchKeyEvent", {type:"keyDown",key,code,windowsVirtualKeyCode:keyCode,modifiers:shift ? 8 : 0});
+    await this.send("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode:keyCode});
   }
   visible(selector) { return this.evaluate(`!!document.querySelector(${JSON.stringify(selector)})?.getClientRects().length`); }
   waitVisible(selector) { return eventually(() => this.visible(selector), `visible ${selector}`); }
@@ -99,6 +110,12 @@ class Page {
     assert.ok(index >= 0, `node option ${id}`);
     await this.click(`.agent-search-select__option:nth-child(${index + 1})`);
   }
+}
+
+if (suite === "host") {
+  try { await runHost({Page,eventually,findBrowser,repo,assets}); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+  process.exit(process.exitCode || 0);
 }
 
 const requests = [];
@@ -169,6 +186,11 @@ const server = createServer(async (request, response) => {
       return json({ app }, app ? 200 : 404);
     }
     if (request.method !== "GET") return json({ error: "Unexpected mutation in workspace suite" }, 500);
+    if (url.pathname === "/theme-frame.html" || url.pathname === "/theme-writer.html") {
+      response.writeHead(200,{"Content-Type":"text/html"});
+      response.end(url.pathname === "/theme-frame.html" ? '<!doctype html><html data-theme="sakura-night"><body style="margin:0"><iframe title="Theme fixture" src="/?agent_id=node-a" style="width:100%;height:100vh;border:0"></iframe></body></html>' : '<!doctype html><title>Host theme fixture</title>');
+      return;
+    }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     if (!["index.html", "app.js", "style.css"].includes(name)) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { "Content-Type": name.endsWith("js") ? "text/javascript" : name.endsWith("css") ? "text/css" : "text/html" });
@@ -227,7 +249,10 @@ try {
     const ref = `dist/docker-app-ui-validation/${suite}/${name}-${width}.png`;
     await mkdir(dirname(resolve(repo, ref)), {recursive:true});
     await writeFile(resolve(repo, ref), Buffer.from(shot.data, "base64"));
-    (evidence.screenshots ||= []).push({ref, width, theme:"light", scenario:`fixture-${name}`});
+    const theme = await page.evaluate("document.documentElement.dataset.theme");
+    const screenshot = {ref, width, theme, scenario:`fixture-${name}`};
+    (evidence.screenshots ||= []).push(screenshot);
+    return screenshot;
   };
   if (suite === "workspace") {
     const closeDraft = async () => {
@@ -444,8 +469,10 @@ try {
     await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
   } else if (suite === "operations") {
     await runOperations({page, test, navigate, hold, requests, state:operationsState, capture, eventually});
-  } else {
+  } else if (suite === "resources") {
     await runResources({page, test, navigate, hold, requests, state:resourcesState, capture, eventually, outputDir:resolve(repo,"dist/docker-app-ui-validation/resources")});
+  } else {
+    await runExperience({page,test,navigate,capture,eventually,origin});
   }
   assert.deepEqual(page.errors, [], "no uncaught page exceptions");
   evidence.status = "passed";

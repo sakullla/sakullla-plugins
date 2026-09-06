@@ -14,10 +14,10 @@ generation revoke or deadline failure.
 
 The plugin declares `ui.route` and `resource.group` in `plugin.yaml`, with
 `host_scope: control-plane` for the management face and `host_scopes`
-including `agent` for the execution face. That dual-face runtime is the SDK
-`RuntimeImplicitRemoteAgentExecution` contract: empty instance targets deliver
-the Agent execution face to every remote Agent; the plugin does not list
-Agents in TargetJSON or configure itself onto a selected node. The host mounts the page at
+including `agent` for the execution face. The management face runs on the control plane; Agent execution uses the SDK
+explicit target allowlist. Empty instance targets do not select all remote Agents.
+The UI offers only remote Agents present in deployed instance targets; it does
+not configure itself onto a selected node. The host mounts the page at
 `/panel-api/plugins/<ui_route_id>/` and lists the resource group from
 `resource_group_id` plus `resource.group.*` metadata. Instance
 `resource_group_ref` is host-injected and must match `resource.group.ref`.
@@ -44,3 +44,104 @@ lists Agents, shows a copy-only official install command when the engine is
 missing, and deploys compose only after that Agent is online and ready. This
 plugin is not configured onto the selected Agent as an HTTP backend. No
 private Host wire contract substitutes for the remaining public grants.
+
+## UI validation
+
+The UI remains native HTML/CSS/JavaScript. Node 22 or newer and a runnable
+Chromium, Chrome, or Edge installation are required for the browser suites.
+`NRE_UI_BROWSER` can name an explicit browser executable. The runner uses Node
+built-ins and Chrome DevTools Protocol; no npm install or product build step is
+needed.
+
+```sh
+go test ./plugins/docker-app ./testing/integration/docker-app
+node plugins/docker-app/testing/ui/run.mjs --suite all
+```
+
+`all` runs `workspace`, `compose`, `operations`, `resources`, and `experience`.
+Each suite must actually execute and produce passing evidence for the current
+asset fingerprint. Missing browsers, skipped suites, stale evidence, and failed
+assertions result in a nonzero exit. These suites use controlled fixture APIs;
+their screenshots are labelled separately from actual host acceptance.
+
+The page follows the host's supported light/dark theme aliases. In a same-origin
+frame it observes the parent document's `data-theme`; as a standalone hosted
+page it uses the host's `theme` preference and receives cross-tab storage
+changes. Unknown or inaccessible host themes fall back to light. Credentials
+and Compose `.env` contents are not part of theme storage. Drafts remain only
+in the current document; navigation asks before discarding them, and browser
+unload confirmation is used where supported.
+
+## Actual host acceptance
+
+Run this only with a dedicated, disposable Agent. The suite deploys an
+application, edits its Compose and files, starts/stops/restarts it, updates and
+rolls back its running image, creates and visits HTTP ingress, deletes the
+application, and performs node image/cache cleanup. It also creates a small
+dangling image as explicit test preparation so cleanup remains testable on a
+subsequent run. The host and Agent must already run the candidate package with
+the required grants and explicit instance target allowlist.
+
+Provide a public JSON configuration outside tracked source, for example:
+
+```json
+{
+  "hostURL": "http://127.0.0.1:18080",
+  "agentID": "explicit-test-agent-id",
+  "agentContainer": "explicit-disposable-agent-container",
+  "packageDigest": "installed-candidate-package-sha256",
+  "tokenContainer": { "name": "explicit-host-container", "env": "API_TOKEN" },
+  "disposableAgent": true,
+  "appPrefix": "ui-acceptance",
+  "baseImage": "nginx:1.27-alpine",
+  "updateTag": "1.30.4-alpine",
+  "publishedPort": 18081,
+  "httpDomain": "http://127.0.0.1:15080",
+  "hostSourceCommit": "full-host-source-commit",
+  "compatibilityPatch": "describe any actual isolated-host adaptation"
+}
+```
+
+Use `tokenEnv` with an environment-variable name instead of `tokenContainer`
+when the token comes from a secret provider. Never put the token value in this
+JSON. Container references are explicit; the runner does not scan unrelated
+containers. Authentication uses the host's normal bootstrap credentials in a
+fresh incognito browser context that is disposed at the end. Tokens are kept
+out of console output, reports, and persistent browser profiles.
+
+```sh
+NRE_UI_HOST_CONFIG=/absolute/path/public-host.json \
+  node plugins/docker-app/testing/ui/run.mjs --suite host
+```
+
+In PowerShell, set `$env:NRE_UI_HOST_CONFIG` to the absolute JSON path before
+running the same Node command. Configuration can live outside an isolated
+verification checkout. Optional metadata references such as
+`productionFingerprint` or `packageMetadata` are informational; acceptance
+compares the configured active package digest, the Agent's package digest,
+and the actual served bytes of all three UI assets against the checkout from
+which the runner is executing.
+
+The selected update tag must be offered by the real registry metadata and
+should be pre-pulled on the test Agent to avoid a registry delay consuming the
+Agent operation deadline. `publishedPort` is the container's published backend
+port; it must differ from the NRE ingress listener port in `httpDomain`. The
+host's current UI route is a standalone page with `frame-ancestors 'none'`;
+the suite opens it through the real host plugin-management link and changes
+themes through the real host ThemeSelector in another tab.
+
+Reports and screenshots are written under `dist/docker-app-ui-validation/`.
+Host evidence includes host/Agent identity, package digest, asset fingerprint,
+viewport, actual theme, executed scenes, cancellation/failure observations,
+and runtime image identities. Required scenes and light/dark/narrow screenshots
+must all exist before `host` can pass. On failure the named test application is
+retained for investigation; resolve that explicitly before rerunning. The
+runner refuses to start with pre-existing managed applications on the dedicated
+Agent. Fixture results cannot substitute for missing host scenes.
+
+The acceptance environment for this redesign uses an isolated export of host
+commit `398ea1d9a3f51e6435ad812ed59447369d8b0ffc`. Its
+`controlPlaneRuntimePlan` reuses the existing package-bound validator to load
+the private custom-signed test candidate, with signature verification enabled.
+The upstream repository is unchanged. The report records this environment
+condition; the result applies to that adapted test host and explicit Agent.

@@ -3,18 +3,23 @@ const applyHostTheme = () => {
   const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
   let theme = "light";
   try {
-    const raw = window.parent && window.parent !== window
+    const embedded = window.parent && window.parent !== window;
+    const raw = embedded
       ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
+      : (window.localStorage.getItem("theme") || document.documentElement.getAttribute("data-theme"));
     const mapped = aliases[raw] || raw;
     if (allowed[mapped]) theme = mapped;
   } catch (_error) {
     theme = "light";
   }
-  document.documentElement.setAttribute("data-theme", theme);
+  if (document.documentElement.getAttribute("data-theme") !== theme) document.documentElement.setAttribute("data-theme", theme);
 };
-
 applyHostTheme();
+try {
+  const root = window.parent && window.parent !== window ? window.parent.document.documentElement : document.documentElement;
+  new MutationObserver(applyHostTheme).observe(root, {attributes:true,attributeFilter:["data-theme"]});
+} catch (_error) { /* Cross-origin parents use the safe initial fallback. */ }
+window.addEventListener("storage", (event) => { if (event.key === "theme" || event.key === null) applyHostTheme(); });
 
 const statusNode = document.querySelector("#app-status");
 const loadingNode = document.querySelector("#app-loading");
@@ -97,10 +102,25 @@ const openDialog = (dialog, initialFocus) => {
   dialogClosures.set(dialog, new Promise((resolve) => { closed = resolve; }));
   const trigger = document.activeElement;
   dialog.returnValue = "";
+  dialog.tabIndex = -1;
   const cancel = () => { dialog.returnValue = "cancel"; };
+  const keydown = (event) => {
+    if (event.key !== "Tab") return;
+    const nodes = Array.from(dialog.querySelectorAll('button,input,textarea,select,a[href],[tabindex]'))
+      .filter((node) => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (!first) { event.preventDefault(); dialog.focus(); return; }
+    if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+      event.preventDefault(); first.focus();
+    }
+  };
   dialog.addEventListener("cancel", cancel);
+  dialog.addEventListener("keydown", keydown);
   dialog.addEventListener("close", () => {
     dialog.removeEventListener("cancel", cancel);
+    dialog.removeEventListener("keydown", keydown);
     if (trigger?.isConnected && !trigger.disabled) trigger.focus();
     else document.querySelector("#workspace-refresh")?.focus();
     dialogClosures.delete(dialog);
@@ -1021,7 +1041,7 @@ const openCreate = async () => {
   showFormFeedback(createForm, "");
   createPanel.hidden = false;
   syncListPanel();
-  if (composeInput) composeInput.focus();
+  if (idInput) idInput.focus();
 };
 
 const closeCreate = () => {
@@ -2905,6 +2925,7 @@ const setDetailSection = async (section) => {
 
 const leaveDetail = async ({ force } = {}) => {
   const navigation = navigationSnapshot();
+  const leavingAppID = selectedAppID;
   if (!force && !(await confirmLeaveEditor())) return false;
   if (!navigationCurrent(navigation)) return false;
   advanceNavigation();
@@ -2921,6 +2942,10 @@ const leaveDetail = async ({ force } = {}) => {
   filesMountedFor = "";
   showStatus("", false);
   syncListPanel();
+  if (!force) {
+    const target = listNode.querySelector(`[data-id="${leavingAppID}"] [data-action="detail"]`) || deployToggle;
+    if (target?.getClientRects().length) target.focus();
+  }
   return true;
 };
 
@@ -2943,6 +2968,7 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
+    if (previousNavigation.view !== "detail" || previousNavigation.app !== appID) detailTitle?.focus();
     return !app.rules_error;
   } catch (error) {
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
@@ -3330,6 +3356,7 @@ if (diskCleanup) {
 const requestCloseCreate = async () => {
   if (busy || !(await confirmDiscardDrafts(["create"]))) return;
   closeCreate();
+  deployToggle?.focus();
 };
 if (createCancel) createCancel.addEventListener("click", requestCloseCreate);
 if (createBack) createBack.addEventListener("click", requestCloseCreate);

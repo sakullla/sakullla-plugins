@@ -1,0 +1,75 @@
+import assert from "node:assert/strict";
+
+function contrast(foreground,background) {
+  const luminance = (text) => text.match(/[\d.]+/g).slice(0,3).map(Number).map((x) => x/255)
+    .map((x) => x <= 0.04045 ? x/12.92 : ((x+0.055)/1.055)**2.4).reduce((sum,x,i) => sum+x*[0.2126,0.7152,0.0722][i],0);
+  const a=luminance(foreground), b=luminance(background); return (Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);
+}
+
+export async function runExperience({page,test,navigate,capture,eventually,origin}) {
+  await test("same-origin host theme changes propagate and unknown themes fall back safely",async () => {
+    await page.send("Page.navigate",{url:origin+"/theme-frame.html"});
+    await eventually(() => page.evaluate(`document.querySelector('iframe')?.contentDocument?.querySelector('#app-loading')?.hidden === true`),"embedded fixture loaded");
+    const theme = () => page.evaluate(`document.querySelector('iframe').contentDocument.documentElement.dataset.theme`);
+    assert.equal(await theme(),"dark");
+    for (const [host,expected] of [["business","light"],["neko-dark","dark"],["unknown-host-theme","light"],["sakura-night","dark"]]) {
+      await page.evaluate(`document.documentElement.dataset.theme=${JSON.stringify(host)}`);
+      await eventually(async () => await theme() === expected,`dynamic ${host} theme`);
+    }
+  });
+
+  await test("standalone plugin follows the actual host theme storage across tabs",async () => {
+    await navigate("?agent_id=node-a");
+    const tab = await page.send("Target.createTarget",{url:origin+"/theme-writer.html"});
+    const {sessionId} = await page.send("Target.attachToTarget",{targetId:tab.targetId,flatten:true});
+    try {
+      for (const [stored,expected] of [["sakura-night","dark"],["business","light"]]) {
+        const result = await page.send("Runtime.evaluate",{expression:`localStorage.setItem('theme',${JSON.stringify(stored)})`},sessionId);
+        assert.equal(result.exceptionDetails,undefined);
+        await eventually(() => page.evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(expected)}`),"cross-tab host theme synchronization");
+      }
+    } finally { await page.send("Target.closeTarget",{targetId:tab.targetId}); }
+  });
+
+  await test("keyboard navigation moves focus into the new view and dialogs retain focus",async () => {
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.evaluate(`document.querySelector('#workspace-refresh').focus()`);
+    let focused = false;
+    for (let i=0;i<20;i+=1) {
+      await page.key("Tab");
+      focused = await page.evaluate(`document.activeElement.matches('.app-card[data-id="alpha"]')`);
+      if (focused) break;
+    }
+    assert.ok(focused,"application information row is keyboard reachable");
+    await page.key("Enter"); await page.waitVisible("#app-detail");
+    assert.ok(await page.evaluate(`document.querySelector('#app-detail').contains(document.activeElement) && document.activeElement.getClientRects().length > 0`),"opening detail moves focus into the new view");
+    await page.click('#detail-overview [data-action="delete"]'); await page.waitVisible("#confirm-dialog");
+    for (let i=0;i<8;i+=1) {
+      await page.key("Tab",{shift:i%2 === 0});
+      assert.ok(await page.evaluate(`document.querySelector('#confirm-dialog').contains(document.activeElement)`),"native dialog traps keyboard focus");
+    }
+    await page.key("Escape"); await eventually(() => page.evaluate(`!document.querySelector('.agent-search-select__trigger').disabled && !document.querySelector('#confirm-dialog').open`),"cancel completed");
+    assert.equal(await page.evaluate(`document.activeElement.dataset.action`),"delete");
+    await page.click("#detail-back"); await page.waitVisible("#app-list");
+    assert.ok(await page.evaluate(`document.querySelector('#app-workspace').contains(document.activeElement) && document.activeElement.getClientRects().length > 0`),"returning to list restores visible focus");
+  });
+
+  await test("light/dark and narrow/desktop layouts keep readable text and reachable controls",async () => {
+    await navigate("?agent_id=node-a");
+    for (const theme of ["light","dark"]) {
+      await page.evaluate(`localStorage.removeItem('theme'); document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      await eventually(() => page.evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`),"fixture theme applied");
+      for (const width of [1440,375]) {
+        assert.equal((await capture(`list-${theme}`,width)).theme,theme);
+        const colors=await page.evaluate(`({fg:getComputedStyle(document.body).color,bg:getComputedStyle(document.body).backgroundColor})`);
+        assert.ok(contrast(colors.fg,colors.bg)>=4.5,"body text contrast remains readable");
+        assert.ok(await page.evaluate(`document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1`),"no viewport overflow");
+        await page.click("#deploy-toggle"); await page.waitVisible("#create-form");
+        await page.key("Tab");
+        assert.ok(await page.evaluate(`document.querySelector('#create-form').contains(document.activeElement)`),"deployment form is keyboard reachable");
+        assert.equal((await capture(`deployment-${theme}`,width)).theme,theme);
+        await page.click("#create-cancel"); await page.waitVisible("#app-list");
+      }
+    }
+  });
+}
