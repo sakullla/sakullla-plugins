@@ -112,6 +112,14 @@ func TestDockerAppUIDoesNotConfigureInstanceOntoSelectedAgent(t *testing.T) {
 	if !strings.Contains(page, `id="engine-guide"`) || !strings.Contains(js, "api/engine") || strings.Contains(js, "/configure") {
 		t.Fatal("plugin page still configures docker-app onto the selected Agent or lacks the install guide")
 	}
+	for _, state := range []string{"app-node-empty", "app-offline", "app-execution-unavailable", "app-node-denied", "app-detection-failed"} {
+		if !strings.Contains(page, `id="`+state+`"`) {
+			t.Fatalf("node state %q has no distinct UI region", state)
+		}
+	}
+	if !strings.Contains(js, `engine?.state === "missing" ? "unready" : "detection-failed"`) {
+		t.Fatal("only a successful missing-Docker report may lead to the installation guide")
+	}
 }
 
 func TestDockerReadyInstalledProjectsEngineReady(t *testing.T) {

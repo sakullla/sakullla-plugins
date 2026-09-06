@@ -155,6 +155,14 @@ func TestAppUIRejectsMissingRequiredComposeEnvironmentBeforeDeploy(t *testing.T)
 	if len(controller.Apps()) != 0 {
 		t.Fatalf("rejected deployment mutated apps: %#v", controller.Apps())
 	}
+	corrected := httptest.NewRecorder()
+	controller.ServeHTTP(corrected, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":`+jsonString(compose)+`,"env":"DATABASE_PASSWORD=fixture-corrected-value"}`))
+	if corrected.Code != http.StatusOK || len(controller.Apps()) != 1 {
+		t.Fatalf("corrected draft could not deploy: status=%d body=%s", corrected.Code, corrected.Body.String())
+	}
+	if strings.Contains(corrected.Body.String(), "fixture-corrected-value") {
+		t.Fatal("successful deployment response echoed submitted environment contents")
+	}
 }
 
 type uiMemoryAppState struct {
@@ -565,6 +573,40 @@ func TestAppUIPublishesHTTPBackendOffersAvailableWhenRuntimeOverlayIsMissing(t *
 	}
 }
 
+func TestAppUIDetailReportsIndependentHTTPRuleReadFailure(t *testing.T) {
+	t.Parallel()
+	handle := &recordingHTTPRuleCreate{listErr: errors.New("host failed at C:/private/fixture-value " + ErrTypedHandlesUnavailable.Error())}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{httpRule: handle})
+	created := httptest.NewRecorder()
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n"}`))
+	if created.Code != http.StatusOK {
+		t.Fatalf("seed app status=%d body=%s", created.Code, created.Body.String())
+	}
+	for _, path := range []string{"/api/apps/media", "/api/apps?agent_id=agent-1"} {
+		rec := httptest.NewRecorder()
+		controller.ServeHTTP(rec, uiRequest(http.MethodGet, path, ""))
+		var payload appAPIResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		view := payload.App
+		if view == nil && len(payload.Apps) == 1 {
+			view = &payload.Apps[0]
+			if payload.Error == "" {
+				t.Fatal("partial list omitted its error")
+			}
+		}
+		if rec.Code != http.StatusOK || view == nil || view.ID != "media" || view.RulesError == "" || view.Compose == "" || len(view.Ports) != 1 {
+			t.Fatalf("independent rule error lost useful app data: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		for _, forbidden := range []string{"fixture-value", "C:/private", ErrTypedHandlesUnavailable.Error()} {
+			if strings.Contains(rec.Body.String(), forbidden) {
+				t.Fatalf("rule read failure leaked %q", forbidden)
+			}
+		}
+	}
+}
+
 func TestAppUIHTTPRuleListFailureDoesNotRecordLocalSuccess(t *testing.T) {
 	t.Parallel()
 	handle := &recordingHTTPRuleCreate{listErr: errors.New("host list rejected fixture-value")}
@@ -671,9 +713,9 @@ func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
 	for _, token := range []string{
 		"入口域名",
 		"无发布端口",
-		"没有可挂的端口",
-		"/http-rule",
-		"/http-rule-delete",
+		"没有发布端口，暂不能添加入口",
+		`"http-rule"`,
+		`"http-rule-delete"`,
 		`name = "domain"`,
 		`name = "port"`,
 		"app.rules",
@@ -1044,7 +1086,7 @@ func TestAppUIInstallGuideBlocksDeployUntilEngineReady(t *testing.T) {
 	}
 }
 
-func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T) {
+func TestAppUIEngineReportFailureReturnsDetectionFailureWithoutSDKText(t *testing.T) {
 	t.Parallel()
 	sdkText := ErrTypedHandlesUnavailable.Error()
 	cases := []struct {
@@ -1071,7 +1113,7 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 			engine := httptest.NewRecorder()
 			controller.ServeHTTP(engine, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
 			body := engine.Body.String()
-			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"online":false`) {
+			if engine.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"state":"detection-failed"`) {
 				t.Fatalf("probe failure engine status=%d body=%s", engine.Code, body)
 			}
 			if strings.Contains(body, `"ready":true`) || strings.Contains(body, sdkText) || strings.Contains(body, OfficialInstallScript) {
@@ -1085,6 +1127,39 @@ func TestAppUIEngineReportFailureReturnsInstallGuideWithoutSDKText(t *testing.T)
 			}
 			if len(controller.Apps()) != 0 {
 				t.Fatalf("probe failure deploy mutated apps: %#v", controller.Apps())
+			}
+		})
+	}
+}
+
+func TestAppUIEngineStatesRequirePositiveInstallationEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		report AgentEngineReport
+		state  string
+		guide  bool
+	}{
+		{"ready", AgentEngineReport{AgentID: "agent-1", Online: true, Installed: true, Version: "27.1.1"}, "ready", false},
+		{"missing", AgentEngineReport{AgentID: "agent-1", Online: true}, "missing", true},
+		{"offline-stale-installed", AgentEngineReport{AgentID: "agent-1", Online: false, Installed: true}, "report-offline", false},
+		{"offline-missing", AgentEngineReport{AgentID: "agent-1", Online: false}, "report-offline", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller := newUIControllerWithSource(t, AgentEngineSourceFunc(func(context.Context, string) (AgentEngineReport, error) {
+				return tc.report, nil
+			}), `{"apps":[]}`)
+			rec := httptest.NewRecorder()
+			controller.ServeHTTP(rec, uiRequest(http.MethodGet, "/api/engine?agent_id=agent-1", ""))
+			var payload appAPIResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusOK || payload.Engine == nil || payload.Engine.State != tc.state {
+				t.Fatalf("state status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if (payload.Engine.Command != nil) != tc.guide {
+				t.Fatalf("installation evidence mismatch: %s", rec.Body.String())
 			}
 		})
 	}
@@ -1221,6 +1296,15 @@ func TestAppUIRejectsInvalidComposeWithoutMutatingExisting(t *testing.T) {
 	apps := controller.Apps()
 	if len(apps) != 1 || apps[0].ID != "media" || apps[0].Image != "nginx:1.27" {
 		t.Fatalf("rejected compose mutated apps=%#v", apps)
+	}
+	invalidEdit := httptest.NewRecorder()
+	controller.ServeHTTP(invalidEdit, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"media","agent_id":"agent-1","compose":"::: not yaml","auto_update":true,"env":"FIXTURE_VALUE=do-not-echo"}`))
+	if invalidEdit.Code != http.StatusBadRequest || strings.Contains(invalidEdit.Body.String(), "do-not-echo") {
+		t.Fatalf("invalid edit status=%d body=%s", invalidEdit.Code, invalidEdit.Body.String())
+	}
+	unchanged := controller.Apps()
+	if len(unchanged) != 1 || unchanged[0].Compose != apps[0].Compose || unchanged[0].AutoUpdate == nil || apps[0].AutoUpdate == nil || *unchanged[0].AutoUpdate != *apps[0].AutoUpdate {
+		t.Fatalf("rejected edit changed the existing Compose or update policy: before=%#v after=%#v", apps, unchanged)
 	}
 }
 
@@ -1727,6 +1811,14 @@ func TestAppUIScriptReportsDeployBeforeRefreshingList(t *testing.T) {
 	failure := strings.Index(text, "但列表刷新失败")
 	if success < 0 || refresh < 0 || failure < 0 || success > refresh {
 		t.Fatalf("deploy success/refresh ordering is missing: success=%d refresh=%d failure=%d", success, refresh, failure)
+	}
+	clearEnv := strings.Index(text, `form.elements.namedItem("env").value = ""`)
+	baseline := strings.Index(text, "draft.capture();")
+	if clearEnv < 0 || baseline < clearEnv || baseline > success {
+		t.Fatal("submitted env must be cleared and the successful baseline recorded before refresh")
+	}
+	if !strings.Contains(text, "confirmDiscardDrafts") || !strings.Contains(text, "beforeunload") {
+		t.Fatal("Compose drafts lack shared navigation and document-unload protection")
 	}
 	page, err := os.ReadFile("assets/ui/index.html")
 	if err != nil {
@@ -3088,7 +3180,7 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 		}
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
-	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app, revision = composeDraft.revision) => {")
 	if renderStart < 0 || renderEnd <= renderStart {
 		t.Fatal("card renderer is missing")
 	}
@@ -3270,12 +3362,12 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal(".workspace-head is not a left-aligned operation group")
 	}
 	createForm := cssRule(stylesheet, "#create-form")
-	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
-		t.Fatal("#create-form still fills main without a capped operation group")
+	if !strings.Contains(createForm, "max-width: none") {
+		t.Fatal("#create-form does not offer the full editor width")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "auto-fill") && !strings.Contains(appList, "auto-fit") {
-		t.Fatal(".app-list is not a card grid")
+	if !strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
+		t.Fatal("application list must be one scannable column")
 	}
 	if strings.Contains(appList, "flex-direction: column") {
 		t.Fatal(".app-list is still a scannable column")
@@ -3323,8 +3415,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if strings.Contains(loadCatch[:endCatch], "showStatus(error.message") {
 		t.Fatal("loadEngine failure still writes the error payload into #app-status")
 	}
-	if !strings.Contains(loadCatch[:endCatch], `showContext("execution-unavailable")`) {
-		t.Fatal("loadEngine failure does not surface execution-face unavailability")
+	if !strings.Contains(loadCatch[:endCatch], `showContext(error.denied ? "denied" : "detection-failed")`) {
+		t.Fatal("engine failure must distinguish explicit permission denial from unknown probe failure")
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, js)
 }
@@ -3481,7 +3573,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if !strings.Contains(crumbFn, `addCrumb("工作区", ".", parts.length === 0)`) {
 		t.Fatal("breadcrumb is missing the workspace root")
 	}
-	if !strings.Contains(crumbFn, `button.addEventListener("click", () => requestList(path))`) {
+	if !strings.Contains(crumbFn, `button.addEventListener("click", () => { if (snapshotCurrent(snapshot)) requestList(path); })`) {
 		t.Fatal("breadcrumb cannot return to a parent directory")
 	}
 	if !strings.Contains(crumbFn, "upBtn.hidden = currentPath === \".\"") {
@@ -3514,7 +3606,7 @@ func assertFilesManagerPage(t *testing.T) {
 	}
 
 	hideStart := strings.Index(js, "const hideEditor = () => {")
-	hideEnd := strings.Index(js, "discardFileEditor = hideEditor")
+	hideEnd := strings.Index(js, "fileDraft = makeDraft")
 	if hideStart < 0 || hideEnd <= hideStart {
 		t.Fatal("hideEditor is missing")
 	}
@@ -3573,19 +3665,17 @@ func assertFilesManagerPage(t *testing.T) {
 		t.Fatal("setBusy is missing")
 	}
 	setBusyFn := js[setBusyStart:setBusyEnd]
-	for _, id := range []string{`"files-edit"`, `"files-download"`, `"files-delete"`} {
-		if !strings.Contains(setBusyFn, id) {
-			t.Fatalf("setBusy(false) still enables %s with no file selected", id)
-		}
+	if !strings.Contains(setBusyFn, `node.disabled = node.dataset.beforeBusy === "true"`) {
+		t.Fatal("setBusy(false) must restore controls that were already disabled")
 	}
 	if !strings.Contains(setBusyFn, "if (!next) syncSelectionActions()") {
 		t.Fatal("setBusy(false) does not restore selection-based disabled flags")
 	}
-	if !strings.Contains(setBusyFn, "node.disabled = next") {
+	if !strings.Contains(setBusyFn, "node.disabled = true") {
 		t.Fatal("setBusy no longer toggles workspace controls")
 	}
 
-	syncBodyStart := strings.Index(js, "const hasFile = Boolean(selectedPath) && !selectedDir;")
+	syncBodyStart := strings.Index(js, "const hasFile = selectionCurrent() && Boolean(selectedPath) && !selectedDir;")
 	if syncBodyStart < 0 {
 		t.Fatal("syncSelectionActions is missing")
 	}
@@ -3593,7 +3683,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if end := strings.Index(syncBody, "};"); end > 0 {
 		syncBody = syncBody[:end]
 	}
-	if !strings.Contains(syncBody, "editBtn.disabled = !hasFile") || !strings.Contains(syncBody, "downloadBtn.disabled = !hasFile") || !strings.Contains(syncBody, "deleteBtn.disabled = !hasTarget") {
+	if !strings.Contains(syncBody, "editBtn.disabled = busy || !hasFile") || !strings.Contains(syncBody, "downloadBtn.disabled = busy || !hasFile") || !strings.Contains(syncBody, "deleteBtn.disabled = busy || !hasTarget") {
 		t.Fatal("syncSelectionActions no longer disables edit/download/delete when nothing is selected")
 	}
 	if !strings.Contains(js, `let selectedPath = "";`) {
@@ -3622,15 +3712,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if mkdirPost < 0 {
 		t.Fatal("mkdir does not write a workspace directory")
 	}
-	start := mkdirPost - 400
-	if start < 0 {
-		start = 0
-	}
-	end := mkdirPost + 400
-	if end > len(js) {
-		end = len(js)
-	}
-	mkdirWindow := js[start:end]
+	mkdirWindow := mkdirFn
 	if !strings.Contains(mkdirWindow, "setBusy(true)") || !strings.Contains(mkdirWindow, "setBusy(false)") {
 		t.Fatal("mkdir does not go through setBusy")
 	}
@@ -3799,14 +3881,14 @@ func assertDetailWorkspacePage(t *testing.T) {
 		t.Fatal("detail still leads with 同一时间只展示一个分区")
 	}
 
-	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintStart := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
 	}
 	paintFn := js[paintStart:paintEnd]
-	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") {
-		t.Fatal("detail title does not show the app id")
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.name || app.id") || !strings.Contains(paintFn, "应用：${app.id}") {
+		t.Fatal("detail must show the application name and explicit identity")
 	}
 	if !strings.Contains(paintFn, "detailStatus") || !strings.Contains(paintFn, "detailOpen") {
 		t.Fatal("detail head does not paint status or open")
@@ -3860,17 +3942,17 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if strings.Contains(httpFn, `${domain}${port}`) {
 		t.Fatal("HTTP rule rows still glue the backend published port onto the public URL")
 	}
-	if !strings.Contains(httpFn, "后端 ") || !strings.Contains(js, "publicURLFromRule") {
+	if !strings.Contains(httpFn, "发布端口 ") || !strings.Contains(js, "publicURLFromRule") {
 		t.Fatal("HTTP rule rows do not keep the public URL separate from the backend published port")
 	}
-	if !strings.Contains(httpFn, "确认删除入口") {
+	if !strings.Contains(httpFn, "runHTTPAction") || !strings.Contains(js, `title: deleting ? "删除入口" : "添加入口"`) {
 		t.Fatal("HTTP delete is missing confirmation")
 	}
 
-	if !strings.Contains(runFn, "确认删除 ${app.id}") {
+	if !strings.Contains(runFn, `title: "删除应用"`) || !strings.Contains(runFn, "关联 HTTP 规则") || !strings.Contains(runFn, "confirm: app.id") {
 		t.Fatal("app delete is missing confirmation in detail")
 	}
-	if !strings.Contains(runFn, "确认回滚 ${app.id}") {
+	if !strings.Contains(runFn, `title: "回滚应用"`) || !strings.Contains(runFn, "服务端记录的上一部署版本") || !strings.Contains(runFn, "appVersion(app)") {
 		t.Fatal("rollback is missing confirmation")
 	}
 	if !strings.Contains(js, "askServiceUpdate") || !strings.Contains(html, `id="update-dialog"`) {
@@ -3899,10 +3981,10 @@ func assertDetailWorkspacePage(t *testing.T) {
 	if !strings.Contains(html, `id="create-back"`) || !strings.Contains(html, "返回") {
 		t.Fatal("deploy form is missing 返回")
 	}
-	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createCancel.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy cancel is not wired back to the card wall")
 	}
-	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createBack.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy 返回 is not wired back to the card wall")
 	}
 	if strings.Count(html, `id="create-templates"`) != 1 {
@@ -4013,8 +4095,8 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("renderOverview is missing")
 	}
 	overview := js[overviewStart:overviewEnd]
-	if !strings.Contains(overview, "renderServiceLockSelect") || !strings.Contains(overview, "取消忽略") || !strings.Contains(overview, "saveServicePolicy") {
-		t.Fatal("详情 overview does not keep lock/ignore editors")
+	if !strings.Contains(overview, "service-policy-summary") || !strings.Contains(overview, "persistedIgnoredTags") || !strings.Contains(overview, "saveServicePolicy") {
+		t.Fatal("详情 overview must show lock/ignore state and provide confirmed policy editing")
 	}
 	collectStart := strings.Index(js, "const collectUpdatePayload = () => {")
 	collectEnd := strings.Index(js, "const actionGroups = (app, options = {}) => {")
@@ -4025,7 +4107,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("update dialog does not send ignore clear")
 	}
 	renderStart := strings.Index(js, "const renderApp = (app) => {")
-	renderEnd := strings.Index(js, "const fillCompose = (app) => {")
+	renderEnd := strings.Index(js, "const fillCompose = (app, revision = composeDraft.revision) => {")
 	if renderStart < 0 || renderEnd < 0 || renderEnd <= renderStart {
 		t.Fatal("card wall renderer is missing")
 	}
@@ -4053,7 +4135,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, "selectEntry(entryPath") {
 		t.Fatal("clicking a file no longer selects without reading")
 	}
-	if !strings.Contains(js, "文本尚未保存") || !strings.Contains(js, "取消则留在当前编辑") {
+	if !strings.Contains(js, "改动尚未保存") || !strings.Contains(js, "取消则保留输入和当前位置") || !strings.Contains(js, `confirmDiscardDrafts(["file"])`) {
 		t.Fatal("unsaved editor leave confirmation is missing")
 	}
 	if !strings.Contains(js, "自动刷新失败，已保留上次快照") {
@@ -4070,7 +4152,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("logs terminal reset does not clear #logs-view")
 	}
 	leaveStart := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
-	leaveEnd := strings.Index(js, "const showDetail = async (appID, section) => {")
+	leaveEnd := strings.Index(js, "const showDetail = async (appID, section, composeRevision = composeDraft.revision) => {")
 	if leaveStart < 0 || leaveEnd <= leaveStart {
 		t.Fatal("leaveDetail is missing")
 	}
@@ -4078,7 +4160,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(leaveFn, "resetLogsTerminal();") {
 		t.Fatal("leaveDetail does not reset the logs terminal")
 	}
-	paintStart := strings.Index(js, "const paintDetail = (app) => {")
+	paintStart := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	paintEnd := strings.Index(js, "const setDetailSection = async (section) => {")
 	if paintStart < 0 || paintEnd <= paintStart {
 		t.Fatal("paintDetail is missing")
@@ -4087,11 +4169,11 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(paintFn, "appChanged") || !strings.Contains(paintFn, "resetLogsTerminal();") {
 		t.Fatal("changing apps does not reset the logs terminal")
 	}
-	if !strings.Contains(paintFn, "detailTitle.textContent = app.id") || !strings.Contains(paintFn, "detailStatus") {
+	if !strings.Contains(paintFn, "detailTitle.textContent = app.name || app.id") || !strings.Contains(paintFn, "detailStatus") {
 		t.Fatal("detail head does not keep app id and status across sections")
 	}
 	for _, want := range []string{
-		"detailTitle.textContent = app.id",
+		"detailTitle.textContent = app.name || app.id",
 		"detailStatus.textContent",
 		"firstEnabledRuleURL(app)",
 		"detailOpen.hidden",
@@ -4116,18 +4198,18 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("logs section does not display log text")
 	}
 	pollStart := strings.Index(js, "const startLogPolling = () => {")
-	pollEnd := strings.Index(js, "const paintDetail = (app) => {")
+	pollEnd := strings.Index(js, "const paintDetail = (app, composeRevision) => {")
 	if pollStart < 0 || pollEnd <= pollStart {
 		t.Fatal("startLogPolling is missing")
 	}
 	pollFn := js[pollStart:pollEnd]
 	fetchCall := strings.Index(pollFn, "fetchLogs();")
 	pauseGate := strings.Index(pollFn, "logsPaused")
-	if fetchCall < 0 || pauseGate < 0 || fetchCall > pauseGate {
-		t.Fatal("paused log polling skips the immediate snapshot fetch")
+	if fetchCall < 0 || pauseGate < 0 || pauseGate > fetchCall {
+		t.Fatal("paused log polling still fetches an automatic snapshot")
 	}
-	if strings.Contains(pollFn, "if (logsPaused || document.visibilityState === \"hidden\" || view !== \"detail\"") {
-		t.Fatal("startLogPolling still returns before fetchLogs when paused")
+	if !strings.Contains(pollFn[:fetchCall], `document.visibilityState === "hidden"`) || !strings.Contains(js, `logsRefresh.addEventListener("click"`) {
+		t.Fatal("hidden polling must stop while manual snapshot refresh remains available")
 	}
 	if !strings.Contains(js, "panelJSON(`api/apps/${encodeURIComponent(appID)}`)") {
 		t.Fatal("detail view does not load GET /api/apps/{id}")
@@ -4235,7 +4317,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(httpFn, `className = "http-rule-open"`) || !strings.Contains(httpFn, `createElement("a")`) || !strings.Contains(httpFn, "link.href") {
 		t.Fatal("existing HTTP entries are not openable in markup")
 	}
-	if !strings.Contains(httpFn, `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`) {
+	if !strings.Contains(httpFn, `runHTTPAction(app, "http-rule-delete"`) || !strings.Contains(js, "取消不会更改规则。") {
 		t.Fatal("HTTP rule delete no longer requires confirmation")
 	}
 	runStart := strings.Index(js, "const runAppAction = async (app, action) => {")
@@ -4256,7 +4338,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if strings.Contains(runFn[logsGate:logsOpen+logsReturn], "已执行操作") || strings.Contains(runFn[logsGate:logsOpen+logsReturn], "postAppAction") {
 		t.Fatal("logs still reports 已执行操作 without opening the logs section")
 	}
-	if !strings.Contains(runFn, `确认删除 ${app.id}？取消不会更改应用。`) {
+	if !strings.Contains(runFn, `title: "删除应用"`) || !strings.Contains(runFn, "confirm: app.id") || !strings.Contains(runFn, "规则清理失败会中止应用删除") {
 		t.Fatal("app delete no longer requires confirmation")
 	}
 	if strings.Contains(listRender, "删除") {
@@ -4268,10 +4350,10 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	if !strings.Contains(js, "COMPOSE_TEMPLATES") || !strings.Contains(js, "applyCreateTemplate") || !strings.Contains(js, "composeInput.value = template.compose") {
 		t.Fatal("deploy form cannot fill a small YAML template")
 	}
-	if !strings.Contains(js, `createCancel.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createCancel.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy form cannot cancel back to the card wall")
 	}
-	if !strings.Contains(js, `createBack.addEventListener("click", closeCreate)`) {
+	if !strings.Contains(js, `createBack.addEventListener("click", requestCloseCreate)`) {
 		t.Fatal("deploy form cannot return back to the card wall")
 	}
 	syncStart := strings.Index(js, "const syncListPanel = () => {")

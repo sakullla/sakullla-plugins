@@ -3,18 +3,23 @@ const applyHostTheme = () => {
   const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
   let theme = "light";
   try {
-    const raw = window.parent && window.parent !== window
+    const embedded = window.parent && window.parent !== window;
+    const raw = embedded
       ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
+      : (window.localStorage.getItem("theme") || document.documentElement.getAttribute("data-theme"));
     const mapped = aliases[raw] || raw;
     if (allowed[mapped]) theme = mapped;
   } catch (_error) {
     theme = "light";
   }
-  document.documentElement.setAttribute("data-theme", theme);
+  if (document.documentElement.getAttribute("data-theme") !== theme) document.documentElement.setAttribute("data-theme", theme);
 };
-
 applyHostTheme();
+try {
+  const root = window.parent && window.parent !== window ? window.parent.document.documentElement : document.documentElement;
+  new MutationObserver(applyHostTheme).observe(root, {attributes:true,attributeFilter:["data-theme"]});
+} catch (_error) { /* Cross-origin parents use the safe initial fallback. */ }
+window.addEventListener("storage", (event) => { if (event.key === "theme" || event.key === null) applyHostTheme(); });
 
 const statusNode = document.querySelector("#app-status");
 const loadingNode = document.querySelector("#app-loading");
@@ -49,6 +54,8 @@ const logsRefresh = document.querySelector("#logs-refresh");
 const logsPause = document.querySelector("#logs-pause");
 const logsStatus = document.querySelector("#logs-status");
 const logsView = document.querySelector("#logs-view");
+const logsEmpty = document.querySelector("#logs-empty");
+const logsContext = document.querySelector("#logs-context");
 const createForm = document.querySelector("#create-form");
 const createTitle = document.querySelector("#app-create-title");
 const createSubmit = document.querySelector("#create-submit");
@@ -87,7 +94,44 @@ const updateCopy = document.querySelector("#update-copy");
 const updateServices = document.querySelector("#update-services");
 const updateConfirm = document.querySelector("#update-confirm");
 
-const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
+// All native dialogs reset their result and return focus to the caller.
+const dialogClosures = new WeakMap();
+const openDialog = (dialog, initialFocus) => {
+  if (dialog.open) return false;
+  let closed;
+  dialogClosures.set(dialog, new Promise((resolve) => { closed = resolve; }));
+  const trigger = document.activeElement;
+  dialog.returnValue = "";
+  dialog.tabIndex = -1;
+  const cancel = () => { dialog.returnValue = "cancel"; };
+  const keydown = (event) => {
+    if (event.key !== "Tab") return;
+    const nodes = Array.from(dialog.querySelectorAll('button,input,textarea,select,a[href],[tabindex]'))
+      .filter((node) => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (!first) { event.preventDefault(); dialog.focus(); return; }
+    if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+      event.preventDefault(); first.focus();
+    }
+  };
+  dialog.addEventListener("cancel", cancel);
+  dialog.addEventListener("keydown", keydown);
+  dialog.addEventListener("close", () => {
+    dialog.removeEventListener("cancel", cancel);
+    dialog.removeEventListener("keydown", keydown);
+    if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+    else document.querySelector("#workspace-refresh")?.focus();
+    dialogClosures.delete(dialog);
+    closed();
+  }, { once: true });
+  dialog.showModal();
+  initialFocus?.focus();
+  return true;
+};
+
+const askConfirm = async ({ title, body, confirm = "确定", cancel = "取消", danger = false, hideConfirm = false } = {}) => {
   if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
     const text = [title, body].filter(Boolean).join("\n");
     if (hideConfirm) {
@@ -96,7 +140,8 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
     }
     return Promise.resolve(window.confirm(text));
   }
-  if (confirmDialog.open) confirmDialog.close("cancel");
+  if (confirmDialog.open) return Promise.resolve(false);
+  if (dialogClosures.has(confirmDialog)) await dialogClosures.get(confirmDialog);
   if (confirmTitle) confirmTitle.textContent = title || "确认";
   if (confirmBody) {
     confirmBody.textContent = body || "";
@@ -112,36 +157,55 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
     confirmCancel.hidden = false;
   }
   return new Promise((resolve) => {
-    const onClose = () => resolve(confirmDialog.returnValue === "ok");
+    const previous = statusNode?.textContent || "";
+    const previousState = statusNode?.dataset.state;
+    showStatus("等待确认操作。", false, "confirming");
+    const onClose = () => {
+      showStatus(previous, previousState === "failed", previousState);
+      resolve(confirmDialog.returnValue === "ok");
+    };
     confirmDialog.addEventListener("close", onClose, { once: true });
-    confirmDialog.showModal();
-    if (confirmCancel) confirmCancel.focus();
+    openDialog(confirmDialog, confirmCancel);
   });
 };
 
 let busy = false;
+let busyFocusTarget = null;
 let selectedAgentID = "";
 let agentsCache = [];
 let engineReady = false;
 let agentOnline = false;
 let lastEngine = null;
 let workspaceSeq = 0;
+let contextVersion = 0;
+let readVersion = 0;
+let detailRequest = 0;
+const contextSnapshot = () => ({ version: contextVersion, read: readVersion, agent: selectedAgentID });
+const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.read === readVersion && snapshot.agent === selectedAgentID;
 let view = "list";
 let selectedAppID = "";
 let detailSection = "overview";
 let detailApp = null;
+let navigationVersion = 0;
+const advanceNavigation = () => { navigationVersion += 1; };
+const navigationSnapshot = () => ({
+  ...contextSnapshot(), navigation: navigationVersion, view,
+  app: selectedAppID, section: detailSection, create: !createPanel.hidden,
+});
+const navigationCurrent = (snapshot) => contextCurrent(snapshot)
+  && snapshot.navigation === navigationVersion && snapshot.view === view
+  && snapshot.app === selectedAppID && snapshot.section === detailSection
+  && snapshot.create === !createPanel.hidden;
 let logsPaused = false;
 let logsTimer = null;
 let logsLoaded = false;
+let logsSnapshotKey = "";
 let logsSeq = 0;
 let filesDirty = false;
 let filesEditorOpen = false;
 let filesMountedFor = "";
 let composeFilledFor = "";
-let discardFileEditor = () => {
-  filesDirty = false;
-  filesEditorOpen = false;
-};
+let composeDraftOwner = "";
 let syncSelectionActions = () => {};
 const engineCache = new Map();
 const ENGINE_CACHE_MS = 15000;
@@ -180,7 +244,7 @@ const panelAuthHeaders = () => {
 let statusTimer = null;
 const STATUS_CLEAR_MS = 4000;
 
-const showStatus = (message, isError) => {
+const showStatus = (message, isError, state) => {
   if (!statusNode) return;
   if (statusTimer) {
     clearTimeout(statusTimer);
@@ -191,12 +255,16 @@ const showStatus = (message, isError) => {
   if (!message) {
     delete statusNode.dataset.error;
     delete statusNode.dataset.tone;
+    delete statusNode.dataset.state;
     return;
   }
   const cancelled = !isError && /^已取消/.test(message);
+  state ||= isError ? "failed" : cancelled ? "cancelled" : /^正在/.test(message) ? "running" : "succeeded";
+  if (/已.*(但|，).*刷新失败/.test(message)) state = "partial";
+  statusNode.dataset.state = state;
   statusNode.dataset.error = isError ? "true" : "false";
-  statusNode.dataset.tone = isError ? "error" : (cancelled ? "info" : "success");
-  if (!isError) {
+  statusNode.dataset.tone = state === "failed" ? "error" : state === "succeeded" ? "success" : "info";
+  if (state === "cancelled") {
     statusTimer = setTimeout(() => {
       if (statusNode.textContent === message) showStatus("", false);
     }, STATUS_CLEAR_MS);
@@ -264,11 +332,12 @@ const riskConfirmBody = (preview) => {
   return items.map((item) => `${labels[item.kind] || item.kind}${item.target ? `：${item.target}` : ""}`).join("\n");
 };
 
-const confirmComposeRisk = async (preview) => {
+const confirmComposeRisk = async (preview, target) => {
   if (!requiresRiskConfirm(preview)) return true;
+  const agent = agentsCache.find((agent) => agent.id === target.agent_id);
   const ok = await askConfirm({
     title: "确认高风险配置",
-    body: riskConfirmBody(preview),
+    body: `节点 ${agentDisplayName(agent) || target.agent_id} · 应用 ${target.id}\n${riskConfirmBody(preview)}`,
     confirm: "继续",
     cancel: "取消",
     danger: true,
@@ -283,24 +352,44 @@ const deployComposePayload = async (payload) => {
     agent_id: payload.agent_id,
     compose: payload.compose,
   });
-  if (!(await confirmComposeRisk(previewed.preview))) return null;
+  if (!(await confirmComposeRisk(previewed.preview, payload))) return null;
   const next = { ...payload };
   if (previewed.preview && previewed.preview.digest) next.confirm = previewed.preview.digest;
   return sendPluginJSON("api/apps", next);
 };
 
 const setBusy = (next) => {
+  if (next && !busy) {
+    busyFocusTarget = document.activeElement;
+    // A mutation owns the target from preview through confirmation and completion.
+    // Reads started before it may not restore pages or replace draft/status state.
+    readVersion += 1;
+    workspaceSeq += 1;
+    detailRequest += 1;
+  }
   busy = next;
-  const roots = [workspaceNode, contextNode].filter(Boolean);
+  if (next) showStatus("正在执行操作…", false, "running");
+  const roots = [workspaceNode, contextNode, document.querySelector(".page-head")].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
-      if (node === agentSelect || node === copyScript || node === copyDaemon) return;
-      if (agentPickerRoot && agentPickerRoot.contains(node)) return;
-      if (!next && (node.id === "files-edit" || node.id === "files-download" || node.id === "files-delete")) return;
-      node.disabled = next;
+      if (node === copyScript || node === copyDaemon) return;
+      if (next) {
+        if (!node.hasAttribute("data-before-busy")) node.dataset.beforeBusy = String(node.disabled);
+        node.disabled = true;
+      } else if (node.hasAttribute("data-before-busy")) {
+        node.disabled = node.dataset.beforeBusy === "true";
+        delete node.dataset.beforeBusy;
+      }
     });
   });
+  agentPicker.setDisabled(next);
   if (!next) syncSelectionActions();
+  if (!next && !document.querySelector("dialog[open]")) {
+    const target = busyFocusTarget;
+    if (target?.isConnected && !target.disabled && target.getClientRects().length) target.focus();
+    else document.querySelector("#workspace-refresh")?.focus();
+    busyFocusTarget = null;
+  }
 };
 
 const parseAgentTime = (value) => {
@@ -360,6 +449,7 @@ const rememberEngine = (agentID, engine) => {
   if (!agentID) return null;
   const entry = {
     ready: engine?.ready === true,
+    state: engine?.state || "detection-failed",
     online: engine?.online === true,
     version: engine?.version || "",
     at: Date.now(),
@@ -403,7 +493,7 @@ const engineMark = (state) => {
   const node = document.createElement("span");
   node.className = "agent-search-select__engine";
   node.dataset.ready = state.ready ? "true" : "false";
-  node.textContent = state.ready ? "引擎就绪" : "引擎未就绪";
+  node.textContent = state.state === "detection-failed" ? "检测失败" : state.ready ? "引擎就绪" : "引擎未就绪";
   return node;
 };
 
@@ -534,7 +624,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     if (engine) {
       triggerEngine.hidden = false;
       triggerEngine.dataset.ready = engine.ready ? "true" : "false";
-      triggerEngine.textContent = engine.ready ? "引擎就绪" : "引擎未就绪";
+      triggerEngine.textContent = engine.state === "detection-failed" ? "检测失败" : engine.ready ? "引擎就绪" : "引擎未就绪";
     } else {
       triggerEngine.hidden = true;
     }
@@ -598,6 +688,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       const option = document.createElement("button");
       option.type = "button";
       option.className = "agent-search-select__option";
+      option.dataset.agentId = agent.id;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", agent.id === picker.selected ? "true" : "false");
       const dot = document.createElement("span");
@@ -640,7 +731,19 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   picker.refresh = (selected) => {
     if (selected !== undefined) picker.selected = String(selected || "");
     syncTrigger();
-    if (picker.open) renderList();
+    if (picker.open) refreshEngineMarks();
+  };
+
+  // Probe completion must not replace an option between pointer down and click.
+  const refreshEngineMarks = () => {
+    list.querySelectorAll("[data-agent-id]").forEach((option) => {
+      option.setAttribute("aria-selected", option.dataset.agentId === picker.selected ? "true" : "false");
+      const engine = cachedEngine(option.dataset.agentId);
+      if (!engine) return;
+      const previous = option.querySelector(".agent-search-select__engine");
+      if (previous) previous.replaceWith(engineMark(engine));
+      else option.append(engineMark(engine));
+    });
   };
 
   trigger.addEventListener("click", () => {
@@ -655,7 +758,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     renderList();
     searchInput.focus();
     probeEngines(filteredAgents().slice(0, 12).map((agent) => agent.id), () => {
-      if (picker.open) renderList();
+      if (picker.open) refreshEngineMarks();
       syncTrigger();
     });
   });
@@ -833,19 +936,64 @@ if (createForm) {
   });
 }
 
-const confirmLeaveEditor = async () => {
-  if (!filesEditorOpen || !filesDirty) return true;
+// Draft baselines live only in this document, including optional .env values.
+const makeDraft = (read, restore) => ({
+  baseline: read(),
+  revision: 0,
+  touch() { this.revision += 1; },
+  get dirty() { return JSON.stringify(read()) !== JSON.stringify(this.baseline); },
+  capture(value = read()) { this.baseline = value; this.touch(); },
+  discard() { this.touch(); restore(this.baseline); },
+});
+const readComposeForm = (form) => Object.fromEntries(Array.from(form.elements)
+  .filter((field) => field.name).map((field) => [field.name, field.type === "checkbox" ? field.checked : field.value]));
+const restoreComposeForm = (form, values) => {
+  Object.entries(values).forEach(([name, value]) => {
+    const field = form.elements.namedItem(name);
+    if (field.type === "checkbox") field.checked = value;
+    else { field.value = value; if (field.tagName === "TEXTAREA") paintCodeEditor(field); }
+  });
+  updateDraftIndicators();
+};
+const createDraft = makeDraft(() => readComposeForm(createForm), (value) => restoreComposeForm(createForm, value));
+const composeDraft = makeDraft(() => readComposeForm(composeForm), (value) => restoreComposeForm(composeForm, value));
+let fileDraft = null;
+const activeDrafts = () => [
+  { id: "create", label: "部署", draft: createDraft, active: !createPanel.hidden },
+  { id: "compose", label: "Compose", draft: composeDraft, active: view === "detail" },
+  { id: "file", label: "文件", draft: fileDraft, active: filesEditorOpen },
+];
+const updateDraftIndicators = () => {
+  document.querySelector("#create-dirty").hidden = !createDraft.dirty;
+  document.querySelector("#compose-dirty").hidden = !composeDraft.dirty;
+};
+const confirmDiscardDrafts = async (ids = ["create", "compose", "file"], { discard = true } = {}) => {
+  const dirty = activeDrafts().filter((item) => ids.includes(item.id) && item.active && item.draft?.dirty);
+  if (!dirty.length) return true;
   const ok = await askConfirm({
-    title: "文本尚未保存",
-    body: "离开将丢弃改动，取消则留在当前编辑。",
-    confirm: "丢弃",
-    cancel: "取消",
-    danger: true,
+    title: "改动尚未保存",
+    body: `${dirty.map((item) => item.label).join("、")}有未保存的输入。丢弃后继续，取消则保留输入和当前位置。`,
+    confirm: "丢弃", cancel: "取消", danger: true,
   });
   if (!ok) return false;
-  discardFileEditor();
+  if (discard) dirty.forEach((item) => item.draft.discard());
+  updateDraftIndicators();
   return true;
 };
+const confirmLeaveEditor = () => confirmDiscardDrafts();
+[createForm, composeForm].forEach((form) => {
+  const changed = () => {
+    (form === createForm ? createDraft : composeDraft).touch();
+    updateDraftIndicators();
+  };
+  form.addEventListener("input", changed);
+  form.addEventListener("change", changed);
+});
+window.addEventListener("beforeunload", (event) => {
+  if (!activeDrafts().some((item) => item.active && item.draft?.dirty)) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 const markCreateTemplate = (name) => {
   const root = createTemplates || createPanel;
@@ -855,18 +1003,22 @@ const markCreateTemplate = (name) => {
   });
 };
 
-const applyCreateTemplate = (name) => {
+const applyCreateTemplate = async (name) => {
   const template = COMPOSE_TEMPLATES[name];
-  if (!template || !composeInput) return;
+  if (!template || !composeInput || busy) return;
+  if (composeInput.value !== createDraft.baseline.compose && !(await confirmDiscardDrafts(["create"], { discard: false }))) return;
   composeInput.value = template.compose || "";
+  createDraft.touch();
   paintCodeEditor(composeInput);
   markCreateTemplate(name);
+  updateDraftIndicators();
   composeInput.focus();
 };
 
 const openCreate = async () => {
   if (!engineReady || !agentOnline) return;
   if (view === "detail" && !(await leaveDetail())) return;
+  advanceNavigation();
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
   if (idInput) {
@@ -883,13 +1035,20 @@ const openCreate = async () => {
   }
   if (autoUpdateInput) autoUpdateInput.checked = false;
   markCreateTemplate("blank");
+  createDraft.capture();
+  updateDraftIndicators();
+  document.querySelector("#create-context").textContent = `目标节点：${agentDisplayName(selectedAgent())}`;
+  showFormFeedback(createForm, "");
   createPanel.hidden = false;
   syncListPanel();
-  if (composeInput) composeInput.focus();
+  if (idInput) idInput.focus();
 };
 
 const closeCreate = () => {
+  if (createPanel && !createPanel.hidden) advanceNavigation();
   if (createForm) createForm.reset();
+  createDraft.capture();
+  updateDraftIndicators();
   if (idInput) idInput.readOnly = false;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
@@ -1036,34 +1195,38 @@ const copyText = async (text) => {
 };
 
 const postAppAction = async (app, action, body = {}) => {
-  await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, body);
+  const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, body);
   closeCreate();
-  if (action === "delete" && selectedAppID === app.id) leaveDetail({ force: true });
-  await renderWorkspace();
+  if (action === "delete" && selectedAppID === app.id) await leaveDetail({ force: true });
+  try {
+    if (await renderWorkspace() === false) throw new Error("节点或详情未能刷新");
+    return { payload };
+  } catch (error) {
+    return { payload, refreshError: error.message };
+  }
 };
-
+const reportActionResult = (result, message) => {
+  if (!result) return;
+  if (result.refreshError) showStatus(`${message}但页面刷新失败：${result.refreshError}`, true, "partial");
+  else showStatus(message, false);
+};
 const postAppActionWithRisk = async (app, action, body = {}) => {
-  try {
-    await postAppAction(app, action, body);
-    return true;
-  } catch (error) {
-    if (action !== "update" || !requiresRiskConfirm(error.preview)) throw error;
-    if (!(await confirmComposeRisk(error.preview))) return false;
-    await postAppAction(app, action, { ...body, confirm: error.preview.digest });
-    return true;
+  let next = { ...body };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await postAppAction(app, action, next);
+    } catch (error) {
+      if (action !== "update" || !requiresRiskConfirm(error.preview)) throw error;
+      const digest = error.preview?.digest;
+      if (!digest || digest === next.confirm) throw new Error("风险确认已失效，请重新打开版本操作。");
+      if (attempt === 2) throw new Error("风险摘要持续变化，请刷新应用后重新确认。");
+      if (!(await confirmComposeRisk(error.preview, app))) return null;
+      next = { ...body, confirm: digest };
+    }
   }
+  throw new Error("风险摘要持续变化，请刷新应用后重新确认。");
 };
-
-const saveServicePolicy = async (app, payload, okMessage) => {
-  setBusy(true);
-  try {
-    if (await postAppActionWithRisk(app, "update", payload)) showStatus(okMessage || "已保存。", false);
-  } catch (error) {
-    showStatus(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-};
+const saveServicePolicy = (app, service) => runAppAction(app, { id: "service-policy", label: "管理版本策略", service });
 
 const MAX_WORKSPACE_FILE_BYTES = 1048576;
 const workspacePathError = "只能使用应用工作区内的相对路径";
@@ -1140,6 +1303,7 @@ const mountAppFiles = () => {
   if (!template || !filesPanel) {
     return {
       bind() {},
+      unbind() {},
       confirmLeave: () => true,
       discard() {},
     };
@@ -1148,6 +1312,17 @@ const mountAppFiles = () => {
     filesPanel.replaceChildren(template.content.cloneNode(true));
   }
   const section = filesPanel.querySelector(".app-files") || filesPanel;
+  const filesStatus = section.querySelector("#files-status");
+  const setFilesStatus = (message, state = "ready") => {
+    if (!filesStatus) return;
+    filesStatus.textContent = message; filesStatus.hidden = !message; filesStatus.dataset.state = state;
+    filesStatus.setAttribute("role", state === "failed" ? "alert" : "status");
+  };
+  const fileError = (message) => { setFilesStatus(message, "failed"); showStatus(message, true); };
+  const dialogError = (dialog, message) => {
+    const feedback = dialog?.querySelector("[data-dialog-feedback]");
+    if (feedback) { feedback.hidden = false; feedback.textContent = message; feedback.dataset.state = "failed"; }
+  };
   const browser = section.querySelector("#files-browser") || section.querySelector(".files-browser");
   const breadcrumb = section.querySelector("#files-breadcrumb") || section.querySelector(".files-breadcrumb");
   const upBtn = section.querySelector("#files-up");
@@ -1181,7 +1356,20 @@ const mountAppFiles = () => {
   let selectedPath = "";
   let selectedName = "";
   let selectedDir = false;
-  let savedContent = "";
+  let fileReadSequence = 0;
+  let fileListSequence = 0;
+  let boundOwner = "";
+  let bindingVersion = 0;
+  let listingSnapshot = null;
+  let selectedOwner = "";
+  let selectedBinding = 0;
+  const namedTargets = new WeakMap();
+  const ownerKey = (value) => value ? `${value.agent_id}/${value.id}` : "";
+  const bindingCurrent = (owner = boundOwner, version = bindingVersion) => !!owner
+    && owner === boundOwner && owner === ownerKey(app) && version === bindingVersion
+    && app.agent_id === selectedAgentID && app.id === selectedAppID && view === "detail" && detailSection === "files";
+  const selectionCurrent = () => bindingCurrent(selectedOwner, selectedBinding);
+  const snapshotCurrent = (snapshot) => snapshot && snapshot === listingSnapshot && bindingCurrent(snapshot.owner, snapshot.binding);
 
   const setDirty = (next) => {
     filesDirty = Boolean(next);
@@ -1196,11 +1384,11 @@ const mountAppFiles = () => {
   };
 
   syncSelectionActions = () => {
-    const hasFile = Boolean(selectedPath) && !selectedDir;
-    const hasTarget = Boolean(selectedPath) && selectedPath !== ".";
-    if (editBtn) editBtn.disabled = !hasFile;
-    if (downloadBtn) downloadBtn.disabled = !hasFile;
-    if (deleteBtn) deleteBtn.disabled = !hasTarget;
+    const hasFile = selectionCurrent() && Boolean(selectedPath) && !selectedDir;
+    const hasTarget = selectionCurrent() && Boolean(selectedPath) && selectedPath !== ".";
+    if (editBtn) editBtn.disabled = busy || !hasFile;
+    if (downloadBtn) downloadBtn.disabled = busy || !hasFile;
+    if (deleteBtn) deleteBtn.disabled = busy || !hasTarget;
     if (selectedLabel) {
       selectedLabel.textContent = hasTarget
         ? `已选择 ${selectedName || selectedPath}`
@@ -1209,9 +1397,9 @@ const mountAppFiles = () => {
   };
 
   const hideEditor = () => {
+    fileDraft?.touch();
     filesEditorOpen = false;
     setDirty(false);
-    savedContent = "";
     if (editor) editor.hidden = true;
     if (editorInput) editorInput.value = "";
     if (binaryHint) binaryHint.hidden = true;
@@ -1220,29 +1408,24 @@ const mountAppFiles = () => {
     syncSelectionActions();
   };
 
-  discardFileEditor = hideEditor;
 
-  const confirmLeave = async () => {
-    if (!filesEditorOpen || !filesDirty) {
-      if (filesEditorOpen && !filesDirty) hideEditor();
-      return true;
-    }
-    const ok = await askConfirm({
-      title: "文本尚未保存",
-      body: "离开将丢弃改动，取消则留在当前编辑。",
-      confirm: "丢弃",
-      cancel: "取消",
-      danger: true,
-    });
-    if (!ok) return false;
+  fileDraft = makeDraft(() => editorInput?.value || "", (value) => {
+    if (editorInput) editorInput.value = value || "";
     hideEditor();
+  });
+  const confirmLeave = async () => {
+    if (!(await confirmDiscardDrafts(["file"]))) return false;
+    if (filesEditorOpen) hideEditor();
     return true;
   };
 
-  const selectEntry = (path, name, isDir) => {
+  const selectEntry = (path, name, isDir, owner = boundOwner, binding = bindingVersion) => {
+    if (path && (busy || !bindingCurrent(owner, binding))) return;
     selectedPath = path;
     selectedName = name;
     selectedDir = isDir;
+    selectedOwner = path ? owner : "";
+    selectedBinding = binding;
     paintSelection();
     syncSelectionActions();
   };
@@ -1255,7 +1438,7 @@ const mountAppFiles = () => {
 
   const showEditor = (path, name, content) => {
     filesEditorOpen = true;
-    savedContent = content;
+    fileDraft.capture(content);
     setDirty(false);
     selectEntry(path, name, false);
     if (browser) browser.hidden = true;
@@ -1276,6 +1459,7 @@ const mountAppFiles = () => {
     if (upBtn) upBtn.hidden = currentPath === ".";
     if (!breadcrumb) return;
     breadcrumb.replaceChildren();
+    const snapshot = listingSnapshot;
     const addCrumb = (label, path, current) => {
       if (current) {
         const currentNode = document.createElement("span");
@@ -1288,7 +1472,7 @@ const mountAppFiles = () => {
       button.type = "button";
       button.className = "btn-link";
       button.textContent = label;
-      button.addEventListener("click", () => requestList(path));
+      button.addEventListener("click", () => { if (snapshotCurrent(snapshot)) requestList(path); });
       breadcrumb.append(button);
     };
     const parts = currentPath === "." ? [] : currentPath.split("/").filter(Boolean);
@@ -1306,47 +1490,75 @@ const mountAppFiles = () => {
   };
 
   const openFile = async (path, name) => {
-    if (!app) return;
+    if (!bindingCurrent() || !selectionCurrent()) return;
+    const owner = boundOwner;
+    const binding = bindingVersion;
     if (filesEditorOpen && filesDirty && selectedPath === path) return;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(owner, binding)) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
-      showStatus(workspacePathError, true);
+      fileError(workspacePathError);
       return;
     }
+    const target = app;
+    const navigation = navigationSnapshot();
+    const revision = fileDraft.revision;
+    const request = ++fileReadSequence;
+    const current = () => bindingCurrent(owner, binding) && navigationCurrent(navigation) && app?.id === target.id
+      && revision === fileDraft.revision && request === fileReadSequence;
+    setFilesStatus(`正在读取文件 ${relative}…`, "loading");
     try {
-      const payload = await postAppFiles(app, { action: "read", path: relative });
+      const payload = await postAppFiles(target, { action: "read", path: relative });
+      if (!current()) return;
       const content = typeof payload.content === "string" ? payload.content : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
+        fileError("文件超过 1MiB 上限");
         return;
       }
       if (!looksLikeText(content)) {
-        showStatus("该文件不适合文本编辑，请下载或重新上传。", true);
+        fileError("该文件不适合文本编辑，请下载或重新上传。");
         if (binaryHint) binaryHint.hidden = false;
         return;
       }
       showEditor(relative, name || relative.split("/").pop(), content);
+      setFilesStatus(`已打开 ${relative}`);
+      showStatus("已打开工作区文件。", false);
     } catch (error) {
-      showStatus(error.message, true);
+      if (!current()) return;
+      fileError(`读取文件失败：${error.message}`);
     }
   };
 
-  const openNewFile = async (path, name) => {
+  const openNewFile = async (path, name, target) => {
+    if (!target || !bindingCurrent(target.owner, target.binding)) return false;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(target.owner, target.binding)) return false;
     showEditor(path, name, "");
+    return true;
   };
 
   const loadList = async (path) => {
-    if (!app) return;
+    if (!bindingCurrent()) return;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
-      showStatus(workspacePathError, true);
+      fileError(workspacePathError);
       return;
     }
+    const target = app;
+    const owner = boundOwner;
+    const binding = bindingVersion;
+    const context = contextSnapshot();
+    const request = ++fileListSequence;
+    setFilesStatus(`正在读取目录 ${relative}…`, "loading");
+    const current = () => bindingCurrent(owner, binding) && contextCurrent(context) && selectedAppID === target.id
+      && view === "detail" && request === fileListSequence;
     try {
-      const payload = await postAppFiles(app, { action: "list", path: relative });
+      const payload = await postAppFiles(target, { action: "list", path: relative });
+      if (!current()) return;
       currentPath = relativeWorkspacePath(payload.path) || relative;
+      listingSnapshot = {owner, binding, path:currentPath};
+      const snapshot = listingSnapshot;
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
       if (!filesEditorOpen) {
         const visible = entries.some((entry) => relativeWorkspacePath(entry.path || entry.name) === selectedPath);
@@ -1354,7 +1566,7 @@ const mountAppFiles = () => {
         else paintSelection();
       }
       renderBreadcrumb();
-      if (listEl) listEl.replaceChildren();
+      if (listEl) { listEl.replaceChildren(); listEl.dataset.stale = "false"; }
       let listed = 0;
       entries.forEach((entry) => {
         const entryPath = relativeWorkspacePath(entry.path || entry.name);
@@ -1369,11 +1581,13 @@ const mountAppFiles = () => {
         const open = document.createElement("button");
         open.type = "button";
         open.className = "files-name";
+        open.title = entryPath;
         open.textContent = entry.dir ? `${entry.name || entryPath}/` : (entry.name || entryPath);
         open.addEventListener("click", (event) => {
           event.stopPropagation();
+          if (!snapshotCurrent(snapshot)) return;
           if (entry.dir) requestList(entryPath);
-          else selectEntry(entryPath, entry.name || entryPath, false);
+          else selectEntry(entryPath, entry.name || entryPath, false, snapshot.owner, snapshot.binding);
         });
         nameWrap.append(open);
         item.append(nameWrap);
@@ -1384,58 +1598,67 @@ const mountAppFiles = () => {
           item.append(size);
         }
         item.addEventListener("click", () => {
-          selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir));
+          if (snapshotCurrent(snapshot)) selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir), snapshot.owner, snapshot.binding);
         });
         if (listEl) listEl.append(item);
       });
       if (emptyEl) emptyEl.hidden = listed !== 0;
+      setFilesStatus(listed ? `目录已读取 · ${listed} 项` : "此目录为空", listed ? "ready" : "empty");
+      return true;
     } catch (error) {
-      if (listEl) listEl.replaceChildren();
+      if (!current()) return;
+      const retained = snapshotCurrent(listingSnapshot);
+      if (listEl) {
+        if (!retained) listEl.replaceChildren();
+        listEl.dataset.stale = String(!!retained);
+      }
       if (emptyEl) emptyEl.hidden = true;
-      showStatus(error.message, true);
+      fileError(`目录 ${relative} 读取失败。${retained ? `显示该应用上次读取的 ${currentPath}。` : "未获得该应用的目录快照。"}${error.message}`);
+      return false;
     }
   };
 
   const requestList = async (path) => {
+    const owner = boundOwner;
+    const binding = bindingVersion;
+    if (!bindingCurrent(owner, binding)) return;
     if (!(await confirmLeave())) return;
+    if (!bindingCurrent(owner, binding)) return;
+    fileReadSequence += 1;
     loadList(path);
   };
 
   const removePath = async (path, name) => {
-    if (!app) return;
+    if (busy || !bindingCurrent() || !selectionCurrent()) return;
     const relative = relativeWorkspacePath(path);
-    if (!relative || relative === ".") {
-      showStatus(relative === "." ? "不能删除应用工作区根目录" : workspacePathError, true);
-      return;
-    }
-    if (!await askConfirm({
-      title: "删除",
-      body: `确认删除 ${name || relative}？取消不会更改工作区。`,
-      confirm: "删除",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，工作区未更改。", false);
-      return;
-    }
+    if (!relative || relative === ".") { fileError(relative === "." ? "不能删除应用工作区根目录" : workspacePathError); return; }
+    const target = app;
     setBusy(true);
     try {
-      await postAppFiles(app, { action: "delete", path: relative });
+      if (!(await askConfirm({
+        title: "删除工作区文件",
+        body: `节点 ${agentDisplayName(selectedAgent())} · 应用 ${target.id}\n确认删除 ${name || relative}？路径：${relative}。取消不会更改工作区。`,
+        confirm: "删除", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，工作区未更改。", false); return; }
+      await postAppFiles(target, {action:"delete",path:relative});
       if (selectedPath === relative) hideEditor();
       showStatus("已删除工作区文件。", false);
-      await loadList(currentPath);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
+      if (await loadList(currentPath) === false) showStatus("文件已删除，但目录刷新失败。", true, "partial");
+    } catch (error) { fileError(error.message); }
+    finally { setBusy(false); }
   };
 
   const openNamedDialog = (dialog, input) => {
-    if (!dialog || typeof dialog.showModal !== "function") return;
+    if (!bindingCurrent() || !dialog || typeof dialog.showModal !== "function") return;
+    fileReadSequence += 1;
+    fileListSequence += 1;
+    namedTargets.set(dialog, {app,owner:boundOwner,binding:bindingVersion,path:currentPath});
     if (input) input.value = "";
-    dialog.showModal();
-    if (input) input.focus();
+    const feedback = dialog.querySelector("[data-dialog-feedback]");
+    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const copy = dialog.querySelector(".files-dialog-copy");
+    if (copy) copy.textContent = `应用 ${app.id} · 当前目录 ${currentPath}。使用工作区内的相对名称。`;
+    openDialog(dialog, input);
   };
   const closeNamedDialog = (dialog) => {
     if (dialog && dialog.open) dialog.close();
@@ -1456,25 +1679,27 @@ const mountAppFiles = () => {
     mkdirForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !app) return;
+      const target = namedTargets.get(mkdirDialog);
+      if (!target || !bindingCurrent(target.owner, target.binding)) return;
       const name = mkdirName ? mkdirName.value.trim() : "";
       if (!name) {
         if (mkdirName) mkdirName.focus();
         return;
       }
-      const next = joinWorkspacePath(currentPath, name);
+      const next = joinWorkspacePath(target.path, name);
       if (!next) {
-        showStatus(workspacePathError, true);
+        dialogError(mkdirDialog, workspacePathError);
         return;
       }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "mkdir", path: next });
+        await postAppFiles(target.app, { action: "mkdir", path: next });
         if (mkdirName) mkdirName.value = "";
         closeNamedDialog(mkdirDialog);
         showStatus("已新建目录。", false);
-        await loadList(currentPath);
+        if (await loadList(target.path) === false) showStatus(`目录 ${next} 已创建，但目录刷新失败。无需重复创建。`, true, "partial");
       } catch (error) {
-        showStatus(error.message, true);
+        dialogError(mkdirDialog, error.message);
       } finally {
         setBusy(false);
       }
@@ -1488,29 +1713,32 @@ const mountAppFiles = () => {
     });
   }
   if (newForm) {
-    newForm.addEventListener("submit", (event) => {
+    newForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !app) return;
+      const target = namedTargets.get(newDialog);
+      if (!target || !bindingCurrent(target.owner, target.binding)) return;
       const name = newName ? newName.value.trim() : "";
       if (!name) {
         showStatus("请填写要新建的文本文件名。", true);
         if (newName) newName.focus();
         return;
       }
-      const next = joinWorkspacePath(currentPath, name);
+      const next = joinWorkspacePath(target.path, name);
       if (!next) {
-        showStatus(workspacePathError, true);
+        dialogError(newDialog, workspacePathError);
         return;
       }
       if (newName) newName.value = "";
       closeNamedDialog(newDialog);
-      openNewFile(next, name);
+      if (!(await openNewFile(next, name, target))) return;
+      fileDraft.capture(null);
       setDirty(true);
     });
   }
   if (editBtn) {
     editBtn.addEventListener("click", () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedDir) {
         showStatus("请先选择一个文件再编辑。", true);
         return;
@@ -1519,43 +1747,52 @@ const mountAppFiles = () => {
     });
   }
   if (uploadBtn && uploadInput) {
-    uploadBtn.addEventListener("click", () => uploadInput.click());
+    let uploadContext = null;
+    uploadBtn.addEventListener("click", () => {
+      if (busy || !bindingCurrent()) return;
+      fileReadSequence += 1;
+      fileListSequence += 1;
+      uploadContext = {navigation:navigationSnapshot(),app,path:currentPath,owner:boundOwner,binding:bindingVersion};
+      uploadInput.click();
+    });
     uploadInput.addEventListener("change", async () => {
       const file = uploadInput.files && uploadInput.files[0];
       uploadInput.value = "";
-      if (!file || !app) return;
-      const next = joinWorkspacePath(currentPath, file.name);
-      if (!next) {
-        showStatus(workspacePathError, true);
-        return;
-      }
-      if (file.size > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
-        return;
-      }
-      const content = await file.text();
+      const context = uploadContext;
+      uploadContext = null;
+      if (!file || busy || !context || !bindingCurrent(context.owner, context.binding) || context.path !== currentPath || !navigationCurrent(context.navigation)) return;
+      const next = joinWorkspacePath(context.path, file.name);
+      if (!next) { fileError(workspacePathError); return; }
+      if (file.size > MAX_WORKSPACE_FILE_BYTES) { fileError("文件超过 1MiB 上限"); return; }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "write", path: next, content });
+        let content;
+        try { content = new TextDecoder("utf-8", {fatal:true}).decode(await file.arrayBuffer()); }
+        catch { throw new Error("上传仅支持 UTF-8 文本文件。"); }
+        if (!looksLikeText(content)) throw new Error("上传仅支持 UTF-8 文本文件。");
+        await postAppFiles(context.app, {action:"write",path:next,content});
         showStatus("已上传工作区文件。", false);
-        await loadList(currentPath);
-      } catch (error) {
-        showStatus(error.message, true);
-      } finally {
-        setBusy(false);
-      }
+        if (await loadList(context.path) === false) showStatus("文件已上传，但目录刷新失败。", true, "partial");
+      } catch (error) { fileError(error.message); }
+      finally { setBusy(false); }
     });
   }
   if (downloadBtn) {
     downloadBtn.addEventListener("click", async () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedDir) {
         showStatus("请先选择一个文件再下载。", true);
         return;
       }
+      const target = app;
+      const filename = selectedName || selectedPath.split("/").pop();
+      const context = contextSnapshot();
+      const owner = boundOwner;
+      const binding = bindingVersion;
       try {
-        const file = await postAppFiles(app, { action: "read", path: selectedPath });
-        downloadTextFile(selectedName || selectedPath.split("/").pop(), file.content || "");
+        const file = await postAppFiles(target, { action: "read", path: selectedPath });
+        if (!bindingCurrent(owner, binding) || !contextCurrent(context)) return;
+        downloadTextFile(filename, file.content || "");
         showStatus("已开始下载。", false);
       } catch (error) {
         showStatus(error.message, true);
@@ -1564,7 +1801,7 @@ const mountAppFiles = () => {
   }
   if (deleteBtn) {
     deleteBtn.addEventListener("click", () => {
-      if (busy || !app) return;
+      if (busy || !selectionCurrent()) return;
       if (!selectedPath || selectedPath === ".") {
         showStatus("请先选择要删除的文件或目录。", true);
         return;
@@ -1574,19 +1811,21 @@ const mountAppFiles = () => {
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
-      if (busy || !app || !selectedPath || selectedDir) return;
+      if (busy || !selectionCurrent() || !selectedPath || selectedDir) return;
+      const target = app;
+      const path = selectedPath;
       const content = editorInput ? editorInput.value : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
-        showStatus("文件超过 1MiB 上限", true);
+        fileError("文件超过 1MiB 上限");
         return;
       }
       setBusy(true);
       try {
-        await postAppFiles(app, { action: "write", path: selectedPath, content });
-        savedContent = content;
+        await postAppFiles(target, { action: "write", path, content });
+        fileDraft.capture(content);
         setDirty(false);
         showStatus("已保存工作区文件。", false);
-        await loadList(currentPath);
+        if (await loadList(currentPath) === false) showStatus("文件已保存，但目录刷新失败。请稍后刷新，无需重复保存。", true, "partial");
       } catch (error) {
         showStatus(error.message, true);
       } finally {
@@ -1607,30 +1846,56 @@ const mountAppFiles = () => {
       loadList(currentPath);
     });
   }
+  section.querySelector("#files-refresh")?.addEventListener("click", () => { if (!busy) requestList(currentPath); });
   syncSelectionActions();
   if (editorInput) {
     editorInput.addEventListener("input", () => {
-      setDirty(editorInput.value !== savedContent);
+      fileDraft.touch();
+      setDirty(fileDraft.dirty);
       paintCodeEditor(editorInput);
     });
   }
 
+  const unbind = () => {
+    bindingVersion += 1;
+    fileReadSequence += 1;
+    fileListSequence += 1;
+    app = null;
+    boundOwner = "";
+    filesMountedFor = "";
+    listingSnapshot = null;
+    currentPath = ".";
+    selectedPath = "";
+    selectedName = "";
+    selectedDir = false;
+    selectedOwner = "";
+    hideEditor();
+    fileDraft.capture("");
+    if (listEl) { listEl.replaceChildren(); delete listEl.dataset.stale; }
+    if (breadcrumb) breadcrumb.replaceChildren();
+    if (emptyEl) emptyEl.hidden = true;
+    setFilesStatus("");
+    closeNamedDialog(mkdirDialog);
+    closeNamedDialog(newDialog);
+    namedTargets.delete(mkdirDialog);
+    namedTargets.delete(newDialog);
+  };
   return {
     bind(nextApp) {
-      app = nextApp;
-      if (!app) {
-        hideEditor();
-        filesMountedFor = "";
-        return;
-      }
-      if (filesMountedFor !== app.id) {
-        hideEditor();
-        currentPath = ".";
-        selectEntry("", "", false);
-        filesMountedFor = app.id;
-        loadList(".");
+      const owner = ownerKey(nextApp);
+      if (!owner || owner !== boundOwner) {
+        unbind();
+        app = nextApp;
+        boundOwner = owner;
+        filesMountedFor = owner;
+        if (owner) { renderBreadcrumb(); loadList("."); }
+      } else {
+        app = nextApp;
+        syncSelectionActions();
+        if (!listingSnapshot && !filesEditorOpen) loadList(currentPath);
       }
     },
+    unbind,
     confirmLeave,
     discard: hideEditor,
   };
@@ -1649,70 +1914,48 @@ const actionButton = (action, className, label) => {
 
 const runAppAction = async (app, action) => {
   if (busy) return;
-  if (action.id === "configure") {
-    showDetail(app.id, "compose");
-    return;
-  }
-  if (action.id === "logs") {
-    showDetail(app.id, "logs");
-    return;
-  }
-  if (action.id === "delete") {
-    if (!await askConfirm({
-      title: "删除应用",
-      body: `确认删除 ${app.id}？取消不会更改应用。`,
-      confirm: "删除",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      await postAppAction(app, "delete", { confirm: app.id });
-      showStatus("已删除应用。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-    return;
-  }
-  if (action.id === "rollback") {
-    if (!await askConfirm({
-      title: "回滚应用",
-      body: `确认回滚 ${app.id} 到上一版本？取消不会更改应用。`,
-      confirm: "回滚",
-      cancel: "取消",
-      danger: true,
-    })) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-  }
-  if (action.id === "update") {
-    const payload = await askServiceUpdate(app);
-    if (!payload) {
-      showStatus("已取消，应用未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      if (await postAppActionWithRisk(app, action.id, payload)) showStatus("已更新应用。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-    return;
-  }
+  const trigger = document.activeElement;
+  if (action.id === "configure") { await showDetail(app.id, "compose"); return; }
+  if (action.id === "logs") { await showDetail(app.id, "logs"); return; }
+  const policy = action.id === "service-policy";
+  if (!policy && !(app.actions || []).some((item) => item.id === action.id)) return;
+  if (policy && !serviceImages(app).some((service) => service.name === action.service)) return;
+  if (["update", "rollback", "delete"].includes(action.id) && !(await confirmLeaveEditor())) return;
+  const target = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}`;
   setBusy(true);
+  busyFocusTarget = trigger;
   try {
-    await postAppAction(app, action.id);
-    showStatus(action.id === "rollback" ? "已回滚应用。" : "已执行操作。", false);
+    if (action.id === "delete") {
+      const rules = Array.isArray(app.rules) ? app.rules : [];
+      const entries = rules.length ? `\n当前显示的入口：${rules.map((rule) => rule.domain || rule.ref).join("、")}` : "";
+      if (!(await askConfirm({
+        title: "删除应用",
+        body: `${target}\n先删除宿主上的关联 HTTP 规则，再停止容器并删除应用工作区。规则清理失败会中止应用删除；规则删除后若应用删除失败，已删除的入口不会恢复。${entries}`,
+        confirm: "删除", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，应用未更改。", false); return; }
+      reportActionResult(await postAppAction(app, "delete", { confirm: app.id }), `${target}：已删除应用。`);
+      return;
+    }
+    if (action.id === "rollback") {
+      if (!(await askConfirm({
+        title: "回滚应用",
+        body: `${target}\n当前镜像：${appVersion(app)}\n目标：服务端记录的上一部署版本。将重新创建应用服务，期间可能短暂不可用。取消不会更改应用。`,
+        confirm: "回滚", cancel: "取消", danger: true,
+      }))) { showStatus("已取消，应用未更改。", false); return; }
+    }
+    if (action.id === "update" || policy) {
+      const payload = await askServiceUpdate(app, { service: action.service, policyOnly: policy });
+      if (!payload) { showStatus("已取消，应用未更改。", false); return; }
+      const result = await postAppActionWithRisk(app, "update", payload);
+      reportActionResult(result, `${target}：${payload.services?.length ? "已更新所选服务。" : "已保存版本策略。"}`);
+      return;
+    }
+    const messages = { start: "已启动应用。", stop: "已停止应用。", restart: "已重启应用。", rollback: "已回滚应用。" };
+    reportActionResult(await postAppAction(app, action.id), `${target}：${messages[action.id] || "已执行操作。"}`);
   } catch (error) {
-    showStatus(error.message, true);
+    // This is the plugin's existing public, server-authoritative deletion stage.
+    const partial = error.message.startsWith("入口规则已按宿主结果删除") || error.message.startsWith("Docker 操作已完成，但应用状态保存失败");
+    showStatus(`${target}：${error.message}`, true, partial ? "partial" : "failed");
   } finally {
     setBusy(false);
   }
@@ -1720,25 +1963,24 @@ const runAppAction = async (app, action) => {
 
 const serviceImages = (app) => (Array.isArray(app.service_images) ? app.service_images.filter((item) => item && item.name) : []);
 
-const askServiceUpdate = (app) => {
-  const services = serviceImages(app);
+const askServiceUpdate = async (app, options = {}) => {
+  const services = serviceImages(app).filter((service) => !options.service || service.name === options.service);
   if (!updateDialog || typeof updateDialog.showModal !== "function") {
     const selected = services.filter((item) => item.update && item.default_tag).map((item) => ({ name: item.name, tag: item.default_tag }));
     if (!selected.length) return Promise.resolve(null);
     const lines = selected.map((item) => `${item.name} → ${item.tag}`).join("\n");
     return Promise.resolve(window.confirm(`确认更新 ${app.id}？\n${lines}\n取消不会改 compose。`) ? { services: selected } : null);
   }
-  if (updateDialog.open) updateDialog.close("cancel");
+  if (updateDialog.open) return Promise.resolve(null);
+  if (dialogClosures.has(updateDialog)) await dialogClosures.get(updateDialog);
   const digestRefresh = services.some((item) => Array.isArray(item.candidates) && item.candidates.some((candidate) => candidate.digest));
   if (updateCopy) {
-    updateCopy.textContent = digestRefresh
-      ? `确认拉取 ${app.id} 的新 digest。取消不会改 compose 或运行镜像。`
-      : `按服务选择 ${app.id} 要写入 compose 的目标版本。取消不会改 compose 或运行镜像。`;
+    updateCopy.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}。${digestRefresh ? "有新的镜像 digest。" : ""}仅更新勾选的服务；锁定和忽略在确认后保存。取消不会改 Compose、版本策略或运行镜像。`;
   }
   if (updateServices) {
     updateServices.replaceChildren();
     services.forEach((service) => {
-      updateServices.append(renderUpdateServiceRow(service));
+      updateServices.append(renderUpdateServiceRow(service, options));
     });
     if (!services.length) {
       const empty = document.createElement("p");
@@ -1761,8 +2003,7 @@ const askServiceUpdate = (app) => {
       resolve(payload);
     };
     updateDialog.addEventListener("close", onClose, { once: true });
-    updateDialog.showModal();
-    if (updateConfirm) updateConfirm.focus();
+    openDialog(updateDialog, updateDialog.querySelector('button[value="cancel"]'));
   });
 };
 
@@ -1819,14 +2060,14 @@ const renderIgnoredClearControls = (service, { buttons = false } = {}) => persis
   return label;
 });
 
-const renderUpdateServiceRow = (service) => {
+const renderUpdateServiceRow = (service, options = {}) => {
   const row = document.createElement("section");
   row.className = "update-service";
   row.dataset.service = service.name;
   row.dataset.lock = service.lock || "";
   const candidates = Array.isArray(service.candidates) ? service.candidates : [];
   const defaultTag = service.default_tag || (candidates[0] && candidates[0].tag) || "";
-  const checked = service.update === true && !!defaultTag;
+  const checked = !options.policyOnly && service.update === true && !!defaultTag;
   if (!candidates.length) row.dataset.empty = "true";
   const head = document.createElement("div");
   head.className = "update-service-head";
@@ -1843,7 +2084,7 @@ const renderUpdateServiceRow = (service) => {
   title.textContent = service.name;
   const current = document.createElement("span");
   current.className = "update-current";
-  current.textContent = service.tag || service.image || "未知版本";
+  current.textContent = `当前：${service.image || service.tag || "未知版本"}`;
   identity.append(title);
   pick.append(selectBox, identity);
   head.append(pick);
@@ -1894,6 +2135,7 @@ const renderUpdateServiceRow = (service) => {
   ignoreBox.addEventListener("change", () => {
     if (ignoreBox.checked) selectBox.checked = false;
   });
+  selectBox.addEventListener("change", () => { if (selectBox.checked) ignoreBox.checked = false; });
   tools.append(ignore);
   const lockSelect = renderServiceLockSelect(service);
   if (lockSelect) tools.append(lockSelect);
@@ -1931,9 +2173,7 @@ const collectUpdatePayload = () => {
 };
 
 const actionGroups = (app, options = {}) => {
-  const apiActions = Array.isArray(app.actions) && app.actions.length
-    ? app.actions
-    : [{ id: "configure", label: "编辑" }, { id: "delete", label: "删除" }];
+  const apiActions = Array.isArray(app.actions) ? app.actions : [];
   const primary = document.createElement("div");
   primary.className = "app-actions app-actions-primary";
   const secondary = document.createElement("div");
@@ -1991,6 +2231,7 @@ const backendPortFromRule = (rule) => {
 };
 
 const firstEnabledRuleURL = (app) => {
+  if (app.rules_error) return "";
   const rules = Array.isArray(app.rules) ? app.rules : [];
   for (const rule of rules) {
     const openURL = publicURLFromRule(rule);
@@ -2050,7 +2291,9 @@ const renderApp = (app) => {
   const imageNode = card.querySelector("[data-app-image]");
   if (imageNode) {
     const version = appVersion(app);
-    const shown = cardImage(version);
+    const shown = serviceImages(app).length > 1
+      ? serviceImages(app).map((service) => `${service.name}: ${service.image || service.current || version}`).join(" · ")
+      : version;
     imageNode.textContent = shown;
     imageNode.hidden = !shown;
     imageNode.title = version;
@@ -2084,8 +2327,8 @@ const renderApp = (app) => {
   const openURL = firstEnabledRuleURL(app);
   const urlNode = card.querySelector("[data-app-url]");
   if (urlNode) {
-    urlNode.hidden = !openURL;
-    urlNode.textContent = openURL ? displayHost(openURL) : "";
+    urlNode.hidden = !openURL && !app.rules_error;
+    urlNode.textContent = app.rules_error ? "入口读取失败" : openURL ? displayHost(openURL) : "";
     urlNode.title = openURL;
   }
   const openButton = card.querySelector('[data-action="open"]');
@@ -2112,7 +2355,7 @@ const renderApp = (app) => {
       runAppAction(app, action);
     });
   });
-  const openDetail = () => { showDetail(app.id, "overview"); };
+  const openDetail = () => { if (!busy) showDetail(app.id, "overview"); };
   const detailButton = card.querySelector('[data-action="detail"]');
   if (detailButton) {
     detailButton.textContent = "详情";
@@ -2135,7 +2378,14 @@ const renderApp = (app) => {
   return card;
 };
 
-const fillCompose = (app) => {
+const fillCompose = (app, revision = composeDraft.revision) => {
+  const owner = `${app.agent_id}/${app.id}`;
+  // A refresh may start while clean and finish after typing. Neither a delayed
+  // collection nor a same-app detail response may turn those edits into a baseline.
+  if (composeDraftOwner === owner && (composeDraft.dirty || composeDraft.revision !== revision)) {
+    showFormFeedback(composeForm, "已刷新应用状态，保留当前未提交的编辑。", "info");
+    return;
+  }
   if (detailComposeInput) {
     detailComposeInput.value = app.compose || "";
     paintCodeEditor(detailComposeInput);
@@ -2146,6 +2396,9 @@ const fillCompose = (app) => {
   }
   if (detailAutoUpdateInput) detailAutoUpdateInput.checked = app.auto_update === true;
   composeFilledFor = app.id;
+  composeDraftOwner = owner;
+  composeDraft.capture();
+  updateDraftIndicators();
 };
 
 const renderOverview = (app) => {
@@ -2172,7 +2425,7 @@ const renderOverview = (app) => {
     [statusValue, "状态"],
     [String(services.length || 1), "服务"],
     [String(ports.length), "端口"],
-    [String(rules.length), "入口"],
+    [app.rules_error ? "未知" : String(rules.length), "入口"],
   ].forEach(([value, label]) => {
     const item = document.createElement("div");
     item.className = "overview-stat";
@@ -2259,24 +2512,16 @@ const renderOverview = (app) => {
         flag.textContent = "无允许候选";
       }
       tools.append(flag);
-      const lockSelect = renderServiceLockSelect(service);
-      if (lockSelect) tools.append(lockSelect);
-      const lock = tools.querySelector(`select[name="lock-${service.name}"]`);
-      if (lock) {
-        lock.addEventListener("change", () => {
-          saveServicePolicy(app, { locks: { [service.name]: lock.value } }, "已保存锁定。");
-        });
-      }
-      renderIgnoredClearControls(service, { buttons: true }).forEach((button) => {
-        button.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          const tag = String(button.dataset.tag || "").trim();
-          if (!tag) return;
-          saveServicePolicy(app, { ignore: [{ service: service.name, tag, clear: true }] }, "已取消忽略。");
-        });
-        tools.append(button);
-      });
+      const currentPolicy = document.createElement("p");
+      currentPolicy.className = "service-policy-summary";
+      currentPolicy.textContent = `锁定：${service.lock || "未锁定"} · 忽略：${persistedIgnoredTags(service).join("、") || "无"}`;
+      const candidates = document.createElement("p");
+      candidates.className = "service-candidates";
+      candidates.textContent = `候选：${(service.candidates || []).map((candidate) => candidate.tag).join("、") || "无允许的候选"}`;
+      const manage = actionButton({ id: "service-policy" }, "btn-secondary", "管理版本策略");
+      manage.dataset.service = service.name;
+      manage.addEventListener("click", () => saveServicePolicy(app, service.name));
+      tools.append(currentPolicy, candidates, manage);
       item.append(tools);
       list.append(item);
     });
@@ -2299,6 +2544,7 @@ const renderOverview = (app) => {
   if (hasUpdate) addRow(run, "更新", "镜像有新版本");
 
   const net = addBlock("入口");
+  if (app.rules_error) addRow(net, "读取状态", app.rules_error);
   if (rules.length) {
     const list = document.createElement("div");
     list.className = "overview-links";
@@ -2320,7 +2566,7 @@ const renderOverview = (app) => {
       }
     });
     addRow(net, "域名", "", { node: list });
-  } else {
+  } else if (!app.rules_error) {
     addRow(net, "域名", "未配置 HTTP 入口");
   }
 
@@ -2346,154 +2592,154 @@ const renderOverview = (app) => {
   } else {
     addRow(store, "数据卷", "无数据卷");
   }
+  if (!(app.actions || []).some((action) => action.id === "rollback")) {
+    const history = document.createElement("p");
+    history.className = "hint rollback-unavailable";
+    history.textContent = "当前没有可用的回滚操作；有上一部署记录且节点可执行时才能回滚。";
+    overviewPanel.append(history);
+  }
   overviewPanel.append(sheet);
   actionGroups(app, { overview: true }).forEach((group) => {
     if (group.classList.contains("app-actions-danger")) {
       const copy = document.createElement("p");
       copy.className = "overview-danger-copy";
-      copy.textContent = "删除会停止容器并清掉该应用工作区。";
+      copy.textContent = "删除会先处理关联 HTTP 入口，再停止容器并清掉应用工作区。";
       group.prepend(copy);
     }
     overviewPanel.append(group);
   });
 };
 
+const runHTTPAction = async (app, action, body, form) => {
+  if (busy || selectedAgentID !== app.agent_id) return;
+  const deleting = action === "http-rule-delete";
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    const target = deleting ? body.domain : `${body.domain} → 发布端口 ${body.port}`;
+    if (!(await askConfirm({
+      title: deleting ? "删除入口" : "添加入口",
+      body: `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}\n${target}\n${deleting ? "删除后此入口停止提供访问。" : "确认将此域名绑定到所选发布端口。"}取消不会更改规则。`,
+      confirm: deleting ? "删除" : "创建", cancel: "取消", danger: deleting,
+    }))) { showStatus("已取消，规则未更改。", false); return; }
+    const payload = deleting ? {rule_ref:body.rule_ref} : {domain:body.domain,port:body.port};
+    await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/${action}`, payload);
+    form?.reset();
+    const message = deleting ? "已删除 HTTP 规则。" : "已创建 HTTP 规则。";
+    showStatus(message, false);
+    try {
+      if (await renderWorkspace() === false) throw new Error("入口或应用信息未能刷新");
+      showStatus(message, false);
+    } catch (error) { showStatus(`${message}但页面刷新失败：${error.message}`, true, "partial"); }
+  } catch (error) {
+    const feedback = httpPanel.querySelector("#http-feedback");
+    if (feedback) { feedback.hidden = false; feedback.textContent = error.message; }
+    showStatus(error.message, true);
+  } finally { setBusy(false); }
+};
+
 const renderHTTP = (app) => {
   if (!httpPanel) return;
+  const owner = `${app.agent_id}/${app.id}`;
+  const draft = httpPanel.dataset.owner === owner ? {
+    domain:httpPanel.querySelector('input[name="domain"]')?.value || "",
+    port:httpPanel.querySelector('select[name="port"]')?.value || "",
+  } : null;
   httpPanel.replaceChildren();
+  httpPanel.dataset.owner = owner;
   const ports = appPorts(app);
   const rules = Array.isArray(app.rules) ? app.rules : [];
+  const feedback = document.createElement("p");
+  feedback.id = "http-feedback";
+  feedback.className = "resource-error";
+  feedback.setAttribute("role", "alert");
+  feedback.textContent = app.rules_error || "";
+  feedback.hidden = !app.rules_error;
+  httpPanel.append(feedback);
+  const retry = actionButton({id:"refresh-http"}, "btn-secondary", "刷新入口");
+  retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
+  httpPanel.append(retry);
   if (rules.length) {
     const ruleList = document.createElement("ul");
     ruleList.className = "http-rules";
     rules.forEach((rule) => {
       const item = document.createElement("li");
+      item.dataset.ruleRef = rule.ref || "";
       const domain = String(rule.domain || "").trim();
-      const disabled = rule.enabled === false;
-      const openURL = disabled ? "" : publicURLFromRule(rule);
+      const openURL = publicURLFromRule(rule);
       const main = document.createElement("div");
       main.className = "http-rule-main";
+      const label = document.createElement("strong");
+      label.textContent = domain || "未命名入口";
+      main.append(label, chip(rule.enabled === false ? "已停用" : "已启用"));
+      const backendPort = backendPortFromRule(rule);
+      if (backendPort) main.append(chip(`发布端口 ${backendPort}`));
+      const target = document.createElement("p");
+      target.className = "http-rule-target";
+      target.textContent = openURL ? `访问目标：${openURL}` : "已停用，不提供访问链接";
+      main.append(target);
       if (openURL) {
         const link = document.createElement("a");
+        link.className = "http-rule-open";
         link.href = openURL;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.className = "http-rule-open";
-        link.textContent = openURL;
-        link.addEventListener("click", (event) => {
-          event.preventDefault();
-          window.open(openURL, "_blank", "noopener,noreferrer");
-        });
+        link.textContent = "访问";
         main.append(link);
-      } else {
-        const label = document.createElement("span");
-        label.textContent = `${domain || "未命名入口"}${disabled ? "（已停用）" : ""}`;
-        if (disabled) label.className = "http-rule-disabled";
-        main.append(label);
-      }
-      const backendPort = backendPortFromRule(rule);
-      if (backendPort) {
-        const bound = chip(`后端 ${backendPort}`);
-        bound.title = "容器发布端口，不是入口监听端口";
-        main.append(bound);
       }
       item.append(main);
       if (rule.ref) {
-        const deleteRule = document.createElement("button");
-        deleteRule.type = "button";
-        deleteRule.className = "btn-link danger";
-        deleteRule.textContent = "删除";
-        deleteRule.addEventListener("click", async () => {
-          if (busy) return;
-          if (!await askConfirm({
-            title: "删除入口",
-            body: `确认删除入口 ${domain || rule.ref}？取消不会更改规则。`,
-            confirm: "删除",
-            cancel: "取消",
-            danger: true,
-          })) {
-            showStatus("已取消，规则未更改。", false);
-            return;
-          }
-          setBusy(true);
-          try {
-            await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/http-rule-delete`, {
-              rule_ref: rule.ref,
-            });
-            showStatus("已删除 HTTP 规则。", false);
-            await renderWorkspace();
-          } catch (error) {
-            showStatus(error.message, true);
-          } finally {
-            setBusy(false);
-          }
-        });
+        const deleteRule = actionButton({id:"delete-http"}, "btn-link danger", "删除");
+        deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:domain || rule.ref}));
         item.append(deleteRule);
       }
       ruleList.append(item);
     });
     httpPanel.append(ruleList);
-  } else if (ports.length) {
+  } else if (!app.rules_error) {
     const empty = document.createElement("p");
     empty.className = "http-empty";
-    empty.textContent = "还没有入口。把域名绑定到下面的发布端口。";
+    empty.textContent = "还没有 HTTP 入口。";
     httpPanel.append(empty);
   }
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
-    const formTitle = document.createElement("p");
-    formTitle.className = "http-form-title";
-    formTitle.textContent = "添加入口";
-    form.append(formTitle);
+    const title = document.createElement("p");
+    title.className = "http-form-title";
+    title.textContent = "添加入口";
     const portLabel = document.createElement("label");
-    portLabel.append("端口");
+    portLabel.append("发布端口");
     const portSelect = document.createElement("select");
     portSelect.name = "port";
     ports.forEach((port) => {
       const option = document.createElement("option");
-      option.value = String(port);
-      option.textContent = String(port);
+      option.value = String(port); option.textContent = String(port);
       portSelect.append(option);
     });
+    if (draft && ports.some((port) => String(port) === draft.port)) portSelect.value = draft.port;
     portLabel.append(portSelect);
     const domainLabel = document.createElement("label");
     domainLabel.append("入口域名");
     const domain = document.createElement("input");
-    domain.name = "domain";
-    domain.required = true;
-    domain.autocomplete = "off";
-    domain.spellcheck = false;
+    domain.name = "domain"; domain.required = true; domain.autocomplete = "off"; domain.spellcheck = false;
     domain.placeholder = "app.example.com";
+    domain.value = draft?.domain || "";
     domainLabel.append(domain);
     const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "btn-primary";
-    submit.textContent = "添加入口";
-    form.append(portLabel, domainLabel, submit);
-    form.addEventListener("submit", async (event) => {
+    submit.type = "submit"; submit.className = "btn-primary"; submit.textContent = "添加入口";
+    form.append(title,portLabel,domainLabel,submit);
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
-      if (busy) return;
-      setBusy(true);
-      try {
-        await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/http-rule`, {
-          domain: domain.value.trim(),
-          port: Number(portSelect.value),
-        });
-        showStatus("已创建 HTTP 规则。", false);
-        form.reset();
-        await renderWorkspace();
-      } catch (error) {
-        showStatus(error.message, true);
-      } finally {
-        setBusy(false);
-      }
+      if (!domain.value.trim()) { domain.focus(); return; }
+      runHTTPAction(app, "http-rule", {domain:domain.value.trim(),port:Number(portSelect.value)}, form);
     });
     httpPanel.append(form);
   } else {
     const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent = "没有可挂的端口";
+    hint.className = "hint http-no-ports";
+    hint.textContent = "没有发布端口，暂不能添加入口。";
     httpPanel.append(hint);
   }
 };
@@ -2513,6 +2759,7 @@ const fillLogServices = (app) => {
 };
 
 const stopLogPolling = () => {
+  logsSeq += 1;
   if (logsTimer) {
     clearInterval(logsTimer);
     logsTimer = null;
@@ -2555,59 +2802,61 @@ const paintLogsView = () => {
 
 const resetLogsTerminal = () => {
   logsSeq += 1;
-  if (logsView) {
-    logsView.textContent = "";
-    logsView.dataset.error = "false";
-  }
+  logsLoaded = false;
+  logsSnapshotKey = "";
+  if (logsView) { logsView.textContent = ""; logsView.dataset.error = "false"; }
+  if (logsEmpty) logsEmpty.hidden = true;
   setLogsState("", false);
 };
-
 const logsContextCurrent = () => detailApp && view === "detail" && detailSection === "logs";
-
 const fetchLogs = async () => {
-  if (!logsContextCurrent()) return;
+  if (!logsContextCurrent() || document.visibilityState === "hidden") return;
   const service = logsService ? logsService.value : "";
   if (!service) {
-    logsLoaded = true;
     resetLogsTerminal();
     setLogsState("没有可查看的服务", false);
     stopLogPolling();
     return;
   }
-  const seq = ++logsSeq;
   const appID = detailApp.id;
+  const key = `${selectedAgentID}/${appID}/${service}`;
+  if (logsSnapshotKey !== key) { resetLogsTerminal(); logsSnapshotKey = key; }
+  logsContext.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${appID} · 服务 ${service} · 每 4 秒读取快照`;
+  const seq = ++logsSeq;
+  const context = contextSnapshot();
+  const current = () => seq === logsSeq && contextCurrent(context) && logsContextCurrent() && detailApp.id === appID && logsService.value === service;
+  setLogsState(logsLoaded ? "正在刷新，显示上次快照" : "正在读取日志快照…", false);
   try {
     const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(appID)}/logs`, { service });
-    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
-    if (logsView) {
-      logsView.textContent = payload.logs || "";
-      logsView.dataset.error = "false";
-      paintLogsView();
-    }
+    if (!current()) return;
+    logsView.textContent = payload.logs || "";
+    logsView.dataset.error = "false";
+    paintLogsView();
     logsLoaded = true;
-    if (!logsPaused) setLogsState("自动刷新", false);
+    logsEmpty.hidden = !!payload.logs;
+    setLogsState(`${logsPaused ? "已暂停自动刷新" : "自动刷新"} · 最近读取 ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
-    if (seq !== logsSeq || !logsContextCurrent() || detailApp.id !== appID) return;
-    if (logsView) logsView.dataset.error = "true";
-    setLogsState("自动刷新失败，已保留上次快照", true);
+    if (!current()) return;
+    logsView.dataset.error = "true";
+    setLogsState(logsLoaded ? "自动刷新失败，已保留上次快照" : "日志读取失败，请重试", true);
     if (!logsLoaded) showStatus(error.message, true);
   }
 };
-
 const startLogPolling = () => {
   stopLogPolling();
-  if (view !== "detail" || detailSection !== "logs") return;
+  if (view !== "detail" || detailSection !== "logs" || logsPaused || document.visibilityState === "hidden") return;
   fetchLogs();
-  if (logsPaused || document.visibilityState === "hidden") return;
   if (!(logsService && logsService.value)) return;
   logsTimer = setInterval(fetchLogs, LOG_REFRESH_MS);
 };
 
-const paintDetail = (app) => {
+const paintDetail = (app, composeRevision) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
+  if (appChanged || detailApp?.agent_id !== app.agent_id) filesWorkspace.unbind();
   detailApp = app;
   selectedAppID = app.id;
-  if (detailTitle) detailTitle.textContent = app.id;
+  if (detailTitle) detailTitle.textContent = app.name || app.id;
+  document.querySelector("#detail-context").textContent = `节点：${agentDisplayName(selectedAgent())} · 应用：${app.id}`;
   if (detailStatus) {
     const status = app.status && app.status !== "有新版本" ? app.status : "";
     detailStatus.textContent = status;
@@ -2634,15 +2883,19 @@ const paintDetail = (app) => {
     if (action) button.textContent = action.label || id;
   });
   renderOverview(app);
-  if (composeFilledFor !== app.id) fillCompose(app);
+  if (composeFilledFor !== app.id) fillCompose(app, composeRevision);
   renderHTTP(app);
   fillLogServices(app);
   if (appChanged) resetLogsTerminal();
 };
 
 const setDetailSection = async (section) => {
+  const navigation = navigationSnapshot();
   const next = section || "overview";
+  const previousSection = detailSection;
   if (next !== "files" && !(await filesWorkspace.confirmLeave())) return false;
+  if (!navigationCurrent(navigation)) return false;
+  if (next !== detailSection) advanceNavigation();
   if (detailSection === "logs" && next !== "logs") stopLogPolling();
   detailSection = next;
   document.querySelectorAll("[data-section-panel]").forEach((panel) => {
@@ -2659,11 +2912,10 @@ const setDetailSection = async (section) => {
     paintCodeEditor(detailEnvInput);
   }
   if (next === "logs") {
-    logsPaused = false;
-    logsLoaded = false;
+    if (previousSection !== "logs") logsPaused = false;
     if (logsPause) {
-      logsPause.textContent = "暂停";
-      logsPause.setAttribute("aria-pressed", "false");
+      logsPause.textContent = logsPaused ? "继续" : "暂停";
+      logsPause.setAttribute("aria-pressed", String(logsPaused));
     }
     if (logsRefresh) logsRefresh.dataset.action = "logs";
     startLogPolling();
@@ -2672,10 +2924,14 @@ const setDetailSection = async (section) => {
 };
 
 const leaveDetail = async ({ force } = {}) => {
-  if (!force && !(await filesWorkspace.confirmLeave())) return false;
+  const navigation = navigationSnapshot();
+  const leavingAppID = selectedAppID;
+  if (!force && !(await confirmLeaveEditor())) return false;
+  if (!navigationCurrent(navigation)) return false;
+  advanceNavigation();
   stopLogPolling();
   resetLogsTerminal();
-  if (force) filesWorkspace.discard();
+  filesWorkspace.unbind();
   view = "list";
   selectedAppID = "";
   detailApp = null;
@@ -2686,33 +2942,58 @@ const leaveDetail = async ({ force } = {}) => {
   filesMountedFor = "";
   showStatus("", false);
   syncListPanel();
+  if (!force) {
+    const target = listNode.querySelector(`[data-id="${leavingAppID}"] [data-action="detail"]`) || deployToggle;
+    if (target?.getClientRects().length) target.focus();
+  }
   return true;
 };
 
-const showDetail = async (appID, section) => {
-  if (!(await confirmLeaveEditor())) return;
+const showDetail = async (appID, section, composeRevision = composeDraft.revision) => {
+  const snapshot = contextSnapshot();
+  const previousNavigation = navigationSnapshot();
+  if (appID !== selectedAppID && !(await confirmLeaveEditor())) return;
+  if (!navigationCurrent(previousNavigation)) return;
+  advanceNavigation();
+  const navigation = navigationSnapshot();
+  const request = ++detailRequest;
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
+    if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const app = payload.app;
     if (!app) throw Object.assign(new Error("应用已不存在。"), { status: 404 });
+    if (app.id !== appID || app.agent_id !== snapshot.agent) throw new Error("应用与当前节点不匹配，请刷新列表。");
     view = "detail";
     closeCreate();
-    paintDetail(app);
+    paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
+    if (previousNavigation.view !== "detail" || previousNavigation.app !== appID) detailTitle?.focus();
+    return !app.rules_error;
   } catch (error) {
+    if (!navigationCurrent(navigation) || request !== detailRequest) return;
     const missing = error.status === 404 || error.message === "app is unknown";
+    if (view === "detail" && selectedAppID === appID
+      && (composeDraft.revision !== composeRevision || activeDrafts().some((item) => item.active && item.draft?.dirty))) {
+      showFormFeedback(composeForm, "详情刷新失败，已保留当前编辑。", "failed");
+      showStatus(missing ? "应用已不存在，当前编辑已保留。" : "详情刷新失败，当前编辑已保留。", true);
+      return false;
+    }
+    await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
-    leaveDetail({ force: true });
+    return false;
   }
 };
 
 const loadEngine = async () => {
   if (!selectedAgentID) return null;
-  const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  const snapshot = contextSnapshot();
+  const payload = await panelJSON(`api/engine?agent_id=${encodeURIComponent(snapshot.agent)}`);
   const engine = payload.engine || null;
-  rememberEngine(selectedAgentID, engine);
-  agentPicker.refresh();
+  if (contextCurrent(snapshot)) {
+    rememberEngine(snapshot.agent, engine);
+    agentPicker.refresh();
+  }
   return engine;
 };
 
@@ -2725,6 +3006,10 @@ const renderGuide = (engine) => {
 };
 
 const showUnreadyGuide = (engine) => {
+  if (engine?.state !== "missing") {
+    showContext("detection-failed");
+    return;
+  }
   const viewState = engine && engine.ready !== true
     ? engine
     : { ready: false, command: engine?.command || { script: OFFICIAL_INSTALL_SCRIPT } };
@@ -2739,15 +3024,17 @@ const showUnreadyGuide = (engine) => {
   showContext(executionFaceUnavailable(viewState) ? "execution-unavailable" : "unready");
 };
 
-const executionFaceUnavailable = (engine) => agentOnline && engine && engine.online === false && engine.ready !== true;
+const executionFaceUnavailable = (engine) => agentOnline && engine?.state === "report-offline";
 
 const showContext = (which) => {
+  document.querySelector("#app-detection-failed").hidden = which !== "detection-failed";
+  document.querySelector("#app-node-denied").hidden = which !== "denied";
   if (nodeEmpty) nodeEmpty.hidden = which !== "empty";
   if (undeployedNode) undeployedNode.hidden = which !== "undeployed";
   if (offlineNode) offlineNode.hidden = which !== "offline";
   if (executionUnavailableNode) executionUnavailableNode.hidden = which !== "execution-unavailable";
   if (engineGuide) engineGuide.hidden = which !== "unready";
-  if (contextNode) contextNode.hidden = which !== "empty" && which !== "undeployed" && which !== "offline" && which !== "execution-unavailable";
+  if (contextNode) contextNode.hidden = !["empty", "undeployed", "offline", "execution-unavailable", "detection-failed", "denied"].includes(which);
 };
 
 const renderApps = (apps) => {
@@ -2774,31 +3061,42 @@ const renderEngineBadge = (engine) => {
   if (!engine) {
     engineReady = false;
     engineStatus.dataset.ready = "false";
-    engineStatus.textContent = "引擎未就绪";
+    engineStatus.textContent = "无法检测 Docker 状态";
     return;
   }
   engineReady = engine.ready === true;
+  if (engine.state === "detection-failed") {
+    engineStatus.dataset.ready = "false";
+    engineStatus.textContent = "无法检测 Docker 状态";
+    return;
+  }
   engineStatus.dataset.ready = engineReady ? "true" : "false";
   if (executionFaceUnavailable(engine)) {
     engineStatus.textContent = "暂时无法执行";
     return;
   }
   engineStatus.textContent = engineReady
-    ? (engine.version ? `引擎 ${engine.version} 已就绪` : "引擎已就绪")
-    : "引擎未就绪";
+    ? (engine.version ? `Docker 引擎 ${engine.version} 已就绪` : "Docker 引擎已就绪")
+    : "尚未安装 Docker";
 };
 
 const renderWorkspace = async () => {
   const seq = ++workspaceSeq;
+  const snapshot = contextSnapshot();
   const keepDetailID = view === "detail" ? selectedAppID : "";
+  const keepDetailApp = detailApp;
+  const composeRevision = composeDraft.revision;
   const keepSection = detailSection;
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
   lastEngine = null;
+  deniedNode.hidden = true;
+  unavailableNode.hidden = true;
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
   closeCreate();
+  const navigation = navigationSnapshot();
   showStatus("", false);
   renderApps([]);
   if (!selectedAgentID) {
@@ -2819,13 +3117,11 @@ const renderWorkspace = async () => {
     engine = await loadEngine();
   } catch (error) {
     if (seq !== workspaceSeq) return;
-    if (error && error.denied) throw error;
-    if (error && error.message === "暂时无法管理 Docker 应用。") throw error;
     leaveDetail({ force: true });
-    renderGuide(null);
     renderEngineBadge(null);
-    showContext("execution-unavailable");
-    return;
+    showContext(error.denied ? "denied" : "detection-failed");
+    if (error.denied) engineStatus.textContent = "无权管理该节点";
+    return false;
   }
   if (seq !== workspaceSeq) return;
   lastEngine = engine;
@@ -2834,25 +3130,40 @@ const renderWorkspace = async () => {
   if (!engineReady) {
     leaveDetail({ force: true });
     renderGuide(engine);
-    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : "unready");
-    return;
+    showContext(executionFaceUnavailable(engine) ? "execution-unavailable" : engine?.state === "missing" ? "unready" : "detection-failed");
+    return false;
   }
   showContext("");
   workspaceNode.hidden = false;
-  const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(selectedAgentID)}`);
-  if (seq !== workspaceSeq) return;
+  let payload;
+  try {
+    payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(snapshot.agent)}`);
+  } catch (error) {
+    if (seq !== workspaceSeq || !navigationCurrent(navigation)) return;
+    throw error;
+  }
+  if (seq !== workspaceSeq || !contextCurrent(snapshot)) return;
+  // Collection data belongs to the node; restoring a detail page also belongs to
+  // the exact navigation and detail object that initiated this refresh.
   renderApps(payload.apps);
+  if (!navigationCurrent(navigation) || detailApp !== keepDetailApp) return;
   if (payload.error) showStatus(payload.error, true);
   if (keepDetailID) {
     const stillThere = (payload.apps || []).some((app) => app.id === keepDetailID);
     if (!stillThere) {
+      if (activeDrafts().some((item) => item.active && item.draft?.dirty)) {
+        showStatus("应用已不存在，当前编辑已保留。", true);
+        return false;
+      }
       showStatus("应用已不存在。", true);
       leaveDetail({ force: true });
       return;
     }
-    await showDetail(keepDetailID, keepSection);
+    const restored = await showDetail(keepDetailID, keepSection, composeRevision);
+    return payload.error ? false : restored;
   } else {
     syncListPanel();
+    return !payload.error;
   }
 };
 
@@ -2880,11 +3191,13 @@ const loadAgents = async () => {
 };
 
 agentPicker.onChange = async (value) => {
+  if (busy) { agentPicker.setValue(selectedAgentID); return; }
   if (!(await confirmLeaveEditor())) {
     agentPicker.setValue(selectedAgentID);
     return;
   }
   leaveDetail({ force: true });
+  contextVersion += 1;
   selectedAgentID = String(value || "");
   const url = new URL(window.location.href);
   if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
@@ -2897,6 +3210,12 @@ agentPicker.onChange = async (value) => {
     showStatus(error.message, true);
   }
 };
+
+document.querySelector("#workspace-refresh")?.addEventListener("click", async () => {
+  if (busy || !(await confirmLeaveEditor())) return;
+  composeFilledFor = "";
+  try { await renderWorkspace(); } catch (error) { showStatus(error.message, true); }
+});
 
 if (deployToggle) {
   deployToggle.addEventListener("click", () => {
@@ -2972,7 +3291,7 @@ const formatDiskCleanupBody = (cleanup) => {
 };
 
 const formatDiskCleanupResult = (cleanup) => {
-  if (!cleanup) return "已执行磁盘清理。";
+  if (!cleanup) return "未返回磁盘清理结果，请刷新检查节点状态。";
   if (cleanup.unchanged) return "已取消，未清理节点磁盘。";
   const overall = diskCleanupStatusLabel(cleanup.status) || "未知";
   const imageState = diskCleanupStatusLabel(cleanup.images_status) || "未知";
@@ -2999,51 +3318,29 @@ const formatDiskCleanupResult = (cleanup) => {
 
 const runDiskCleanup = async () => {
   if (busy || !selectedAgentID) return;
-  if (!agentOnline) {
-    showStatus("该节点离线，不能清理磁盘。", true);
-    return;
-  }
-  if (!engineReady) {
-    showStatus("引擎未就绪，不能清理磁盘。", true);
-    return;
-  }
-  setBusy(true);
-  let previewed = null;
-  try {
-    const payload = await panelJSON(`api/disk-cleanup?agent_id=${encodeURIComponent(selectedAgentID)}`);
-    previewed = payload.cleanup || null;
-  } catch (error) {
-    showStatus(error.message, true);
-    setBusy(false);
-    return;
-  }
-  setBusy(false);
-  if (diskCleanupPreviewFailed(previewed)) {
-    showStatus(formatDiskCleanupPreviewFailure(previewed), true);
-    return;
-  }
-  const empty = !previewed || previewed.empty === true;
-  const ok = await askConfirm({
-    title: "清理节点磁盘",
-    body: formatDiskCleanupBody(previewed),
-    confirm: empty ? "知道了" : "清理",
-    cancel: empty ? "知道了" : "取消",
-    danger: !empty,
-    hideConfirm: empty,
-  });
-  if (!ok || empty) {
-    showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false);
-    return;
-  }
+  if (!agentOnline || !engineReady) { showStatus("当前节点无法清理磁盘，请检查节点状态。", true); return; }
+  const agentID = selectedAgentID;
+  const target = agentDisplayName(selectedAgent());
   setBusy(true);
   try {
-    const payload = await sendPluginJSON("api/disk-cleanup", {
-      agent_id: selectedAgentID,
-      confirm: true,
+    const payload = await panelJSON(`api/disk-cleanup?agent_id=${encodeURIComponent(agentID)}`);
+    const previewed = payload.cleanup;
+    if (!previewed) throw new Error("未获得磁盘清理预览，请重试。");
+    if (diskCleanupPreviewFailed(previewed)) throw new Error(formatDiskCleanupPreviewFailure(previewed));
+    const empty = previewed.empty === true;
+    const ok = await askConfirm({
+      title: `清理节点磁盘 · ${target}`, body: formatDiskCleanupBody(previewed),
+      confirm: "清理", cancel: empty ? "知道了" : "取消", danger: !empty, hideConfirm: empty,
     });
-    const cleanup = payload.cleanup || {};
-    const failed = cleanup.status === "failed" || cleanup.status === "partial";
-    showStatus(formatDiskCleanupResult(cleanup), failed);
+    if (!ok || empty) { showStatus(empty ? "没有可清理项。" : "已取消，未清理节点磁盘。", false, "cancelled"); return; }
+    showStatus(`正在清理节点 ${target}…`, false, "running");
+    const result = await sendPluginJSON("api/disk-cleanup", { agent_id: agentID, confirm: true });
+    const cleanup = result.cleanup;
+    if (!cleanup || !["success", "partial", "failed"].includes(cleanup.status)) throw new Error("未获得可确认的清理结果，请刷新检查节点状态。");
+    const steps = [cleanup.images_status, cleanup.builder_cache_status];
+    const allDone = steps.every((step) => step === "success" || step === "skipped");
+    const state = cleanup.unchanged ? "cancelled" : cleanup.status === "partial" ? "partial" : cleanup.status === "success" && allDone ? "succeeded" : "failed";
+    showStatus(`节点 ${target}\n${formatDiskCleanupResult(cleanup)}`, state === "partial" || state === "failed", state);
   } catch (error) {
     showStatus(error.message, true);
   } finally {
@@ -3057,8 +3354,13 @@ if (diskCleanup) {
   });
 }
 
-if (createCancel) createCancel.addEventListener("click", closeCreate);
-if (createBack) createBack.addEventListener("click", closeCreate);
+const requestCloseCreate = async () => {
+  if (busy || !(await confirmDiscardDrafts(["create"]))) return;
+  closeCreate();
+  deployToggle?.focus();
+};
+if (createCancel) createCancel.addEventListener("click", requestCloseCreate);
+if (createBack) createBack.addEventListener("click", requestCloseCreate);
 
 const templateRoot = createTemplates || createPanel;
 if (templateRoot) {
@@ -3114,7 +3416,7 @@ if (logsPause) {
     logsPause.setAttribute("aria-pressed", logsPaused ? "true" : "false");
     if (logsPaused) {
       stopLogPolling();
-      setLogsState("已暂停", false);
+      setLogsState(logsLoaded ? "已暂停，显示上次快照" : "已暂停，尚未获得快照", logsView?.dataset.error === "true");
     } else {
       startLogPolling();
     }
@@ -3155,93 +3457,73 @@ if (copyDaemon) {
   });
 }
 
-if (composeForm) {
-  composeForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (busy || !detailApp) return;
-    if (!selectedAgentID) {
-      showStatus("请先选择一台节点。", true);
+const showFormFeedback = (form, message, state = "failed") => {
+  const node = form.querySelector("[data-form-feedback]");
+  node.textContent = message;
+  node.hidden = !message;
+  node.dataset.state = state;
+  node.setAttribute("role", state === "failed" ? "alert" : "status");
+};
+const submitCompose = async (form, updating) => {
+  if (busy || (updating && !detailApp)) return;
+  const invalid = Array.from(form.elements).find((field) => field.willValidate && (!field.checkValidity() || (field.required && !field.value.trim())));
+  if (invalid) {
+    showFormFeedback(form, invalid.name === "id" ? "填写有效的应用 ID：小写字母、数字及连字符。" : "请填写 Compose YAML。");
+    invalid.setAttribute("aria-invalid", "true");
+    invalid.focus();
+    return;
+  }
+  form.querySelectorAll('[aria-invalid]').forEach((field) => field.removeAttribute("aria-invalid"));
+  if (!selectedAgentID || !agentOnline || !engineReady) {
+    showFormFeedback(form, "当前节点无法部署，请检查节点状态。");
+    return;
+  }
+  const data = new FormData(form);
+  const nextApp = {
+    id: updating ? detailApp.id : String(data.get("id") || "").trim(),
+    agent_id: selectedAgentID,
+    compose: String(data.get("compose") || ""),
+    env: String(data.get("env") || ""),
+    auto_update: data.get("auto_update") === "on",
+  };
+  const draft = updating ? composeDraft : createDraft;
+  setBusy(true);
+  showFormFeedback(form, updating ? "正在保存 Compose…" : "正在部署应用…", "running");
+  try {
+    const saved = await deployComposePayload(nextApp);
+    if (!saved) { showFormFeedback(form, "已取消，输入已保留。", "cancelled"); return; }
+    if (selectedAgentID !== nextApp.agent_id || (updating && selectedAppID !== nextApp.id)) {
+      showStatus(`应用 ${nextApp.id} 已保存，请在目标节点刷新查看结果。`, false);
       return;
     }
-    if (!agentOnline) {
-      showStatus("该节点离线，不能部署。", true);
-      return;
-    }
-    if (!engineReady) {
-      showStatus("引擎未就绪，不能部署。", true);
-      return;
-    }
-    const updating = true;
-    setBusy(true);
-    showStatus("正在更新应用…", false);
+    // Submission succeeded. Clear submitted secrets before any fallible refresh.
+    form.elements.namedItem("env").value = "";
+    paintCodeEditor(form.elements.namedItem("env"));
+    draft.capture();
+    updateDraftIndicators();
+    if (updating) composeFilledFor = "";
+    else closeCreate();
+    showStatus(updating ? "已更新应用。" : "已部署应用。", false);
+    showFormFeedback(form, "已保存。", "succeeded");
     try {
-      const saved = await deployComposePayload({
-        id: detailApp.id,
-        agent_id: selectedAgentID,
-        compose: detailComposeInput ? detailComposeInput.value : "",
-        env: detailEnvInput ? String(detailEnvInput.value || "") : "",
-        auto_update: detailAutoUpdateInput ? detailAutoUpdateInput.checked : false,
-      });
-      if (!saved) return;
-      composeFilledFor = "";
-      showStatus("已更新应用。", false);
-      try {
-        await renderWorkspace();
-      } catch (refreshError) {
-        showStatus(`应用已更新，但列表刷新失败：${refreshError.message}`, true);
-      }
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-  });
-}
-
-if (createForm) {
-  createForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (busy) return;
-    if (!selectedAgentID) {
-      showStatus("请先选择一台节点。", true);
-      return;
-    }
-    if (!agentOnline) {
-      showStatus("该节点离线，不能部署。", true);
-      return;
-    }
-    if (!engineReady) {
-      showStatus("引擎未就绪，不能部署。", true);
-      return;
-    }
-    const data = new FormData(createForm);
-    const nextApp = {
-      id: String(data.get("id") || "").trim(),
-      agent_id: selectedAgentID,
-      compose: String(data.get("compose") || ""),
-      env: String(data.get("env") || ""),
-      auto_update: data.get("auto_update") === "on",
-    };
-    const updating = false;
-    setBusy(true);
-    showStatus(updating ? "正在更新应用…" : "正在部署应用…", false);
-    try {
-      const saved = await deployComposePayload(nextApp);
-      if (!saved) return;
-      closeCreate();
+      const refreshed = await renderWorkspace();
+      if (refreshed === false) throw new Error("节点或详情未能刷新");
       showStatus(updating ? "已更新应用。" : "已部署应用。", false);
-      try {
-        await renderWorkspace();
-      } catch (refreshError) {
-        showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true);
-      }
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
+    } catch (refreshError) {
+      showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true, "partial");
+      showFormFeedback(form, "操作已完成，但页面刷新失败。请稍后刷新，无需重复提交。", "partial");
     }
-  });
-}
+  } catch (error) {
+    showFormFeedback(form, error.message);
+    showStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+[ [composeForm, true], [createForm, false] ].forEach(([form, updating]) => {
+  form.noValidate = true;
+  form.addEventListener("submit", (event) => { event.preventDefault(); submitCompose(form, updating); });
+});
 
 (async () => {
   try {

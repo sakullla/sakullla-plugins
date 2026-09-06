@@ -280,6 +280,7 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 		absOutside,
 		"..",
 		"../other/secret.txt",
+		"data/../../other/secret.txt",
 	} {
 		payload, err := json.Marshal(map[string]any{
 			"action": "write", "app_id": "komga", "path": path, "content": []byte("escaped"),
@@ -296,6 +297,13 @@ func TestControllerCallFilesRejectsAbsolutePath(t *testing.T) {
 		}
 		if _, err := controller.Call(context.Background(), "generation-1", "files", payload); err == nil {
 			t.Fatalf("files read path %q succeeded", path)
+		}
+		payload, err = json.Marshal(map[string]any{"action": "delete", "app_id": "komga", "path": path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controller.Call(context.Background(), "generation-1", "files", payload); err == nil {
+			t.Fatalf("files delete path %q succeeded", path)
 		}
 	}
 
