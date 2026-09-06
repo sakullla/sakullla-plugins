@@ -181,6 +181,7 @@ switch ($Suite) {
     }
     Invoke-Checked (Join-Path $hostPath 'panel/backend-go') go @('test', '-p=4', '-count=1', '-timeout=30s', './cmd/nre-control-plane', './internal/controlplane/config', './internal/controlplane/http', './internal/controlplane/localagent', './internal/controlplane/pluginhost', './internal/controlplane/service', './internal/controlplane/storage')
     Require-Tool npm
+    Invoke-Checked (Join-Path $hostPath 'panel/frontend') npm @('ci', '--prefer-offline', '--no-audit', '--fund=false')
     Invoke-Checked (Join-Path $hostPath 'panel/frontend') npm @('test')
     Invoke-Checked (Join-Path $hostPath 'panel/frontend') npm @('run', 'build')
     $image = "nre-candidate:$($hostOID.Substring(0,12))"
