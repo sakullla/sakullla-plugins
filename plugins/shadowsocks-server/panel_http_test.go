@@ -26,6 +26,16 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		}
 		bodies[route] = body
 	}
+	for _, required := range []string{"数据集分流", "route-upstreams", "route-rules", "route-default-action"} {
+		if !strings.Contains(bodies["/"], required) {
+			t.Fatalf("routing page missing %q", required)
+		}
+	}
+	for _, required := range []string{"api/upstreams", "api/routing", "moveRoute", "removeRoute", "default_upstream_id", "secret_ref"} {
+		if !strings.Contains(bodies["/app.js"], required) {
+			t.Fatalf("routing interaction missing %q", required)
+		}
+	}
 	policy := httptest.NewRecorder()
 	controller.ServeHTTP(policy, httptest.NewRequest(http.MethodGet, "/", nil))
 	if !strings.Contains(policy.Header().Get("Content-Security-Policy"), "default-src 'self'") {

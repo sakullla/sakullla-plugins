@@ -685,6 +685,27 @@ main {
   gap: var(--space-3);
 }
 
+.field--check {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+}
+
+#routing-panel {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.route-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
 input,
 select,
 textarea {

@@ -1,0 +1,7 @@
+{
+  "schema": "sakullla.ip-policy/v1",
+  "default_action": "allow",
+  "datasets": [],
+  "province_whitelist": [],
+  "rules": []
+}

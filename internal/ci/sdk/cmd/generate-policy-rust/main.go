@@ -22,13 +22,19 @@ type enumValue struct {
 }
 
 type templateData struct {
-	DescriptorSHA256 string
-	Fields           string
-	ABIStatuses      []enumValue
-	RuntimeErrors    []enumValue
-	PolicyActions    []enumValue
-	SecurityCodes    []enumValue
-	SecurityActions  []enumValue
+	DescriptorSHA256  string
+	Fields            string
+	ABIStatuses       []enumValue
+	RuntimeErrors     []enumValue
+	PolicyActions     []enumValue
+	SecurityCodes     []enumValue
+	SecurityActions   []enumValue
+	SecurityReasons   []enumValue
+	DomainSources     []enumValue
+	SourceAuthorities []enumValue
+	DatasetKinds      []enumValue
+	DatasetCoverages  []enumValue
+	DatasetStatuses   []enumValue
 }
 
 type messageProjection struct {
@@ -109,12 +115,44 @@ func generate() ([]byte, error) {
 		SecurityCodes: []enumValue{
 			{"Unspecified", uint32(pluginsdk.PolicySecurityEventCodeUnspecified)},
 			{"WafRuleMatch", uint32(pluginsdk.PolicySecurityEventCodeWAFRuleMatch)},
+			{"IpRuleMatch", uint32(pluginsdk.PolicySecurityEventCodeIPRuleMatch)},
+			{"IpCheckFailure", uint32(pluginsdk.PolicySecurityEventCodeIPCheckFailure)},
+			{"RoutingRuleMatch", uint32(pluginsdk.PolicySecurityEventCodeRoutingRuleMatch)},
+			{"RoutingFailure", uint32(pluginsdk.PolicySecurityEventCodeRoutingFailure)},
 		},
 		SecurityActions: []enumValue{
 			{"Unspecified", uint32(pluginsdk.PolicySecurityEventActionUnspecified)},
 			{"Observe", uint32(pluginsdk.PolicySecurityEventActionObserve)},
 			{"Deny", uint32(pluginsdk.PolicySecurityEventActionDeny)},
+			{"Allow", uint32(pluginsdk.PolicySecurityEventActionAllow)},
+			{"Direct", uint32(pluginsdk.PolicySecurityEventActionDirect)},
+			{"Upstream", uint32(pluginsdk.PolicySecurityEventActionUpstream)},
 		},
+		SecurityReasons: []enumValue{
+			{"None", uint32(pluginsdk.PolicySecurityEventReasonNone)},
+			{"SourceUnauthenticated", uint32(pluginsdk.PolicySecurityEventReasonSourceUnauthenticated)},
+			{"DatasetUnavailable", uint32(pluginsdk.PolicySecurityEventReasonDatasetUnavailable)},
+			{"ClassificationMissing", uint32(pluginsdk.PolicySecurityEventReasonClassificationMissing)},
+			{"BudgetExceeded", uint32(pluginsdk.PolicySecurityEventReasonBudgetExceeded)},
+			{"UpstreamUnavailable", uint32(pluginsdk.PolicySecurityEventReasonUpstreamUnavailable)},
+			{"UpstreamAuthentication", uint32(pluginsdk.PolicySecurityEventReasonUpstreamAuthentication)},
+			{"ProtocolUnsupported", uint32(pluginsdk.PolicySecurityEventReasonProtocolUnsupported)},
+			{"DataInvalid", uint32(pluginsdk.PolicySecurityEventReasonDataInvalid)},
+			{"CoverageUnknown", uint32(pluginsdk.PolicySecurityEventReasonCoverageUnknown)},
+			{"Revoked", uint32(pluginsdk.PolicySecurityEventReasonRevoked)},
+		},
+		DomainSources: []enumValue{
+			{"Unspecified", uint32(pluginsdk.PolicyDomainSourceUnspecified)},
+			{"Original", uint32(pluginsdk.PolicyDomainSourceOriginal)},
+			{"HttpHost", uint32(pluginsdk.PolicyDomainSourceHTTPHost)},
+			{"TlsSni", uint32(pluginsdk.PolicyDomainSourceTLSSNI)},
+			{"IpOnly", uint32(pluginsdk.PolicyDomainSourceIPOnly)},
+			{"Unavailable", uint32(pluginsdk.PolicyDomainSourceUnavailable)},
+		},
+		SourceAuthorities: []enumValue{{"Unspecified", 0}, {"Socket", uint32(pluginsdk.PolicySourceSocket)}, {"Xff", uint32(pluginsdk.PolicySourceXFF)}, {"Proxy", uint32(pluginsdk.PolicySourcePROXY)}, {"Relay", uint32(pluginsdk.PolicySourceRelay)}},
+		DatasetKinds:      []enumValue{{"Unspecified", 0}, {"Country", 1}, {"Region", 2}, {"Cidr", 3}},
+		DatasetCoverages:  []enumValue{{"Unspecified", 0}, {"Covered", 1}, {"Unknown", 2}, {"UnsupportedFamily", 3}},
+		DatasetStatuses:   []enumValue{{"Unspecified", 0}, {"Ok", 1}, {"Unavailable", 2}, {"MissingClassification", 3}, {"BudgetExceeded", 4}, {"Unauthorized", 5}, {"StaleReference", 6}, {"InvalidData", 7}},
 	}
 	if err := verifyDescriptorEnums(data); err != nil {
 		return nil, err
@@ -139,9 +177,19 @@ func projectFields() (string, error) {
 		{"read_body_window_request", "nre.plugin.policy.v1.ReadBodyWindowRequest", [][2]string{{"OFFSET", "offset"}, {"LENGTH", "length"}}},
 		{"state_get_request", "nre.plugin.policy.v1.StateGetRequest", [][2]string{{"KEY", "key"}}},
 		{"state_put_request", "nre.plugin.policy.v1.StatePutRequest", [][2]string{{"KEY", "key"}, {"VALUE", "value"}}},
-		{"emit_event_request", "nre.plugin.policy.v1.EmitEventRequest", [][2]string{{"CODE", "code"}, {"ACTION", "action"}}},
+		{"emit_event_request", "nre.plugin.policy.v1.EmitEventRequest", [][2]string{{"CODE", "code"}, {"ACTION", "action"}, {"RULE_INDEX", "rule_index"}, {"DATASET_INDEX", "dataset_index"}, {"CLASSIFICATION_INDEX", "classification_index"}, {"OUTBOUND_INDEX", "outbound_index"}, {"REASON", "reason"}, {"DOMAIN_SOURCE", "domain_source"}}},
 		{"add_metric_request", "nre.plugin.policy.v1.AddMetricRequest", [][2]string{{"NAME", "name"}, {"DELTA", "delta"}}},
 		{"bytes_response", "nre.plugin.policy.v1.BytesResponse", [][2]string{{"VALUE", "value"}, {"FOUND", "found"}}},
+		{"read_trusted_source_request", "nre.plugin.policy.v1.ReadTrustedSourceRequest", [][2]string{}},
+		{"trusted_source", "nre.plugin.policy.v1.TrustedSource", [][2]string{{"INSTANCE_ID", "instance_id"}, {"GENERATION", "generation"}, {"ENTRY_ID", "entry_id"}, {"PEER_ADDRESS", "peer_address"}, {"SOURCE_ADDRESS", "source_address"}, {"AUTHORITY", "authority"}}},
+		{"trusted_source_response", "nre.plugin.policy.v1.TrustedSourceResponse", [][2]string{{"SOURCE", "source"}, {"ERROR", "error"}}},
+		{"dataset_reference", "nre.plugin.policy.v1.DatasetReference", [][2]string{{"HANDLE", "handle"}, {"INSTANCE_ID", "instance_id"}, {"GENERATION", "generation"}, {"SOURCE_ID", "source_id"}, {"VERSION_DIGEST", "version_digest"}}},
+		{"dataset_resolve_request", "nre.plugin.policy.v1.DatasetResolveRequest", [][2]string{{"SOURCE_ID", "source_id"}, {"MAX_DURATION_MICROS", "max_duration_micros"}, {"MAX_RESPONSE_BYTES", "max_response_bytes"}}},
+		{"dataset_resolve_response", "nre.plugin.policy.v1.DatasetResolveResponse", [][2]string{{"REFERENCE", "reference"}, {"ERROR", "error"}}},
+		{"dataset_classification", "nre.plugin.policy.v1.DatasetClassification", [][2]string{{"NAME", "name"}, {"KIND", "kind"}}},
+		{"dataset_query_request", "nre.plugin.policy.v1.DatasetQueryRequest", [][2]string{{"REFERENCE", "reference"}, {"CLASSIFICATIONS", "classifications"}, {"MAX_DURATION_MICROS", "max_duration_micros"}, {"MAX_RESPONSE_BYTES", "max_response_bytes"}}},
+		{"dataset_match", "nre.plugin.policy.v1.DatasetMatch", [][2]string{{"INDEX", "index"}, {"MATCHED", "matched"}, {"COVERAGE", "coverage"}}},
+		{"dataset_query_response", "nre.plugin.policy.v1.DatasetQueryResponse", [][2]string{{"REFERENCE", "reference"}, {"STATUS", "status"}, {"MATCHES", "matches"}}},
 	}
 	var output strings.Builder
 	for _, projection := range projections {
@@ -172,6 +220,12 @@ func verifyDescriptorEnums(data templateData) error {
 		{"nre.plugin.policy.v1.EvaluateSuccess", "action", data.PolicyActions},
 		{"nre.plugin.policy.v1.EmitEventRequest", "code", data.SecurityCodes},
 		{"nre.plugin.policy.v1.EmitEventRequest", "action", data.SecurityActions},
+		{"nre.plugin.policy.v1.EmitEventRequest", "reason", data.SecurityReasons},
+		{"nre.plugin.policy.v1.EmitEventRequest", "domain_source", data.DomainSources},
+		{"nre.plugin.policy.v1.TrustedSource", "authority", data.SourceAuthorities},
+		{"nre.plugin.policy.v1.DatasetClassification", "kind", data.DatasetKinds},
+		{"nre.plugin.policy.v1.DatasetMatch", "coverage", data.DatasetCoverages},
+		{"nre.plugin.policy.v1.DatasetQueryResponse", "status", data.DatasetStatuses},
 	}
 	for _, check := range checks {
 		message, err := protoschema.Message(check.Message)
@@ -250,6 +304,9 @@ pub const HOST_STATE_GET: &str = "` + pluginsdk.PolicyHostStateGet + `";
 pub const HOST_STATE_PUT: &str = "` + pluginsdk.PolicyHostStatePut + `";
 pub const HOST_EMIT_EVENT: &str = "` + pluginsdk.PolicyHostEmitEvent + `";
 pub const HOST_ADD_METRIC: &str = "` + pluginsdk.PolicyHostAddMetric + `";
+pub const HOST_READ_TRUSTED_SOURCE: &str = "` + pluginsdk.PolicyHostReadTrustedSource + `";
+pub const HOST_DATASET_QUERY: &str = "` + pluginsdk.PolicyHostDatasetQuery + `";
+pub const HOST_DATASET_RESOLVE: &str = "` + pluginsdk.PolicyHostDatasetResolve + `";
 
 pub const MAX_TIMEOUT_MILLISECONDS: u32 = ` + fmt.Sprint(pluginsdk.PolicyV1MaxTimeoutMilliseconds) + `;
 pub const MIN_MEMORY_BYTES: u64 = ` + fmt.Sprint(pluginsdk.PolicyV1MinMemoryBytes) + `;
@@ -297,6 +354,12 @@ impl PolicyAction {
 }
 {{template "enum" (map "Name" "SecurityEventCode" "Values" .SecurityCodes)}}
 {{template "enum" (map "Name" "SecurityEventAction" "Values" .SecurityActions)}}
+{{template "enum" (map "Name" "SecurityEventReason" "Values" .SecurityReasons)}}
+{{template "enum" (map "Name" "PolicyDomainSource" "Values" .DomainSources)}}
+{{template "enum" (map "Name" "TrustedSourceAuthority" "Values" .SourceAuthorities)}}
+{{template "enum" (map "Name" "DatasetClassificationKind" "Values" .DatasetKinds)}}
+{{template "enum" (map "Name" "DatasetMatchCoverage" "Values" .DatasetCoverages)}}
+{{template "enum" (map "Name" "DatasetQueryStatus" "Values" .DatasetStatuses)}}
 
 pub mod field {
 {{.Fields}}}
@@ -311,5 +374,8 @@ unsafe extern "C" {
     pub(crate) fn ` + pluginsdk.PolicyHostStatePut + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
     pub(crate) fn ` + pluginsdk.PolicyHostEmitEvent + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
     pub(crate) fn ` + pluginsdk.PolicyHostAddMetric + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
+    pub(crate) fn ` + pluginsdk.PolicyHostReadTrustedSource + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
+    pub(crate) fn ` + pluginsdk.PolicyHostDatasetQuery + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
+    pub(crate) fn ` + pluginsdk.PolicyHostDatasetResolve + `(request_ptr: u32, request_len: u32, response_ptr: u32, response_capacity: u32) -> u64;
 }
 `))

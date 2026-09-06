@@ -1053,11 +1053,12 @@ func TestAdmitCreatedAccountWithoutQuotaOrExpiry(t *testing.T) {
 func TestServiceListenApplyBindFailureDoesNotMarkLive(t *testing.T) {
 	t.Parallel()
 	exec := newListenExecutor(&failListenBinder{err: errors.New("bind: address already in use")})
+	exec.secrets = &issuedSecrets{items: map[string]string{issuedSecretKey("secret/alice", "test-version-000000000001"): "alice-password"}}
 	payload, err := json.Marshal(map[string]any{
 		"agent_id": "agent-1",
 		"listens": []map[string]any{{
 			"id": "listen-1", "port": 8388, "method": "aes-256-gcm",
-			"users": []map[string]any{{"id": "alice", "enabled": true, "password": "alice-password"}},
+			"users": []map[string]any{{"id": "alice", "enabled": true, "secret_ref": "secret/alice", "secret_version": "test-version-000000000001"}},
 		}},
 	})
 	if err != nil {

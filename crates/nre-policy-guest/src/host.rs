@@ -1,13 +1,18 @@
 use crate::abi_generated::{self, field};
 use crate::{
-    AbiStatus, BytesResponse, FrameWriter, GuestError, NormalizedHttpResponse, ReasonCode,
-    SecurityEventAction, SecurityEventCode, WireLimits, unpack_host_result,
+    AbiStatus, BytesResponse, DatasetQueryRequest, DatasetQueryResponse, DatasetResolveRequest,
+    DatasetResolveResponse, FrameWriter, GuestError, NormalizedHttpResponse, PolicySecurityEvent,
+    PolicyTrustedSourceResponse, ReasonCode, SecurityEventAction, SecurityEventCode, WireLimits,
+    unpack_host_result,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostImport {
     ReadField,
     ReadNormalizedHttp,
+    ReadTrustedSource,
+    DatasetQuery,
+    DatasetResolve,
     ReadBodyWindow,
     StateGet,
     StatePut,
@@ -24,6 +29,9 @@ impl HostImport {
         match self {
             Self::ReadField => abi_generated::HOST_READ_FIELD,
             Self::ReadNormalizedHttp => abi_generated::HOST_READ_NORMALIZED_HTTP,
+            Self::ReadTrustedSource => abi_generated::HOST_READ_TRUSTED_SOURCE,
+            Self::DatasetQuery => abi_generated::HOST_DATASET_QUERY,
+            Self::DatasetResolve => abi_generated::HOST_DATASET_RESOLVE,
             Self::ReadBodyWindow => abi_generated::HOST_READ_BODY_WINDOW,
             Self::StateGet => abi_generated::HOST_STATE_GET,
             Self::StatePut => abi_generated::HOST_STATE_PUT,
@@ -35,7 +43,13 @@ impl HostImport {
     const fn permits_response_growth_retry(self) -> bool {
         matches!(
             self,
-            Self::ReadField | Self::ReadNormalizedHttp | Self::ReadBodyWindow | Self::StateGet
+            Self::ReadField
+                | Self::ReadNormalizedHttp
+                | Self::ReadTrustedSource
+                | Self::DatasetQuery
+                | Self::DatasetResolve
+                | Self::ReadBodyWindow
+                | Self::StateGet
         )
     }
 }
@@ -67,6 +81,24 @@ impl HostTransport for WasmHost {
                     response_capacity,
                 ),
                 HostImport::ReadNormalizedHttp => abi_generated::nre_host_read_normalized_http(
+                    request_ptr,
+                    request_len,
+                    response_ptr,
+                    response_capacity,
+                ),
+                HostImport::ReadTrustedSource => abi_generated::nre_host_read_trusted_source(
+                    request_ptr,
+                    request_len,
+                    response_ptr,
+                    response_capacity,
+                ),
+                HostImport::DatasetQuery => abi_generated::nre_host_dataset_query(
+                    request_ptr,
+                    request_len,
+                    response_ptr,
+                    response_capacity,
+                ),
+                HostImport::DatasetResolve => abi_generated::nre_host_dataset_resolve(
                     request_ptr,
                     request_len,
                     response_ptr,
@@ -189,6 +221,51 @@ where
         NormalizedHttpResponse::decode(response, self.limits.response_wire)
     }
 
+    pub fn read_trusted_source(&mut self) -> Result<PolicyTrustedSourceResponse<'_>, GuestError> {
+        let response_length = self.invoke(HostImport::ReadTrustedSource, 0)?;
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        PolicyTrustedSourceResponse::decode(response, self.limits.response_wire)
+    }
+
+    pub fn dataset_resolve(
+        &mut self,
+        request: DatasetResolveRequest<'_>,
+    ) -> Result<DatasetResolveResponse<'_>, GuestError> {
+        let request_length = request.encode(&mut self.request)?;
+        let response_length = self.invoke(HostImport::DatasetResolve, request_length)?;
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        let decoded = DatasetResolveResponse::decode(response, self.limits.response_wire)?;
+        if decoded
+            .reference
+            .is_some_and(|reference| reference.source_id != request.source_id)
+        {
+            return Err(GuestError::new(
+                AbiStatus::InvalidArgument,
+                ReasonCode::InvalidWire,
+            ));
+        }
+        Ok(decoded)
+    }
+
+    pub fn dataset_query(
+        &mut self,
+        request: DatasetQueryRequest<'_>,
+    ) -> Result<DatasetQueryResponse<'_>, GuestError> {
+        let request_length = request.encode(&mut self.request)?;
+        let response_length = self.invoke(HostImport::DatasetQuery, request_length)?;
+        let response = self
+            .response
+            .get(..response_length)
+            .ok_or_else(response_exhausted)?;
+        DatasetQueryResponse::decode(response, self.limits.response_wire)?.validate_for(request)
+    }
+
     pub fn read_body_window(
         &mut self,
         offset: u32,
@@ -233,6 +310,11 @@ where
         writer.write_varint_field(field::emit_event_request::CODE, code as u64)?;
         writer.write_varint_field(field::emit_event_request::ACTION, action as u64)?;
         let request_length = writer.len();
+        self.invoke_empty(HostImport::EmitEvent, request_length)
+    }
+
+    pub fn emit_policy_event(&mut self, event: PolicySecurityEvent) -> Result<(), GuestError> {
+        let request_length = event.encode(&mut self.request)?;
         self.invoke_empty(HostImport::EmitEvent, request_length)
     }
 

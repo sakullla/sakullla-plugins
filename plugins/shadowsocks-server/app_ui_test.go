@@ -133,7 +133,7 @@ func startUITestController(t *testing.T, setup uiTestSetup) *Controller {
 	}
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,11 +151,13 @@ func startUITestController(t *testing.T, setup uiTestSetup) *Controller {
 }
 
 type uiMemoryListenState struct {
-	mu      sync.Mutex
-	listens []ListenRule
-	secrets map[string]string
-	nodes   map[string]NodeAddresses
-	found   bool
+	mu           sync.Mutex
+	listens      []ListenRule
+	secrets      map[string]string
+	nodes        map[string]NodeAddresses
+	found        bool
+	routing      RoutingConfiguration
+	routingFound bool
 }
 
 func (state *uiMemoryListenState) LoadListens(context.Context) ([]ListenRule, bool, error) {
@@ -197,6 +199,20 @@ func (state *uiMemoryListenState) StoreNodes(_ context.Context, nodes map[string
 	defer state.mu.Unlock()
 	state.nodes = cloneAgentNodes(nodes)
 	state.found = true
+	return nil
+}
+
+func (state *uiMemoryListenState) LoadRouting(context.Context) (RoutingConfiguration, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return cloneRouting(state.routing), state.routingFound, nil
+}
+
+func (state *uiMemoryListenState) StoreRouting(_ context.Context, routing RoutingConfiguration) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.routing = cloneRouting(routing)
+	state.routingFound = true
 	return nil
 }
 
@@ -434,7 +450,7 @@ func TestControlAPICreateApplyBindsAndHandshakes(t *testing.T) {
 	})
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
-		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1",
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +478,18 @@ func TestControlAPICreateApplyBindsAndHandshakes(t *testing.T) {
 	if err != nil || len(items) != 1 || len(items[0].Users) != 1 {
 		t.Fatalf("apply items=%#v err=%v", items, err)
 	}
-	client, err := engineFromMaterial(view.Method, []byte(items[0].Users[0].Password), items[0].ServerPSK)
+	userMaterial, ok := controller.secrets().lookup(items[0].Users[0].SecretRef, items[0].Users[0].SecretVersion)
+	if !ok {
+		t.Fatal("user scoped reference did not resolve")
+	}
+	serverMaterial := ""
+	if items[0].ServerSecretRef != "" {
+		serverMaterial, ok = controller.secrets().lookup(items[0].ServerSecretRef, items[0].ServerSecretVersion)
+		if !ok {
+			t.Fatal("server scoped reference did not resolve")
+		}
+	}
+	client, err := engineFromMaterial(view.Method, []byte(userMaterial), serverMaterial)
 	if err != nil {
 		t.Fatal(err)
 	}

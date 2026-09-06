@@ -94,6 +94,41 @@
           </div>
           <div id="listen-list" class="listen-grid"></div>
         </section>
+        <section class="panel" id="routing-panel">
+          <header class="workspace-bar">
+            <div class="workspace-bar-copy">
+              <h2>数据集分流</h2>
+            </div>
+          </header>
+          <p class="hint">按顺序匹配域名或 IP；上游失败不会回退直连。仅 IP 目标的 TCP 可在拨号前用最多 16 KiB / 250 ms 识别 HTTP Host 或明文 TLS SNI；UDP、ECH、HTTP/2 和无法识别的流量按 IP/默认规则处理，原目标与字节不变。</p>
+          <form id="upstream-form" class="field-row">
+            <label class="field"><span class="field-label">ID</span><input name="id" required placeholder="ai-upstream"></label>
+            <label class="field"><span class="field-label">地址</span><input name="host" required placeholder="203.0.113.20"></label>
+            <label class="field"><span class="field-label">端口</span><input name="port" type="number" min="1" max="65535" required value="8388"></label>
+            <label class="field"><span class="field-label">加密</span><select name="method"><option>2022-blake3-aes-128-gcm</option><option>2022-blake3-aes-256-gcm</option><option>aes-128-gcm</option><option>aes-256-gcm</option></select></label>
+            <label class="field"><span class="field-label">客户端密码</span><input name="password" type="password" required autocomplete="new-password"></label>
+            <label class="field field--check"><input name="tcp" type="checkbox" checked> TCP</label>
+            <label class="field field--check"><input name="udp" type="checkbox" checked> UDP</label>
+            <button class="btn btn--primary" type="submit">添加上游</button>
+          </form>
+          <div id="route-upstreams" class="route-list"></div>
+          <form id="route-form" class="field-row">
+            <label class="field"><span class="field-label">规则 ID</span><input name="id" required placeholder="ai-not-cn"></label>
+            <label class="field"><span class="field-label">数据源</span><input name="source_id" required placeholder="geosite"></label>
+            <label class="field"><span class="field-label">分类</span><input name="classification" required value="category-ai"></label>
+            <label class="field"><span class="field-label">类型</span><select name="kind"><option value="domain">域名</option><option value="cidr">CIDR</option><option value="country">国家</option><option value="region">地区</option></select></label>
+            <label class="field"><span class="field-label">属性</span><input name="attribute" placeholder="!cn"></label>
+            <label class="field"><span class="field-label">动作</span><select name="action"><option value="upstream">指定上游</option><option value="direct">直连</option><option value="reject">拒绝</option></select></label>
+            <label class="field"><span class="field-label">上游</span><select name="upstream_id" id="route-upstream-select"></select></label>
+            <button class="btn btn--primary" type="submit">添加规则</button>
+          </form>
+          <div id="route-rules" class="route-list"></div>
+          <div class="field-row">
+            <label class="field"><span class="field-label">默认动作</span><select id="route-default-action"><option value="direct">直连</option><option value="reject">拒绝</option><option value="upstream">指定上游</option></select></label>
+            <label class="field"><span class="field-label">默认上游</span><select id="route-default-upstream"></select></label>
+            <button id="route-save-default" class="btn btn--primary" type="button">保存默认路由</button>
+          </div>
+        </section>
       </div>
     </section>
   </main>

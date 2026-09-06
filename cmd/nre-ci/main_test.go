@@ -302,7 +302,7 @@ func TestPluginArtifactSourceLayoutIsStrictAndRuntimeSpecific(t *testing.T) {
 		{id: "shadowsocks-server", kind: artifactRPCService, sourceNeedle: "shadowsocks-server/cmd/shadowsocks-server"},
 		{id: "webdav", kind: artifactRPCService, sourceNeedle: "webdav/cmd/webdav"},
 		{id: "waf", kind: artifactRPCService, sourceNeedle: "waf/cmd/waf", packageName: "sakullla-waf"},
-		{id: "ip-policy", kind: artifactWASMPolicy, packageName: "sakullla-ip-policy"},
+		{id: "ip-policy", kind: artifactRPCService, sourceNeedle: "ip-policy/cmd/ip-policy", packageName: "sakullla-ip-policy"},
 		{id: "rate-limit", kind: artifactWASMPolicy, packageName: "sakullla-rate-limit"},
 	}
 	for _, test := range tests {
@@ -390,6 +390,45 @@ func TestPluginWAFAllowlistRequiresControlPlaneRPCWithNestedWASM(t *testing.T) {
 			_, err := pluginArtifactSpecFor(root, "waf")
 			if err == nil || !strings.Contains(err.Error(), test.needle) {
 				t.Fatalf("waf allowlist error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPluginIPPolicyAllowlistRequiresControlPlaneRPCWithNestedWASM(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := pluginArtifactSpecFor(repositoryRoot, "ip-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.kind != artifactRPCService || spec.artifactName != "ip-policy" || spec.packageName != "sakullla-ip-policy" || !strings.Contains(spec.sourcePath, "ip-policy/cmd/ip-policy") {
+		t.Fatalf("ip-policy dual-face spec = %#v", spec)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		needle string
+	}{
+		{name: "host-scope", mutate: func(document map[string]any) { document["runtime"].(map[string]any)["host_scope"] = "agent" }, needle: "control-plane"},
+		{name: "policy-kind", mutate: func(document map[string]any) { document["runtime"].(map[string]any)["policy_kind"] = "waf" }, needle: "policy_kind"},
+		{name: "nested-policy", mutate: func(document map[string]any) { delete(document["runtime"].(map[string]any), "policy") }, needle: "nested Agent wasm-policy"},
+		{name: "wasm-entry", mutate: func(document map[string]any) {
+			document["runtime"].(map[string]any)["policy"].(map[string]any)["entry"] = "artifacts/other.wasm"
+		}, needle: "artifacts/ip-policy.wasm"},
+		{name: "native-artifact", mutate: func(document map[string]any) {
+			document["artifacts"] = []map[string]any{{"path": "artifacts/ip-policy.wasm", "sha256": strings.Repeat("b", 64), "size": 1, "mode": "wasm"}}
+		}, needle: "native executable plus wasm artifacts"},
+		{name: "policy-stage", mutate: func(document map[string]any) { document["extension_points"] = []string{"ui.route", "http.request"} }, needle: "http.request/l4.accept"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeIPPolicyDualFaceManifest(t, root, test.mutate)
+			_, err := pluginArtifactSpecFor(root, "ip-policy")
+			if err == nil || !strings.Contains(err.Error(), test.needle) {
+				t.Fatalf("ip-policy allowlist error = %v", err)
 			}
 		})
 	}
@@ -562,6 +601,38 @@ func writeWAFDualFaceManifest(t *testing.T, root string, mutate func(map[string]
 		"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "on-failure", "core_fallback": "preserve"},
 		"signature":       map[string]any{"algorithm": "ed25519", "key_id": "sakullla-official-root-2026", "file": "signature.json"},
 		"cleanup":         map[string]any{"instances": "delete", "config": "delete", "owned_data": "delete", "grants": "delete", "shared_refs": "retain", "audit_events": "retain"},
+	}
+	if mutate != nil {
+		mutate(document)
+	}
+	wire, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plugin.yaml"), wire, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeIPPolicyDualFaceManifest(t *testing.T, root string, mutate func(map[string]any)) {
+	t.Helper()
+	directory := filepath.Join(root, "plugins", "ip-policy")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"schema_version": 1, "id": "ip-policy", "version": "0.2.0", "name": "IP 策略", "description": "fixture",
+		"compatibility": map[string]any{"host": "*", "agent": "*"},
+		"runtime": map[string]any{
+			"kind": "rpc-service", "abi": "nre:rpc/v1", "host_scope": "control-plane", "entry": "ip-policy", "policy_kind": "ip",
+			"policy": map[string]any{"kind": "wasm-policy", "abi": "nre:policy/v1", "host_scope": "agent", "entry": "artifacts/ip-policy.wasm", "resource_budget": map[string]any{"timeout_ms": 2, "memory_bytes": 16777216, "concurrency": 64, "input_bytes": 131072, "output_bytes": 4096}, "failure_policy": map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "never", "core_fallback": "preserve"}},
+		},
+		"artifacts":        []map[string]any{{"path": "artifacts/linux-amd64/ip-policy", "sha256": strings.Repeat("a", 64), "size": 1, "mode": "executable", "goos": "linux", "goarch": "amd64"}, {"path": "artifacts/ip-policy.wasm", "sha256": strings.Repeat("b", 64), "size": 1, "mode": "wasm"}},
+		"extension_points": []string{"ui.route", "http.request", "l4.accept"}, "ui_route_id": "ip-policy", "metadata": map[string]string{"policy.mode.handling": "raw-decision-v1"},
+		"permissions": []map[string]string{{"name": "ui.dynamic"}}, "config_schema": "config.schema.json",
+		"resource_budget": map[string]any{"timeout_ms": 1000, "memory_bytes": 65536, "concurrency": 1, "input_bytes": 1, "output_bytes": 1, "cpu_millis": 1, "restarts": 0},
+		"failure_policy":  map[string]any{"on_error": "fail-closed", "on_budget": "fail-closed", "restart": "on-failure", "core_fallback": "preserve"},
+		"signature":       map[string]any{"algorithm": "ed25519", "key_id": "sakullla-official-root-2026", "file": "signature.json"}, "cleanup": map[string]any{"instances": "delete", "config": "delete", "owned_data": "delete", "grants": "delete", "shared_refs": "retain", "audit_events": "retain"},
 	}
 	if mutate != nil {
 		mutate(document)

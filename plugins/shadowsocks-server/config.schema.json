@@ -90,6 +90,54 @@
           }
         }
       }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "hostInjected": true,
+      "default": {"upstreams": [], "rules": [], "default_action": "direct"},
+      "required": ["upstreams", "rules", "default_action"],
+      "properties": {
+        "upstreams": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "host", "port", "method", "secret_ref", "secret_version", "enabled", "tcp", "udp"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+              "host": {"type": "string", "minLength": 1, "maxLength": 253},
+              "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+              "method": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
+              "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$", "hostInjected": true},
+              "secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$", "hostInjected": true},
+              "enabled": {"type": "boolean"}, "tcp": {"type": "boolean"}, "udp": {"type": "boolean"}
+            }
+          }
+        },
+        "rules": {
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "source_id", "classification", "action"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+              "source_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
+              "classification": {
+                "type": "object", "additionalProperties": false, "required": ["name", "kind"],
+                "properties": {
+                  "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.!@+-]{0,127}$"},
+                  "kind": {"enum": ["domain", "cidr", "country", "region"]},
+                  "attributes": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}, "boolean": {"type": "boolean"}, "integer": {"type": "integer"}, "negate": {"type": "boolean"}}, "oneOf": [{"required": ["boolean"]}, {"required": ["integer"]}]}}
+                }
+              },
+              "action": {"enum": ["direct", "reject", "upstream"]},
+              "upstream_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"}
+            }
+          }
+        },
+        "default_action": {"enum": ["direct", "reject", "upstream"]},
+        "default_upstream_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"}
+      }
     }
   }
 }

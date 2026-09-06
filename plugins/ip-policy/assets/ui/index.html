@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>IP 策略</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div><p class="eyebrow">安全 · 入口防护</p><h1>IP 策略</h1><p>用可信来源、CIDR 和 Host 托管地理数据保护 HTTP、TCP、UDP 与受管插件入口。</p></div>
+      <label>节点<input id="node-id" placeholder="例如 local 或 edge-a"><button id="load" type="button">加载状态</button></label>
+    </header>
+    <p id="status" role="status">正在连接管理服务…</p>
+    <section id="workspace" hidden>
+      <section class="panel summary">
+        <div><span>期望模式</span><strong id="desired-mode">—</strong></div>
+        <div><span>实际应用</span><strong id="applied-mode">—</strong></div>
+        <div><span>最近有效代</span><strong id="generation">—</strong></div>
+        <div><span>检查状态</span><strong id="phase">—</strong></div>
+      </section>
+      <section class="grid two">
+        <article class="panel">
+          <div class="panel-head"><div><h2>全局行为</h2><p>新安装默认观察；切换配置和模式时原子发布。</p></div><div class="actions"><button data-mode="observe">观察</button><button data-mode="enforce" class="danger">拦截</button></div></div>
+          <label>未命中规则时<select id="default-action"><option value="allow">允许</option><option value="deny">拒绝</option></select></label>
+        </article>
+        <article class="panel">
+          <h2>入口模式</h2><p>入口身份由 Host 核验。WAF 和其它 deny 阶段不会被 IP 允许覆盖。</p>
+		  <label>Host 已授权入口<select id="entry-select"><option value="">请选择入口</option></select></label>
+          <div class="actions"><button id="entry-observe">观察</button><button id="entry-enforce" class="danger">拦截</button><button id="entry-reset">继承全局</button></div>
+          <form id="entry-rule-form" class="form-row"><input name="id" required placeholder="入口规则 ID"><select name="action"><option value="deny">拒绝</option><option value="allow">允许</option></select><select name="type"><option value="ip">单 IP</option><option value="cidr">CIDR</option><option value="classification">国家/省份分类</option></select><input name="value" placeholder="IP 或 CIDR"><select id="entry-classification" name="classification"><option value="">请选择已配置分类</option></select><button>添加入口规则</button></form>
+          <ul id="entry-rules" class="list"></ul>
+		  <p>HTTP、TCP、UDP 与受管入口均通过公开 policy.control 原子保存模式和完整规则列表。</p>
+        </article>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><h2>规则</h2><p>全局与入口 deny 优先于 allow。单 IP 同时支持 IPv4/IPv6。</p></div><span id="rule-count" class="badge"></span></div>
+        <form id="rule-form" class="form-row"><input name="id" required placeholder="规则 ID"><select name="action"><option value="deny">拒绝</option><option value="allow">允许</option></select><select name="type"><option value="ip">单 IP</option><option value="cidr">CIDR</option><option value="classification">国家/地区分类</option></select><input name="value" placeholder="IP 或 CIDR"><input name="dataset_id" placeholder="分类的数据集 ID"><input name="classification_id" placeholder="分类 ID"><button>添加</button></form>
+        <ul id="rules" class="list"></ul>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><h2>中国大陆省份白名单</h2><p>只允许 covered 且命中的所选省份；其它省、境外和未知 IPv6 都拒绝。省级 IPv6 覆盖以目录显示为准。</p></div><span class="badge warning">IPv6 部分覆盖</span></div>
+        <div id="provinces" class="province-grid"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><h2>数据源与版本</h2><p>显示 desired / applied / last good、来源许可、分类覆盖和失败原因。</p></div><button id="save">原子保存配置</button></div>
+        <form id="dataset-form" class="form-row">
+          <input name="dataset_id" required placeholder="字典 ID，例如 province-data">
+          <input name="source_id" required placeholder="Host 数据源 ID">
+          <input name="classification_id" required placeholder="分类 ID，例如 guangdong">
+          <input name="classification_name" required placeholder="SDK 名称，例如 cn-44">
+          <select name="classification_kind"><option value="region">省份/地区</option><option value="country">国家</option><option value="cidr">CIDR 类</option></select>
+          <button>添加分类</button>
+        </form>
+        <form id="binding-form" class="form-row">
+          <input name="dataset_id" required placeholder="要绑定的字典 ID">
+          <input name="version_digest" required placeholder="sha256:… 不可变版本">
+          <select name="mode"><option value="observe">观察</option><option value="enforce">拦截</option></select>
+          <button>原子绑定配置与模式</button>
+        </form>
+        <form id="source-form" class="form-row">
+          <input name="source_id" required placeholder="Host 数据源 ID">
+          <select name="action"><option value="put-source">保存来源</option><option value="refresh">刷新</option><option value="rollback">回退</option><option value="activate">激活版本</option></select>
+          <input name="name" placeholder="来源名称">
+          <input name="url" placeholder="固定发布 URL">
+          <select name="format"><option value="geoip">V2Fly/Loyalsoldier GeoIP</option><option value="geo-mmdb">DB-IP City Lite</option><option value="cidr">CIDR</option></select>
+          <input name="license_url" placeholder="许可 URL">
+          <input name="version_digest" placeholder="回退/激活所需 sha256:…">
+          <button>执行数据操作</button>
+        </form>
+        <div id="datasets" class="cards"></div>
+      </section>
+      <section class="panel">
+        <h2>诊断事件</h2><p>事件只包含 Host 固定字典，不记录路径、header、body 或凭据。</p>
+        <ul id="events" class="list"></ul>
+      </section>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -6,15 +6,19 @@
 //! Trusted connection provenance and MMDB results are Host-owned inputs. Raw
 //! forwarded headers and GeoLite databases are deliberately outside this crate.
 
+mod config;
 mod geo;
 mod policy;
+mod runtime;
 mod trie;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+pub use config::{Classification, Config, Dataset, Overlay, ParseError, Rule, Selector};
 pub use geo::{GeoFailurePolicy, GeoHandle, GeoLookup, GeoProvider, GeoRecord, GeoRule, GeoStatus};
 pub use policy::{
     Decision, DecisionReason, IpPolicy, RuleEffect, SourceAuthentication, TrustedSource,
 };
+pub use runtime::{Evaluation, EvaluationError, RuntimeState, emit_failure};
 pub use trie::{Cidr, ConfigError, IpAddress, PolicySet};

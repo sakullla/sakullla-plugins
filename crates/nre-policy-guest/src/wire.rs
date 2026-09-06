@@ -95,6 +95,10 @@ impl<'a> WireCursor<'a> {
         Ok(Some(Field { number, value }))
     }
 
+    pub(crate) const fn limits(&self) -> WireLimits {
+        self.limits
+    }
+
     fn read_varint(&mut self) -> Result<u64, GuestError> {
         let mut value = 0_u64;
         for index in 0..10 {

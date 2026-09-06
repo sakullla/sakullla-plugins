@@ -1,6 +1,7 @@
 package shadowsocksserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +42,12 @@ func (netListenBinder) ListenPacket(network, address string) (net.PacketConn, er
 	return net.ListenPacket(network, address)
 }
 
+type networkDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+}
+
+type nativeNetworkDialer struct{ net.Dialer }
+
 // ListenReport is the execution-face presence plus bound port summary.
 // It never includes secret material.
 type ListenReport struct {
@@ -49,6 +57,7 @@ type ListenReport struct {
 	DDNS    string             `json:"ddns_domain,omitempty"`
 	IPv4    string             `json:"ipv4,omitempty"`
 	IPv6    string             `json:"ipv6,omitempty"`
+	Routes  []RouteStatus      `json:"routes,omitempty"`
 }
 
 // ListenPortStatus is one bound TCP+UDP port without keys or passwords.
@@ -59,25 +68,28 @@ type ListenPortStatus struct {
 	UDP  bool   `json:"udp"`
 }
 
-// ListenApplyUser is the one-time secret envelope for one enabled user.
+// ListenApplyUser carries only a scoped Host secret reference.
 type ListenApplyUser struct {
-	ID       string `json:"id"`
-	Enabled  bool   `json:"enabled"`
-	Password string `json:"password,omitempty"`
+	ID            string `json:"id"`
+	Enabled       bool   `json:"enabled"`
+	SecretRef     string `json:"secret_ref,omitempty"`
+	SecretVersion string `json:"secret_version,omitempty"`
 }
 
-// ListenApplyItem is the desired listen on one Agent, including engine material.
+// ListenApplyItem is the desired managed listen on one Agent.
 type ListenApplyItem struct {
-	ID        string            `json:"id"`
-	Port      int               `json:"port"`
-	Method    string            `json:"method"`
-	ServerPSK string            `json:"server_psk,omitempty"`
-	Users     []ListenApplyUser `json:"users"`
+	ID                  string            `json:"id"`
+	Port                int               `json:"port"`
+	Method              string            `json:"method"`
+	ServerSecretRef     string            `json:"server_secret_ref,omitempty"`
+	ServerSecretVersion string            `json:"server_secret_version,omitempty"`
+	Users               []ListenApplyUser `json:"users"`
 }
 
 type listenApplyRequest struct {
-	AgentID string            `json:"agent_id"`
-	Listens []ListenApplyItem `json:"listens"`
+	AgentID string               `json:"agent_id"`
+	Listens []ListenApplyItem    `json:"listens"`
+	Routing RoutingConfiguration `json:"routing"`
 }
 
 type listenStopRequest struct {
@@ -94,6 +106,8 @@ type listenApplyResult struct {
 type listenExecutor struct {
 	mu       sync.Mutex
 	binder   listenBinder
+	managed  *hostCapabilityRuntime
+	secrets  SecretVerifier
 	bound    map[string]*boundListen
 	bindHost string
 }
@@ -104,15 +118,32 @@ type boundUserEngine struct {
 }
 
 type boundListen struct {
-	mu      sync.Mutex
-	closed  bool
-	id      string
-	port    int
-	tcp     net.Listener
-	udp     net.PacketConn
-	engines []*boundUserEngine
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu            sync.Mutex
+	closed        bool
+	id            string
+	port          int
+	tcp           net.Listener
+	udp           net.PacketConn
+	engines       []*boundUserEngine
+	dialer        networkDialer
+	secrets       SecretVerifier
+	routes        *routeSnapshot
+	udpPacketID   uint64
+	routeFailures map[string]string
+	routeSources  map[string]string
+	flowRoutes    map[string]*routeSnapshot
+	flowOrder     []string
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+}
+
+type preparedListen struct {
+	item     ListenApplyItem
+	existing *boundListen
+	bound    *boundListen
+	engines  []*boundUserEngine
+	ctx      context.Context
+	routes   *routeSnapshot
 }
 
 type prefixConn struct {
@@ -129,9 +160,6 @@ func (c *prefixConn) Read(p []byte) (int, error) {
 }
 
 func newListenExecutor(binder listenBinder) *listenExecutor {
-	if binder == nil {
-		binder = netListenBinder{}
-	}
 	return &listenExecutor{binder: binder, bound: map[string]*boundListen{}}
 }
 
@@ -170,7 +198,14 @@ func (exec *listenExecutor) report(payload []byte) ([]byte, error) {
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
-	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked()})
+	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked(), Routes: exec.routeStatusesLocked()})
+}
+
+func (exec *listenExecutor) routeStatusesLocked() []RouteStatus {
+	for _, listener := range exec.bound {
+		return listener.routeStatuses()
+	}
+	return []RouteStatus{}
 }
 
 func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, error) {
@@ -179,8 +214,23 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 		return nil, err
 	}
 	var request listenApplyRequest
-	if err := json.Unmarshal(payload, &request); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		return nil, errors.New("listen payload is invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("listen payload is invalid")
+	}
+	var route *routeSnapshot
+	var routeClient datasetRoutingClient
+	if exec.managed != nil {
+		routeClient = exec.managed.datasets
+	}
+	route, err = prepareRouteSnapshot(ctx, request.Routing, routeClient)
+	if err != nil {
+		return nil, err
 	}
 	desired := make(map[string]struct{}, len(request.Listens))
 	for _, item := range request.Listens {
@@ -191,24 +241,25 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
+	prepared := make([]preparedListen, 0, len(request.Listens))
+	for _, item := range request.Listens {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		candidate, err := exec.prepareOneLocked(ctx, item, route)
+		if err != nil {
+			exec.abortPrepared(prepared)
+			return nil, err
+		}
+		prepared = append(prepared, candidate)
+	}
 	for id := range exec.bound {
 		if _, ok := desired[id]; !ok {
 			exec.unbindLocked(id)
 		}
 	}
-	var applyErr error
-	for _, item := range request.Listens {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := exec.bindOneLocked(item); err != nil {
-			if applyErr == nil {
-				applyErr = err
-			}
-		}
-	}
-	if applyErr != nil {
-		return nil, applyErr
+	for _, candidate := range prepared {
+		exec.commitPrepared(candidate)
 	}
 	return json.Marshal(listenApplyResult{Accepted: true, AgentID: agentID, Listens: exec.viewsLocked()})
 }
@@ -259,58 +310,204 @@ func (exec *listenExecutor) viewsLocked() []ListenPortStatus {
 	return out
 }
 
-func (exec *listenExecutor) bindOneLocked(item ListenApplyItem) error {
+func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApplyItem, routes *routeSnapshot) (preparedListen, error) {
 	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
-		return ErrInvalid
+		return preparedListen{}, ErrInvalid
 	}
 	existing := exec.bound[item.ID]
 	var current []*boundUserEngine
 	if existing != nil && existing.port == item.Port {
 		current = existing.snapshotUserEngines()
 	}
-	engines, err := assembleUserEngines(item, current)
+	resolver := exec.secrets
+	if exec.managed != nil {
+		resolver = exec.managed
+	}
+	engines, err := assembleUserEngines(ctx, item, current, resolver)
 	if err != nil {
-		return err
+		return preparedListen{}, err
 	}
 	if existing != nil && existing.port == item.Port {
-		existing.replaceUserEngines(engines)
-		return nil
+		return preparedListen{item: item, existing: existing, engines: engines, routes: routes}, nil
 	}
 	host := exec.bindHost
 	if host == "" {
 		host = "0.0.0.0"
 	}
 	address := net.JoinHostPort(host, strconv.Itoa(item.Port))
-	tcp, err := exec.binder.Listen("tcp", address)
+	var tcp net.Listener
+	var udp net.PacketConn
+	var dialer networkDialer
+	if exec.managed != nil {
+		tcp, err = exec.managed.listenTCP(ctx, item.Port)
+		dialer = managedNetworkDialer{runtime: exec.managed}
+	} else if exec.binder != nil {
+		tcp, err = exec.binder.Listen("tcp", address)
+		dialer = &nativeNetworkDialer{net.Dialer{Timeout: 5 * time.Second}}
+	} else {
+		err = ErrTypedHandlesUnavailable
+	}
 	if err != nil {
 		destroyUserEngines(engines, nil)
-		return ErrListenBind
+		return preparedListen{}, ErrListenBind
 	}
-	udp, err := exec.binder.ListenPacket("udp", address)
+	if exec.managed != nil {
+		udp, err = exec.managed.listenUDP(ctx, item.Port)
+	} else {
+		udp, err = exec.binder.ListenPacket("udp", address)
+	}
 	if err != nil {
 		_ = tcp.Close()
 		destroyUserEngines(engines, nil)
-		return ErrListenBind
-	}
-	if existing != nil {
-		exec.unbindLocked(item.ID)
+		return preparedListen{}, ErrListenBind
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, cancel: cancel}
+	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, routeSources: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
+	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx, routes: routes}, nil
+}
+
+func (exec *listenExecutor) commitPrepared(candidate preparedListen) {
+	if candidate.bound == nil {
+		candidate.existing.replaceUserEngines(candidate.engines)
+		candidate.existing.replaceRoutes(candidate.routes)
+		return
+	}
+	if candidate.existing != nil {
+		exec.unbindLocked(candidate.item.ID)
+	}
+	bound := candidate.bound
 	bound.wg.Add(2)
 	go func() {
 		defer bound.wg.Done()
-		bound.serveTCP(ctx)
+		bound.serveTCP(candidate.ctx)
 	}()
 	go func() {
 		defer bound.wg.Done()
-		bound.serveUDP(ctx)
+		bound.serveUDP(candidate.ctx)
 	}()
-	exec.bound[item.ID] = bound
-	return nil
+	exec.bound[candidate.item.ID] = bound
 }
 
-func assembleUserEngines(item ListenApplyItem, current []*boundUserEngine) ([]*boundUserEngine, error) {
+func (b *boundListen) replaceRoutes(routes *routeSnapshot) {
+	b.mu.Lock()
+	b.routes = routes
+	b.routeFailures = map[string]string{}
+	b.routeSources = map[string]string{}
+	b.mu.Unlock()
+}
+
+func (b *boundListen) snapshotRoutes() *routeSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.routes
+}
+
+func (b *boundListen) snapshotRoutesForFlow(address net.Addr) *routeSnapshot {
+	if address == nil {
+		return b.snapshotRoutes()
+	}
+	key := address.Network() + "\x00" + address.String()
+	b.mu.Lock()
+	if routes := b.flowRoutes[key]; routes != nil {
+		b.mu.Unlock()
+		return routes
+	}
+	if b.flowRoutes == nil {
+		b.flowRoutes = map[string]*routeSnapshot{}
+	}
+	if managed, ok := b.udp.(*managedPacketConn); ok {
+		kept := b.flowOrder[:0]
+		for _, candidate := range b.flowOrder {
+			token := strings.TrimPrefix(candidate, "udp\x00")
+			if managed.hasFlow(token) {
+				kept = append(kept, candidate)
+			} else {
+				delete(b.flowRoutes, candidate)
+			}
+		}
+		b.flowOrder = kept
+	}
+	for len(b.flowOrder) >= 256 {
+		oldest := b.flowOrder[0]
+		b.flowOrder = b.flowOrder[1:]
+		delete(b.flowRoutes, oldest)
+	}
+	routes := b.routes
+	b.flowRoutes[key] = routes
+	b.flowOrder = append(b.flowOrder, key)
+	b.mu.Unlock()
+	return routes
+}
+
+func (b *boundListen) recordRouteFailure(decision routeDecision, failure string) {
+	if decision.RuleID == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.routeFailures == nil {
+		b.routeFailures = map[string]string{}
+	}
+	if failure == "" {
+		delete(b.routeFailures, decision.RuleID)
+	} else {
+		b.routeFailures[decision.RuleID] = failure
+	}
+	b.mu.Unlock()
+}
+
+func (b *boundListen) recordRouteSource(decision routeDecision, source string) {
+	if decision.RuleID == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.routeSources == nil {
+		b.routeSources = map[string]string{}
+	}
+	b.routeSources[decision.RuleID] = source
+	b.mu.Unlock()
+}
+
+func (b *boundListen) routeStatuses() []RouteStatus {
+	b.mu.Lock()
+	routes := b.routes
+	failures := make(map[string]string, len(b.routeFailures))
+	sources := make(map[string]string, len(b.routeSources))
+	for id, failure := range b.routeFailures {
+		failures[id] = failure
+	}
+	for id, source := range b.routeSources {
+		sources[id] = source
+	}
+	b.mu.Unlock()
+	statuses := routes.statuses()
+	for index := range statuses {
+		if failures[statuses[index].RuleID] != "" {
+			statuses[index].Failure = failures[statuses[index].RuleID]
+		}
+		if sources[statuses[index].RuleID] != "" {
+			statuses[index].DomainSource = sources[statuses[index].RuleID]
+		}
+	}
+	return statuses
+}
+
+func (exec *listenExecutor) abortPrepared(prepared []preparedListen) {
+	keep := map[*ProtocolEngine]struct{}{}
+	for _, listener := range exec.bound {
+		for _, engine := range listener.snapshotEngines() {
+			keep[engine] = struct{}{}
+		}
+	}
+	for _, candidate := range prepared {
+		if candidate.bound != nil {
+			candidate.bound.close()
+			continue
+		}
+		destroyUserEngines(candidate.engines, keep)
+	}
+}
+
+func assembleUserEngines(ctx context.Context, item ListenApplyItem, current []*boundUserEngine, resolver SecretVerifier) ([]*boundUserEngine, error) {
 	byID := make(map[string]*ProtocolEngine, len(current))
 	for _, existing := range current {
 		if existing == nil || existing.engine == nil || existing.id == "" {
@@ -320,11 +517,38 @@ func assembleUserEngines(item ListenApplyItem, current []*boundUserEngine) ([]*b
 	}
 	next := make([]*boundUserEngine, 0, len(item.Users))
 	created := make([]*ProtocolEngine, 0, len(item.Users))
+	serverPSK := ""
+	if item.ServerSecretRef != "" {
+		if resolver == nil {
+			return nil, ErrTypedHandlesUnavailable
+		}
+		material, err := resolver.Resolve(ctx, item.ServerSecretRef, item.ServerSecretVersion)
+		if err != nil {
+			return nil, err
+		}
+		serverPSK = string(material)
+		clear(material)
+	}
 	for _, user := range item.Users {
-		if !user.Enabled || strings.TrimSpace(user.Password) == "" {
+		if !user.Enabled {
 			continue
 		}
-		engine, err := engineFromMaterial(item.Method, []byte(user.Password), item.ServerPSK)
+		if user.SecretRef == "" || user.SecretVersion == "" || resolver == nil {
+			destroyListenEngines(created)
+			return nil, ErrInvalid
+		}
+		password, err := resolver.Resolve(ctx, user.SecretRef, user.SecretVersion)
+		if err != nil {
+			destroyListenEngines(created)
+			return nil, err
+		}
+		if len(password) == 0 {
+			clear(password)
+			destroyListenEngines(created)
+			return nil, ErrInvalid
+		}
+		engine, err := engineFromMaterial(item.Method, password, serverPSK)
+		clear(password)
 		if err != nil {
 			destroyListenEngines(created)
 			return nil, err
@@ -369,6 +593,8 @@ func (b *boundListen) close() {
 	b.mu.Lock()
 	engines := b.engines
 	b.engines = nil
+	b.flowRoutes = nil
+	b.flowOrder = nil
 	b.mu.Unlock()
 	destroyUserEngines(engines, nil)
 }
@@ -485,7 +711,8 @@ func (b *boundListen) serveUDP(ctx context.Context) {
 
 func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	handshakeDeadline := time.Now().Add(5 * time.Second)
+	_ = conn.SetDeadline(handshakeDeadline)
 	request, session, err := readTCPHandshake(conn, b.snapshotEngines())
 	if session != nil {
 		defer session.Close()
@@ -496,17 +723,61 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	if err != nil {
 		return
 	}
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	target, err := dialer.DialContext(ctx, "tcp", request.Target)
+	routes := b.snapshotRoutes()
+	routeTarget := request.Target
+	domainSource := "target-domain"
+	if host, port, splitErr := net.SplitHostPort(request.Target); splitErr == nil {
+		if _, addressErr := netip.ParseAddr(strings.Trim(host, "[]")); addressErr == nil {
+			domainSource = "none"
+			var domain string
+			var replay []byte
+			conn, domain, replay = sniffTargetDomain(ctx, conn, session, request.Payload, handshakeDeadline)
+			request.Payload = replay
+			if domain != "" {
+				routeTarget = net.JoinHostPort(domain, port)
+				if len(replay) > 0 && replay[0] == 0x16 {
+					domainSource = "sniffed-tls-sni"
+				} else {
+					domainSource = "sniffed-http-host"
+				}
+			}
+		}
+	}
+	decision, err := routes.decide(ctx, "tcp", routeTarget)
+	b.recordRouteSource(decision, domainSource)
+	if err != nil || decision.Action == RouteReject {
+		failure := "route-rejected"
+		if err != nil {
+			failure = "dataset-or-upstream-unavailable"
+		}
+		b.recordRouteFailure(decision, failure)
+		return
+	}
+	if b.dialer == nil {
+		return
+	}
+	dialTarget := request.Target
+	if decision.Action == RouteUpstream {
+		dialTarget = net.JoinHostPort(decision.Upstream.Host, strconv.Itoa(decision.Upstream.Port))
+	}
+	target, err := b.dialer.DialContext(ctx, "tcp", dialTarget)
 	if err != nil {
+		b.recordRouteFailure(decision, "dial-failed")
 		return
 	}
 	defer target.Close()
-	if len(request.Payload) > 0 {
+	if decision.Action == RouteUpstream {
+		target, err = b.wrapUpstreamTCP(ctx, target, *decision.Upstream, request)
+		if err != nil {
+			b.recordRouteFailure(decision, "upstream-auth-failed")
+			return
+		}
+	} else if len(request.Payload) > 0 {
 		if _, err := target.Write(request.Payload); err != nil {
 			return
 		}
 	}
+	b.recordRouteFailure(decision, "")
 	_ = conn.SetDeadline(time.Time{})
 	_ = target.SetDeadline(time.Time{})
 
@@ -551,23 +822,52 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 	if matched == nil {
 		return
 	}
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "udp", request.Target)
+	decision, err := b.snapshotRoutesForFlow(clientAddr).decide(ctx, "udp", request.Target)
+	if err != nil || decision.Action == RouteReject {
+		failure := "route-rejected"
+		if err != nil {
+			failure = "dataset-or-upstream-unavailable"
+		}
+		b.recordRouteFailure(decision, failure)
+		return
+	}
+	if b.dialer == nil {
+		return
+	}
+	dialTarget := request.Target
+	if decision.Action == RouteUpstream {
+		dialTarget = net.JoinHostPort(decision.Upstream.Host, strconv.Itoa(decision.Upstream.Port))
+	}
+	conn, err := b.dialer.DialContext(ctx, "udp", dialTarget)
 	if err != nil {
+		b.recordRouteFailure(decision, "dial-failed")
 		return
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if len(request.Payload) > 0 {
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	var responses [][]byte
+	if decision.Action == RouteUpstream {
+		var upstreamErr error
+		responses, upstreamErr = b.roundTripUpstreamUDPResponses(ctx, conn, *decision.Upstream, request)
+		if upstreamErr != nil {
+			b.recordRouteFailure(decision, "upstream-auth-failed")
+			return
+		}
+	} else if len(request.Payload) > 0 {
 		if _, err := conn.Write(request.Payload); err != nil {
 			return
 		}
+		responses, err = collectUDPAssociationResponses(conn, func(payload []byte) ([]byte, error) { return payload, nil })
+		if err != nil {
+			b.recordRouteFailure(decision, "response-budget")
+			return
+		}
 	}
-	buf := make([]byte, maxUDPPacket)
-	n, err := conn.Read(buf)
-	if err != nil || n == 0 {
+	if len(responses) == 0 {
+		b.recordRouteFailure(decision, "no-response")
 		return
 	}
+	b.recordRouteFailure(decision, "")
 	saltSize := 8
 	if !matched.modern {
 		saltSize = matched.SaltSize()
@@ -576,15 +876,34 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 	if _, err := rand.Read(responseSalt); err != nil {
 		return
 	}
-	sealed, err := matched.SealUDPResponse(responseSalt, 0, request.SessionID, request.Target, buf[:n], time.Now(), nil)
-	if err != nil {
-		return
-	}
 	udp := b.packetConn()
 	if udp == nil {
 		return
 	}
-	_, _ = udp.WriteTo(sealed, clientAddr)
+	for _, response := range responses {
+		if _, err := rand.Read(responseSalt); err != nil {
+			return
+		}
+		packetID := uint64(0)
+		if matched.modern {
+			packetID = b.nextUDPPacketID()
+		}
+		sealed, err := matched.SealUDPResponse(responseSalt, packetID, request.SessionID, request.Target, response, time.Now(), nil)
+		if err != nil {
+			return
+		}
+		if _, err := udp.WriteTo(sealed, clientAddr); err != nil {
+			return
+		}
+	}
+}
+
+func (b *boundListen) nextUDPPacketID() uint64 {
+	b.mu.Lock()
+	b.udpPacketID++
+	value := b.udpPacketID
+	b.mu.Unlock()
+	return value
 }
 
 func relayTCPClientToTarget(conn, target net.Conn, session *TCPServerSession) {

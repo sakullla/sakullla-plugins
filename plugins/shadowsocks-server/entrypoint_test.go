@@ -19,6 +19,8 @@ func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")
 	t.Setenv("NRE_PLUGIN_HTTP_ENDPOINT", "")
 	t.Setenv("NRE_PLUGIN_HTTP_COOKIE_FILE", "")
+	t.Setenv(pluginsdk.EnvPluginInstanceID, "shadowsocks-server")
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeControlPlane)
 
 	err := RunEntrypoint(context.Background(), nil, &bytes.Buffer{})
 	if err == nil {
@@ -27,7 +29,7 @@ func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 	if errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("RunEntrypoint() returned the old startup sentinel: %v", err)
 	}
-	if !strings.Contains(err.Error(), "NRE_PLUGIN_") {
+	if !strings.Contains(err.Error(), "NRE_PLUGIN_") && !strings.Contains(err.Error(), "plugin host runtime endpoint") {
 		t.Fatalf("RunEntrypoint() error = %v, want canonical SDK endpoint validation", err)
 	}
 }
@@ -84,10 +86,15 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 	for _, permission := range manifest.Permissions {
 		grants = append(grants, permission.Name)
 	}
-	if !slices.Contains(grants, pluginsdk.PermissionNetworkFull) {
-		t.Fatalf("plugin.yaml permissions omit %q", pluginsdk.PermissionNetworkFull)
+	if slices.Contains(grants, pluginsdk.PermissionNetworkFull) {
+		t.Fatalf("plugin.yaml permissions retain %q", pluginsdk.PermissionNetworkFull)
 	}
-	requiredFeatures := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
+	for _, required := range []string{pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite} {
+		if !slices.Contains(grants, required) {
+			t.Fatalf("plugin.yaml permissions omit %q", required)
+		}
+	}
+	requiredFeatures := supportedFeatures()
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)

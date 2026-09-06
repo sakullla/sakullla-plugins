@@ -79,14 +79,17 @@ type listenWriteRequest struct {
 }
 
 type listenAPIResponse struct {
-	Ready     bool                `json:"ready"`
-	Listens   []listenAPIView     `json:"listens,omitempty"`
-	Listen    *listenAPIView      `json:"listen,omitempty"`
-	User      *listenUserView     `json:"user,omitempty"`
-	Defaults  *listenDefaultsView `json:"defaults,omitempty"`
-	Execution *executionView      `json:"execution,omitempty"`
-	Error     string              `json:"error,omitempty"`
-	Access    struct {
+	Ready        bool                  `json:"ready"`
+	Listens      []listenAPIView       `json:"listens,omitempty"`
+	Listen       *listenAPIView        `json:"listen,omitempty"`
+	User         *listenUserView       `json:"user,omitempty"`
+	Defaults     *listenDefaultsView   `json:"defaults,omitempty"`
+	Execution    *executionView        `json:"execution,omitempty"`
+	Routing      *RoutingConfiguration `json:"routing,omitempty"`
+	RouteStatus  []RouteStatus         `json:"route_status,omitempty"`
+	RouteSources []RouteSourceStatus   `json:"route_sources,omitempty"`
+	Error        string                `json:"error,omitempty"`
+	Access       struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -109,6 +112,21 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	if path == "/api/listens" {
 		c.serveListenCollection(writer, request)
 		return true
+	}
+	if path == "/api/routing" {
+		c.serveRouting(writer, request)
+		return true
+	}
+	if path == "/api/upstreams" {
+		c.serveUpstreamCollection(writer, request)
+		return true
+	}
+	if rest, found := strings.CutPrefix(path, "/api/upstreams/"); found {
+		id, action, cut := strings.Cut(rest, "/")
+		if cut && (action == "enable" || action == "disable" || action == "delete") {
+			c.serveUpstreamItem(writer, request, id, action)
+			return true
+		}
 	}
 	if listenID, action, ok := parseListenAPI(path); ok {
 		c.serveListenItem(writer, request, listenID, action)
@@ -134,7 +152,7 @@ func parseListenAPI(path string) (listenID, action string, ok bool) {
 	if !cut {
 		return decoded, "get", true
 	}
-	if action == "users" || action == "delete" {
+	if action == "users" || action == "delete" || action == "rotate-server" {
 		return decoded, action, true
 	}
 	return "", "", false
@@ -154,7 +172,7 @@ func parseUserAPI(path string) (userID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "enable", "disable", "delete", "qr.png":
+	case "enable", "disable", "delete", "rotate", "qr.png":
 		return decoded, action, true
 	default:
 		return "", "", false
@@ -356,6 +374,19 @@ func (c *Controller) serveListenItem(writer http.ResponseWriter, request *http.R
 			return
 		}
 		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Access: readWriteAccess()})
+	case "rotate-server":
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", "POST")
+			writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+			return
+		}
+		body, _ := decodeListenWrite(request)
+		view, err := c.rotateServerSecret(request.Context(), listenID, body.AgentID)
+		if err != nil {
+			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+			return
+		}
+		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Listen: &view, Access: readWriteAccess()})
 	default:
 		http.Error(writer, "Shadowsocks 管理面板未找到该页面", http.StatusNotFound)
 	}
@@ -409,7 +440,7 @@ func (c *Controller) serveUserItem(writer http.ResponseWriter, request *http.Req
 		if request.Method != http.MethodHead {
 			_, _ = writer.Write(png)
 		}
-	case "enable", "disable", "delete":
+	case "enable", "disable", "delete", "rotate":
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", "POST")
 			writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
@@ -418,6 +449,15 @@ func (c *Controller) serveUserItem(writer http.ResponseWriter, request *http.Req
 		body, _ := decodeListenWrite(request)
 		c.rememberRequestNode(request.Context(), body.AgentID, requestNode(body))
 		var err error
+		if action == "rotate" {
+			view, rotateErr := c.rotateUserSecret(request.Context(), userID, body.AgentID)
+			if rotateErr != nil {
+				writeListenJSON(writer, listenStatus(rotateErr), listenAPIResponse{Error: publicListenError(rotateErr)})
+				return
+			}
+			writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, User: &view, Access: readWriteAccess()})
+			return
+		}
 		if action == "delete" {
 			err = c.deleteUser(request.Context(), userID, body.AgentID)
 		} else {
@@ -440,6 +480,111 @@ func (c *Controller) serveUserItem(writer http.ResponseWriter, request *http.Req
 	default:
 		http.Error(writer, "Shadowsocks 管理面板未找到该页面", http.StatusNotFound)
 	}
+}
+
+func (c *Controller) rotateUserSecret(ctx context.Context, userID, agentID string) (listenUserView, error) {
+	if c.managedRuntime == nil {
+		return listenUserView{}, ErrExecutionUnavailable
+	}
+	current := c.directory()
+	listener, user, ok := current.userListener(userID)
+	if !ok {
+		return listenUserView{}, ErrDenied
+	}
+	if agentID == "" {
+		agentID = listener.AgentID
+	}
+	if agentID != listener.AgentID {
+		return listenUserView{}, ErrDenied
+	}
+	if err := c.requireMutableAgent(ctx, agentID); err != nil {
+		return listenUserView{}, err
+	}
+	reference, err := c.managedRuntime.createReplacementSecret(ctx, "user", listener.Method)
+	if err != nil {
+		return listenUserView{}, err
+	}
+	next, err := current.ReplaceUserSecret(user.ID, user.SecretVersion, reference.ID, reference.Version)
+	if err != nil {
+		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
+		return listenUserView{}, err
+	}
+	if err = c.commitDirectory(ctx, next); err != nil {
+		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
+		return listenUserView{}, err
+	}
+	if err = c.applyAgentListens(ctx, agentID); err != nil {
+		_ = c.commitDirectory(ctx, current)
+		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
+		return listenUserView{}, err
+	}
+	if err = c.finishSecretReplacement(ctx, agentID, current, next,
+		pluginsdk.ScopedSecretReference{ID: user.SecretRef, Version: user.SecretVersion}, reference); err != nil {
+		return listenUserView{}, err
+	}
+	return c.projectUser(ctx, userID)
+}
+
+func (c *Controller) rotateServerSecret(ctx context.Context, listenID, agentID string) (listenAPIView, error) {
+	if c.managedRuntime == nil {
+		return listenAPIView{}, ErrExecutionUnavailable
+	}
+	current := c.directory()
+	listener, ok := current.Listen(listenID)
+	if !ok || !SS2022Method(listener.Method) || listener.ServerSecretRef == "" {
+		return listenAPIView{}, ErrDenied
+	}
+	if agentID == "" {
+		agentID = listener.AgentID
+	}
+	if agentID != listener.AgentID {
+		return listenAPIView{}, ErrDenied
+	}
+	if err := c.requireMutableAgent(ctx, agentID); err != nil {
+		return listenAPIView{}, err
+	}
+	reference, err := c.managedRuntime.createReplacementSecret(ctx, "server", listener.Method)
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	next := clone(current)
+	for index := range next.Listeners {
+		if next.Listeners[index].ID == listenID {
+			next.Listeners[index].ServerSecretRef, next.Listeners[index].ServerSecretVersion = reference.ID, reference.Version
+		}
+	}
+	if err = c.commitDirectory(ctx, next); err != nil {
+		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
+		return listenAPIView{}, err
+	}
+	if err = c.applyAgentListens(ctx, agentID); err != nil {
+		_ = c.commitDirectory(ctx, current)
+		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
+		return listenAPIView{}, err
+	}
+	if err = c.finishSecretReplacement(ctx, agentID, current, next,
+		pluginsdk.ScopedSecretReference{ID: listener.ServerSecretRef, Version: listener.ServerSecretVersion}, reference); err != nil {
+		return listenAPIView{}, err
+	}
+	return c.projectListen(ctx, listenID)
+}
+
+func (c *Controller) finishSecretReplacement(ctx context.Context, agentID string, previous, next Configuration, oldReference, newReference pluginsdk.ScopedSecretReference) error {
+	if err := c.managedRuntime.revokeSecret(ctx, oldReference.ID, oldReference.Version); err == nil {
+		return nil
+	}
+	if err := c.commitDirectory(ctx, previous); err != nil {
+		_ = c.commitDirectory(ctx, next)
+		return ErrExecutionUnavailable
+	}
+	if err := c.applyAgentListens(ctx, agentID); err != nil {
+		_ = c.commitDirectory(ctx, next)
+		return ErrExecutionUnavailable
+	}
+	if err := c.managedRuntime.revokeSecret(ctx, newReference.ID, newReference.Version); err != nil {
+		return ErrExecutionUnavailable
+	}
+	return ErrExecutionUnavailable
 }
 
 func (c *Controller) requireMutableAgent(ctx context.Context, agentID string) error {
@@ -507,18 +652,31 @@ func (c *Controller) secrets() *issuedSecrets {
 	return c.controlSecrets
 }
 
-func (c *Controller) putSecret(ctx context.Context, ref, version, material string) error {
+func (c *Controller) putSecret(ctx context.Context, ref, version, material string) (string, error) {
 	if ref == "" || version == "" {
-		return nil
+		return version, nil
+	}
+	if c.managedRuntime != nil {
+		value := []byte(material)
+		reference, err := c.managedRuntime.importSecret(ctx, ref, value)
+		clear(value)
+		if err != nil || reference.ID != ref {
+			return "", ErrTypedHandlesUnavailable
+		}
+		c.secrets().put(reference.ID, reference.Version, material)
+		return reference.Version, nil
 	}
 	c.secrets().put(ref, version, material)
 	c.mu.Lock()
 	state := c.listenState
 	c.mu.Unlock()
 	if state == nil {
-		return nil
+		return version, nil
 	}
-	return state.StoreSecrets(ctx, c.secrets().snapshot())
+	if err := state.StoreSecrets(ctx, c.secrets().snapshot()); err != nil {
+		return "", err
+	}
+	return version, nil
 }
 
 // RememberAgentNode stores a shareable public identity for agentID.
@@ -565,6 +723,9 @@ func requestNode(body listenWriteRequest) NodeAddresses {
 func (c *Controller) resolveMaterial(ctx context.Context, ref, version string) ([]byte, error) {
 	if stored, ok := c.secrets().lookup(ref, version); ok {
 		return []byte(stored), nil
+	}
+	if c.managedRuntime != nil {
+		return c.managedRuntime.Resolve(ctx, ref, version)
 	}
 	c.mu.Lock()
 	published := c.published
@@ -645,12 +806,28 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 		return listenAPIView{}, err
 	}
 	previous := current
-	if err = c.putSecret(ctx, user.SecretRef, user.SecretVersion, password); err != nil {
+	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	if err != nil {
 		return listenAPIView{}, err
 	}
-	if SS2022Method(method) {
-		if err = c.putSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK); err != nil {
+	if userVersion != user.SecretVersion {
+		next, err = next.ReplaceUserSecret(user.ID, user.SecretVersion, user.SecretRef, userVersion)
+		if err != nil {
 			return listenAPIView{}, err
+		}
+		user.SecretVersion = userVersion
+	}
+	if SS2022Method(method) {
+		serverVersion, secretErr := c.putSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK)
+		if secretErr != nil {
+			err = secretErr
+			return listenAPIView{}, err
+		}
+		for index := range next.Listeners {
+			if next.Listeners[index].ID == listener.ID {
+				next.Listeners[index].ServerSecretVersion = serverVersion
+				listener.ServerSecretVersion = serverVersion
+			}
 		}
 	}
 	if err = c.commitDirectory(ctx, next); err != nil {
@@ -704,8 +881,15 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 		return listenAPIView{}, err
 	}
 	previous := current
-	if err = c.putSecret(ctx, user.SecretRef, user.SecretVersion, password); err != nil {
+	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	if err != nil {
 		return listenAPIView{}, err
+	}
+	if userVersion != user.SecretVersion {
+		next, err = next.ReplaceUserSecret(user.ID, user.SecretVersion, user.SecretRef, userVersion)
+		if err != nil {
+			return listenAPIView{}, err
+		}
 	}
 	if err = c.commitDirectory(ctx, next); err != nil {
 		return listenAPIView{}, err
@@ -749,7 +933,7 @@ func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string,
 
 func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) error {
 	current := c.directory()
-	listener, _, ok := current.userListener(userID)
+	listener, user, ok := current.userListener(userID)
 	if !ok {
 		return ErrDenied
 	}
@@ -773,6 +957,9 @@ func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) err
 	if err = c.applyAgentListens(ctx, agentID); err != nil {
 		_ = c.commitDirectory(ctx, previous)
 		return err
+	}
+	if c.managedRuntime != nil {
+		return c.managedRuntime.revokeSecret(ctx, user.SecretRef, user.SecretVersion)
 	}
 	return nil
 }
@@ -804,6 +991,16 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
+	if c.managedRuntime != nil {
+		for _, user := range listener.Users {
+			if err := c.managedRuntime.revokeSecret(ctx, user.SecretRef, user.SecretVersion); err != nil {
+				return err
+			}
+		}
+		if listener.ServerSecretRef != "" {
+			return c.managedRuntime.revokeSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion)
+		}
+	}
 	return nil
 }
 
@@ -815,7 +1012,7 @@ func (c *Controller) applyAgentListens(ctx context.Context, agentID string) erro
 	if err != nil {
 		return err
 	}
-	if err = c.ApplyListen(ctx, agentID, items); err != nil {
+	if err = c.ApplyListenRouting(ctx, agentID, items, c.directory().Routing); err != nil {
 		if errors.Is(err, ErrAgentOffline) || errors.Is(err, ErrListenBind) || errors.Is(err, ErrExecutionUnavailable) {
 			return err
 		}
@@ -834,31 +1031,9 @@ func (c *Controller) listenApplyItems(ctx context.Context, agentID string) ([]Li
 		if listener.AgentID != agentID {
 			continue
 		}
-		item := ListenApplyItem{ID: listener.ID, Port: listener.Port, Method: listener.Method}
-		if SS2022Method(listener.Method) && listener.ServerSecretRef != "" {
-			serverPSK, err := c.resolveMappedPSK(ctx, listener.Method, listener.ServerSecretRef, listener.ServerSecretVersion)
-			if err != nil {
-				return nil, err
-			}
-			item.ServerPSK = serverPSK
-		}
+		item := ListenApplyItem{ID: listener.ID, Port: listener.Port, Method: listener.Method, ServerSecretRef: listener.ServerSecretRef, ServerSecretVersion: listener.ServerSecretVersion}
 		for _, user := range listener.Users {
-			applyUser := ListenApplyUser{ID: user.ID, Enabled: user.Enabled}
-			if user.Enabled {
-				password, err := c.sharePassword(ctx, listener, user)
-				if err != nil {
-					return nil, err
-				}
-				if SS2022Method(listener.Method) {
-					if _, userPSK, ok := splitSS2022ClientPassword([]byte(password)); ok {
-						applyUser.Password = string(userPSK)
-					} else {
-						applyUser.Password = password
-					}
-				} else {
-					applyUser.Password = password
-				}
-			}
+			applyUser := ListenApplyUser{ID: user.ID, Enabled: user.Enabled, SecretRef: user.SecretRef, SecretVersion: user.SecretVersion}
 			item.Users = append(item.Users, applyUser)
 		}
 		items = append(items, item)
@@ -899,7 +1074,7 @@ func (c *Controller) reconcileAgentListens(ctx context.Context, agentID string) 
 	if err != nil {
 		return
 	}
-	_ = c.ApplyListen(ctx, agentID, items)
+	_ = c.ApplyListenRouting(ctx, agentID, items, c.directory().Routing)
 }
 
 func listenRuntimeMatchesDesired(desired []ListenRule, live []ListenPortStatus) bool {
@@ -1190,6 +1365,8 @@ func listenStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrPortConflict), errors.Is(err, ErrListenBind):
 		return http.StatusConflict
+	case errors.Is(err, ErrRouteDatasetUnavailable), errors.Is(err, ErrRouteUpstreamUnavailable):
+		return http.StatusConflict
 	case errors.Is(err, ErrInvalid), errors.Is(err, ErrTraditionalMultiUser):
 		return http.StatusBadRequest
 	default:
@@ -1215,6 +1392,12 @@ func publicListenError(err error) string {
 		return "账号不存在或操作被拒绝"
 	case errors.Is(err, ErrMissingShareHost):
 		return missingPublicHost
+	case errors.Is(err, ErrRouteDatasetUnavailable):
+		return "数据集或分类不可用"
+	case errors.Is(err, ErrRouteUpstreamUnavailable):
+		return "上游不可用或协议未启用"
+	case errors.Is(err, ErrRouteRejected):
+		return "路由已拒绝"
 	case errors.Is(err, ErrInvalid):
 		return "请求无效"
 	default:

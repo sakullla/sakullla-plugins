@@ -2,7 +2,7 @@ schema_version: 1
 id: shadowsocks-server
 version: 0.1.18
 name: Shadowsocks 服务
-description: 通过简单面板管理账号，并分享本机自监听的 Shadowsocks 服务
+description: 管理宿主受管 Shadowsocks 入口，并按 GeoSite、GeoIP 或 CIDR 数据集选择直连、拒绝和上游
 compatibility:
   host: "*"
   agent: "*"
@@ -36,13 +36,20 @@ assets:
   - assets/ui/app.js
   - assets/ui/style.css
 permissions:
-  - name: secret.use
   - name: storage.read
   - name: storage.write
   - name: event.emit
   - name: service.revocable-resource-handle
   - name: agent.read
-  - name: network.full
+  - name: runtime.identity
+  - name: network.managed.listen
+  - name: network.managed.dial
+  - name: secret.scoped.read
+    resource: secret-scope:shadowsocks-inbound
+  - name: secret.scoped.write
+    resource: secret-scope:shadowsocks-inbound
+  - name: dataset.query
+  - name: dataset.resolve
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

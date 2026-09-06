@@ -49,6 +49,9 @@ func (b *failListenBinder) ListenPacket(string, string) (net.PacketConn, error) 
 
 func newCallController(t *testing.T, binder listenBinder) *Controller {
 	t.Helper()
+	if binder == nil {
+		binder = netListenBinder{}
+	}
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		ListenBinder: binder,
@@ -58,6 +61,7 @@ func newCallController(t *testing.T, binder listenBinder) *Controller {
 	}
 	if controller.listenExec != nil {
 		controller.listenExec.bindHost = "127.0.0.1"
+		controller.listenExec.secrets = &issuedSecrets{items: map[string]string{}}
 	}
 	t.Cleanup(func() {
 		if controller.listenExec != nil {
@@ -72,6 +76,40 @@ func callListen(t *testing.T, controller *Controller, name string, payload map[s
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if name == pluginCallListenApply && controller.listenExec != nil {
+		var normalized map[string]any
+		if json.Unmarshal(raw, &normalized) == nil {
+			issued, _ := controller.listenExec.secrets.(*issuedSecrets)
+			listens, _ := normalized["listens"].([]any)
+			for _, rawListen := range listens {
+				listen, _ := rawListen.(map[string]any)
+				listenID, _ := listen["id"].(string)
+				if secret, _ := listen["server_psk"].(string); secret != "" && issued != nil {
+					ref, version := "test/server/"+listenID, "test-version-000000000001"
+					issued.put(ref, version, secret)
+					listen["server_secret_ref"], listen["server_secret_version"] = ref, version
+					delete(listen, "server_psk")
+				}
+				users, _ := listen["users"].([]any)
+				for _, rawUser := range users {
+					user, _ := rawUser.(map[string]any)
+					secret, _ := user["password"].(string)
+					id, _ := user["id"].(string)
+					if secret == "" || issued == nil {
+						continue
+					}
+					ref, version := "test/user/"+id, "test-version-000000000001"
+					issued.put(ref, version, secret)
+					user["secret_ref"], user["secret_version"] = ref, version
+					delete(user, "password")
+				}
+			}
+			raw, err = json.Marshal(normalized)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	return controller.Call(context.Background(), "generation-1", name, raw)
 }
