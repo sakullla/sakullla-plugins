@@ -710,13 +710,15 @@ func TestDockerFrpcMiaospeedComposeProjectsIndependentImages(t *testing.T) {
 
 func TestDockerMiaospeedLatestDigestConfirmKeepsFloatingTag(t *testing.T) {
 	t.Parallel()
-	compose := "services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"
-	app := dockerapp.App{
-		ID:         "proxy",
-		Image:      "airportr/miaospeed:latest",
-		Compose:    compose,
-		Generation: "generation-1",
+	parsed, err := dockerapp.ParseConfiguration([]byte(`{"apps":[{"id":"proxy","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n","generation":"generation-1"}]}`))
+	if err != nil || len(parsed.Apps) != 1 {
+		t.Fatalf("parse=%#v err=%v", parsed, err)
 	}
+	app := parsed.Apps[0]
+	if app.Image != "fatedier/frpc:v0.68.1" {
+		t.Fatalf("lexically first image=%q", app.Image)
+	}
+	catalogCompose := app.Compose
 	store := dockerapp.NewDeploymentStore()
 	fake := &rolloutFake{}
 	rollout := dockerapp.Rollout{
@@ -724,20 +726,59 @@ func TestDockerMiaospeedLatestDigestConfirmKeepsFloatingTag(t *testing.T) {
 		Executor: fake,
 		Auditor:  dockerapp.AuditorFunc(func(dockerapp.AuditRecord) {}),
 	}
-	view, err := rollout.AutoUpdate(context.Background(), app, nil, dockerapp.UpdateObservation{
-		CurrentDigest: "sha256:0123456789abcdef0123456789abcdef",
-		LatestDigest:  "sha256:c170021a597490ffd29c96426440c394b65333bc67ac557d8a0e30569765bba9",
+	miaospeedCurrent := "sha256:0123456789abcdef0123456789abcdef"
+	miaospeedLatest := "sha256:c170021a597490ffd29c96426440c394b65333bc67ac557d8a0e30569765bba9"
+	observed := app
+	observed.Image = "airportr/miaospeed:latest"
+	view, err := rollout.AutoUpdate(context.Background(), observed, nil, dockerapp.UpdateObservation{
+		CurrentDigest: miaospeedCurrent,
+		LatestDigest:  miaospeedLatest,
 	})
 	if err != nil || view.AutoUpdate || !view.HasUpdate || view.Published || len(fake.calls) != 0 {
 		t.Fatalf("digest projection view=%#v calls=%v err=%v", view, fake.calls, err)
 	}
-	if err := rollout.ConfirmUpdate(context.Background(), app); err != nil {
+	projected, ok := store.Get(app.ID)
+	if !ok || projected.ImageDigest != miaospeedCurrent || projected.AvailableDigest != miaospeedLatest {
+		t.Fatalf("digest projection record=%#v ok=%v", projected, ok)
+	}
+	if app.Image != "fatedier/frpc:v0.68.1" || app.Compose != catalogCompose {
+		t.Fatalf("catalog mutated before confirm: %#v", app)
+	}
+	if err := rollout.ConfirmUpdate(context.Background(), observed); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(app.Compose, "airportr/miaospeed:latest") || strings.Contains(app.Compose, "4.7.4") {
-		t.Fatalf("confirm rewrote latest: %q", app.Compose)
+	if app.Compose != catalogCompose || strings.Contains(app.Compose, "4.7.4") {
+		t.Fatalf("caller catalog rewritten: %q", app.Compose)
 	}
-	if !strings.Contains(app.Compose, "fatedier/frpc:v0.68.1") {
-		t.Fatalf("confirm rewrote frpc: %q", app.Compose)
+	published, ok := store.Get(app.ID)
+	if !ok || published.ImageDigest != miaospeedLatest {
+		t.Fatalf("published digest=%#v ok=%v", published, ok)
 	}
+	if len(fake.started) == 0 {
+		t.Fatal("confirm did not publish a runtime app")
+	}
+	runtime := fake.started[len(fake.started)-1]
+	if strings.Contains(runtime.Compose, "4.7.4") {
+		t.Fatalf("published compose rewrote latest to semver: %q", runtime.Compose)
+	}
+	frpc := composeImage(runtime.Compose, "frpc")
+	miaospeed := composeImage(runtime.Compose, "miaospeed")
+	if frpc != "fatedier/frpc:v0.68.1" {
+		t.Fatalf("published compose pinned or rewrote frpc: %q", frpc)
+	}
+	if !strings.HasPrefix(miaospeed, "airportr/miaospeed:latest") || strings.Contains(miaospeed, "4.7.4") {
+		t.Fatalf("published compose rewrote latest: %q", miaospeed)
+	}
+	if !strings.Contains(miaospeed, miaospeedLatest) {
+		t.Fatalf("published compose did not pin miaospeed digest: %q", miaospeed)
+	}
+}
+
+func composeImage(document, name string) string {
+	for _, service := range dockerapp.ComposeServiceImages(document) {
+		if service.Name == name {
+			return service.Image
+		}
+	}
+	return ""
 }

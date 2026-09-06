@@ -2736,6 +2736,7 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	t.Parallel()
 	miaospeedCurrent := "sha256:0123456789abcdef0123456789abcdef"
 	miaospeedLatest := "sha256:c170021a597490ffd29c96426440c394b65333bc67ac557d8a0e30569765bba9"
+	executor := &uiTestRollout{}
 	controller := newUIControllerWithOptions(t, uiControllerOptions{
 		observer: &uiTestObserver{
 			tagsByImage: map[string][]string{
@@ -2746,7 +2747,7 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 				"airportr/miaospeed:latest": {current: miaospeedCurrent, latest: miaospeedLatest},
 			},
 		},
-		rollout: &uiTestRollout{},
+		rollout: executor,
 	})
 	created := httptest.NewRecorder()
 	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"}`))
@@ -2795,6 +2796,20 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	}
 	if serviceImageRef(controller.Apps()[0].Compose, "frpc") != "fatedier/frpc:v0.68.1" {
 		t.Fatalf("frpc tag rewritten: %q", controller.Apps()[0].Compose)
+	}
+	if len(executor.started) == 0 {
+		t.Fatal("digest confirm did not publish a runtime app")
+	}
+	runtime := executor.started[len(executor.started)-1]
+	if strings.Contains(runtime.Compose, "4.7.4") {
+		t.Fatalf("published compose rewrote latest to semver: %q", runtime.Compose)
+	}
+	if serviceImageRef(runtime.Compose, "frpc") != "fatedier/frpc:v0.68.1" {
+		t.Fatalf("published compose pinned or rewrote frpc: %q", runtime.Compose)
+	}
+	miaospeedRuntime := serviceImageRef(runtime.Compose, "miaospeed")
+	if !strings.HasPrefix(miaospeedRuntime, "airportr/miaospeed:latest") || !strings.Contains(miaospeedRuntime, miaospeedLatest) {
+		t.Fatalf("published compose did not pin miaospeed digest: %q", runtime.Compose)
 	}
 
 	after := httptest.NewRecorder()
@@ -5373,15 +5388,17 @@ func nginxSemverTags() []string {
 }
 
 type uiTestRollout struct {
-	calls []string
+	calls   []string
+	started []App
 }
 
 func (fake *uiTestRollout) Pull(context.Context, uint64, App) error {
 	fake.calls = append(fake.calls, "pull")
 	return nil
 }
-func (fake *uiTestRollout) Start(_ context.Context, _ uint64, _ App) (string, error) {
+func (fake *uiTestRollout) Start(_ context.Context, _ uint64, app App) (string, error) {
 	fake.calls = append(fake.calls, "start")
+	fake.started = append(fake.started, app)
 	return "new", nil
 }
 func (fake *uiTestRollout) Ready(context.Context, uint64, App, string) error {
