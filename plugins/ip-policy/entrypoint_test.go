@@ -47,7 +47,10 @@ func TestManifestPermissionsSatisfyHandshakeAndProbe(t *testing.T) {
 	for _, permission := range manifest.Permissions {
 		grants = append(grants, permission.Name)
 	}
-	required := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
+	required, err := pluginsdk.RequiredRPCFeaturesForExecutionScope(grants, manifest.ExtensionPoints, pluginsdk.HostScopeControlPlane)
+	if err != nil {
+		t.Fatal(err)
+	}
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
@@ -59,8 +62,11 @@ func TestManifestPermissionsSatisfyHandshakeAndProbe(t *testing.T) {
 	if err := pluginsdk.ValidateRPCFeatures(required, response.Features); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(response.Features, ","), pluginsdk.RPCFeatureExecutionScopeV1) {
-		t.Fatal("control-plane face advertised Agent execution scope")
+	if !strings.Contains(strings.Join(response.Features, ","), pluginsdk.RPCFeatureExecutionScopeV1) {
+		t.Fatal("control-plane process omitted explicit execution-scope support")
+	}
+	if !strings.Contains(strings.Join(response.Features, ","), pluginsdk.RPCFeaturePolicyEntryOverlaysV1) {
+		t.Fatal("control-plane process omitted entry-overlay support")
 	}
 	output := &bytes.Buffer{}
 	if err := RunEntrypoint(context.Background(), []string{CIHandshakeFlag}, output); err != nil || !strings.Contains(output.String(), pluginsdk.RPCABIV1) {

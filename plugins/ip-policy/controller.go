@@ -41,17 +41,21 @@ type controllerEpoch struct {
 
 func requiredGrants() []string {
 	return []string{
-		"ui.dynamic", "storage.read", "storage.write", "event.emit", "http.rule",
+		"ui.dynamic", "storage.read", "storage.write", "event.emit",
 		string(pluginsdk.CapabilityDatasetManage), string(pluginsdk.CapabilityDatasetBind),
 		string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve),
-		string(pluginsdk.CapabilityPolicyControl),
+		string(pluginsdk.CapabilityPolicyControl), string(pluginsdk.CapabilityPolicyEntryOverlays),
 	}
+}
+
+func controlPlaneFeatures() []string {
+	return pluginsdk.RPCFeaturesWithExecutionScope(pluginsdk.RequiredRPCFeatures(requiredGrants()))
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
 	controller := &Controller{config: DefaultConfiguration(), runtime: config.Runtime}
 	timeouts := (rpcplugin.Timeouts{Prepare: config.PrepareTimeout, Activate: config.ActivateTimeout, Stop: config.StopTimeout, Drain: config.DrainTimeout}).WithDefaults(rpcplugin.UniformTimeouts(5 * time.Second))
-	features := pluginsdk.RequiredRPCFeatures(requiredGrants())
+	features := controlPlaneFeatures()
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,

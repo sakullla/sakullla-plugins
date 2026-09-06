@@ -19,7 +19,7 @@
       "required": ["id", "name", "kind"],
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.!@+-]{0,127}$"},
         "kind": {"type": "string", "enum": ["cidr", "country", "region"]}
       }
     },

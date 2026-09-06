@@ -61,6 +61,24 @@ func TestConfigurationRejectsAttributesUnmaskedCIDRAndCountryWhitelist(t *testin
 	}
 }
 
+func TestConfigurationClassificationIdentityMatchesSDKAndRust(t *testing.T) {
+	config := validConfiguration()
+	config.Datasets[0].Classifications = append(config.Datasets[0].Classifications, ClassificationDefinition{ID: "guangdong-copy", Name: "cn-44", Kind: pluginsdk.DatasetClassificationRegion})
+	if err := config.Validate(); err == nil {
+		t.Fatal("different IDs for one canonical classification were accepted")
+	}
+
+	config = validConfiguration()
+	config.Datasets[0].Classifications = append(config.Datasets[0].Classifications, ClassificationDefinition{ID: "upper-name", Name: "CN-44", Kind: pluginsdk.DatasetClassificationRegion})
+	if err := config.Validate(); err != nil {
+		t.Fatalf("SDK/Rust case-sensitive classification was rejected: %v", err)
+	}
+	config.Datasets[0].Classifications[len(config.Datasets[0].Classifications)-1].Name = " cn-44"
+	if err := config.Validate(); err == nil {
+		t.Fatal("classification name with whitespace was accepted")
+	}
+}
+
 func TestEntryOverlayUsesBaseDatasetDictionary(t *testing.T) {
 	config := validConfiguration()
 	valid := []byte(`{"schema":"sakullla.ip-policy-overlay/v1","rules":[{"id":"allow-gd","action":"allow","selector":{"type":"classification","dataset_id":"province-data","classification_id":"guangdong"}}]}`)

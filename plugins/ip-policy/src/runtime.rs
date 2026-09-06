@@ -13,6 +13,29 @@ const DATASET_CALL_MICROS: u32 = 1200;
 const DATASET_RESPONSE_BYTES: u32 = 4096;
 const HOST_CALLS: u16 = 8;
 
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn init_lifecycle_status(initialized: bool) -> AbiStatus {
+    if initialized {
+        AbiStatus::InvalidArgument
+    } else {
+        AbiStatus::Ok
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn reset_lifecycle_status(input_active: bool, output_active: bool) -> AbiStatus {
+    if input_active || output_active {
+        AbiStatus::InvalidArgument
+    } else {
+        AbiStatus::Ok
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn valid_input_allocation(size: u32, maximum: usize) -> bool {
+    size != 0 && size as usize <= maximum
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnedReference {
     handle: FixedStr<256>,
@@ -630,5 +653,39 @@ fn map_runtime_failure(code: RuntimeErrorCode) -> RuntimeErrorCode {
         RuntimeErrorCode::Internal
     } else {
         code
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn abi_sequence_preserves_initialized_runtime_across_request_resets() {
+        let mut initialized = false;
+        assert_eq!(init_lifecycle_status(initialized), AbiStatus::Ok);
+        initialized = true;
+
+        assert!(initialized);
+        assert_eq!(reset_lifecycle_status(false, false), AbiStatus::Ok);
+        assert!(initialized);
+        assert_eq!(reset_lifecycle_status(false, false), AbiStatus::Ok);
+        assert!(initialized);
+
+        assert_eq!(
+            init_lifecycle_status(initialized),
+            AbiStatus::InvalidArgument
+        );
+        assert_eq!(
+            reset_lifecycle_status(true, false),
+            AbiStatus::InvalidArgument
+        );
+        assert_eq!(
+            reset_lifecycle_status(false, true),
+            AbiStatus::InvalidArgument
+        );
+        assert!(!valid_input_allocation(0, 128 << 10));
+        assert!(!valid_input_allocation((128 << 10) + 1, 128 << 10));
+        assert!(valid_input_allocation(1024, 128 << 10));
     }
 }

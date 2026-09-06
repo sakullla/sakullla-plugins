@@ -31,12 +31,23 @@ type BindingMutation struct {
 }
 
 func (controller *Controller) inspectPolicy(ctx context.Context, entry *pluginsdk.PolicyEntryTarget) (pluginsdk.PolicyControlResponse, error) {
+	return controller.inspectPolicyTarget(ctx, "", ipStage, entry)
+}
+
+func (controller *Controller) inspectPolicyTarget(ctx context.Context, instanceID string, stage pluginsdk.PolicyStageIdentity, entry *pluginsdk.PolicyEntryTarget) (pluginsdk.PolicyControlResponse, error) {
 	if controller == nil || controller.runtime == nil {
 		return pluginsdk.PolicyControlResponse{}, ErrUnavailable
 	}
-	response, err := controller.runtime.ControlPolicy(ctx, pluginsdk.PolicyControlRequest{Action: pluginsdk.PolicyControlInspect, Stage: ipStage, Entry: entry})
+	return controller.controlPolicy(ctx, pluginsdk.PolicyControlRequest{Action: pluginsdk.PolicyControlInspect, InstanceID: instanceID, Stage: stage, Entry: entry})
+}
+
+func (controller *Controller) controlPolicy(ctx context.Context, request pluginsdk.PolicyControlRequest) (pluginsdk.PolicyControlResponse, error) {
+	response, err := controller.runtime.ControlPolicy(ctx, request)
 	if err != nil {
 		return response, publicRuntimeError(err)
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return pluginsdk.PolicyControlResponse{}, ErrUnavailable
 	}
 	return response, nil
 }
@@ -62,34 +73,74 @@ func (controller *Controller) replacePolicy(ctx context.Context, config Configur
 		Stage: current.Stage, Mode: mode, ExpectedRevision: &revision, ExpectedInstanceVersion: &instance, Config: encoded,
 	}
 	request.OperationID = operationIDFor("policy", request)
-	response, err := controller.runtime.ControlPolicy(ctx, request)
+	response, err := controller.controlPolicy(ctx, request)
 	if err != nil {
-		return response, publicRuntimeError(err)
+		return response, err
 	}
 	controller.rememberConfig(config)
 	return response, nil
 }
 
-func (controller *Controller) setEntryMode(ctx context.Context, entry pluginsdk.PolicyEntryTarget, mode pluginsdk.PolicyMode, reset bool) (pluginsdk.PolicyControlResponse, error) {
-	if entry.Validate() != nil || mode.Validate() != nil && !reset {
+func (controller *Controller) listPolicyEntries(ctx context.Context) (pluginsdk.PolicyControlResponse, error) {
+	if controller == nil || controller.runtime == nil {
+		return pluginsdk.PolicyControlResponse{}, ErrUnavailable
+	}
+	return controller.controlPolicy(ctx, pluginsdk.PolicyControlRequest{Action: pluginsdk.PolicyControlListEntries, Stage: ipStage})
+}
+
+func (controller *Controller) resolvePolicyEntry(ctx context.Context, claimed pluginsdk.PolicyEntryTarget) (pluginsdk.PolicyControlResponse, pluginsdk.PolicyEntryTarget, error) {
+	if claimed.Validate() != nil || claimed.Token == "" {
+		return pluginsdk.PolicyControlResponse{}, pluginsdk.PolicyEntryTarget{}, fmt.Errorf("%w: 入口身份无效", ErrInvalidConfig)
+	}
+	listed, err := controller.listPolicyEntries(ctx)
+	if err != nil {
+		return pluginsdk.PolicyControlResponse{}, pluginsdk.PolicyEntryTarget{}, err
+	}
+	for _, snapshot := range listed.Entries {
+		if snapshot.Entry == claimed {
+			return listed, snapshot.Entry, nil
+		}
+	}
+	return pluginsdk.PolicyControlResponse{}, pluginsdk.PolicyEntryTarget{}, fmt.Errorf("%w: Host 列表中不存在该入口", ErrInvalidConfig)
+}
+
+func (controller *Controller) inspectResolvedEntry(ctx context.Context, claimed pluginsdk.PolicyEntryTarget) (pluginsdk.PolicyControlResponse, error) {
+	listed, entry, err := controller.resolvePolicyEntry(ctx, claimed)
+	if err != nil {
+		return pluginsdk.PolicyControlResponse{}, err
+	}
+	return controller.inspectPolicyTarget(ctx, listed.InstanceID, listed.Stage, &entry)
+}
+
+func (controller *Controller) replaceEntry(ctx context.Context, current pluginsdk.PolicyControlResponse, mode pluginsdk.PolicyMode, overlay json.RawMessage) (pluginsdk.PolicyControlResponse, error) {
+	if current.Entry == nil || current.Entry.Token == "" || mode.Validate() != nil {
+		return pluginsdk.PolicyControlResponse{}, fmt.Errorf("%w: 入口状态或模式无效", ErrInvalidConfig)
+	}
+	revision, instance := current.Desired.Version.Revision, current.Desired.Version.InstanceVersion
+	request := pluginsdk.PolicyControlRequest{Action: pluginsdk.PolicyControlReplaceEntry, InstanceID: current.InstanceID, Stage: current.Stage, Entry: current.Entry, Mode: mode, ExpectedRevision: &revision, ExpectedInstanceVersion: &instance, Overlay: append(json.RawMessage(nil), overlay...)}
+	request.OperationID = operationIDFor("entry", request)
+	return controller.controlPolicy(ctx, request)
+}
+
+func (controller *Controller) setEntryMode(ctx context.Context, claimed pluginsdk.PolicyEntryTarget, mode pluginsdk.PolicyMode, reset bool) (pluginsdk.PolicyControlResponse, error) {
+	if claimed.Validate() != nil || claimed.Token == "" || mode.Validate() != nil && !reset {
 		return pluginsdk.PolicyControlResponse{}, fmt.Errorf("%w: 入口或模式无效", ErrInvalidConfig)
 	}
-	current, err := controller.inspectPolicy(ctx, &entry)
+	current, err := controller.inspectResolvedEntry(ctx, claimed)
 	if err != nil {
 		return pluginsdk.PolicyControlResponse{}, err
 	}
 	revision, instance := current.Desired.Version.Revision, current.Desired.Version.InstanceVersion
-	action := pluginsdk.PolicyControlReplaceEntry
 	if reset {
-		action, mode = pluginsdk.PolicyControlResetEntry, ""
+		request := pluginsdk.PolicyControlRequest{Action: pluginsdk.PolicyControlResetEntry, InstanceID: current.InstanceID, Stage: current.Stage, Entry: current.Entry, ExpectedRevision: &revision, ExpectedInstanceVersion: &instance}
+		request.OperationID = operationIDFor("entry-reset", request)
+		return controller.controlPolicy(ctx, request)
 	}
-	request := pluginsdk.PolicyControlRequest{Action: action, InstanceID: current.InstanceID, Stage: current.Stage, Entry: &entry, Mode: mode, ExpectedRevision: &revision, ExpectedInstanceVersion: &instance}
-	request.OperationID = operationIDFor("entry", request)
-	response, err := controller.runtime.ControlPolicy(ctx, request)
-	if err != nil {
-		return response, publicRuntimeError(err)
+	overlay := append(json.RawMessage(nil), current.Overlay...)
+	if len(overlay) == 0 {
+		overlay, _ = json.Marshal(EntryOverlay{Schema: OverlaySchema, Rules: []Rule{}})
 	}
-	return response, nil
+	return controller.replaceEntry(ctx, current, mode, overlay)
 }
 
 func (controller *Controller) bindDatasetAtomic(ctx context.Context, mutation BindingMutation) (pluginsdk.DatasetBindingResponse, error) {
@@ -177,21 +228,6 @@ func publicRuntimeError(err error) error {
 		return ErrUnauthorized
 	}
 	return ErrUnavailable
-}
-
-func encodeOverlay(overlay EntryOverlay, policyID string) (json.RawMessage, error) {
-	if !validID(policyID) {
-		return nil, fmt.Errorf("%w: policy identity invalid", ErrInvalidConfig)
-	}
-	payload, err := json.Marshal(overlay)
-	if err != nil {
-		return nil, err
-	}
-	envelope := pluginsdk.PolicyOverlayEnvelope{Schema: pluginsdk.PolicyOverlaySchemaV1, Stages: []pluginsdk.PolicyStageOverlay{{Kind: pluginsdk.PolicyOverlayStageIP, PolicyID: policyID, Payload: payload}}}
-	if err := envelope.Validate(); err != nil {
-		return nil, err
-	}
-	return json.Marshal(envelope)
 }
 
 func cleanSourceID(value string) string { return strings.TrimSpace(value) }

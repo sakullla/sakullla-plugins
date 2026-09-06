@@ -8,6 +8,7 @@ use nre_policy_guest::{
     pack_policy_buffer,
 };
 
+use crate::runtime::{init_lifecycle_status, reset_lifecycle_status, valid_input_allocation};
 use crate::{EvaluationError, RuntimeState, emit_failure};
 
 const INPUT_BYTES: usize = 128 << 10;
@@ -31,8 +32,7 @@ pub extern "C" fn nre_policy_version() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nre_policy_alloc(size: u32) -> u32 {
-    if size == 0
-        || size as usize > INPUT_BYTES
+    if !valid_input_allocation(size, INPUT_BYTES)
         || INPUT_ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -53,6 +53,10 @@ pub extern "C" fn nre_policy_free(pointer: u32, length: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nre_policy_init(pointer: u32, length: u32) -> u32 {
+    let lifecycle = init_lifecycle_status(INITIALIZED.load(Ordering::Acquire));
+    if lifecycle != AbiStatus::Ok {
+        return lifecycle as u32;
+    }
     let Ok(frame) = input_frame(pointer, length) else {
         return AbiStatus::InvalidArgument as u32;
     };
@@ -112,10 +116,15 @@ pub extern "C" fn nre_policy_evaluate(pointer: u32, length: u32) -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nre_policy_reset() -> u32 {
-    if INPUT_ACTIVE.load(Ordering::Acquire) || OUTPUT_ACTIVE.load(Ordering::Acquire) {
-        return AbiStatus::InvalidArgument as u32;
+    let lifecycle = reset_lifecycle_status(
+        INPUT_ACTIVE.load(Ordering::Acquire),
+        OUTPUT_ACTIVE.load(Ordering::Acquire),
+    );
+    if lifecycle != AbiStatus::Ok {
+        return lifecycle as u32;
     }
-    INITIALIZED.store(false, Ordering::Release);
+    // Reset is a per-request pool boundary. Immutable generation state remains
+    // valid until the Host closes this WASM instance.
     AbiStatus::Ok as u32
 }
 

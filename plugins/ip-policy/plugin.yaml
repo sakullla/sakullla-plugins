@@ -56,12 +56,12 @@ permissions:
   - name: ui.dynamic
   - name: storage.read
   - name: storage.write
-  - name: http.rule
   - name: dataset.manage
   - name: dataset.bind
   - name: dataset.query
   - name: dataset.resolve
   - name: policy.control
+  - name: policy.entry-overlays
   - name: policy.read
   - name: policy.trusted-source
   - name: http.inspect

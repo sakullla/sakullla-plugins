@@ -2,6 +2,7 @@ package hostfixture
 
 import (
 	"bytes"
+	"context"
 	"net/netip"
 	"strings"
 	"testing"
@@ -217,6 +218,58 @@ func TestIPPolicyCanonicalIPv6CIDR(t *testing.T) {
 	defer session.Close()
 	if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionDeny {
 		t.Fatalf("IPv6 CIDR status=%d", status)
+	}
+}
+
+func TestIPPolicyPooledInstanceResetPreservesGenerationAcrossRequests(t *testing.T) {
+	artifact := buildIPPolicyArtifact(t)
+	options := ipPolicyOptions()
+	session, status := startWAFArtifact(t, artifact, options)
+	defer session.Close()
+	if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionAllow {
+		t.Fatalf("first pooled request status=%d", status)
+	}
+	firstEventCount := len(session.SecurityEvents())
+	session.Reset()
+
+	initWire := marshalPolicyInit(t, options.config, options.grants, options.generation)
+	initPointer := wafAllocateAndWrite(t, context.Background(), session.guest, initWire)
+	result, err := session.guest.ExportedFunction(pluginsdk.PolicyExportInit).Call(context.Background(), uint64(initPointer), uint64(len(initWire)))
+	wafFree(t, context.Background(), session.guest, initPointer, uint32(len(initWire)))
+	if err != nil || len(result) != 1 || pluginsdk.PolicyStatus(uint32(result[0])) != pluginsdk.PolicyStatusInvalidArgument {
+		t.Fatalf("second init result=%v err=%v", result, err)
+	}
+
+	options.trustedSource.SourceAddress = netip.MustParseAddr("203.0.113.7")
+	options.trustedSource.PeerAddress = options.trustedSource.SourceAddress
+	options.datasetMatches["region:cn-44"] = pluginsdk.DatasetMatch{Coverage: pluginsdk.DatasetCovered}
+	if action := session.Evaluate(); action != pluginsdk.PolicyActionDeny {
+		t.Fatalf("second pooled request action=%d", action)
+	}
+	if session.HostCalls(pluginsdk.PolicyHostReadTrustedSource) != 2 || session.HostCalls(pluginsdk.PolicyHostDatasetQuery) != 2 {
+		t.Fatalf("pooled Host calls source/query=%d/%d", session.HostCalls(pluginsdk.PolicyHostReadTrustedSource), session.HostCalls(pluginsdk.PolicyHostDatasetQuery))
+	}
+	events := session.SecurityEvents()
+	if len(events) != firstEventCount+1 || events[len(events)-1].Action != pluginsdk.PolicySecurityEventActionDeny || events[len(events)-1].DatasetIndex != 1 || events[len(events)-1].ClassificationIndex != 1 {
+		t.Fatalf("pooled events crossed requests: %+v", events)
+	}
+}
+
+func TestIPPolicyL4ConsumesHostProjectedOverlay(t *testing.T) {
+	artifact := buildIPPolicyArtifact(t)
+	options := ipPolicyOptions()
+	options.extensionPoint = pluginsdk.ExtensionL4Accept
+	options.trustedSource.EntryID = "tcp-8"
+	options.trustedSource.SourceAddress = netip.MustParseAddr("203.0.113.7")
+	options.trustedSource.PeerAddress = options.trustedSource.SourceAddress
+	options.overlay = []byte(`{"schema":"sakullla.ip-policy-overlay/v1","rules":[{"id":"entry-deny","action":"deny","selector":{"type":"ip","value":"203.0.113.7"}}]}`)
+	session, status := startWAFArtifact(t, artifact, options)
+	defer session.Close()
+	if status != pluginsdk.PolicyStatusOK || session.Evaluate() != pluginsdk.PolicyActionDeny {
+		t.Fatalf("L4 overlay status=%d", status)
+	}
+	if bytes.Contains(options.overlay, []byte("token")) {
+		t.Fatal("management token leaked into policy overlay")
 	}
 }
 

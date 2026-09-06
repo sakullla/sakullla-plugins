@@ -131,6 +131,15 @@ func ParseEntryOverlay(raw []byte, config Configuration) (EntryOverlay, error) {
 	if err := validateRules(overlay.Rules, config.datasetIndex(), MaxOverlayRules); err != nil {
 		return EntryOverlay{}, err
 	}
+	globalIDs := map[string]bool{}
+	for _, rule := range config.Rules {
+		globalIDs[rule.ID] = true
+	}
+	for _, rule := range overlay.Rules {
+		if globalIDs[rule.ID] {
+			return EntryOverlay{}, fmt.Errorf("%w: 入口规则 ID 与全局规则重复", ErrInvalidConfig)
+		}
+	}
 	return overlay, nil
 }
 
@@ -154,11 +163,14 @@ func (config Configuration) Validate() error {
 			return fmt.Errorf("%w: 数据集 ID 重复", ErrInvalidConfig)
 		}
 		seen := map[string]bool{}
+		seenCanonical := map[string]bool{}
 		for _, classification := range dataset.Classifications {
-			if !validID(classification.ID) || seen[classification.ID] || !validIPClassification(classification) {
+			canonical := string(classification.Kind) + "\x00" + classification.Name
+			if !validID(classification.ID) || seen[classification.ID] || seenCanonical[canonical] || !validIPClassification(classification) {
 				return fmt.Errorf("%w: 数据分类无效或重复", ErrInvalidConfig)
 			}
 			seen[classification.ID] = true
+			seenCanonical[canonical] = true
 		}
 		datasets[dataset.ID] = dataset
 		sources[dataset.SourceID] = true

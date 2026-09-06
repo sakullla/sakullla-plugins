@@ -17,7 +17,7 @@ func runtimeServices() pluginsdk.RPCServiceDeclaration {
 }
 
 func handshakeDeclaration() pluginsdk.RPCPluginDeclaration {
-	return pluginsdk.RPCPluginDeclaration{PluginID: PluginID, PluginVersion: PluginVersion, RequiredCapabilities: requiredGrants(), SupportedFeatures: pluginsdk.RequiredRPCFeatures(requiredGrants())}
+	return pluginsdk.RPCPluginDeclaration{PluginID: PluginID, PluginVersion: PluginVersion, RequiredCapabilities: requiredGrants(), SupportedFeatures: controlPlaneFeatures()}
 }
 
 func newProbeController(request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCLifecycle, error) {

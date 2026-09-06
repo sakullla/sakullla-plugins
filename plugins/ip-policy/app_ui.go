@@ -1,9 +1,11 @@
 package ippolicy
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,17 +17,19 @@ import (
 var uiAssets embed.FS
 
 type APIResponse struct {
-	Ready     bool                               `json:"ready"`
-	Config    Configuration                      `json:"config"`
-	Policy    *pluginsdk.PolicyControlResponse   `json:"policy,omitempty"`
-	Entry     *pluginsdk.PolicyControlResponse   `json:"entry,omitempty"`
-	Bindings  []pluginsdk.DatasetBindingResponse `json:"bindings"`
-	Datasets  []DatasetView                      `json:"datasets"`
-	Events    []pluginsdk.PolicyEvent            `json:"events"`
-	Provinces []ProvinceOption                   `json:"provinces"`
-	Issues    []string                           `json:"issues"`
-	Error     string                             `json:"error,omitempty"`
-	Access    APIAccess                          `json:"access"`
+	Ready        bool                               `json:"ready"`
+	Config       Configuration                      `json:"config"`
+	Policy       *pluginsdk.PolicyControlResponse   `json:"policy,omitempty"`
+	Entry        *pluginsdk.PolicyControlResponse   `json:"entry,omitempty"`
+	Entries      []pluginsdk.PolicyEntrySnapshot    `json:"entries"`
+	EntryOverlay *EntryOverlay                      `json:"entry_overlay,omitempty"`
+	Bindings     []pluginsdk.DatasetBindingResponse `json:"bindings"`
+	Datasets     []DatasetView                      `json:"datasets"`
+	Events       []pluginsdk.PolicyEvent            `json:"events"`
+	Provinces    []ProvinceOption                   `json:"provinces"`
+	Issues       []string                           `json:"issues"`
+	Error        string                             `json:"error,omitempty"`
+	Access       APIAccess                          `json:"access"`
 }
 
 type APIAccess struct {
@@ -48,8 +52,7 @@ type writeRequest struct {
 	Reset   bool                         `json:"reset,omitempty"`
 	Binding *BindingMutation             `json:"binding,omitempty"`
 	Dataset *DatasetMutation             `json:"dataset,omitempty"`
-	RuleRef string                       `json:"rule_ref,omitempty"`
-	Overlay *EntryOverlay                `json:"overlay,omitempty"`
+	Rules   []Rule                       `json:"rules,omitempty"`
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -72,8 +75,8 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 		controller.serveBinding(writer, request)
 	case "/api/dataset":
 		controller.serveDataset(writer, request)
-	case "/api/http-overlay":
-		controller.serveHTTPOverlay(writer, request)
+	case "/api/entry-rules":
+		controller.serveEntryRules(writer, request)
 	default:
 		http.Error(writer, "IP 策略页面未找到", http.StatusNotFound)
 	}
@@ -91,7 +94,9 @@ func (controller *Controller) serveState(writer http.ResponseWriter, request *ht
 	}
 	response := controller.state(request)
 	status := http.StatusOK
-	if !response.Ready {
+	if response.Error == ErrUnauthorized.Error() {
+		status = http.StatusForbidden
+	} else if !response.Ready {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(writer, status, response)
@@ -99,20 +104,48 @@ func (controller *Controller) serveState(writer http.ResponseWriter, request *ht
 
 func (controller *Controller) state(request *http.Request) APIResponse {
 	config := controller.currentConfig()
-	response := APIResponse{Ready: true, Config: config, Bindings: []pluginsdk.DatasetBindingResponse{}, Datasets: []DatasetView{}, Events: []pluginsdk.PolicyEvent{}, Provinces: Provinces(), Issues: []string{}, Access: APIAccess{CanRead: true, CanWrite: true}}
+	response := APIResponse{Ready: true, Config: config, Entries: []pluginsdk.PolicyEntrySnapshot{}, Bindings: []pluginsdk.DatasetBindingResponse{}, Datasets: []DatasetView{}, Events: []pluginsdk.PolicyEvent{}, Provinces: Provinces(), Issues: []string{}, Access: APIAccess{CanRead: true, CanWrite: true}}
 	policyState, err := controller.inspectPolicy(request.Context(), nil)
 	if err != nil {
 		response.Ready, response.Error = false, publicError(err)
 		return response
 	}
 	response.Policy = &policyState
-	entry := entryFromQuery(request)
-	if entry != nil {
-		entryState, entryErr := controller.inspectPolicy(request.Context(), entry)
-		if entryErr != nil {
-			response.Issues = append(response.Issues, "入口状态不可用")
-		} else {
+	listed, listErr := controller.listPolicyEntries(request.Context())
+	if listErr != nil {
+		response.Issues = append(response.Issues, "入口列表不可用")
+	} else {
+		response.Entries = make([]pluginsdk.PolicyEntrySnapshot, len(listed.Entries))
+		copy(response.Entries, listed.Entries)
+	}
+	entryToken := strings.TrimSpace(request.URL.Query().Get("entry_token"))
+	if entryToken != "" && listErr == nil {
+		found := false
+		for _, snapshot := range listed.Entries {
+			if snapshot.Entry.Token != entryToken {
+				continue
+			}
+			found = true
+			entryState, entryErr := controller.inspectPolicyTarget(request.Context(), listed.InstanceID, listed.Stage, &snapshot.Entry)
+			if entryErr != nil {
+				response.Issues = append(response.Issues, "入口状态不可用")
+				break
+			}
 			response.Entry = &entryState
+			overlay := EntryOverlay{Schema: OverlaySchema, Rules: []Rule{}}
+			if len(entryState.Overlay) != 0 {
+				parsed, overlayErr := ParseEntryOverlay(entryState.Overlay, config)
+				if overlayErr != nil {
+					response.Issues = append(response.Issues, "入口规则不可用")
+					break
+				}
+				overlay = parsed
+			}
+			response.EntryOverlay = &overlay
+			break
+		}
+		if !found {
+			response.Issues = append(response.Issues, "入口已不存在")
 		}
 	}
 	nodeID := cleanIdentity(request.URL.Query().Get("node_id"))
@@ -166,6 +199,19 @@ func (controller *Controller) state(request *http.Request) APIResponse {
 	return response
 }
 
+func (controller *Controller) serveEntryRules(writer http.ResponseWriter, request *http.Request) {
+	body, ok := controller.decodeWrite(writer, request)
+	if !ok {
+		return
+	}
+	if body.Entry == nil || body.Rules == nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "入口身份或规则列表缺失"})
+		return
+	}
+	result, err := controller.setEntryRules(request.Context(), *body.Entry, body.Rules)
+	writeMutation(writer, result, err)
+}
+
 func (controller *Controller) serveConfig(writer http.ResponseWriter, request *http.Request) {
 	body, ok := controller.decodeWrite(writer, request)
 	if !ok {
@@ -214,31 +260,28 @@ func (controller *Controller) serveDataset(writer http.ResponseWriter, request *
 	writeMutation(writer, result, err)
 }
 
-func (controller *Controller) serveHTTPOverlay(writer http.ResponseWriter, request *http.Request) {
-	body, ok := controller.decodeWrite(writer, request)
-	if !ok {
-		return
-	}
-	if body.Overlay == nil || strings.TrimSpace(body.RuleRef) == "" {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "HTTP 入口规则缺失"})
-		return
+func (controller *Controller) setEntryRules(ctx context.Context, claimed pluginsdk.PolicyEntryTarget, rules []Rule) (any, error) {
+	if claimed.Validate() != nil || claimed.Token == "" || len(rules) > MaxOverlayRules {
+		return nil, fmt.Errorf("%w: 入口身份或规则数量无效", ErrInvalidConfig)
 	}
 	config := controller.currentConfig()
-	if _, err := ParseEntryOverlay(mustJSON(*body.Overlay), config); err != nil {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": publicError(err)})
-		return
-	}
-	policyState, err := controller.inspectPolicy(request.Context(), nil)
+	ownedRules := make([]Rule, len(rules))
+	copy(ownedRules, rules)
+	overlay := EntryOverlay{Schema: OverlaySchema, Rules: ownedRules}
+	parsed, err := ParseEntryOverlay(mustJSON(overlay), config)
 	if err != nil {
-		writeMutation(writer, nil, err)
-		return
+		return nil, err
 	}
-	overlay, err := encodeOverlay(*body.Overlay, policyState.InstanceID)
-	if err == nil {
-		requestBody := pluginsdk.HTTPRuleRequest{Action: pluginsdk.HTTPRuleActionCutover, RuleRef: body.RuleRef, Overlay: overlay}
-		err = controller.runtime.Call(request.Context(), pluginsdk.HostRuntimeCall{Operation: pluginsdk.HostRuntimeHTTPRule, OperationID: operationIDFor("overlay", requestBody), Payload: mustJSON(requestBody)}, nil)
+	current, err := controller.inspectResolvedEntry(ctx, claimed)
+	if err != nil {
+		return nil, err
 	}
-	writeMutation(writer, map[string]bool{"stored": err == nil}, publicRuntimeError(err))
+	mode, err := pluginsdk.ResolvePolicyMode(current.Desired.Settings)
+	if err != nil || mode.Validate() != nil {
+		return nil, ErrUnavailable
+	}
+	encoded := mustJSON(parsed)
+	return controller.replaceEntry(ctx, current, mode, encoded)
 }
 
 func (controller *Controller) decodeWrite(writer http.ResponseWriter, request *http.Request) (writeRequest, bool) {
@@ -262,18 +305,6 @@ func (controller *Controller) decodeWrite(writer http.ResponseWriter, request *h
 		return writeRequest{}, false
 	}
 	return body, true
-}
-
-func entryFromQuery(request *http.Request) *pluginsdk.PolicyEntryTarget {
-	kind, id, node := cleanIdentity(request.URL.Query().Get("entry_kind")), cleanIdentity(request.URL.Query().Get("entry_id")), cleanIdentity(request.URL.Query().Get("node_id"))
-	if kind == "" || id == "" || node == "" {
-		return nil
-	}
-	entry := &pluginsdk.PolicyEntryTarget{NodeID: node, Kind: kind, ID: id}
-	if entry.Validate() != nil {
-		return nil
-	}
-	return entry
 }
 
 func uiAuthorized(request *http.Request) bool {

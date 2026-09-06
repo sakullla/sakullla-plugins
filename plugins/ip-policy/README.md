@@ -2,7 +2,7 @@
 
 `ip-policy` 是一个正式双执行面插件包：control-plane RPC 进程提供专用中文管理页，Agent 上的 `nre:policy/v1` WASM guest 在 HTTP、TCP、UDP 和受管插件入口执行同一不可变策略。它不修改系统防火墙，不读取本地 MMDB，也不兼容或迁移 ForwardX 配置。IP 插件此前没有正式部署，因此安装只创建全新实例；初始模式是 typed `observe`，原始决策默认 `allow`。
 
-管理面只调用公开 SDK 0.10 的 `dataset.control`、`dataset.binding`、`dataset.resolve/query` 与 `policy.control`。数据绑定、guest Config 和默认模式需要一起变化时，管理面使用 `DatasetBindingInstanceUpdate` 一次提交，避免发布任何中间快照。失败的下载、摘要、分类、预算或节点候选不会替换 `applied`/`last_good`。
+管理面只调用公开 SDK 0.11 的 `dataset.control`、`dataset.binding`、`dataset.resolve/query` 与 `policy.control`。入口仅从 Host `list-entries` 列表选择，用 Host 签发的 token 调用 `inspect`/`replace-entry`/`reset-entry`；模式与完整 IP overlay 通过同一次双 CAS 原子更新。数据绑定、guest Config 和默认模式需要一起变化时，管理面使用 `DatasetBindingInstanceUpdate` 一次提交，避免发布任何中间快照。失败的下载、摘要、分类、预算或节点候选不会替换 `applied`/`last_good`。
 
 ## Configuration contract
 

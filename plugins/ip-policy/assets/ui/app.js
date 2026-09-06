@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { config: null, node: "", payload: null };
+const state = { config: null, node: "", payload: null, entries: [], entryRules: [] };
 
 const authHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -39,10 +39,44 @@ const render = (payload) => {
   $("#generation").textContent = node.generation || "尚未应用";
   $("#phase").textContent = node.phase || (payload.issues?.length ? "有检查故障" : "就绪");
   renderRules();
+	const selectedToken = $("#entry-select").value;
+	state.entries = Array.isArray(payload.entries) ? payload.entries : [];
+	$("#entry-select").innerHTML = `<option value="">请选择入口</option>` + state.entries.map((snapshot) => `<option value="${text(snapshot.entry.token)}">${text(snapshot.entry.node_id)} · ${text(snapshot.entry.kind)} · ${text(snapshot.entry.id)}</option>`).join("");
+	if (state.entries.some((snapshot) => snapshot.entry.token === selectedToken)) $("#entry-select").value = selectedToken;
+  state.entryRules = Array.isArray(payload.entry_overlay?.rules) ? payload.entry_overlay.rules.map((rule) => structuredClone(rule)) : [];
+  renderEntryRules();
+	renderEntryClassifications(payload.provinces || []);
   renderProvinces(payload.provinces || []);
   renderDatasets(payload.datasets || [], payload.bindings || []);
   renderEvents(payload.events || []);
   status(payload.issues?.join("；") || "状态已更新");
+};
+
+const selectedEntry = () => state.entries.find((snapshot) => snapshot.entry.token === $("#entry-select").value)?.entry;
+
+const renderEntryRules = () => {
+  const root = $("#entry-rules");
+  root.innerHTML = state.entryRules.length ? state.entryRules.map((rule, index) => `<li><div><strong>${text(rule.id)}</strong><small>${text(rule.action)} · ${text(rule.selector.type)} · ${text(rule.selector.value || `${rule.selector.dataset_id}/${rule.selector.classification_id}`)}</small></div><button data-entry-remove="${index}">删除</button></li>`).join("") : `<li class="empty">当前入口没有专属规则。</li>`;
+  document.querySelectorAll("[data-entry-remove]").forEach((button) => button.onclick = async () => {
+    state.entryRules.splice(Number(button.dataset.entryRemove), 1);
+    try { await persistEntryRules(); } catch (error) { status(error.message, true); }
+  });
+};
+
+const renderEntryClassifications = (provinces) => {
+	const provinceNames = new Map(provinces.map((province) => [province.classification, province.name]));
+	const options = (state.config?.datasets || []).flatMap((dataset) => (dataset.classifications || []).map((classification) => ({
+		value: `${dataset.id}/${classification.id}`,
+		label: `${provinceNames.get(classification.name) || classification.name} · ${dataset.id}/${classification.id} · ${classification.kind}`,
+	})));
+	$("#entry-classification").innerHTML = `<option value="">请选择已配置分类</option>` + options.map((option) => `<option value="${text(option.value)}">${text(option.label)}</option>`).join("");
+};
+
+const persistEntryRules = async () => {
+	const entry = selectedEntry();
+	if (!entry) throw new Error("请先选择 Host 已授权入口");
+  await api("api/entry-rules", { method: "POST", body: JSON.stringify({ entry, rules: state.entryRules }) });
+  await load();
 };
 
 const renderRules = () => {
@@ -82,8 +116,8 @@ const load = async () => {
   state.node = $("#node-id").value.trim();
   const params = new URLSearchParams();
   if (state.node) params.set("node_id", state.node);
-  const kind = $("#entry-kind").value.trim(), id = $("#entry-id").value.trim();
-  if (kind && id && state.node) { params.set("entry_kind", kind); params.set("entry_id", id); }
+	const token = $("#entry-select").value;
+	if (token) params.set("entry_token", token);
   status("正在读取实际状态…");
   try { render(await api(`api/state?${params}`)); } catch (error) { status(error.message, true); $("#workspace").hidden = false; }
 };
@@ -110,16 +144,22 @@ $("#rule-form").onsubmit = (event) => {
 };
 
 const entryMode = async (mode, reset = false) => {
-  const entry = { node_id: state.node, kind: $("#entry-kind").value.trim(), id: $("#entry-id").value.trim() };
+  const entry = selectedEntry();
+	if (!entry) throw new Error("请先选择 Host 已授权入口");
   await api("api/entry-mode", { method: "POST", body: JSON.stringify({ entry, mode, reset }) }); await load();
 };
 $("#entry-observe").onclick = () => entryMode("observe").catch((error) => status(error.message, true));
 $("#entry-enforce").onclick = () => entryMode("enforce").catch((error) => status(error.message, true));
 $("#entry-reset").onclick = () => entryMode("", true).catch((error) => status(error.message, true));
+$("#entry-select").onchange = () => load();
 $("#entry-rule-form").onsubmit = async (event) => {
   event.preventDefault(); const data = new FormData(event.currentTarget);
-  const overlay = { schema: "sakullla.ip-policy-overlay/v1", rules: [{ id: String(data.get("id") || ""), action: String(data.get("action") || ""), selector: { type: String(data.get("type") || ""), value: String(data.get("value") || "") } }] };
-  try { await api("api/http-overlay", { method: "POST", body: JSON.stringify({ rule_ref: String(data.get("rule_ref") || ""), overlay }) }); await load(); } catch (error) { status(error.message, true); }
+  if (state.entryRules.length >= 64) { status("每个入口最多 64 条规则", true); return; }
+  const type = String(data.get("type") || "");
+	const [dataset_id = "", classification_id = ""] = String(data.get("classification") || "").split("/");
+  const selector = type === "classification" ? { type, dataset_id, classification_id } : { type, value: String(data.get("value") || "") };
+  state.entryRules.push({ id: String(data.get("id") || ""), action: String(data.get("action") || ""), selector });
+  try { await persistEntryRules(); event.currentTarget.reset(); } catch (error) { state.entryRules.pop(); status(error.message, true); }
 };
 
 $("#dataset-form").onsubmit = (event) => {
