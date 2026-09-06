@@ -55,6 +55,15 @@ func TestManifestPermissionsSatisfyHandshakeAndProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyFeatures := make([]string, 0, len(required)-1)
+	for _, feature := range required {
+		if feature != pluginsdk.RPCFeaturePolicyEntryOverlaysV1 {
+			legacyFeatures = append(legacyFeatures, feature)
+		}
+	}
+	if _, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", Generation: "legacy-generation", GrantedScopes: grants, RequiredFeatures: legacyFeatures}); err == nil {
+		t.Fatal("Host without required entry-overlay feature completed handshake")
+	}
 	response, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", Generation: "generation", GrantedScopes: grants, RequiredFeatures: required})
 	if err != nil {
 		t.Fatal(err)

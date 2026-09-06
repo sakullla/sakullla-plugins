@@ -59,7 +59,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 	adapter, err := rpcplugin.NewAdapter(rpcplugin.Config{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
-		Capabilities: requiredGrants(), RequiredGrants: requiredGrants(), SupportedFeatures: features,
+		Capabilities: requiredGrants(), RequiredGrants: requiredGrants(), SupportedFeatures: features, RequiredFeatures: features,
 		Timeouts: timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {
