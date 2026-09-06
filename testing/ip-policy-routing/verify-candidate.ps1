@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $pluginRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $hostPath = (Resolve-Path $HostRoot).Path
 $datasetSources = @(
