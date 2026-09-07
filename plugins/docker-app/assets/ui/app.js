@@ -696,6 +696,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       const name = document.createElement("span");
       name.className = "agent-search-select__option-name";
       name.textContent = agentDisplayName(agent);
+      name.title = agentDisplayName(agent);
       const meta = document.createElement("span");
       meta.className = "agent-search-select__option-meta";
       meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
@@ -2358,12 +2359,28 @@ const renderApp = (app) => {
   const imageNode = card.querySelector("[data-app-image]");
   if (imageNode) {
     const version = appVersion(app);
-    const shown = serviceImages(app).length > 1
-      ? serviceImages(app).map((service) => `${service.name}: ${service.image || service.current || version}`).join(" · ")
-      : version;
-    imageNode.textContent = shown;
-    imageNode.hidden = !shown;
-    imageNode.title = version;
+    const services = serviceImages(app);
+    const images = services.length ? services : [{ image: version }];
+    imageNode.replaceChildren();
+    images.forEach((service) => {
+      const shown = service.image || service.current || version;
+      if (!shown) return;
+      const row = document.createElement("div");
+      row.className = "app-card-image-row";
+      if (services.length > 1) {
+        const name = document.createElement("span");
+        name.className = "app-card-service";
+        name.textContent = service.name;
+        row.append(name);
+      }
+      const image = document.createElement("span");
+      image.className = "app-card-image";
+      image.textContent = shown;
+      image.title = shown;
+      row.append(image);
+      imageNode.append(row);
+    });
+    imageNode.hidden = !imageNode.children.length;
   }
   const portNode = card.querySelector("[data-app-ports]");
   if (portNode) {
@@ -2422,8 +2439,8 @@ const renderApp = (app) => {
       runAppAction(app, action);
     });
   });
-  const openDetail = () => { if (!busy) showDetail(app.id, "overview"); };
   const detailButton = card.querySelector('[data-action="detail"]');
+  const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, "overview"); };
   if (detailButton) {
     detailButton.textContent = "详情";
     detailButton.addEventListener("click", (event) => {
@@ -2959,6 +2976,7 @@ const paintDetail = (app, composeRevision) => {
   renderHTTP(app);
   fillLogServices(app);
   if (appChanged) resetLogsTerminal();
+  scheduleImageRefresh([app]);
 };
 
 const setDetailSection = async (section) => {
@@ -3029,6 +3047,14 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
   advanceNavigation();
   const navigation = navigationSnapshot();
   const request = ++detailRequest;
+  const trigger = listNode.querySelector(`[data-id="${appID}"] [data-action="detail"]`);
+  const loadingMessage = `正在读取 ${appID} 的详情…`;
+  if (trigger) {
+    trigger.disabled = true;
+    trigger.textContent = "加载中…";
+    trigger.setAttribute("aria-busy", "true");
+  }
+  showStatus(loadingMessage, false);
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
@@ -3054,6 +3080,14 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     await leaveDetail({ force: true });
     showStatus(missing ? "应用已不存在。" : error.message, true);
     return false;
+  } finally {
+    if (trigger) {
+      trigger.textContent = "详情";
+      trigger.removeAttribute("aria-busy");
+      trigger.disabled = busy;
+      if (busy) trigger.dataset.beforeBusy = "false";
+    }
+    if (request === detailRequest && statusNode.textContent === loadingMessage) showStatus("", false);
   }
 };
 
@@ -3109,9 +3143,47 @@ const showContext = (which) => {
   if (contextNode) contextNode.hidden = !["empty", "undeployed", "offline", "execution-unavailable", "detection-failed", "denied"].includes(which);
 };
 
+let imageRefreshTimer = null;
+let imageRefreshAgent = "";
+let imageRefreshAttempts = 0;
+const scheduleImageRefresh = (apps) => {
+  clearTimeout(imageRefreshTimer);
+  imageRefreshTimer = null;
+  if (imageRefreshAgent !== selectedAgentID) {
+    imageRefreshAgent = selectedAgentID;
+    imageRefreshAttempts = 0;
+  }
+  if (!apps.some((app) => app.image_checking)) {
+    imageRefreshAttempts = 0;
+    return;
+  }
+  if (imageRefreshAttempts >= 10) return;
+  const snapshot = contextSnapshot();
+  imageRefreshTimer = setTimeout(async () => {
+    imageRefreshTimer = null;
+    if (!contextCurrent(snapshot) || document.visibilityState === "hidden") return;
+    if (busy || !createPanel.hidden || view === "detail" && detailSection !== "overview") { scheduleImageRefresh(apps); return; }
+    imageRefreshAttempts += 1;
+    const navigation = navigationSnapshot();
+    try {
+      if (view === "detail") {
+        await showDetail(selectedAppID, detailSection);
+      } else {
+        const payload = await panelJSON(`api/apps?agent_id=${encodeURIComponent(snapshot.agent)}`);
+        if (!navigationCurrent(navigation)) return;
+        renderApps(payload.apps);
+        syncListPanel();
+      }
+    } catch (_error) {
+      if (navigationCurrent(navigation)) scheduleImageRefresh(apps);
+    }
+  }, 1500);
+};
+
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
   listNode.replaceChildren(...list.map(renderApp));
+  scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
   syncListPanel();

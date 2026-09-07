@@ -2007,7 +2007,7 @@ func TestControllerCallImageObserveUsesNodeArchitectureDigest(t *testing.T) {
 			return nil, errors.New("unexpected command")
 		}
 	})
-	decoded := callImageObserve(t, runner, "airportr/miaospeed:latest")
+	decoded := callImageObserve(t, runner, "example/worker:latest")
 	wantLatest := sameFormDigest(current, amd64)
 	if decoded["current_digest"] != current {
 		t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
@@ -2055,17 +2055,22 @@ func TestControllerCallImageObserveProductionArchitectureAndIndexRepoDigest(t *t
 				return nil, errors.New("unexpected command")
 			}
 		})
-		return callImageObserve(t, runner, "airportr/miaospeed:latest"), argv
+		if imagetoolsErr != nil {
+			controller := newCallController(t, t.TempDir(), runner, nil)
+			_, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, []byte(`{"action":"observe","image":"example/worker:latest"}`))
+			if err == nil {
+				t.Fatal("missing registry index must not report the local index as current")
+			}
+			return nil, argv
+		}
+		return callImageObserve(t, runner, "example/worker:latest"), argv
 	}
 
-	t.Run("imagetools failure keeps index current", func(t *testing.T) {
+	t.Run("missing registry index reports an unavailable comparison", func(t *testing.T) {
 		t.Parallel()
 		decoded, argv := observe(t, verbose, nil, errors.New("docker: unknown command imagetools"))
-		if decoded["current_digest"] != current {
-			t.Fatalf("current_digest=%q want %q", decoded["current_digest"], current)
-		}
-		if decoded["latest_digest"] != current {
-			t.Fatalf("latest_digest=%q mixed index RepoDigest with platform %q", decoded["latest_digest"], sameFormDigest(current, amd64))
+		if decoded != nil {
+			t.Fatal("missing registry index was projected as up to date")
 		}
 		assertNoImageMutation(t, argv)
 	})
@@ -2087,7 +2092,7 @@ func TestControllerCallImageObserveProductionArchitectureAndIndexRepoDigest(t *t
 	})
 }
 
-func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T) {
+func TestControllerCallImageObserveReportsFailedRegistryLookup(t *testing.T) {
 	t.Parallel()
 	current := "nginx@sha256:" + strings.Repeat("c", 64)
 	var argv [][]string
@@ -2103,17 +2108,12 @@ func TestControllerCallImageObserveEqualizesWhenRegistryLookupFails(t *testing.T
 			return nil, errors.New("unexpected command")
 		}
 	})
-	decoded := callImageObserve(t, runner, "nginx:latest")
-	if decoded["current_digest"] != current || decoded["latest_digest"] != current {
-		t.Fatalf("registry failure should equalize digests, got %#v", decoded)
+	controller := newCallController(t, t.TempDir(), runner, nil)
+	raw, err := controller.Call(context.Background(), "generation-1", pluginCallImageName, []byte(`{"action":"observe","image":"nginx:latest"}`))
+	if err == nil || err.Error() != "registry image digest lookup failed" || len(raw) != 0 {
+		t.Fatalf("registry failure must not look up-to-date: error=%v", err)
 	}
 	assertNoImageMutation(t, argv)
-	for _, value := range decoded {
-		text, _ := value.(string)
-		if containsLocalDockerMarker(strings.ToLower(text)) {
-			t.Fatalf("observe leaked docker socket marker: %#v", decoded)
-		}
-	}
 }
 
 func TestControllerCallImageObserveFallsBackToImageIDWithoutRepoDigest(t *testing.T) {
@@ -2292,10 +2292,21 @@ func assertNoImageMutation(t *testing.T, argv [][]string) {
 
 func newCallController(t *testing.T, root string, runner CommandRunner, images ImageUpdateObserver) *Controller {
 	t.Helper()
+	// Existing execution fixtures model a daemon without registry mirrors.
+	// Mirror-specific tests install their own runner on the returned controller.
+	commandRunner := CommandRunnerFunc(func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		if name == "docker" && len(args) == 3 && args[0] == "info" && args[2] == registryMirrorInfoFormat {
+			return []byte(`[]`), nil
+		}
+		if runner == nil {
+			return execCommandRunner{}.Run(ctx, dir, name, args...)
+		}
+		return runner.Run(ctx, dir, name, args...)
+	})
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact",
 		UIWorkDirRoot: root,
-		CommandRunner: runner,
+		CommandRunner: commandRunner,
 		CallImages:    images,
 	})
 	if err != nil {

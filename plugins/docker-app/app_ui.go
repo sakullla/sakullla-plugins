@@ -28,6 +28,7 @@ const (
 	diskCleanupAgentIDRequiredError     = "agent_id is required"
 	diskCleanupAgentIDInvalidError      = "agent_id is invalid"
 	imageObservationTTL                 = 5 * time.Minute
+	appDetailImageRefreshTimeout        = time.Second
 )
 
 func diskCleanupFailurePublicMessage(kind string) string {
@@ -47,6 +48,7 @@ type appView struct {
 	Name          string            `json:"name"`
 	Status        string            `json:"status"`
 	Notice        string            `json:"notice,omitempty"`
+	ImageChecking bool              `json:"image_checking,omitempty"`
 	Version       string            `json:"version"`
 	Compose       string            `json:"compose,omitempty"`
 	Env           string            `json:"env,omitempty"`
@@ -1055,7 +1057,18 @@ func (controller *Controller) appViewFor(ctx context.Context, app App, listed []
 			deployment = record.Value
 		}
 	}
-	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(ctx, app, refreshTags), controller.serviceDigestAvailability(ctx, app, deployment, refreshDigests))
+	observationCtx := ctx
+	if refreshDigests {
+		// Detail must remain usable when a registry is slow. Share one budget
+		// across all service tag/digest checks; background observation continues.
+		var cancel context.CancelFunc
+		observationCtx, cancel = context.WithTimeout(ctx, appDetailImageRefreshTimeout)
+		defer cancel()
+	}
+	view := projectAppView(app, running, deployment, latest, controller.tagsForApp(observationCtx, app, refreshTags), controller.serviceDigestAvailability(observationCtx, app, deployment, refreshDigests))
+	controller.mu.Lock()
+	view.ImageChecking = controller.imageRefresh[app.ID]
+	controller.mu.Unlock()
 	ports := view.Ports
 	if len(ports) == 0 {
 		ports, _ = ListPublishedPorts(app, nil)
@@ -1127,7 +1140,9 @@ func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh b
 		}
 		listed, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
 		if err != nil {
-			controller.storeImageTagFailure(app.ID, service.Image)
+			if ctx.Err() == nil {
+				controller.storeImageTagFailure(app.ID, service.Image)
+			}
 			result[service.Name] = serviceTagListing{Failed: true}
 			continue
 		}

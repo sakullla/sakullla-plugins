@@ -2743,14 +2743,14 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 				"fatedier/frpc:v0.68.1": {"v0.68.1", "v0.71.0", "v0.71.1", "latest"},
 			},
 			digestByImage: map[string]uiTestDigest{
-				"fatedier/frpc:v0.68.1":     {current: "sha256:frpc", latest: "sha256:frpc"},
-				"airportr/miaospeed:latest": {current: miaospeedCurrent, latest: miaospeedLatest},
+				"fatedier/frpc:v0.68.1": {current: "sha256:frpc", latest: "sha256:frpc"},
+				"example/worker:latest": {current: miaospeedCurrent, latest: miaospeedLatest},
 			},
 		},
 		rollout: executor,
 	})
 	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"}`))
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: example/worker:latest\n"}`))
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -2791,7 +2791,7 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	if updated.Code != http.StatusOK {
 		t.Fatalf("miaospeed digest update status=%d body=%s", updated.Code, updated.Body.String())
 	}
-	if serviceImageRef(controller.Apps()[0].Compose, "miaospeed") != "airportr/miaospeed:latest" {
+	if serviceImageRef(controller.Apps()[0].Compose, "miaospeed") != "example/worker:latest" {
 		t.Fatalf("floating tag rewritten: %q", controller.Apps()[0].Compose)
 	}
 	if serviceImageRef(controller.Apps()[0].Compose, "frpc") != "fatedier/frpc:v0.68.1" {
@@ -2808,7 +2808,7 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 		t.Fatalf("published compose pinned or rewrote frpc: %q", runtime.Compose)
 	}
 	miaospeedRuntime := serviceImageRef(runtime.Compose, "miaospeed")
-	if !strings.HasPrefix(miaospeedRuntime, "airportr/miaospeed:latest") || !strings.Contains(miaospeedRuntime, miaospeedLatest) {
+	if !strings.HasPrefix(miaospeedRuntime, "example/worker:latest") || !strings.Contains(miaospeedRuntime, miaospeedLatest) {
 		t.Fatalf("published compose did not pin miaospeed digest: %q", runtime.Compose)
 	}
 
@@ -2914,7 +2914,7 @@ func TestAppUIDetailFailedDigestCompareIsTemporary(t *testing.T) {
 		},
 	})
 	created := httptest.NewRecorder()
-	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n"}`))
+	controller.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/apps", `{"id":"proxy","agent_id":"agent-1","compose":"services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: example/worker:latest\n"}`))
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -3006,9 +3006,9 @@ func TestProjectServiceViewUnlockedFrpcIncludesHubMinorBump(t *testing.T) {
 		Image: "fatedier/frpc:v0.68.1",
 		ServiceImages: []ServiceImage{
 			{Name: "frpc", Image: "fatedier/frpc:v0.68.1"},
-			{Name: "miaospeed", Image: "airportr/miaospeed:latest"},
+			{Name: "miaospeed", Image: "example/worker:latest"},
 		},
-		Compose: "services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: airportr/miaospeed:latest\n",
+		Compose: "services:\n  frpc:\n    image: fatedier/frpc:v0.68.1\n  miaospeed:\n    image: example/worker:latest\n",
 	}
 	tags := map[string]serviceTagListing{
 		"frpc": {Tags: []string{"v0.68.1", "v0.71.0", "v0.71.1", "latest"}, Known: true},
@@ -3230,6 +3230,39 @@ func TestAppUIListDoesNotBlockOnImageTagRefresh(t *testing.T) {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("background image tag refresh did not start")
+	}
+}
+
+func TestAppUIDetailBoundsImageRefreshWait(t *testing.T) {
+	for _, kind := range []string{"tags", "digests"} {
+		t.Run(kind, func(t *testing.T) {
+			started := make(chan struct{}, 2)
+			release := make(chan struct{})
+			defer close(release)
+			var observer ImageUpdateObserver = &blockingImageTagObserver{started: started, release: release}
+			if kind == "digests" {
+				observer = &blockingImageObserver{started: started, release: release}
+			}
+			controller := newUIControllerWithOptions(t, uiControllerOptions{
+				config:   `{"apps":[{"id":"media","agent_id":"agent-1","compose":"services:\n  web:\n    image: nginx:latest\n  worker:\n    image: example/worker:latest\n","env":"MODE=fixture","generation":"generation-1"}]}`,
+				observer: observer,
+			})
+			detail := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/media", ""))
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("detail blocked on registry checks instead of returning application data")
+			}
+			app := decodeAppDetail(t, detail.Body.Bytes())
+			if detail.Code != http.StatusOK || app.ID != "media" || app.Env != "MODE=fixture" || len(app.ServiceImages) != 2 || app.Compose == "" {
+				t.Fatalf("detail lost configuration while image checks were unavailable: status=%d", detail.Code)
+			}
+		})
 	}
 }
 

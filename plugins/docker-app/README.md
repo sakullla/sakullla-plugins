@@ -47,6 +47,26 @@ private Host wire contract substitutes for the remaining public grants.
 
 ## UI validation
 
+Docker Hub metadata checks use the Agent Docker daemon's effective
+`RegistryConfig.Mirrors`, including standard Registry tag endpoints and the
+`accelerator-sources` `/api/tags` catalog. Pagination stays on the configured
+mirror. If mirrors are configured, a failed lookup does not silently bypass
+them; only a daemon without mirrors queries Docker Hub directly. Private
+registry images retain their own registry. Manifest reads preserve the original
+image reference and do not pull or recreate containers. Failed digest checks
+remain unavailable rather than being reported as an up-to-date image.
+
+Detail pages share a one-second foreground image-check budget while background
+checks continue. The page refreshes pending image results without discarding an
+open editor. Agent Docker proxy support for `docker info` and formatted
+`docker image inspect` is required; update the Agent alongside this plugin.
+
+An optional read-only field diagnostic accepts image names at runtime through
+`NRE_DOCKER_APP_LIVE_IMAGES` (space-separated). Run `TestLiveDockerImageMetadata`
+from a compiled Go test binary on the Agent to verify real tag enumeration,
+local/remote digests, and update projection. This test is skipped when the
+variable is unset; ordinary test suites remain offline.
+
 The UI remains native HTML/CSS/JavaScript. Node 22 or newer and a runnable
 Chromium, Chrome, or Edge installation are required for the browser suites.
 `NRE_UI_BROWSER` can name an explicit browser executable. The runner uses Node

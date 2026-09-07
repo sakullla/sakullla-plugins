@@ -266,6 +266,90 @@ try {
       if (await page.visible("#confirm-dialog")) await page.click("#confirm-ok");
       await eventually(async () => !(await page.visible("#create-form")), "deployment closed");
     };
+  await test("detail request immediately shows progress and reports failures", async () => {
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    const pending = hold("/api/apps/alpha");
+    try {
+      await page.click('[data-id="alpha"] [data-action="detail"]');
+      await eventually(() => pending.seen, "detail request pending");
+      assert.equal(await page.evaluate(`document.querySelector('[data-id="alpha"] [data-action="detail"]').textContent`), "加载中…");
+      assert.match(await page.evaluate(`document.querySelector('#app-status').textContent`), /正在读取.*alpha/);
+    } finally { pending.release(); }
+    await page.waitVisible("#app-detail");
+    assert.equal(await page.evaluate(`document.querySelector('#app-status').hidden`), true);
+    await page.click("#detail-back");
+    assert.equal(await page.evaluate(`document.querySelector('[data-id="alpha"] [data-action="detail"]').disabled`), false);
+    const original = apps;
+    const missing = hold("/api/apps/alpha");
+    try {
+      await page.click('[data-id="alpha"] [data-action="detail"]');
+      await eventually(() => missing.seen, "missing detail pending");
+      apps = apps.filter(app => app.id !== "alpha");
+      missing.release();
+      await eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === 'failed'`), "detail failure shown");
+      assert.match(await page.evaluate(`document.querySelector('#app-status').textContent`), /应用已不存在/);
+      assert.equal(await page.evaluate(`document.querySelector('[data-id="alpha"] [data-action="detail"]').disabled`), false);
+    } finally { apps = original; missing.release(); }
+  });
+
+  await test("multi-service cards separate images from identity and keep actions compact", async () => {
+    const original = apps;
+    apps = [makeApp("sample", "node-a", {
+      version:"example/gateway:v1.2.3", services:["gateway", "worker"], ports:[8765],
+      service_images:[{name:"gateway",image:"example/gateway:v1.2.3"},{name:"worker",image:"example/worker:latest"}],
+    })];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="sample"]');
+      for (const width of [1440, 375]) {
+        await page.send("Emulation.setDeviceMetricsOverride", {width,height:1000,deviceScaleFactor:1,mobile:false});
+        const layout = await page.evaluate(`(() => {
+          const card = document.querySelector('.app-card');
+          const image = card.querySelector('[data-app-image]');
+          const r = image.getBoundingClientRect(), h = card.querySelector('.app-card-head').getBoundingClientRect();
+          return {images:[...image.querySelectorAll('.app-card-image')].map(n=>n.textContent), imageTop:r.top, headBottom:h.bottom, imageWidth:r.width, headWidth:h.width,
+            actions:[...card.querySelectorAll('.app-card-actions button')].filter(n=>n.getClientRects().length).map(n=>n.textContent)};
+        })()`);
+        assert.deepEqual(layout.images, ["example/gateway:v1.2.3", "example/worker:latest"]);
+        assert.ok(layout.imageTop >= layout.headBottom && layout.imageWidth >= layout.headWidth - 1, "images use the card width below the identity");
+        assert.deepEqual(layout.actions, ["详情"]);
+        await capture("multi-service-card", width);
+      }
+    } finally { apps = original; }
+  });
+
+  await test("node menu reserves readable names and stays inside the viewport", async () => {
+    const original = agents.map(agent=>({...agent}));
+    Object.assign(agents[0], {name:"debian-jnp12",last_seen_at:new Date().toISOString()});
+    Object.assign(agents[1], {name:"zouter-hk",last_seen_at:new Date().toISOString()});
+    try {
+      for (const width of [1440, 721, 375]) {
+        await page.send("Emulation.setDeviceMetricsOverride", {width,height:1000,deviceScaleFactor:1,mobile:false});
+        await navigate("?agent_id=node-a"); await page.click('.agent-search-select__trigger');
+        await eventually(()=>page.visible('[data-agent-id="node-a"] .agent-search-select__engine'), "node engine badges loaded");
+        const layout = await page.evaluate(`(() => {
+          const menu = document.querySelector('.agent-search-select__dropdown').getBoundingClientRect();
+          const name = document.querySelector('[data-agent-id="node-a"] .agent-search-select__option-name');
+          return {left:menu.left,right:menu.right,width:menu.width,client:document.documentElement.clientWidth,nameHeight:name.getBoundingClientRect().height,lineHeight:parseFloat(getComputedStyle(name).lineHeight),nameWidth:name.clientWidth,nameScroll:name.scrollWidth};
+        })()`);
+        assert.ok(layout.left >= 0 && layout.right <= layout.client, `menu stays within viewport: ${JSON.stringify(layout)}`);
+        if (width >= 721) assert.ok(layout.width >= 400, "desktop dropdown is wider than the compact trigger");
+        assert.ok(layout.nameHeight <= layout.lineHeight + 1 && layout.nameScroll <= layout.nameWidth, "ordinary node names fit on one line");
+        await capture("node-menu", width);
+      }
+    } finally { agents.splice(0, agents.length, ...original); }
+  });
+  await test("background image checks update the card without reloading the page", async () => {
+    const original = apps;
+    apps = [makeApp("sample", "node-a", {image_checking:true})];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="sample"]');
+      apps = [makeApp("sample", "node-a", {notice:"有新版本",actions:[{id:"update",label:"更新"}]})];
+      await eventually(() => page.visible('[data-id="sample"] [data-action="update"]'), "background result appears on the card");
+      assert.equal(await page.visible("#app-detail"), false);
+      assert.equal(requests.filter(request=>request.method!=="GET").length, 0);
+    } finally { apps = original; }
+  });
+
   await test("no selection and explicit node states", async () => {
     await navigate(); await page.waitVisible("#app-node-empty");
     await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');

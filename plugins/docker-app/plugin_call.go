@@ -798,6 +798,20 @@ func (controller *Controller) dockerImageTags(ctx context.Context, image string)
 		return nil, errors.New(imageObserveRequiredMessage)
 	}
 	if registry == "docker.io" {
+		ctx, cancel := context.WithTimeout(ctx, registryLookupTimeout)
+		defer cancel()
+		mirrors, err := controller.dockerRegistryMirrors(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, mirror := range mirrors {
+			if tags, err := listMirrorTags(ctx, mirror, repository); err == nil {
+				return tags, nil
+			}
+		}
+		if len(mirrors) > 0 {
+			return nil, errors.New("configured Docker registry mirrors could not list image tags")
+		}
 		return listDockerHubTags(ctx, repository)
 	}
 	return listRegistryTags(ctx, registry, repository)
@@ -918,11 +932,10 @@ func (controller *Controller) callImageObserve(ctx context.Context, request imag
 	if err != nil {
 		return nil, err
 	}
-	latest := current
-	if registry := controller.dockerRegistryDigest(ctx, request.Image, current, arch); registry != "" {
-		if formed := sameFormDigest(current, registry); formed != "" {
-			latest = formed
-		}
+	registry := controller.dockerRegistryDigest(ctx, request.Image, current, arch)
+	latest := sameFormDigest(current, registry)
+	if latest == "" {
+		return nil, errors.New("registry image digest lookup failed")
 	}
 	return json.Marshal(map[string]any{
 		"current_digest": current,
@@ -1191,6 +1204,22 @@ func (controller *Controller) dockerImageInspect(ctx context.Context, image stri
 }
 
 func (controller *Controller) dockerRegistryDigest(ctx context.Context, image, current, arch string) string {
+	ctx, cancel := context.WithTimeout(ctx, registryLookupTimeout)
+	defer cancel()
+	if registry, repository := splitDockerRepository(image); registry == "docker.io" {
+		mirrors, err := controller.dockerRegistryMirrors(ctx)
+		if err != nil {
+			return ""
+		}
+		for _, mirror := range mirrors {
+			if digest, err := mirrorImageDigest(ctx, mirror, image, repository, current, arch); err == nil && digest != "" {
+				return digest
+			}
+		}
+		if len(mirrors) > 0 {
+			return ""
+		}
+	}
 	var index string
 	output, err := controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image)
 	if err == nil {
