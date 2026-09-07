@@ -732,6 +732,13 @@ try {
       failImport = false;
     },
   );
+  await click("#load");
+  await until(
+    async () =>
+      (await evaluate('document.querySelector("#status").textContent')) ===
+      "状态已更新",
+    "clean final preview state",
+  );
   for (const width of [1440, 768, 390]) {
     await send("Emulation.setDeviceMetricsOverride", {
       width,
