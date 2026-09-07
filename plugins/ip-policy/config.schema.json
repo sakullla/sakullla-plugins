@@ -6,11 +6,11 @@
   "additionalProperties": false,
   "required": ["schema", "default_action", "datasets", "province_whitelist", "rules"],
   "properties": {
-    "schema": {"const": "sakullla.ip-policy/v1"},
-    "default_action": {"type": "string", "enum": ["allow", "deny"]},
-    "datasets": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/dataset"}},
-    "province_whitelist": {"type": "array", "maxItems": 31, "items": {"$ref": "#/$defs/classification_ref"}},
-    "rules": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/rule"}}
+    "schema": {"const": "sakullla.ip-policy/v1", "default": "sakullla.ip-policy/v1", "hostInjected": true},
+    "default_action": {"type": "string", "enum": ["allow", "deny"], "default": "allow", "hostInjected": true},
+    "datasets": {"type": "array", "maxItems": 4, "default": [], "hostInjected": true, "items": {"$ref": "#/$defs/dataset"}},
+    "province_whitelist": {"type": "array", "maxItems": 31, "default": [], "hostInjected": true, "items": {"$ref": "#/$defs/classification_ref"}},
+    "rules": {"type": "array", "maxItems": 256, "default": [], "hostInjected": true, "items": {"$ref": "#/$defs/rule"}}
   },
   "$defs": {
     "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
