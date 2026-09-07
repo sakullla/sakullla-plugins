@@ -15,7 +15,7 @@ import (
 
 const (
 	PluginID           = "ip-policy"
-	PluginVersion      = "0.2.0"
+	PluginVersion      = "0.2.1"
 	ConfigSchema       = "sakullla.ip-policy/v1"
 	OverlaySchema      = "sakullla.ip-policy-overlay/v1"
 	DefaultActionAllow = "allow"

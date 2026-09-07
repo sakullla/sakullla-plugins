@@ -34,6 +34,9 @@ func TestManifestDeclaresControlPlaneUIAndAgentIPPolicy(t *testing.T) {
 	if manifest.UISchema != "" || manifest.UIRouteID != PluginID {
 		t.Fatalf("dedicated UI declaration schema=%q route=%q", manifest.UISchema, manifest.UIRouteID)
 	}
+	if manifest.Cleanup.Instances != "delete" || manifest.Cleanup.Config != "delete" || manifest.Cleanup.OwnedData != "delete" || manifest.Cleanup.Grants != "delete" {
+		t.Fatalf("plugin-owned state must be removed on uninstall: %+v", manifest.Cleanup)
+	}
 	if _, err := os.Stat("ui.schema.json"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("legacy generic UI schema remains")
 	}

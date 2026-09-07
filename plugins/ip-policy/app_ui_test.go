@@ -77,7 +77,7 @@ func TestDedicatedManagementPageAndVisibleRuntimeStates(t *testing.T) {
 	controller := activeUIController(t, &runtimeStub{entries: entries})
 	page := httptest.NewRecorder()
 	controller.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
-	for _, text := range []string{"IP 策略", "中国大陆省份白名单", "Host 已授权入口", "请选择已配置分类", "期望模式", "实际应用", "最近有效", "检查状态", "诊断事件"} {
+	for _, text := range []string{"IP 策略", "中国大陆省份白名单", "选择入口", "全局规则", "入口专属规则", "全局模式", "应用状态", "配置版本", "诊断事件"} {
 		if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), text) {
 			t.Fatalf("page missing %q: %s", text, page.Body.String())
 		}

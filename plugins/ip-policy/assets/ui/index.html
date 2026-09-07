@@ -1,82 +1,414 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>IP 策略</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <main>
-    <header class="hero">
-      <div><p class="eyebrow">安全 · 入口防护</p><h1>IP 策略</h1><p>用可信来源、CIDR 和 Host 托管地理数据保护 HTTP、TCP、UDP 与受管插件入口。</p></div>
-      <label>节点<input id="node-id" placeholder="例如 local 或 edge-a"><button id="load" type="button">加载状态</button></label>
-    </header>
-    <p id="status" role="status">正在连接管理服务…</p>
-    <section id="workspace" hidden>
-      <section class="panel summary">
-        <div><span>期望模式</span><strong id="desired-mode">—</strong></div>
-        <div><span>实际应用</span><strong id="applied-mode">—</strong></div>
-        <div><span>最近有效代</span><strong id="generation">—</strong></div>
-        <div><span>检查状态</span><strong id="phase">—</strong></div>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>IP 策略</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">安全 · 入口防护</p>
+          <h1>IP 策略</h1>
+          <p>管理访问来源，查看节点和入口的防护状态。</p>
+        </div>
+        <div class="node-toolbar">
+          <span class="field-label">查看节点</span>
+          <div class="node-controls">
+            <div id="node-picker" class="node-picker">
+              <button
+                id="node-trigger"
+                type="button"
+                class="select-trigger"
+                aria-expanded="false"
+                aria-controls="node-menu"
+              >
+                <span id="node-label">选择节点</span
+                ><span aria-hidden="true">⌄</span>
+              </button>
+              <div id="node-menu" class="picker-menu" hidden>
+                <input
+                  id="node-search"
+                  type="search"
+                  aria-label="搜索节点"
+                  placeholder="搜索节点名称或地址"
+                />
+                <div id="node-filters" class="chips">
+                  <button data-online="" aria-pressed="true">全部</button
+                  ><button data-online="online">在线</button
+                  ><button data-online="offline">离线</button>
+                </div>
+                <div
+                  id="node-options"
+                  class="picker-options"
+                  role="listbox"
+                  aria-label="当前插件的节点"
+                ></div>
+                <label class="sort-field"
+                  >排序<select id="node-sort">
+                    <option value="seen">最近活跃</option>
+                    <option value="name">名称</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <button id="load" class="secondary" type="button">刷新</button>
+          </div>
+          <p id="node-hint" class="hint"></p>
+        </div>
+      </header>
+      <p id="status" role="status" aria-live="polite">正在连接管理服务…</p>
+      <section id="workspace" hidden>
+        <section class="panel summary">
+          <div><span>全局模式</span><strong id="desired-mode">—</strong></div>
+          <div>
+            <span>所选入口模式</span
+            ><strong id="applied-mode">请先选择入口</strong>
+          </div>
+          <div><span>应用状态</span><strong id="phase">—</strong></div>
+          <div><span>配置版本</span><strong id="generation">—</strong></div>
+        </section>
+        <div class="workspace-tabs" role="tablist" aria-label="策略设置">
+          <button role="tab" aria-selected="true" data-tab="global">
+            全局规则</button
+          ><button role="tab" aria-selected="false" data-tab="entry">
+            入口专属规则</button
+          ><button role="tab" aria-selected="false" data-tab="data">
+            地理数据</button
+          ><button role="tab" aria-selected="false" data-tab="events">
+            诊断事件
+          </button>
+        </div>
+        <section id="tab-global" role="tabpanel">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>全局行为</h2>
+                <p>
+                  应用于所有使用本策略的入口。观察模式只记录命中，拦截模式执行拒绝规则。
+                </p>
+              </div>
+              <div class="segmented">
+                <button data-mode="observe">观察</button
+                ><button data-mode="enforce">拦截</button>
+              </div>
+            </div>
+            <label class="compact-field"
+              >未命中任何规则时<select id="default-action">
+                <option value="allow">允许访问</option>
+                <option value="deny">拒绝访问</option>
+              </select></label
+            >
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>全局规则</h2>
+                <p>
+                  在所有入口生效。全局和入口专属规则中，拒绝规则优先于允许规则。
+                </p>
+              </div>
+              <span id="rule-count" class="badge">0 条</span>
+            </div>
+            <form id="rule-form" class="rule-form">
+              <label
+                >处理方式<select name="action">
+                  <option value="deny">拒绝访问</option>
+                  <option value="allow">允许访问</option>
+                </select></label
+              ><label
+                >匹配来源<select name="type">
+                  <option value="ip">单个 IP</option>
+                  <option value="cidr">IP 网段</option>
+                  <option value="classification">国家或地区</option>
+                </select></label
+              ><label data-value-field
+                >IP 地址<input
+                  name="value"
+                  placeholder="例如 192.0.2.1"
+                  required /></label
+              ><label data-class-field hidden
+                >国家或地区<select
+                  name="classification"
+                  id="rule-classification"
+                ></select></label
+              ><button>添加规则</button>
+            </form>
+            <p class="hint classification-hint" hidden>
+              先在“地理数据”中选择数据源和分类。
+            </p>
+            <ul id="rules" class="list"></ul>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>中国大陆省份白名单</h2>
+                <p>
+                  应用于所有使用本策略的入口。启用后，只有所选省份继续匹配规则；其它省份、境外和无法确认归属的地址会被拒绝。
+                </p>
+              </div>
+              <span id="province-coverage" class="badge">尚未配置</span>
+            </div>
+            <div id="province-empty" class="empty-state">
+              <strong>先准备省份数据</strong>
+              <p>选择包含中国省份分类的数据源，使用版本后即可勾选省份。</p>
+              <button id="setup-provinces" class="secondary">
+                配置省份数据
+              </button>
+            </div>
+            <div id="province-settings" hidden>
+              <label class="compact-field"
+                >省份数据来源<select id="province-dataset"></select
+              ></label>
+              <div class="panel-head province-toolbar">
+                <span id="province-count">未启用白名单</span>
+                <div class="actions">
+                  <button id="province-all" class="text-button">全选</button
+                  ><button id="province-clear" class="text-button">
+                    清空并停用
+                  </button>
+                </div>
+              </div>
+              <div id="provinces" class="province-grid"></div>
+              <p id="province-hint" class="hint"></p>
+            </div>
+          </section>
+          <div class="save-bar">
+            <span id="draft-status">配置已保存</span
+            ><button id="save">保存全局配置</button>
+          </div>
+        </section>
+        <section id="tab-entry" role="tabpanel" hidden>
+          <section class="panel">
+            <h2>入口专属规则</h2>
+            <p>
+              只对选中的域名或监听端口生效，在全局规则之外补充限制。入口允许规则不能抵消全局拒绝规则。
+            </p>
+            <label
+              >选择入口<select id="entry-select">
+                <option value="">请先选择节点</option>
+              </select></label
+            >
+            <p id="entry-hint" class="hint"></p>
+            <fieldset id="entry-controls" disabled>
+              <legend class="sr-only">所选入口的设置</legend>
+              <div class="panel-head">
+                <div>
+                  <h3>此入口的模式</h3>
+                  <p id="entry-mode-hint">默认继承全局设置。</p>
+                </div>
+                <div class="segmented">
+                  <button id="entry-reset" type="button">继承全局</button
+                  ><button id="entry-observe" type="button">观察</button
+                  ><button id="entry-enforce" type="button">拦截</button>
+                </div>
+              </div>
+              <form id="entry-rule-form" class="rule-form">
+                <label
+                  >处理方式<select name="action">
+                    <option value="deny">拒绝访问</option>
+                    <option value="allow">允许访问</option>
+                  </select></label
+                ><label
+                  >匹配来源<select name="type">
+                    <option value="ip">单个 IP</option>
+                    <option value="cidr">IP 网段</option>
+                    <option value="classification">国家或地区</option>
+                  </select></label
+                ><label data-value-field
+                  >IP 地址<input
+                    name="value"
+                    placeholder="例如 192.0.2.1"
+                    required /></label
+                ><label data-class-field hidden
+                  >国家或地区<select
+                    id="entry-classification"
+                    name="classification"
+                  ></select></label
+                ><button>添加并保存</button>
+              </form>
+              <p class="hint classification-hint" hidden>
+                请先在“地理数据”中添加分类。
+              </p>
+              <ul id="entry-rules" class="list"></ul>
+            </fieldset>
+          </section>
+        </section>
+        <section id="tab-data" role="tabpanel" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>数据源与版本</h2>
+                <p>
+                  先选择数据源和版本，再选择需要的国家或省份。系统会校验版本并完成绑定。
+                </p>
+              </div>
+              <button id="add-source" class="secondary">添加数据源</button>
+            </div>
+            <p id="catalog-status" class="hint"></p>
+            <form id="binding-form">
+              <div class="form-grid">
+                <label
+                  >1. 数据源<select id="source-select" required>
+                    <option value="">选择数据源</option>
+                  </select></label
+                ><label
+                  >2. 使用版本<select id="version-select" required>
+                    <option value="">先选择数据源</option>
+                  </select></label
+                >
+              </div>
+              <div id="version-info" class="version-info"></div>
+              <div class="panel-head">
+                <h3>3. 选择分类</h3>
+                <div class="actions">
+                  <button
+                    id="select-province-classes"
+                    type="button"
+                    class="text-button"
+                  >
+                    选中大陆省份</button
+                  ><button id="clear-classes" type="button" class="text-button">
+                    清空
+                  </button>
+                </div>
+              </div>
+              <input
+                id="classification-search"
+                type="search"
+                aria-label="搜索数据分类"
+                placeholder="搜索国家、省份或分类名称"
+              />
+              <div id="catalog-classes" class="classification-grid"></div>
+              <button id="more-classes" type="button" class="secondary" hidden>
+                加载更多分类
+              </button>
+              <p id="binding-hint" class="hint"></p>
+              <button id="bind" disabled>使用所选数据</button>
+            </form>
+          </section>
+          <section class="panel">
+            <h2>已使用的数据</h2>
+            <p>这里的数据供全局地理规则、入口地理规则和省份白名单引用。</p>
+            <div id="datasets" class="cards"></div>
+          </section>
+        </section>
+        <section id="tab-events" role="tabpanel" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>诊断事件</h2>
+                <p id="event-retention">选择节点后查看本插件的事件。</p>
+              </div>
+              <button id="events-refresh" class="secondary">刷新事件</button>
+            </div>
+            <div class="form-grid">
+              <label
+                >结果<select id="event-mode">
+                  <option value="">全部结果</option>
+                  <option value="deny">已拦截</option>
+                  <option value="observe">仅观察</option>
+                  <option value="skip">跳过检查</option>
+                </select></label
+              ><label
+                >搜索<input
+                  id="event-search"
+                  type="search"
+                  placeholder="来源 IP、入口或规则"
+              /></label>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>来源 IP</th>
+                    <th>入口 / 规则</th>
+                    <th>结果</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody id="events"></tbody>
+              </table>
+            </div>
+            <p id="events-empty" class="empty-state"></p>
+            <div class="pagination">
+              <button id="events-prev" class="secondary" disabled>上一页</button
+              ><span id="events-page">第 1 页</span
+              ><button id="events-next" class="secondary" disabled>
+                下一页
+              </button>
+            </div>
+          </section>
+        </section>
       </section>
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><div><h2>全局行为</h2><p>新安装默认观察；切换配置和模式时原子发布。</p></div><div class="actions"><button data-mode="observe">观察</button><button data-mode="enforce" class="danger">拦截</button></div></div>
-          <label>未命中规则时<select id="default-action"><option value="allow">允许</option><option value="deny">拒绝</option></select></label>
-        </article>
-        <article class="panel">
-          <h2>入口模式</h2><p>入口身份由 Host 核验。WAF 和其它 deny 阶段不会被 IP 允许覆盖。</p>
-		  <label>Host 已授权入口<select id="entry-select"><option value="">请选择入口</option></select></label>
-          <div class="actions"><button id="entry-observe">观察</button><button id="entry-enforce" class="danger">拦截</button><button id="entry-reset">继承全局</button></div>
-          <form id="entry-rule-form" class="form-row"><input name="id" required placeholder="入口规则 ID"><select name="action"><option value="deny">拒绝</option><option value="allow">允许</option></select><select name="type"><option value="ip">单 IP</option><option value="cidr">CIDR</option><option value="classification">国家/省份分类</option></select><input name="value" placeholder="IP 或 CIDR"><select id="entry-classification" name="classification"><option value="">请选择已配置分类</option></select><button>添加入口规则</button></form>
-          <ul id="entry-rules" class="list"></ul>
-		  <p>HTTP、TCP、UDP 与受管入口均通过公开 policy.control 原子保存模式和完整规则列表。</p>
-        </article>
-      </section>
-      <section class="panel">
-        <div class="panel-head"><div><h2>规则</h2><p>全局与入口 deny 优先于 allow。单 IP 同时支持 IPv4/IPv6。</p></div><span id="rule-count" class="badge"></span></div>
-        <form id="rule-form" class="form-row"><input name="id" required placeholder="规则 ID"><select name="action"><option value="deny">拒绝</option><option value="allow">允许</option></select><select name="type"><option value="ip">单 IP</option><option value="cidr">CIDR</option><option value="classification">国家/地区分类</option></select><input name="value" placeholder="IP 或 CIDR"><input name="dataset_id" placeholder="分类的数据集 ID"><input name="classification_id" placeholder="分类 ID"><button>添加</button></form>
-        <ul id="rules" class="list"></ul>
-      </section>
-      <section class="panel">
-        <div class="panel-head"><div><h2>中国大陆省份白名单</h2><p>只允许 covered 且命中的所选省份；其它省、境外和未知 IPv6 都拒绝。省级 IPv6 覆盖以目录显示为准。</p></div><span class="badge warning">IPv6 部分覆盖</span></div>
-        <div id="provinces" class="province-grid"></div>
-      </section>
-      <section class="panel">
-        <div class="panel-head"><div><h2>数据源与版本</h2><p>显示 desired / applied / last good、来源许可、分类覆盖和失败原因。</p></div><button id="save">原子保存配置</button></div>
-        <form id="dataset-form" class="form-row">
-          <input name="dataset_id" required placeholder="字典 ID，例如 province-data">
-          <input name="source_id" required placeholder="Host 数据源 ID">
-          <input name="classification_id" required placeholder="分类 ID，例如 guangdong">
-          <input name="classification_name" required placeholder="SDK 名称，例如 cn-44">
-          <select name="classification_kind"><option value="region">省份/地区</option><option value="country">国家</option><option value="cidr">CIDR 类</option></select>
-          <button>添加分类</button>
+      <dialog id="source-dialog">
+        <form id="source-form">
+          <div class="panel-head">
+            <div>
+              <h2>导入地理数据</h2>
+              <p>
+                选择数据文件，系统自动完成上传和校验。省份白名单使用包含省份信息的
+                MMDB 数据。
+              </p>
+            </div>
+            <button
+              id="source-close"
+              type="button"
+              class="text-button"
+              aria-label="关闭"
+            >
+              ✕
+            </button>
+          </div>
+          <label
+            >数据文件<input
+              name="file"
+              type="file"
+              accept=".mmdb,.dat,.txt"
+              required
+          /></label>
+          <label
+            >数据类型<select name="format">
+              <option value="geo-mmdb">省份数据库（MMDB）</option>
+              <option value="geoip">国家数据库（GeoIP）</option>
+              <option value="cidr">IP 网段列表（文本）</option>
+            </select></label
+          >
+          <label
+            >显示名称<input
+              name="name"
+              maxlength="128"
+              placeholder="默认使用文件名"
+          /></label>
+          <details>
+            <summary>来源说明（可选）</summary>
+            <label
+              >数据许可页面<input
+                name="license_url"
+                type="url"
+                placeholder="https://…"
+            /></label>
+          </details>
+          <p class="hint">
+            单个文件最多 128
+            MiB。只导入一次，不自动下载或在插件中另存副本。数据存入共享目录；卸载插件会清理本插件的配置和引用，共享数据可在没有使用者后删除。
+          </p>
+          <p id="source-error" role="alert"></p>
+          <button>导入并校验</button>
         </form>
-        <form id="binding-form" class="form-row">
-          <input name="dataset_id" required placeholder="要绑定的字典 ID">
-          <input name="version_digest" required placeholder="sha256:… 不可变版本">
-          <select name="mode"><option value="observe">观察</option><option value="enforce">拦截</option></select>
-          <button>原子绑定配置与模式</button>
-        </form>
-        <form id="source-form" class="form-row">
-          <input name="source_id" required placeholder="Host 数据源 ID">
-          <select name="action"><option value="put-source">保存来源</option><option value="refresh">刷新</option><option value="rollback">回退</option><option value="activate">激活版本</option></select>
-          <input name="name" placeholder="来源名称">
-          <input name="url" placeholder="固定发布 URL">
-          <select name="format"><option value="geoip">V2Fly/Loyalsoldier GeoIP</option><option value="geo-mmdb">DB-IP City Lite</option><option value="cidr">CIDR</option></select>
-          <input name="license_url" placeholder="许可 URL">
-          <input name="version_digest" placeholder="回退/激活所需 sha256:…">
-          <button>执行数据操作</button>
-        </form>
-        <div id="datasets" class="cards"></div>
-      </section>
-      <section class="panel">
-        <h2>诊断事件</h2><p>事件只包含 Host 固定字典，不记录路径、header、body 或凭据。</p>
-        <ul id="events" class="list"></ul>
-      </section>
-    </section>
-  </main>
-  <script src="app.js"></script>
-</body>
+      </dialog>
+      <dialog id="confirm-dialog">
+        <h2 id="confirm-title">确认修改</h2>
+        <p id="confirm-message"></p>
+        <div class="actions">
+          <button id="confirm-cancel" class="secondary">取消</button
+          ><button id="confirm-ok">确定</button>
+        </div>
+      </dialog>
+    </main>
+    <script src="app.js"></script>
+  </body>
 </html>

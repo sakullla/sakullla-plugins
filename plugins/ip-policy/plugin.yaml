@@ -1,6 +1,6 @@
 schema_version: 1
 id: ip-policy
-version: 0.2.0
+version: 0.2.1
 name: IP 策略
 description: 用可信来源、CIDR、GeoIP 国家与中国大陆省份数据保护 HTTP、TCP、UDP 和受管插件入口
 compatibility:
