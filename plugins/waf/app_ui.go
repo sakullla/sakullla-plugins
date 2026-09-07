@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"embed"
@@ -25,15 +27,22 @@ const (
 )
 
 type wafAPIResponse struct {
-	Ready       bool            `json:"ready"`
-	DefaultMode string          `json:"default_mode,omitempty"`
-	Entries     []HTTPEntry     `json:"entries,omitempty"`
-	CustomRules []CustomRule    `json:"custom_rules,omitempty"`
-	Exclusions  []Exclusion     `json:"exclusions,omitempty"`
-	Events      []SecurityEvent `json:"events,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Notice      string          `json:"notice,omitempty"`
-	Access      struct {
+	ManagedRules    []CustomRule    `json:"managed_rules"`
+	Coverage        map[string]int  `json:"coverage"`
+	Ready           bool            `json:"ready"`
+	DefaultMode     string          `json:"default_mode,omitempty"`
+	Entries         []HTTPEntry     `json:"entries,omitempty"`
+	CustomRules     []CustomRule    `json:"custom_rules,omitempty"`
+	Exclusions      []Exclusion     `json:"exclusions,omitempty"`
+	Events          []SecurityEvent `json:"events,omitempty"`
+	EventsAvailable bool            `json:"events_available"`
+	EventSummary    map[string]int  `json:"event_summary,omitempty"`
+	RecentEvents    []SecurityEvent `json:"recent_events,omitempty"`
+	EntriesPage     *wafPage        `json:"entries_page,omitempty"`
+	EventsPage      *wafPage        `json:"events_page,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	Notice          string          `json:"notice,omitempty"`
+	Access          struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -64,6 +73,8 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 		controller.serveState(writer, request)
 	case "/api/mode":
 		controller.serveGlobalMode(writer, request)
+	case "/api/entries/mode-all":
+		controller.serveEntryModes(writer, request)
 	case "/api/entries/mode":
 		controller.serveEntryMode(writer, request)
 	case "/api/custom-rules":
@@ -86,7 +97,11 @@ func (controller *Controller) serveState(writer http.ResponseWriter, request *ht
 		return
 	}
 	agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
-	response := controller.stateResponse(request.Context(), agentID, "")
+	response := controller.stateResponseWithEvents(request.Context(), agentID, "", request.URL.Query().Get("include_events") != "false")
+	if err := paginateWAFState(&response, request.URL.Query()); err != nil {
+		writeWAFJSON(writer, http.StatusBadRequest, wafAPIResponse{Error: "分页或筛选参数无效。"})
+		return
+	}
 	status := http.StatusOK
 	if !response.Ready && response.Error != "" {
 		status = http.StatusServiceUnavailable
@@ -95,6 +110,87 @@ func (controller *Controller) serveState(writer http.ResponseWriter, request *ht
 		}
 	}
 	writeWAFJSON(writer, status, response)
+}
+
+type wafPage struct {
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+	Total    int `json:"total"`
+}
+
+// Pagination covers the current catalog and the events retained by the host.
+// Callers without page_size keep the original state response contract.
+func paginateWAFState(response *wafAPIResponse, query url.Values) error {
+	if !query.Has("page_size") {
+		return nil
+	}
+	positiveInt := func(key string, fallback int) (int, error) {
+		if !query.Has(key) {
+			return fallback, nil
+		}
+		value, err := strconv.Atoi(query.Get(key))
+		if err != nil || value < 1 {
+			return 0, ErrInvalidConfig
+		}
+		return value, nil
+	}
+	size, err := positiveInt("page_size", 10)
+	if err != nil || size > 100 {
+		return ErrInvalidConfig
+	}
+	entryPage, err := positiveInt("entry_page", 1)
+	if err != nil {
+		return err
+	}
+	eventPage, err := positiveInt("event_page", 1)
+	if err != nil {
+		return err
+	}
+	entryMode, eventMode := query.Get("entry_mode"), query.Get("event_mode")
+	for _, mode := range []string{entryMode, eventMode} {
+		if mode != "" && mode != ModeObserve && mode != ModeDeny && mode != "skip" {
+			return ErrInvalidMode
+		}
+	}
+	entryQuery := strings.ToLower(strings.TrimSpace(query.Get("entry_query")))
+	eventQuery := strings.ToLower(strings.TrimSpace(query.Get("event_query")))
+	entries := make([]HTTPEntry, 0, len(response.Entries))
+	for _, entry := range response.Entries {
+		mode := entry.Mode
+		if entry.OverlayInvalid || !entry.Attached {
+			mode = "skip"
+		}
+		text := strings.ToLower(strings.Join([]string{entry.FrontendURL, entry.Backend, entry.RuleRef}, " "))
+		if (entryMode == "" || mode == entryMode) && strings.Contains(text, entryQuery) {
+			entries = append(entries, entry)
+		}
+	}
+	events := make([]SecurityEvent, 0, len(response.Events))
+	for _, event := range response.Events {
+		mode := event.Disposition
+		if mode != ModeDeny {
+			mode = ModeObserve
+			if event.Reason != "" && event.Reason != "rule_matched" {
+				mode = "skip"
+			}
+		}
+		text := strings.ToLower(strings.Join([]string{event.Site, event.RuleID, event.Reason, event.Digest}, " "))
+		if (eventMode == "" || mode == eventMode) && strings.Contains(text, eventQuery) {
+			events = append(events, event)
+		}
+	}
+	pageBounds := func(total, page int) (*wafPage, int, int) {
+		pages := max(1, (total+size-1)/size)
+		page = min(page, pages)
+		start := (page - 1) * size
+		return &wafPage{Page: page, PageSize: size, Total: total}, start, min(start+size, total)
+	}
+	var start, end int
+	response.EntriesPage, start, end = pageBounds(len(entries), entryPage)
+	response.Entries = entries[start:end]
+	response.EventsPage, start, end = pageBounds(len(events), eventPage)
+	response.Events = events[start:end]
+	return nil
 }
 
 func (controller *Controller) serveGlobalMode(writer http.ResponseWriter, request *http.Request) {
@@ -142,8 +238,8 @@ func (controller *Controller) serveEntryMode(writer http.ResponseWriter, request
 }
 
 func (controller *Controller) serveCustomRules(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writer.Header().Set("Allow", http.MethodPost)
+	if request.Method != http.MethodPost && request.Method != http.MethodDelete {
+		writer.Header().Set("Allow", "POST, DELETE")
 		writeWAFJSON(writer, http.StatusMethodNotAllowed, wafAPIResponse{Error: "method not allowed"})
 		return
 	}
@@ -156,6 +252,14 @@ func (controller *Controller) serveCustomRules(writer http.ResponseWriter, reque
 		writeWAFJSON(writer, http.StatusBadRequest, wafAPIResponse{Error: ErrInvalidRule.Error()})
 		return
 	}
+	if request.Method == http.MethodDelete {
+		if err := controller.removeCustomRule(request.Context(), body.ID); err != nil {
+			writeWAFJSON(writer, wafStatus(err), wafAPIResponse{Error: publicWAFError(err)})
+			return
+		}
+		writeWAFJSON(writer, http.StatusOK, wafAPIResponse{Ready: true})
+		return
+	}
 	agentID := strings.TrimSpace(body.AgentID)
 	if err := controller.addCustomRule(request.Context(), CustomRule{ID: body.ID, Target: body.Target, Needle: body.Needle}); err != nil {
 		writeWAFJSON(writer, wafStatus(err), controller.stateResponse(request.Context(), agentID, publicWAFError(err)))
@@ -165,8 +269,8 @@ func (controller *Controller) serveCustomRules(writer http.ResponseWriter, reque
 }
 
 func (controller *Controller) serveExclusions(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writer.Header().Set("Allow", http.MethodPost)
+	if request.Method != http.MethodPost && request.Method != http.MethodDelete {
+		writer.Header().Set("Allow", "POST, DELETE")
 		writeWAFJSON(writer, http.StatusMethodNotAllowed, wafAPIResponse{Error: "method not allowed"})
 		return
 	}
@@ -179,6 +283,14 @@ func (controller *Controller) serveExclusions(writer http.ResponseWriter, reques
 		writeWAFJSON(writer, http.StatusBadRequest, wafAPIResponse{Error: ErrInvalidExclusion.Error()})
 		return
 	}
+	if request.Method == http.MethodDelete {
+		if err := controller.removeExclusion(request.Context(), body.RuleID, body.PathPrefix); err != nil {
+			writeWAFJSON(writer, wafStatus(err), wafAPIResponse{Error: publicWAFError(err)})
+			return
+		}
+		writeWAFJSON(writer, http.StatusOK, wafAPIResponse{Ready: true})
+		return
+	}
 	agentID := strings.TrimSpace(body.AgentID)
 	if err := controller.addExclusion(request.Context(), Exclusion{RuleID: body.RuleID, PathPrefix: body.PathPrefix}); err != nil {
 		writeWAFJSON(writer, wafStatus(err), controller.stateResponse(request.Context(), agentID, publicWAFError(err)))
@@ -188,8 +300,12 @@ func (controller *Controller) serveExclusions(writer http.ResponseWriter, reques
 }
 
 func (controller *Controller) stateResponse(ctx context.Context, agentID, failed string) wafAPIResponse {
+	return controller.stateResponseWithEvents(ctx, agentID, failed, true)
+}
+
+func (controller *Controller) stateResponseWithEvents(ctx context.Context, agentID, failed string, includeEvents bool) wafAPIResponse {
 	config := controller.currentConfig()
-	response := wafAPIResponse{Ready: true, DefaultMode: config.Mode, CustomRules: config.CustomRules, Exclusions: config.Exclusions}
+	response := wafAPIResponse{Ready: true, DefaultMode: config.Mode, CustomRules: config.CustomRules, Exclusions: config.Exclusions, ManagedRules: managedRuleCatalog(), Coverage: map[string]int{"total": 0, "deny": 0, "observe": 0, "unprotected": 0, "disabled": 0}}
 	response.Access.CanRead = true
 	response.Access.CanWrite = true
 	if failed != "" {
@@ -207,8 +323,23 @@ func (controller *Controller) stateResponse(ctx context.Context, agentID, failed
 		return response
 	}
 	response.Entries = entries
+	for _, entry := range entries {
+		response.Coverage["total"]++
+		if !entry.Enabled {
+			response.Coverage["disabled"]++
+			continue
+		}
+		if !entry.Attached || entry.OverlayInvalid {
+			response.Coverage["unprotected"]++
+			continue
+		}
+		response.Coverage[entry.Mode]++
+	}
 	if len(entries) == 0 {
 		response.Notice = emptyEntriesNotice
+	}
+	if !includeEvents {
+		return response
 	}
 	if controller.events == nil {
 		response.Error = publicWAFError(ErrUnavailable)
@@ -220,6 +351,18 @@ func (controller *Controller) stateResponse(ctx context.Context, agentID, failed
 		return response
 	}
 	response.Events = events
+	response.EventsAvailable = true
+	response.EventSummary = map[string]int{"deny": 0, "observe": 0, "skip": 0}
+	for _, event := range events {
+		mode := ModeObserve
+		if event.Disposition == ModeDeny {
+			mode = ModeDeny
+		} else if event.Reason != "" && event.Reason != "rule_matched" {
+			mode = "skip"
+		}
+		response.EventSummary[mode]++
+	}
+	response.RecentEvents = events[:min(5, len(events))]
 	return response
 }
 

@@ -45,7 +45,7 @@ func TestOfficialConfigUICopyIsChineseAndBindingsStayStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"IP 策略", "中国大陆省份白名单", "数据源与版本", "诊断事件"} {
+	for _, want := range []string{"IP 策略", "中国大陆省份白名单", "地理数据", "诊断事件"} {
 		if !strings.Contains(string(ipPage), want) {
 			t.Fatalf("ip-policy management page missing %q", want)
 		}

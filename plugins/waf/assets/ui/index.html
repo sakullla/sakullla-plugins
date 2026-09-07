@@ -1,110 +1,518 @@
 <!doctype html>
 <html lang="zh-CN" data-theme="light">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Web 防火墙</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <div class="wash" aria-hidden="true"></div>
-  <main>
-    <header class="page-head">
-      <div class="page-head-copy">
-        <h1>Web 防火墙</h1>
-        <p class="lede">按 HTTP 入口查看观察中或拦截状态、排除误报，并添加有界自定义规则。不声称完整兼容 CRS 或 PCRE。</p>
-      </div>
-      <div class="page-head-agent">
-        <div class="node-card">
-          <label class="agent-field">节点
-            <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
-            <select id="agent-picker" aria-label="选择节点"></select>
-          </label>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Web 防火墙</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="page-head">
+        <div class="page-head-copy">
+          <p class="eyebrow">安全 / 请求防护</p>
+          <h1>Web 防火墙</h1>
+          <p class="lede">识别异常请求、阻断攻击，并及时处理正常业务的误报。</p>
         </div>
-      </div>
-    </header>
-    <p id="app-loading" role="status">正在加载防护状态…</p>
-    <p id="app-unavailable" role="status" hidden>暂时无法管理 Web 防火墙。</p>
-    <p id="app-denied" role="alert" hidden>无权管理 Web 防火墙。</p>
-    <p id="app-status" role="status" hidden></p>
-    <section id="app-context" class="context-region" hidden>
-      <section class="state-panel" id="app-node-empty" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
-          <div>
-            <h2>未选择节点</h2>
-            <p>请先选择一台节点，再查看该节点上已挂载的 HTTP 入口。</p>
+        <div class="page-head-agent">
+          <div class="node-card">
+            <div class="agent-field">
+              <span id="agent-picker-label" class="field-label">节点</span>
+              <input
+                type="hidden"
+                id="agent-select"
+                name="agent_id"
+                value=""
+                autocomplete="off"
+              />
+              <div
+                id="agent-picker"
+                class="agent-search-select"
+                aria-labelledby="agent-picker-label"
+              ></div>
+            </div>
           </div>
         </div>
-      </section>
-      <section class="state-panel" id="app-execution-unavailable" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
-          <div>
-            <h2>防护执行面暂时不可用</h2>
-            <p>管理页已打开，但还不能列出或改动 HTTP 入口防护。刷新本页，或确认该节点上的策略面已投影。</p>
+      </header>
+      <p id="app-loading" role="status">正在加载防护状态…</p>
+      <p id="app-unavailable" role="status" hidden>暂时无法管理 Web 防火墙。</p>
+      <p id="app-denied" role="alert" hidden>无权管理 Web 防火墙。</p>
+      <p id="app-status" role="status" hidden></p>
+      <section id="app-context" class="context-region" hidden>
+        <section class="state-panel" id="app-node-empty" hidden>
+          <div class="setup-hero">
+            <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+            <div>
+              <h2>未选择节点</h2>
+              <p>请先选择一台节点，再查看该节点上已挂载的 HTTP 入口。</p>
+            </div>
           </div>
-        </div>
+        </section>
+        <section class="state-panel" id="app-execution-unavailable" hidden>
+          <div class="setup-hero">
+            <span
+              class="setup-mark"
+              data-kind="unavailable"
+              aria-hidden="true"
+            ></span>
+            <div>
+              <h2>防护执行面暂时不可用</h2>
+              <p>
+                管理页已打开，但还不能列出或改动 HTTP
+                入口防护。刷新本页，或确认该节点上的策略面已投影。
+              </p>
+            </div>
+          </div>
+        </section>
       </section>
-    </section>
-    <section id="app-workspace" class="workspace-region" hidden>
-      <div class="workspace-head">
-        <div class="workspace-head-copy">
-          <h2>HTTP 入口</h2>
-          <p id="entry-count" class="count"></p>
+      <section id="app-workspace" hidden>
+        <nav class="main-tabs" role="tablist" aria-label="防火墙工作区">
+          <button
+            id="tab-overview"
+            data-tab="overview"
+            role="tab"
+            aria-selected="true"
+            aria-controls="view-overview"
+            type="button"
+          >
+            防护概览
+          </button>
+          <button
+            id="tab-events"
+            data-tab="events"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-events"
+            tabindex="-1"
+            type="button"
+          >
+            安全事件
+          </button>
+          <button
+            id="tab-rules"
+            data-tab="rules"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-rules"
+            tabindex="-1"
+            type="button"
+          >
+            防护策略
+          </button>
+          <button
+            id="tab-scope"
+            data-tab="scope"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-scope"
+            tabindex="-1"
+            type="button"
+          >
+            防护范围
+          </button>
+          <button
+            id="refresh-state"
+            class="btn-secondary refresh-button"
+            type="button"
+          >
+            刷新数据
+          </button>
+        </nav>
+
+        <div
+          id="view-overview"
+          role="tabpanel"
+          aria-labelledby="tab-overview"
+          class="view-stack"
+        >
+          <section class="protection-banner" id="protection-banner">
+            <div class="shield-symbol" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+              >
+                <path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z" />
+                <path d="m8 12 3 3 5-6" />
+              </svg>
+            </div>
+            <div class="protection-copy">
+              <p class="eyebrow">当前节点 · 基础请求防护</p>
+              <h2 id="protection-title">正在确认防护配置</h2>
+              <p id="protection-copy" class="hint"></p>
+            </div>
+            <button class="btn-secondary" data-open-tab="scope" type="button">
+              检查防护范围 →
+            </button>
+          </section>
+          <div class="section-caption">
+            <h2>防护效果</h2>
+            <span>宿主返回的近期记录</span>
+          </div>
+          <div class="stat-grid">
+            <button class="stat-card" data-event-mode="deny" type="button">
+              <span class="stat-label"
+                ><i class="stat-dot danger"></i>命中并拦截</span
+              ><strong id="stat-deny">—</strong
+              ><span class="stat-help">请求已被 WAF 拒绝 <b>↗</b></span>
+            </button>
+            <button class="stat-card" data-event-mode="observe" type="button">
+              <span class="stat-label"
+                ><i class="stat-dot warning"></i>仅检测命中</span
+              ><strong id="stat-observe">—</strong
+              ><span class="stat-help">记录命中，仍然放行 <b>↗</b></span>
+            </button>
+            <button class="stat-card" data-event-mode="skip" type="button">
+              <span class="stat-label"
+                ><i class="stat-dot muted"></i>检查未完成</span
+              ><strong id="stat-skip">—</strong
+              ><span class="stat-help">需要检查防护缺口 <b>↗</b></span>
+            </button>
+          </div>
+          <p
+            id="event-source-status"
+            class="event-source-status"
+            role="status"
+          ></p>
+          <div class="overview-grid">
+            <section class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>需要关注</h2>
+                  <p class="hint">先解决影响防护效果的问题。</p>
+                </div>
+              </div>
+              <ul id="attention-list" class="attention-list"></ul>
+            </section>
+            <section class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>当前检测能力</h2>
+                  <p class="hint">内置基础特征与自定义规则共同检查请求。</p>
+                </div>
+              </div>
+              <div id="capability-list" class="capability-list"></div>
+              <div class="panel-footer">
+                <span id="policy-summary"></span
+                ><button class="btn-link" data-open-tab="rules" type="button">
+                  查看防护策略 →
+                </button>
+              </div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>最近安全事件</h2>
+                <p class="hint">从处理结果追溯命中规则，定位误报。</p>
+              </div>
+              <button class="btn-link" data-open-tab="events" type="button">
+                查看全部事件 →
+              </button>
+            </div>
+            <div id="recent-events"></div>
+          </section>
         </div>
-        <div class="workspace-head-actions">
-          <button id="global-observe" class="btn-secondary" type="button">全部观察</button>
-          <button id="global-deny" class="btn-primary" type="button">全部拦截</button>
-        </div>
-      </div>
-      <section id="app-list-panel">
-        <p id="app-empty" hidden>还没有 HTTP 入口。</p>
-        <ul id="entry-list"></ul>
-      </section>
-      <section class="panel" id="rules-panel">
-        <h2>排除与自定义规则</h2>
-        <p class="hint">排除按规则 ID 和路径前缀生效。自定义规则只支持有界字面量，不提供正则。</p>
-        <div class="split">
-          <form id="exclusion-form" class="stack">
-            <h3>添加排除</h3>
-            <label>规则 ID
-              <input name="rule_id" maxlength="32" required>
-            </label>
-            <label>路径前缀
-              <input name="path_prefix" maxlength="96" placeholder="/api" required>
-            </label>
-            <button class="btn-secondary" type="submit">添加排除</button>
-            <ul id="exclusion-list"></ul>
-          </form>
-          <form id="custom-form" class="stack">
-            <h3>添加自定义规则</h3>
-            <label>规则 ID
-              <input name="id" maxlength="32" required>
-            </label>
-            <label>检查目标
-              <select name="target">
-                <option value="path">路径</option>
-                <option value="query">查询</option>
-                <option value="headers">请求头</option>
-                <option value="body">请求体</option>
+
+        <div
+          id="view-events"
+          role="tabpanel"
+          aria-labelledby="tab-events"
+          hidden
+        >
+          <section class="panel" id="event-panel">
+            <div class="section-head">
+              <div>
+                <h2>安全事件 <span id="event-count" class="count"></span></h2>
+                <p class="hint">
+                  查看命中与跳过事件，区分已拦截、仅记录和未完成检查。
+                </p>
+              </div>
+            </div>
+            <form id="event-search-form" class="list-toolbar" role="search">
+              <input
+                id="event-query"
+                type="search"
+                maxlength="256"
+                placeholder="搜索站点或规则 ID"
+                aria-label="搜索安全事件"
+              />
+              <select id="event-mode" aria-label="处理结果">
+                <option value="">全部结果</option>
+                <option value="deny">已拦截</option>
+                <option value="observe">仅检测</option>
+                <option value="skip">检查未完成</option>
               </select>
-            </label>
-            <label>匹配内容
-              <input name="needle" minlength="2" maxlength="64" required>
-            </label>
-            <button class="btn-secondary" type="submit">添加规则</button>
-            <ul id="custom-list"></ul>
-          </form>
+
+              <button class="btn-secondary" type="submit">查询</button>
+            </form>
+            <p id="event-empty" class="empty-state" hidden>
+              暂无命中或跳过事件。
+            </p>
+            <div class="table-scroll">
+              <table class="events-table">
+                <thead>
+                  <tr>
+                    <th>站点</th>
+                    <th>命中规则 / 原因</th>
+                    <th>处理结果</th>
+                    <th><span class="sr-only">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody id="event-list"></tbody>
+              </table>
+            </div>
+            <nav
+              id="event-pagination"
+              class="pagination"
+              aria-label="安全事件分页"
+            ></nav>
+            <p class="retention-note" id="event-retention"></p>
+          </section>
+        </div>
+
+        <div id="view-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+          <section class="panel" id="rules-panel">
+            <div class="section-head">
+              <div>
+                <h2>防护策略</h2>
+                <p class="hint">先了解检测内容，再为业务添加规则或精确排除。</p>
+              </div>
+              <button id="add-rule" class="btn-primary" type="button">
+                ＋ 添加自定义规则
+              </button>
+            </div>
+            <div class="rule-tabs" role="tablist" aria-label="规则类型">
+              <button
+                id="managed-tab"
+                role="tab"
+                aria-selected="true"
+                aria-controls="managed-rule-panel"
+                type="button"
+              >
+                内置检测 <span id="managed-count" class="count">0</span>
+              </button>
+              <button
+                id="custom-tab"
+                role="tab"
+                aria-selected="false"
+                aria-controls="custom-rule-panel"
+                tabindex="-1"
+                type="button"
+              >
+                自定义规则 <span id="custom-count" class="count">0</span>
+              </button>
+              <button
+                id="exclusion-tab"
+                role="tab"
+                aria-selected="false"
+                aria-controls="exclusion-rule-panel"
+                tabindex="-1"
+                type="button"
+              >
+                排除规则 <span id="exclusion-count" class="count">0</span>
+              </button>
+            </div>
+            <div
+              id="managed-rule-panel"
+              role="tabpanel"
+              aria-labelledby="managed-tab"
+            >
+              <p class="rule-description">
+                基础特征检测：按字面量匹配，不支持完整 CRS、PCRE
+                或异常评分。命中后的处理方式由入口模式决定。
+              </p>
+              <div id="managed-list" class="managed-list"></div>
+            </div>
+            <div
+              id="custom-rule-panel"
+              role="tabpanel"
+              aria-labelledby="custom-tab"
+              hidden
+            >
+              <p class="rule-description">
+                自定义规则作用于当前插件实例的所有节点。添加具体的请求特征，避免过宽匹配。
+              </p>
+              <p id="custom-empty" class="empty-state">
+                还没有自定义规则，内置检测仍然生效。
+              </p>
+              <ul id="custom-list" class="data-list"></ul>
+            </div>
+            <div
+              id="exclusion-rule-panel"
+              role="tabpanel"
+              aria-labelledby="exclusion-tab"
+              hidden
+            >
+              <p class="rule-description">
+                排除指定规则对某个路径前缀的检查，作用于当前插件实例的所有节点。请从已确认的误报创建排除。
+              </p>
+              <p id="exclusion-empty" class="empty-state">
+                还没有排除规则。可从安全事件详情中定位并处理误报。
+              </p>
+              <ul id="exclusion-list" class="data-list"></ul>
+            </div>
+          </section>
+        </div>
+
+        <div id="view-scope" role="tabpanel" aria-labelledby="tab-scope" hidden>
+          <section class="mode-guide">
+            <div>
+              <strong>仅检测</strong>
+              <p>
+                命中规则后记录并放行。用于上线验证和误报排查，观察中不会阻止攻击。
+              </p>
+            </div>
+            <div>
+              <strong>检测并拦截</strong>
+              <p>
+                拒绝命中规则的请求，正常请求继续通行。完成业务验证后再启用。
+              </p>
+            </div>
+          </section>
+          <section class="panel" id="app-list-panel">
+            <div class="section-head">
+              <div>
+                <h2>HTTP 入口 <span id="entry-count" class="count"></span></h2>
+                <p class="hint">按入口设置防护模式，仅影响当前节点。</p>
+              </div>
+              <div class="actions">
+                <button id="global-observe" class="btn-secondary" type="button">
+                  全部仅检测</button
+                ><button id="global-deny" class="btn-primary" type="button">
+                  全部检测并拦截
+                </button>
+              </div>
+            </div>
+            <form id="entry-search-form" class="list-toolbar" role="search">
+              <input
+                id="entry-query"
+                type="search"
+                placeholder="搜索域名、后端或入口 ID"
+                aria-label="搜索 HTTP 入口"
+              /><select id="entry-mode" aria-label="入口防护状态">
+                <option value="">全部状态</option>
+                <option value="observe">仅检测</option>
+                <option value="deny">检测并拦截</option>
+                <option value="skip">需处理</option></select
+              ><button class="btn-secondary" type="submit">查询</button>
+            </form>
+            <p id="app-empty" class="empty-state" hidden>还没有 HTTP 入口。</p>
+            <ul id="entry-list" class="data-list"></ul>
+            <nav
+              id="entry-pagination"
+              class="pagination"
+              aria-label="HTTP 入口分页"
+            ></nav>
+          </section>
         </div>
       </section>
-      <section class="panel" id="event-panel">
-        <h2>命中与跳过事件</h2>
-        <p id="event-empty" class="hint">暂无命中或跳过事件。</p>
-        <ul id="event-list"></ul>
-      </section>
-    </section>
-  </main>
-  <script src="app.js"></script>
-</body>
+    </main>
+    <dialog id="rule-dialog" aria-labelledby="rule-dialog-title">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">防护规则</p>
+          <h2 id="rule-dialog-title">添加自定义规则</h2>
+        </div>
+        <button
+          id="close-rule-dialog"
+          class="btn-icon"
+          aria-label="关闭"
+          type="button"
+        >
+          ×
+        </button>
+      </div>
+      <p id="rule-dialog-error" role="alert" hidden></p>
+      <form id="custom-form" class="stack">
+        <p class="hint">仅支持字面量匹配，不支持正则、CRS 或 PCRE 规则。</p>
+        <label
+          >规则 ID<input
+            name="id"
+            maxlength="32"
+            placeholder="例如 block-admin"
+            required
+          /><span class="field-hint"
+            >使用唯一标识，便于在事件中定位规则。</span
+          ></label
+        >
+        <label
+          >检查目标<select name="target">
+            <option value="path">请求路径</option>
+            <option value="query">查询参数</option>
+            <option value="headers">请求头</option>
+            <option value="body">请求体</option>
+          </select></label
+        >
+        <label
+          >匹配内容<input
+            name="needle"
+            minlength="2"
+            maxlength="64"
+            placeholder="例如 /private/admin"
+            required
+          /><span class="field-hint">输入 2–64 个字符的字面量。</span></label
+        >
+        <div class="dialog-actions">
+          <button class="btn-secondary" data-close-dialog type="button">
+            取消</button
+          ><button class="btn-primary" type="submit">添加规则</button>
+        </div>
+      </form>
+      <form id="exclusion-form" class="stack" hidden>
+        <p class="hint">仅排除指定规则在匹配路径下的检查。</p>
+        <label
+          >规则 ID<input
+            name="rule_id"
+            maxlength="32"
+            placeholder="输入内置或自定义规则 ID"
+            required
+        /></label>
+        <label
+          >路径前缀<input
+            name="path_prefix"
+            maxlength="96"
+            placeholder="/api/health"
+            required
+          /><span class="field-hint"
+            >请尽量缩小排除范围，避免放过不相关请求。</span
+          ></label
+        >
+        <div class="dialog-actions">
+          <button class="btn-secondary" data-close-dialog type="button">
+            取消</button
+          ><button class="btn-primary" type="submit">添加排除</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="event-dialog" aria-labelledby="event-dialog-title">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">请求检查记录</p>
+          <h2 id="event-dialog-title">安全事件详情</h2>
+        </div>
+        <button
+          class="btn-icon"
+          data-close-event
+          type="button"
+          aria-label="关闭事件详情"
+        >
+          ×
+        </button>
+      </div>
+      <div id="event-detail"></div>
+      <p class="hint">
+        确认属于正常业务请求后，再填写范围尽可能小的路径排除。现有事件接口不提供请求路径。
+      </p>
+      <div class="dialog-actions">
+        <button class="btn-secondary" data-close-event type="button">
+          关闭</button
+        ><button id="event-create-exclusion" class="btn-primary" type="button">
+          为此规则添加排除
+        </button>
+      </div>
+    </dialog>
+    <script src="app.js"></script>
+  </body>
 </html>
