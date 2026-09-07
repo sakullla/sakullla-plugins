@@ -2824,6 +2824,85 @@ func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	}
 }
 
+func TestAppUIManualDigestUpdateDiscardsInFlightObservation(t *testing.T) {
+	t.Parallel()
+	current := "sha256:0123456789abcdef0123456789abcdef"
+	latest := "sha256:fedcba9876543210fedcba9876543210"
+	controller := newUIControllerWithOptions(t, uiControllerOptions{rollout: &uiTestRollout{}})
+	created := uiDeployCompose(t, controller, "sample-app", "agent-1", "services:\n  sidecar:\n    image: registry.example.test/sidecar:v1.0.0\n  worker:\n    image: registry.example.test/worker:latest\n")
+	if created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	observer := &heldServiceDigestObserver{
+		uiTestObserver: uiTestObserver{digestByImage: map[string]uiTestDigest{
+			"registry.example.test/sidecar:v1.0.0": {current: "sha256:sidecar", latest: "sha256:sidecar"},
+			"registry.example.test/worker:latest":  {current: current, latest: latest},
+		}},
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	controller.uiImageObserver = observer
+	app := controller.Apps()[0]
+	controller.imageCache[app.ID] = cachedImageObservation{
+		Image: app.Image, ObservedAt: time.Now(),
+		DigestsByImage: map[string]cachedImageDigest{
+			"registry.example.test/worker:latest": {Current: current, Latest: latest},
+		},
+	}
+	controller.imageRefresh[app.ID] = true
+	token, epoch := controller.imageObserveToken[app.ID], controller.imageDeleteEpoch[app.ID]
+	controller.imageSlots <- struct{}{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.observeImageInBackground(app, token, epoch)
+	}()
+	release := sync.OnceFunc(func() { close(observer.release) })
+	t.Cleanup(release)
+	select {
+	case <-observer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background service digest observation did not start")
+	}
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/sample-app/update", `{"services":[{"name":"worker","tag":"latest"}]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background observation did not finish")
+	}
+	gotCurrent, gotLatest, ok := controller.cachedServiceDigest(app.ID, "registry.example.test/worker:latest")
+	if !ok || gotCurrent != latest || gotLatest != latest {
+		t.Fatalf("stale observation overwrote published digest: current=%q latest=%q cached=%v", gotCurrent, gotLatest, ok)
+	}
+	deployment, ok := controllerDeployment(controller, app.ID)
+	if !ok || deployment.ImageDigest != latest || deployment.AvailableDigest != "" {
+		t.Fatalf("stale observation changed published deployment: %#v exists=%v", deployment, ok)
+	}
+}
+
+type heldServiceDigestObserver struct {
+	uiTestObserver
+	started chan struct{}
+	release chan struct{}
+}
+
+func (observer *heldServiceDigestObserver) ObserveImage(ctx context.Context, app App) (UpdateObservation, error) {
+	observed, err := observer.uiTestObserver.ObserveImage(ctx, app)
+	if app.Image == "registry.example.test/worker:latest" {
+		close(observer.started)
+		select {
+		case <-observer.release:
+		case <-ctx.Done():
+			return UpdateObservation{}, ctx.Err()
+		}
+	}
+	return observed, err
+}
+
 func TestAppUIDetailFailedDigestCompareIsTemporary(t *testing.T) {
 	t.Parallel()
 	controller := newUIControllerWithOptions(t, uiControllerOptions{

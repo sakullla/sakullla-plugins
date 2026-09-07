@@ -125,6 +125,14 @@ type Controller struct {
 	imageObserveToken  map[string]uint64
 	imageDeleteEpoch   map[string]uint64
 	imageSlots         chan struct{}
+	imageUpdateLocks   sync.Map // app ID -> *sync.Mutex; serializes observation commits and manual digest updates.
+}
+
+func (controller *Controller) lockImageUpdate(appID string) func() {
+	value, _ := controller.imageUpdateLocks.LoadOrStore(appID, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
 }
 
 type cachedImageObservation struct {

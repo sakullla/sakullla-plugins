@@ -569,7 +569,23 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 	policyChanged := !mapsEqualString(updated.ImageLocks, app.ImageLocks) || !ignoredUpdatesEqual(updated.IgnoredUpdates, app.IgnoredUpdates)
 	digestRequested := floatingDigestUpdateRequested(updated, serviceTags)
 	if digestRequested {
-		app = controller.rememberFloatingDigest(ctx, app, serviceTags)
+		unlock := controller.lockImageUpdate(app.ID)
+		defer unlock()
+		// Keep the selected digest cached while invalidating observations that
+		// started before this update. They must not overwrite the confirmation.
+		controller.mu.Lock()
+		controller.imageObserveToken[app.ID]++
+		controller.imageRefresh[app.ID] = true
+		cached := controller.imageCache[app.ID]
+		cached.Image = app.Image
+		controller.imageCache[app.ID] = cached
+		controller.mu.Unlock()
+		defer controller.allowImageObservation(app.ID)
+		app, err = controller.rememberFloatingDigest(ctx, app, serviceTags)
+		if err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
+			return err
+		}
 	}
 	if !composeChanged && !policyChanged && !digestRequested {
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
@@ -1175,9 +1191,9 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 	return result
 }
 
-func (controller *Controller) rememberFloatingDigest(ctx context.Context, app App, serviceTags map[string]string) App {
+func (controller *Controller) rememberFloatingDigest(ctx context.Context, app App, serviceTags map[string]string) (App, error) {
 	if controller.uiRollout.Store == nil {
-		return app
+		return app, nil
 	}
 	for _, service := range appServiceImages(app) {
 		want, ok := serviceTags[service.Name]
@@ -1196,13 +1212,13 @@ func (controller *Controller) rememberFloatingDigest(ctx context.Context, app Ap
 			}
 		}
 		if current == "" || latest == "" || current == latest {
-			return app
+			return app, nil
 		}
 		disabled := false
-		_, _ = controller.uiRollout.AutoUpdate(ctx, app, &disabled, UpdateObservation{CurrentDigest: current, LatestDigest: latest})
-		return app
+		_, err := controller.uiRollout.AutoUpdate(ctx, app, &disabled, UpdateObservation{CurrentDigest: current, LatestDigest: latest})
+		return app, err
 	}
-	return app
+	return app, nil
 }
 
 func (controller *Controller) markFloatingDigestPublished(app App, serviceTags map[string]string) {
@@ -1451,6 +1467,8 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		observed.TagsByService = tags
 	}
 	extraDigests := controller.observeFloatingServiceDigests(ctx, live)
+	unlock := controller.lockImageUpdate(app.ID)
+	defer unlock()
 	var view UpdateView
 	var autoErr error
 	if observeOK {
