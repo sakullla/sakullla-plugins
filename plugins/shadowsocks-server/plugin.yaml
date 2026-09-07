@@ -1,6 +1,6 @@
 schema_version: 1
 id: shadowsocks-server
-version: 0.1.18
+version: 0.1.19
 name: Shadowsocks 服务
 description: 管理宿主受管 Shadowsocks 入口，并按 GeoSite、GeoIP 或 CIDR 数据集选择直连、拒绝和上游
 compatibility:
