@@ -65,76 +65,84 @@ pub struct WasmHost;
 
 #[cfg(target_arch = "wasm32")]
 impl HostTransport for WasmHost {
+    #[inline(always)]
     fn call(&mut self, import: HostImport, request: &[u8], response: &mut [u8]) -> u64 {
-        let request_ptr = request.as_ptr() as u32;
-        let request_len = request.len() as u32;
-        let response_ptr = response.as_mut_ptr() as u32;
-        let response_capacity = response.len() as u32;
-        // SAFETY: the canonical Host ABI reads only the request range and writes
-        // at most response_capacity bytes to the caller-owned response range.
+        let args = (
+            request.as_ptr() as u32,
+            request.len() as u32,
+            response.as_mut_ptr() as u32,
+            response.len() as u32,
+        );
+        // Optional capabilities must disappear when no typed caller uses them.
+        // The six original ABI imports remain mandatory even when unused.
         unsafe {
             match import {
-                HostImport::ReadField => abi_generated::nre_host_read_field(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::ReadNormalizedHttp => abi_generated::nre_host_read_normalized_http(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::ReadTrustedSource => abi_generated::nre_host_read_trusted_source(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::DatasetQuery => abi_generated::nre_host_dataset_query(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::DatasetResolve => abi_generated::nre_host_dataset_resolve(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::ReadBodyWindow => abi_generated::nre_host_read_body_window(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::StateGet => abi_generated::nre_host_state_get(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::StatePut => abi_generated::nre_host_state_put(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::EmitEvent => abi_generated::nre_host_emit_event(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
-                HostImport::AddMetric => abi_generated::nre_host_add_metric(
-                    request_ptr,
-                    request_len,
-                    response_ptr,
-                    response_capacity,
-                ),
+                HostImport::ReadNormalizedHttp => {
+                    abi_generated::nre_host_read_normalized_http(args.0, args.1, args.2, args.3)
+                }
+                HostImport::ReadTrustedSource => {
+                    abi_generated::nre_host_read_trusted_source(args.0, args.1, args.2, args.3)
+                }
+                HostImport::DatasetQuery => {
+                    abi_generated::nre_host_dataset_query(args.0, args.1, args.2, args.3)
+                }
+                HostImport::DatasetResolve => {
+                    abi_generated::nre_host_dataset_resolve(args.0, args.1, args.2, args.3)
+                }
+                _ => call_required_host(import, request, response),
             }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn call_required_host(import: HostImport, request: &[u8], response: &mut [u8]) -> u64 {
+    let request_ptr = request.as_ptr() as u32;
+    let request_len = request.len() as u32;
+    let response_ptr = response.as_mut_ptr() as u32;
+    let response_capacity = response.len() as u32;
+    // SAFETY: the canonical Host ABI reads only the request range and writes
+    // at most response_capacity bytes to the caller-owned response range.
+    unsafe {
+        match import {
+            HostImport::ReadField => abi_generated::nre_host_read_field(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            HostImport::ReadBodyWindow => abi_generated::nre_host_read_body_window(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            HostImport::StateGet => abi_generated::nre_host_state_get(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            HostImport::StatePut => abi_generated::nre_host_state_put(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            HostImport::EmitEvent => abi_generated::nre_host_emit_event(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            HostImport::AddMetric => abi_generated::nre_host_add_metric(
+                request_ptr,
+                request_len,
+                response_ptr,
+                response_capacity,
+            ),
+            _ => crate::pack_host_result(AbiStatus::PermissionDenied, 0),
         }
     }
 }
@@ -326,6 +334,7 @@ where
         self.invoke_empty(HostImport::AddMetric, request_length)
     }
 
+    #[inline(always)]
     fn invoke_empty(
         &mut self,
         import: HostImport,
@@ -341,6 +350,10 @@ where
         Ok(())
     }
 
+    // Keep the import constant through the transport boundary. Outlining this
+    // dispatch retains unused WASM imports and requests capabilities that the
+    // guest neither uses nor declares in its signed manifest.
+    #[inline(always)]
     fn invoke(&mut self, import: HostImport, request_length: usize) -> Result<usize, GuestError> {
         let first_capacity = self.limits.initial_response_bytes;
         let (mut status, mut length) = self.call_once(import, request_length, first_capacity)?;
@@ -370,6 +383,7 @@ where
         Ok(written)
     }
 
+    #[inline(always)]
     fn call_once(
         &mut self,
         import: HostImport,
