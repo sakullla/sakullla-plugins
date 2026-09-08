@@ -63,6 +63,21 @@ export async function runCompanion({Page,eventually,findBrowser,repo}) {
     assert.equal(await page.evaluate(`document.querySelector('#companion-assistant').dataset.expression`),"wink");
     await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant').dataset.expression==='idle'`),"tap expression returns to idle");
     console.log("PASS generated portrait blinks automatically and responds with a matching wink");
+    await page.send("Network.enable");
+    await page.send("Network.setCacheDisabled",{cacheDisabled:true});
+    await page.send("Network.clearBrowserCache");
+    await page.send("Network.emulateNetworkConditions",{offline:true,latency:0,downloadThroughput:0,uploadThroughput:0});
+    try {
+      await page.click("#companion-toggle");
+      await page.evaluate(`document.querySelector('.companion-portrait').decode()`);
+      assert.ok(await page.evaluate(`document.querySelector('.companion-portrait').naturalWidth>=900`),"preloaded expression stays visible when server is unreachable");
+      await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant').dataset.expression==='idle'`),"offline expression returns to idle");
+      await page.evaluate(`document.querySelector('.companion-portrait').decode()`);
+      await capture("portrait-offline");
+      console.log("PASS loaded portrait and expressions survive an unreachable preview server");
+    } finally {
+      await page.send("Network.emulateNetworkConditions",{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1});
+    }
     await capture("reference-desktop");
     for(const width of [320,375]) {
       await page.send("Emulation.setDeviceMetricsOverride",{width,height:900,deviceScaleFactor:1,mobile:false});

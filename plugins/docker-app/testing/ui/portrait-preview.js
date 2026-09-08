@@ -3,9 +3,25 @@
   if(document.readyState==="loading")await new Promise(resolve=>document.addEventListener("DOMContentLoaded",resolve,{once:true}));
   const companion=document.querySelector("#companion-assistant"),toggle=document.querySelector("#companion-toggle");
   companion.dataset.renderer="loading";
-  const portrait=new Image();portrait.className="companion-portrait";portrait.alt="";portrait.draggable=false;
-  portrait.src="/__preview/live2d/reference/character.webp";
-  try {await portrait.decode();} catch {companion.dataset.renderer="failed";return;}
+  // A decoded HTTP URL can be fetched again when assigned to another image.
+  // Keep validated image bytes locally so animation survives a server outage.
+  const imageURLs=new Set();
+  const loadImage=async path=>{
+    const response=await fetch(path);
+    if(!response.ok)throw new Error("Portrait image is unavailable");
+    const url=URL.createObjectURL(await response.blob());
+    const image=new Image();image.src=url;
+    try {await image.decode();} catch(error) {URL.revokeObjectURL(url);throw error;}
+    imageURLs.add(url);
+    return image;
+  };
+  window.addEventListener("pagehide",event=>{
+    if(!event.persisted)for(const url of imageURLs)URL.revokeObjectURL(url);
+  });
+  let portrait;
+  try {portrait=await loadImage("/__preview/live2d/reference/character.webp");}
+  catch {companion.dataset.renderer="failed";return;}
+  portrait.className="companion-portrait";portrait.alt="";portrait.draggable=false;
   const artwork=await fetch("/__preview/live2d/reference/character.json").then(r=>r.ok?r.json():null).catch(()=>null);
   toggle.querySelector(".console-companion")?.remove();toggle.prepend(portrait);companion.dataset.renderer="portrait";
   document.querySelector("#companion-title").textContent=artwork?.title || "白发猫耳 · 立绘预览";
@@ -22,8 +38,8 @@
   const frames={idle:portrait.src};
   await Promise.all(Object.entries(artwork?.expressions || {}).map(async ([name,file])=>{
     if(!["idle","blink","wink"].includes(name)||!/^[a-zA-Z0-9_-]+\.webp$/.test(file))return;
-    const frame=new Image();frame.src=`/__preview/live2d/reference/${file}`;
-    try {await frame.decode();frames[name]=frame.src;} catch { /* Keep the usable neutral portrait. */ }
+    try {const frame=await loadImage(`/__preview/live2d/reference/${file}`);frames[name]=frame.src;}
+    catch { /* Keep the usable neutral portrait. */ }
   }));
   companion.dataset.expressionFrames=String(Object.keys(frames).length);
   let blinkTimer,restoreTimer,taps=0,blinkCount=0;
