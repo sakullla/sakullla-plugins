@@ -57,6 +57,12 @@ export async function runCompanion({Page,eventually,findBrowser,repo}) {
     await page.send("Page.navigate",{url:"http://127.0.0.1:4173/?agent_id=node-a"});
     await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer==='portrait'`),"reference portrait loaded");
     assert.ok(await page.evaluate(`document.querySelector('.companion-portrait').naturalWidth >= 900`),"portrait retains high resolution source pixels");
+    await eventually(()=>page.evaluate(`Number(document.querySelector('#companion-assistant').dataset.expressionFrames)>=3`),"matching expression frames preloaded");
+    await eventually(()=>page.evaluate(`Number(document.querySelector('#companion-assistant').dataset.blinkCount)>0`),"automatic portrait blink",8000);
+    await page.click("#companion-toggle");
+    assert.equal(await page.evaluate(`document.querySelector('#companion-assistant').dataset.expression`),"wink");
+    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant').dataset.expression==='idle'`),"tap expression returns to idle");
+    console.log("PASS generated portrait blinks automatically and responds with a matching wink");
     await capture("reference-desktop");
     for(const width of [320,375]) {
       await page.send("Emulation.setDeviceMetricsOverride",{width,height:900,deviceScaleFactor:1,mobile:false});

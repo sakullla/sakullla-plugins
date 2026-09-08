@@ -19,10 +19,44 @@
   dialog.append(full,close);document.body.append(dialog);
   close.addEventListener("click",()=>dialog.close());zoom.addEventListener("click",()=>{dialog.showModal();close.focus();});
   let paused=matchMedia("(prefers-reduced-motion: reduce)").matches;
-  companion.dataset.motion=paused?"paused":"playing";
+  const frames={idle:portrait.src};
+  await Promise.all(Object.entries(artwork?.expressions || {}).map(async ([name,file])=>{
+    if(!["idle","blink","wink"].includes(name)||!/^[a-zA-Z0-9_-]+\.webp$/.test(file))return;
+    const frame=new Image();frame.src=`/__preview/live2d/reference/${file}`;
+    try {await frame.decode();frames[name]=frame.src;} catch { /* Keep the usable neutral portrait. */ }
+  }));
+  companion.dataset.expressionFrames=String(Object.keys(frames).length);
+  let blinkTimer,restoreTimer,taps=0,blinkCount=0;
+  const setFrame=name=>{portrait.src=frames[name] || frames.idle;companion.dataset.expression=name;};
+  const visible=()=>!document.hidden&&companion.dataset.minimized!=="true"&&!document.querySelector("dialog[open]");
+  const clear=()=>{clearTimeout(blinkTimer);clearTimeout(restoreTimer);};
+  const scheduleBlink=()=>{
+    clearTimeout(blinkTimer);
+    if(paused||!visible()||!frames.blink)return;
+    blinkTimer=setTimeout(()=>{
+      if(paused||!visible())return;
+      setFrame("blink");companion.dataset.blinkCount=String(++blinkCount);
+      restoreTimer=setTimeout(()=>{setFrame("idle");scheduleBlink();},145);
+    },2800+Math.random()*2500);
+  };
+  const sync=()=>{clear();setFrame("idle");companion.dataset.motion=paused?"paused":"playing";scheduleBlink();};
   document.addEventListener("companion-motion",()=>{
-    if(paused)return;
-    portrait.animate([{transform:"translateY(0)"},{transform:"translateY(-7px) rotate(-2deg)",offset:.4},{transform:"translateY(0)"}],{duration:650,easing:"ease-in-out"});
+    if(paused||!visible())return;
+    clear();
+    if(frames.wink&&frames.blink){
+      setFrame(taps++%2 ? "blink" : "wink");
+      companion.dataset.lastInteraction=String(Date.now());
+      restoreTimer=setTimeout(()=>{setFrame("idle");scheduleBlink();},850);
+    } else {
+      portrait.animate([{transform:"translateY(0)"},{transform:"translateY(-4px)",offset:.4},{transform:"translateY(0)"}],{duration:450,easing:"ease-in-out"});
+      scheduleBlink();
+    }
   });
-  document.addEventListener("companion-pause",event=>{paused=event.detail.paused;companion.dataset.motion=paused?"paused":"playing";});
+  document.addEventListener("companion-pause",event=>{paused=event.detail.paused;sync();});
+  document.addEventListener("visibilitychange",sync);
+  new MutationObserver(sync).observe(companion,{attributes:true,attributeFilter:["data-minimized"]});
+  new MutationObserver(sync).observe(document.body,{subtree:true,attributes:true,attributeFilter:["open"]});
+  const preference=matchMedia("(prefers-reduced-motion: reduce)");
+  preference.addEventListener("change",()=>{paused=preference.matches;sync();});
+  sync();
 })();
