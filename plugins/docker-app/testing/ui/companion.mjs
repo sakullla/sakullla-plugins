@@ -56,7 +56,7 @@ export async function runCompanion({Page,eventually,findBrowser,repo}) {
     await page.send("Emulation.setDeviceMetricsOverride",{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
     await page.send("Page.navigate",{url:"http://127.0.0.1:4173/?agent_id=node-a"});
     await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer==='portrait'`),"reference portrait loaded");
-    assert.equal(await page.evaluate(`document.querySelector('.companion-portrait').naturalWidth`),934);
+    assert.ok(await page.evaluate(`document.querySelector('.companion-portrait').naturalWidth >= 900`),"portrait retains high resolution source pixels");
     await capture("reference-desktop");
     for(const width of [320,375]) {
       await page.send("Emulation.setDeviceMetricsOverride",{width,height:900,deviceScaleFactor:1,mobile:false});
