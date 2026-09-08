@@ -3101,7 +3101,12 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
     syncListPanel();
-    if (previousNavigation.view !== "detail" || previousNavigation.app !== appID) detailTitle?.focus();
+    if (previousNavigation.view !== "detail" || previousNavigation.app !== appID) {
+      detailTitle?.focus();
+      // Leave application controls clear when entering a management view.
+      document.querySelector("#companion-assistant").dataset.minimized = "true";
+      document.querySelector("#companion-toggle").setAttribute("aria-label", "展开看板娘");
+    }
     return !app.rules_error;
   } catch (error) {
     if (!navigationCurrent(navigation) || request !== detailRequest) return;

@@ -18,6 +18,8 @@ import (
 //go:embed assets/ui/*
 var appUIAssets embed.FS
 
+const appUIContentSecurityPolicy = pluginsdk.PluginUIContentSecurityPolicy + "; img-src 'self' blob:"
+
 const (
 	appActorHeader                      = pluginsdk.HeaderPluginActor
 	appOperationHeader                  = pluginsdk.HeaderPluginOperationKey
@@ -137,7 +139,7 @@ type riskItemView struct {
 }
 
 func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
+	pluginsdk.SetPluginUIResponseHeadersWithPolicy(writer.Header(), appUIContentSecurityPolicy)
 	if pluginsdk.ServePluginUIAsset(writer, request, appUIAssets, "assets/ui") {
 		return
 	}

@@ -3441,6 +3441,7 @@ main { padding-bottom: 13rem; }
 .companion-assistant.is-yielding { opacity: 0; pointer-events: none; }
 .companion-assistant.is-yielding * { pointer-events: none; }
 body:has(dialog[open]) .companion-assistant { visibility: hidden; }
+body:has(#app-create:not([hidden]), #detail-compose:not([hidden]), #files-editor:not([hidden])) .companion-assistant { visibility: hidden; }
 @keyframes companion-breathe { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-4px) rotate(1deg); } }
 @media (max-width: 520px) {
   .companion-assistant { right: .65rem; bottom: max(.75rem, env(safe-area-inset-bottom)); }

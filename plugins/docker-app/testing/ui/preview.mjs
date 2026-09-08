@@ -1,3 +1,4 @@
+import { UI_ASSETS, assetContentType } from "./assets.mjs";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -95,13 +96,19 @@ const server = createServer(async (request, response) => {
       return;
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html","app.js","style.css"].includes(name) || request.method !== "GET") return json({error:"Not found"},404);
-    let content = await readFile(new URL(name, assets),"utf8");
+    if (!UI_ASSETS.includes(name) || request.method !== "GET") return json({error:"Not found"},404);
+    let content = await readFile(new URL(name, assets));
     if (name === "index.html") {
-      const renderer=url.searchParams.get("companion")==="live2d" ? "live2d" : "portrait";
-      content = content.replace("</body>", previewControls+`<script src="/__preview/${renderer}-runner.js" defer></script></body>`);
+      content = content.toString("utf8");
+      const renderer=url.searchParams.get("companion");
+      if (["live2d", "portrait"].includes(renderer)) {
+        content=content.replace("</head>", '<meta name="nre-companion-preview" content="custom"></head>');
+        const type=renderer === "portrait" ? 'type="module"' : 'defer';
+        content=content.replace("</body>", `<script src="/__preview/${renderer}-runner.js" ${type}></script></body>`);
+      }
+      content=content.replace("</body>",previewControls+"</body>");
     }
-    response.writeHead(200,{"Content-Type":name.endsWith("js")?"text/javascript; charset=utf-8":name.endsWith("css")?"text/css; charset=utf-8":"text/html; charset=utf-8","Cache-Control":"no-store"}); response.end(content);
+    response.writeHead(200,{"Content-Type":assetContentType(name),"Cache-Control":"no-store"}); response.end(content);
   } catch (error) {json({error:String(error.message)},500);}
 });
 server.listen(port,"127.0.0.1",()=>console.log(`Docker app preview: http://127.0.0.1:${port}/?agent_id=node-a\nAssets: ${fileURLToPath(assets)}\nMock data only. Ctrl+C to stop.`));

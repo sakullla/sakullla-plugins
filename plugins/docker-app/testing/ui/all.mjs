@@ -1,3 +1,4 @@
+import { UI_ASSETS } from "./assets.mjs";
 import { spawn } from "node:child_process";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -6,7 +7,7 @@ import { createHash } from "node:crypto";
 export async function runAll({runner,repo,assets}) {
   const started = new Date().toISOString();
   const digest = createHash("sha256");
-  for (const name of ["index.html","app.js","style.css"]) digest.update(await readFile(resolve(assets,name)));
+  for (const name of UI_ASSETS) digest.update(await readFile(resolve(assets,name)));
   const fingerprint = digest.digest("hex");
   const suites = ["workspace","compose","operations","resources","experience"];
   const report = {kind:"fixture-browser-aggregate",suite:"all",started_at:started,assets_sha256:fingerprint,results:[]};

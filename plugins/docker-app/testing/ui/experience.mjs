@@ -7,6 +7,27 @@ function contrast(foreground,background) {
 }
 
 export async function runExperience({page,test,navigate,capture,eventually,origin}) {
+  await test("packaged companion loads without preview routes and keeps frames offline",async () => {
+    await page.send("Emulation.setDeviceMetricsOverride",{width:1440,height:900,deviceScaleFactor:1,mobile:false});
+    await navigate("?agent_id=node-a");
+    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.expressionFrames==='3'`),"packaged expression frames loaded");
+    const resources=await page.evaluate(`performance.getEntriesByType('resource').map(entry=>new URL(entry.name).pathname)`);
+    for (const name of ["companion.js","companion-idle.webp","companion-blink.webp","companion-wink.webp"]) assert.ok(resources.includes('/'+name),`packaged asset ${name} loaded`);
+    assert.ok(!resources.some(path=>path.startsWith('/__preview/')),"companion needs no development server routes");
+    await page.send("Network.enable");
+    await page.send("Network.emulateNetworkConditions",{offline:true,latency:0,downloadThroughput:0,uploadThroughput:0});
+    try {
+      await page.click("#companion-toggle");
+      await page.evaluate(`document.querySelector('.companion-portrait').decode()`);
+      assert.equal(await page.evaluate(`document.querySelector('#companion-assistant').dataset.expression`),"wink");
+      await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant').dataset.expression==='idle'`),"offline return to idle");
+      await page.evaluate(`document.querySelector('.companion-portrait').decode()`);
+    } finally {
+      await page.send("Network.emulateNetworkConditions",{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1});
+    }
+    await capture("packaged-companion",1440);
+  });
+
   await test("mobile header keeps node names on one line and the companion docks outside it",async () => {
     await navigate("?agent_id=node-a");
     await page.evaluate(`(() => {const label=document.querySelector('.agent-search-select__label');label.textContent='debian-jnp12（预览）';})()`);

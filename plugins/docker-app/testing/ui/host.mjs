@@ -1,3 +1,4 @@
+import { UI_ASSETS } from "./assets.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { readFile, writeFile, mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -53,7 +54,7 @@ export async function runHost({Page,eventually,findBrowser,repo,assets}) {
     report.app_id=appID;
     report.source_commit=spawnSync("git",["rev-parse","HEAD"],{cwd:repo,encoding:"utf8",windowsHide:true}).stdout.trim();
     const fingerprint=createHash("sha256");
-    for (const name of ["index.html","app.js","style.css"]) fingerprint.update(await readFile(resolve(assets,name)));
+    for (const name of UI_ASSETS) fingerprint.update(await readFile(resolve(assets,name)));
     report.assets_sha256=fingerprint.digest("hex");
     const scene=async(name,run)=>{console.log(`HOST ${name}: running`);const result=await run();report.results.push({name,status:"passed",result});await persist();console.log(`HOST ${name}: passed`);};
     const verifyCandidate=async()=>{
@@ -63,7 +64,7 @@ export async function runHost({Page,eventually,findBrowser,repo,assets}) {
       assert.equal(agent?.package_digest,config.packageDigest,"Agent must execute the same candidate");
       assert.ok(plugin.instances?.some((instance)=>instance.targets?.includes(config.agentID)),"test Agent must be explicitly targeted");
       const files=[];
-      for (const name of ["index.html","app.js","style.css"]) {
+      for (const name of UI_ASSETS) {
         const response=await fetch(appURL(name==="index.html" ? "" : name),{headers:{"X-Panel-Token":token},cache:"no-store"});
         assert.equal(response.status,200);
         const served=Buffer.from(await response.arrayBuffer()),local=await readFile(resolve(assets,name));

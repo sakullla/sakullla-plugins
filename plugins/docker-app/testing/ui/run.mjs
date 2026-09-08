@@ -1,3 +1,4 @@
+import { UI_ASSETS, assetContentType, FIXTURE_ASSET_CSP } from "./assets.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -206,8 +207,8 @@ const server = createServer(async (request, response) => {
       return;
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "app.js", "style.css"].includes(name)) { response.writeHead(404); response.end(); return; }
-    response.writeHead(200, { "Content-Type": name.endsWith("js") ? "text/javascript" : name.endsWith("css") ? "text/css" : "text/html" });
+    if (!UI_ASSETS.includes(name)) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { "Content-Type": assetContentType(name), "Content-Security-Policy": FIXTURE_ASSET_CSP });
     response.end(await readFile(join(assets, name)));
   } catch (error) { response.writeHead(500); response.end(String(error)); }
 });
@@ -591,7 +592,7 @@ try {
   evidence.status = "passed";
   evidence.browser = executable;
   const hash = createHash("sha256");
-  for (const name of ["index.html", "app.js", "style.css"]) hash.update(await readFile(join(assets, name)));
+  for (const name of UI_ASSETS) hash.update(await readFile(join(assets, name)));
   evidence.assets_sha256 = hash.digest("hex");
 } catch (error) {
   if (page) {

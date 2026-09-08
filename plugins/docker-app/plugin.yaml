@@ -35,6 +35,11 @@ assets:
   - assets/ui/index.html
   - assets/ui/app.js
   - assets/ui/style.css
+  - assets/ui/companion.js
+  - assets/ui/companion-idle.webp
+  - assets/ui/companion-blink.webp
+  - assets/ui/companion-wink.webp
+  - assets/companion-art.json
 permissions:
   - name: http.rule
   - name: ui.dynamic

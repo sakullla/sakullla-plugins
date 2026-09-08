@@ -1,0 +1,29 @@
+{
+  "origin": "Original AI-generated character and matching expression edit",
+  "model": "gpt-image-2",
+  "generated": 1788868918,
+  "animation": "Aligned raster expression frames, not a rigged Live2D model",
+  "assets": [
+    {
+      "path": "companion-idle.webp",
+      "width": 1024,
+      "height": 1140,
+      "bytes": 336442,
+      "sha256": "9d776ff88c4c2ad36289cae9f9f1cc059d7614250e8c6e6f609108ef9ec55655"
+    },
+    {
+      "path": "companion-blink.webp",
+      "width": 1024,
+      "height": 1140,
+      "bytes": 333446,
+      "sha256": "d1ed01aea3382feea61b60318f50a71f8b8dd4df3136466402d9050608c131ee"
+    },
+    {
+      "path": "companion-wink.webp",
+      "width": 1024,
+      "height": 1140,
+      "bytes": 334774,
+      "sha256": "755005495e04f9798198a1908cac032e2223e322ee5185327acd3ae1e7280f71"
+    }
+  ]
+}

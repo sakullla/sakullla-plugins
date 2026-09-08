@@ -59,22 +59,33 @@ files, logs, and HTTP entries. It never connects to Docker or a production host.
 The preview-only controls switch light/night themes and reset sample data.
 Stop the server with Ctrl+C.
 
-The current local artwork study uses a user-provided reference cutout at
-`dist/docker-app-live2d-preview/reference/character.webp`. It is a portrait
-preview, not a rigged Live2D model, and is not included in the plugin package.
-To prepare a different reference, run `python plugins/docker-app/testing/ui/prepare-portrait.py /path/to/reference.jpg`
+The plugin package includes its original AI-generated companion artwork,
+`companion.js`, and neutral/blink/wink WebP frames. Each frame is below the
+1 MiB response budget. The page loads these package-local assets directly;
+there is no dependency on `dist/`, a preview server, a model CDN, or an image
+API. The image CSP permits same-origin assets and validated in-memory blob
+images, so loaded expressions continue working through a connection outage.
+The companion uses aligned raster expression frames; it is not a completed
+Cubism mesh model. Full Live2D mesh/deformer binding and `.moc3` export remain
+outstanding. Artwork provenance is recorded in `assets/companion-art.json`.
+
+For local art experiments, add `&companion=portrait` to use
+`dist/docker-app-live2d-preview/reference/character.webp` and its optional
+expression metadata. To prepare a reference, run
+`python plugins/docker-app/testing/ui/prepare-portrait.py /path/to/reference.jpg`
 with Pillow, NumPy, and ONNX Runtime installed. The reference stays local;
 the script downloads the Apache-2.0 anime segmentation model from SkyTNT.
-For the separate motion evaluation, run `node plugins/docker-app/testing/ui/prepare-live2d.mjs`
-and open the preview with `&companion=live2d`. This downloads the official Hiyori
-Momose sample and pinned renderer dependencies into ignored `dist/` storage.
-This content uses sample data owned and copyrighted by Live2D Inc.; the sample
-remains subject to the [sample terms](https://www.live2d.com/en/learn/sample/model-terms/)
+For the separate Live2D runtime evaluation, run
+`node plugins/docker-app/testing/ui/prepare-live2d.mjs` and open the preview
+with `&companion=live2d`. This downloads the official Hiyori Momose sample and
+pinned renderer dependencies into ignored `dist/` storage. These third-party
+sample assets and runtimes are not included in official plugin packages.
+This evaluation uses sample data owned and copyrighted by Live2D Inc.; the
+sample is subject to the [sample terms](https://www.live2d.com/en/learn/sample/model-terms/)
 and [Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html).
-Neither evaluation artwork nor third-party runtimes are published as official
-assets. `node plugins/docker-app/testing/ui/run.mjs --suite companion` checks
-the running local preview, actual idle-frame changes, motion pause, mobile
-placement, and the high-resolution reference image.
+`node plugins/docker-app/testing/ui/run.mjs --suite companion` checks the
+running local preview, actual sample-model idle-frame changes, motion pause,
+mobile placement, and the packaged companion's expression animation.
 
 Docker Hub metadata checks use the Agent Docker daemon's effective
 `RegistryConfig.Mirrors`, including standard Registry tag endpoints and the

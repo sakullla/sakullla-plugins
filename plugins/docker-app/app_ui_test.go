@@ -1,6 +1,7 @@
 package dockerapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,45 @@ import (
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
+
+func TestAppUIShipsCompanionAssets(t *testing.T) {
+	t.Parallel()
+	manifest, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newUIController(t)
+	for _, name := range []string{"companion.js", "companion-idle.webp", "companion-blink.webp", "companion-wink.webp"} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(string(manifest), "- assets/ui/"+name) {
+				t.Fatalf("asset omitted from package: %s", name)
+			}
+			want, err := appUIAssets.ReadFile("assets/ui/" + name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			controller.ServeHTTP(response, uiRequest(http.MethodGet, "/"+name, ""))
+			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), want) {
+				t.Fatalf("asset response status=%d bytes=%d", response.Code, response.Body.Len())
+			}
+			if len(want) >= 1<<20 {
+				t.Fatalf("asset exceeds plugin response budget: %d", len(want))
+			}
+			if strings.HasSuffix(name, ".webp") && response.Header().Get("Content-Type") != "image/webp" {
+				t.Fatalf("unexpected media type %q", response.Header().Get("Content-Type"))
+			}
+		})
+	}
+	page := httptest.NewRecorder()
+	controller.ServeHTTP(page, uiRequest(http.MethodGet, "/", ""))
+	if !strings.Contains(page.Body.String(), `src="companion.js"`) {
+		t.Fatal("page does not load packaged companion")
+	}
+	if page.Header().Get("Content-Security-Policy") != appUIContentSecurityPolicy {
+		t.Fatal("companion local image policy not applied")
+	}
+}
 
 func TestPluginYAMLDeclaresUIRouteNotHostPage(t *testing.T) {
 	t.Parallel()
