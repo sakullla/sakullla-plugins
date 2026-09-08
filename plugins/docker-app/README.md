@@ -47,6 +47,35 @@ private Host wire contract substitutes for the remaining public grants.
 
 ## UI validation
 
+For an interactive local preview, run:
+
+```sh
+node plugins/docker-app/testing/ui/preview.mjs --port 4173
+```
+
+Open `http://127.0.0.1:4173/?agent_id=node-a`. The preview reads the current UI
+assets on each request and uses in-memory fixtures for application operations,
+files, logs, and HTTP entries. It never connects to Docker or a production host.
+The preview-only controls switch light/night themes and reset sample data.
+Stop the server with Ctrl+C.
+
+The current local artwork study uses a user-provided reference cutout at
+`dist/docker-app-live2d-preview/reference/character.webp`. It is a portrait
+preview, not a rigged Live2D model, and is not included in the plugin package.
+To prepare a different reference, run `python plugins/docker-app/testing/ui/prepare-portrait.py /path/to/reference.jpg`
+with Pillow, NumPy, and ONNX Runtime installed. The reference stays local;
+the script downloads the Apache-2.0 anime segmentation model from SkyTNT.
+For the separate motion evaluation, run `node plugins/docker-app/testing/ui/prepare-live2d.mjs`
+and open the preview with `&companion=live2d`. This downloads the official Hiyori
+Momose sample and pinned renderer dependencies into ignored `dist/` storage.
+This content uses sample data owned and copyrighted by Live2D Inc.; the sample
+remains subject to the [sample terms](https://www.live2d.com/en/learn/sample/model-terms/)
+and [Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html).
+Neither evaluation artwork nor third-party runtimes are published as official
+assets. `node plugins/docker-app/testing/ui/run.mjs --suite companion` checks
+the running local preview, actual idle-frame changes, motion pause, mobile
+placement, and the high-resolution reference image.
+
 Docker Hub metadata checks use the Agent Docker daemon's effective
 `RegistryConfig.Mirrors`, including standard Registry tag endpoints and the
 `accelerator-sources` `/api/tags` catalog. Pagination stays on the configured

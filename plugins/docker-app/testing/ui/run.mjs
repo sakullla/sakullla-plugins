@@ -14,6 +14,7 @@ import { runResources } from "./resources.mjs";
 import { runExperience } from "./experience.mjs";
 import { runAll } from "./all.mjs";
 import { runHost } from "./host.mjs";
+import { runCompanion } from "./companion.mjs";
 import { createResourcesState, handleResourcesRequest } from "./fixtures/resources.mjs";
 import { createOperationsState, handleOperationsRequest } from "./fixtures/operations.mjs";
 
@@ -21,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const assets = resolve(here, "../../assets/ui");
 const suite = process.argv[process.argv.indexOf("--suite") + 1];
-if (!["workspace", "compose", "operations", "resources", "experience", "all", "host"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
+if (!["workspace", "compose", "operations", "resources", "experience", "all", "host", "companion"].includes(suite)) throw new Error(`Suite ${suite || "<missing>"} is not implemented; no tests were run.`);
 
 if (suite === "all") {
   try { await runAll({runner:fileURLToPath(import.meta.url),repo,assets}); }
@@ -89,6 +90,8 @@ class Page {
       if (!node || node.disabled || !node.getClientRects().length) throw new Error('Unreachable control: ' + ${JSON.stringify(selector)});
       node.scrollIntoView({block:'center'});
       const r = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+      if (hit && !node.contains(hit)) throw new Error('Covered control: ' + ${JSON.stringify(selector)} + ' by ' + hit.tagName + '#' + hit.id + '.' + hit.className);
       return {x:r.x+r.width/2, y:r.y+r.height/2};
     })()`);
     await this.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
@@ -111,6 +114,12 @@ class Page {
     assert.ok(index >= 0, `node option ${id}`);
     await this.click(`.agent-search-select__option:nth-child(${index + 1})`);
   }
+}
+
+if (suite === "companion") {
+  try {await runCompanion({Page,eventually,findBrowser,repo});}
+  catch(error) {console.error(error);process.exitCode=1;}
+  process.exit(process.exitCode || 0);
 }
 
 if (suite === "host") {
@@ -306,11 +315,11 @@ try {
           const card = document.querySelector('.app-card');
           const image = card.querySelector('[data-app-image]');
           const r = image.getBoundingClientRect(), h = card.querySelector('.app-card-head').getBoundingClientRect();
-          return {images:[...image.querySelectorAll('.app-card-image')].map(n=>n.textContent), imageTop:r.top, headBottom:h.bottom, imageWidth:r.width, headWidth:h.width,
+          return {images:[...image.querySelectorAll('.app-card-image')].map(n=>n.textContent), imageLeft:r.left, headRight:h.right, imageTop:r.top, headBottom:h.bottom, imageWidth:r.width, headWidth:h.width,
             actions:[...card.querySelectorAll('.app-card-actions button')].filter(n=>n.getClientRects().length).map(n=>n.textContent)};
         })()`);
         assert.deepEqual(layout.images, ["example/gateway:v1.2.3", "example/worker:latest"]);
-        assert.ok(layout.imageTop >= layout.headBottom && layout.imageWidth >= layout.headWidth - 1, "images use the card width below the identity");
+        assert.ok(width > 850 ? layout.imageLeft >= layout.headRight : layout.imageTop >= layout.headBottom, "identity and service images occupy separate regions");
         assert.deepEqual(layout.actions, ["详情"]);
         await capture("multi-service-card", width);
       }
@@ -333,7 +342,7 @@ try {
         })()`);
         assert.ok(layout.left >= 0 && layout.right <= layout.client, `menu stays within viewport: ${JSON.stringify(layout)}`);
         if (width >= 721) assert.ok(layout.width >= 400, "desktop dropdown is wider than the compact trigger");
-        assert.ok(layout.nameHeight <= layout.lineHeight + 1 && layout.nameScroll <= layout.nameWidth, "ordinary node names fit on one line");
+        assert.ok(layout.nameHeight <= layout.lineHeight + 1 && layout.nameScroll <= layout.nameWidth, `ordinary node names fit on one line at ${width}: ${JSON.stringify(layout)}`);
         await capture("node-menu", width);
       }
     } finally { agents.splice(0, agents.length, ...original); }
@@ -448,8 +457,7 @@ try {
         return {count: cards.length, rows, refreshWidth: refresh.width, pickerWidth: picker.width};
       })()`);
       assert.ok(grid.refreshWidth < grid.pickerWidth, `refresh is not a stretched primary at ${width}: ${JSON.stringify(grid)}`);
-      if (width <= 375) assert.equal(grid.rows, grid.count, `narrow list is a single card column at ${width}: ${JSON.stringify(grid)}`);
-      if (width >= 1440) assert.ok(grid.rows < grid.count, `wide list is a card grid at ${width}: ${JSON.stringify(grid)}`);
+      assert.equal(grid.rows, grid.count, `applications remain separate information rows at ${width}: ${JSON.stringify(grid)}`);
       const bounds = await page.evaluate(`(() => {
         const client = document.documentElement.clientWidth;
         return {client, scroll: document.documentElement.scrollWidth, controls: Array.from(document.querySelectorAll('.agent-search-select__trigger, #deploy-toggle, #workspace-refresh, #app-list .app-card')).map(n => {

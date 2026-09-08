@@ -10,8 +10,9 @@
   <main>
     <header class="page-head">
       <div class="page-head-copy">
+        <span class="console-eyebrow"><span aria-hidden="true">✦</span> SAKULLLA / APP CONSOLE</span>
         <h1>Docker 应用</h1>
-        <p class="lede">管理当前节点的应用、配置与运行状态。</p>
+        <p class="lede">让每一个应用，都井然有序。</p>
         <p class="sr-only">有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="page-head-agent">
@@ -198,7 +199,14 @@
         <p class="hint hint-footnote">相对路径映射到应用工作目录。未点更新不会换镜像。</p>
       </section>
       <section class="panel" id="app-list-panel" aria-labelledby="app-list-title">
+        <div class="inventory-toolbar">
+          <label class="inventory-search"><span aria-hidden="true">⌕</span><input id="app-search" type="search" placeholder="搜索应用、服务或镜像" aria-label="搜索应用、服务或镜像" autocomplete="off"></label>
+          <label class="inventory-filter"><span class="sr-only">应用状态</span><select id="app-filter" aria-label="应用状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="updates">有更新</option><option value="stopped">已停止</option></select></label>
+          <span id="inventory-summary" class="inventory-summary" role="status"></span>
+        </div>
+        <div class="inventory-columns" aria-hidden="true"><span>应用 / 状态</span><span>服务与镜像</span><span>端口</span><span>操作</span></div>
         <div id="app-list" class="app-list" data-card-wall="apps"></div>
+        <p id="app-no-results" class="inventory-no-results" role="status" hidden>没有匹配的应用，试试其他名称或状态。</p>
         <p id="app-empty" hidden>还没有应用。点「部署应用」开始。</p>
       </section>
       <section class="panel" id="app-detail" aria-labelledby="detail-title" hidden>
@@ -362,6 +370,25 @@
       </section>
     </template>
   </main>
+  <aside id="companion-assistant" class="companion-assistant" aria-label="看板娘快捷帮助">
+    <p id="companion-message" class="companion-message" role="status" hidden></p>
+    <section id="companion-panel" class="companion-panel" aria-labelledby="companion-title" hidden>
+      <div class="companion-panel-head"><strong id="companion-title">应用小助手</strong><button id="companion-close" type="button" aria-label="关闭快捷帮助">×</button></div>
+      <p id="companion-copy">应用的日常管理，交给这里就好。</p>
+      <div class="companion-shortcuts">
+        <button type="button" data-companion-action="deploy" class="btn-secondary">部署应用</button>
+        <button type="button" data-companion-action="refresh" class="btn-secondary">刷新状态</button>
+      </div>
+      <button type="button" id="companion-minimize" class="btn-link">收起看板娘</button>
+      <button type="button" id="companion-pause" class="btn-link" aria-pressed="false">暂停动作</button>
+    </section>
+    <button id="companion-tools" class="companion-tools" type="button" aria-label="看板娘设置与快捷操作" aria-controls="companion-panel" aria-expanded="false">⋯</button>
+    <button id="companion-toggle" class="companion-toggle" type="button" aria-label="与看板娘打招呼">
+      <svg class="console-companion" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 14.6 9.4 21 12l-6.4 2.6L12 21l-2.6-6.4L3 12l6.4-2.6Z" fill="currentColor"/><circle cx="19.5" cy="4.5" r="1.5" fill="currentColor" opacity=".5"/></svg>
+      <span class="companion-restore" aria-hidden="true">✦</span>
+    </button>
+  </aside>
+
   <dialog id="update-dialog" class="files-dialog update-dialog" aria-labelledby="update-title">
     <form method="dialog" id="update-form" class="files-dialog-form">
       <h3 id="update-title">服务版本与策略</h3>

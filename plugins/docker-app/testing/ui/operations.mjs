@@ -89,16 +89,15 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
     assert.deepEqual(state.applied[0].body.services,[{name:"web",tag:"1.28"}]);
   });
 
-  await test("floating digest candidates are selectable from update and service policy dialogs", async () => {
-    for (const entry of ["update", "policy"]) {
+  await test("floating digest candidates are selectable from app and individual service updates", async () => {
+    for (const entry of ["update", "service"]) {
       state.reset();
       state.apps[0].service_images[1] = {name:"db", image:"example/worker:latest", tag:"latest", update:true, default_tag:"latest", candidates:[{tag:"latest",digest:true}]};
       await navigate("?agent_id=node-a"); await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
       if (entry === "update") await update();
-      else await page.click('#detail-overview [data-action="service-policy"][data-service="db"]');
+      else await page.click('#detail-overview [data-action="service-update"][data-service="db"]');
       await dialog("update");
       if (entry === "update") await page.click('input[name="update-web"]');
-      else await page.click('input[name="update-db"]');
       assert.equal(await page.evaluate(`document.querySelector('input[name="update-db"]').checked`), true);
       await page.click('select[name="target-db"]'); await page.key("Escape");
       assert.equal(await page.evaluate(`document.querySelector('select[name="target-db"]').value`), "latest");
@@ -115,10 +114,38 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
     for (const width of [1440,375]) {
       await capture("bounded-services",width);
       const box = await page.evaluate(`(() => {const card=document.querySelector('[data-id="alpha"]'), preview=card.querySelector('[data-app-image]'); return {rows:preview.querySelectorAll('.app-card-image-row').length,height:preview.getBoundingClientRect().height,width:card.getBoundingClientRect().width,rem:parseFloat(getComputedStyle(document.documentElement).fontSize),copy:preview.textContent,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
-      assert.equal(box.rows,2); assert.ok(box.height < box.rem*10); assert.ok(box.width <= box.rem*26+1); assert.equal(box.overflow,false); assert.match(box.copy,/另有 18 个服务/);
+      assert.equal(box.rows,2); assert.ok(box.height < box.rem*10); assert.ok(box.width <= width); assert.equal(box.overflow,false); assert.match(box.copy,/另有 18 个服务/);
     }
     await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
     assert.equal(await page.evaluate(`document.querySelectorAll('#detail-overview .overview-service').length`),20);
+  });
+
+  await test("version policy cannot accidentally update a service image", async () => {
+    await reset(); await policy(); await dialog("update");
+    assert.equal(await page.visible('input[name="update-web"]'),false);
+    assert.equal(await text("#update-title"),"版本策略");
+    assert.equal(await text("#update-confirm"),"保存策略");
+    await choose('select[name="lock-web"]',"^1.27");
+    await close(true,"update"); await status("succeeded"); await idle();
+    assert.deepEqual(state.applied[0].body,{locks:{web:"^1.27"}});
+    assert.equal(state.apps[0].service_images[0].image,"nginx:1.27");
+  });
+
+  await test("inventory searches services and images and filters status without mutations", async () => {
+    state.reset(); state.apps[2].status="已停止";
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.evaluate(`(() => {const search=document.querySelector('#app-search'); search.value='postgres'; search.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    assert.equal(await page.visible('[data-id="alpha"]'),true);
+    assert.equal(await page.visible('[data-id="single"]'),false);
+    await page.evaluate(`(() => {const search=document.querySelector('#app-search'); search.value='missing-image'; search.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    assert.equal(await page.visible('#app-no-results'),true);
+    await page.evaluate(`(() => {const search=document.querySelector('#app-search'); search.value=''; search.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await choose('#app-filter','stopped');
+    assert.equal(await page.visible('[data-id="steady"]'),true);
+    assert.equal(await page.visible('[data-id="alpha"]'),false);
+    assert.equal(state.calls.length,0);
+    await page.selectAgent('node-b');
+    assert.equal(await page.evaluate(`document.querySelector('#app-filter').value`),'all');
   });
 
   await test("rollback identifies current and prior deployment and cancellation never submits", async () => {

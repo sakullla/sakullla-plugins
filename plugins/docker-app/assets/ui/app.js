@@ -2013,6 +2013,7 @@ const serviceImages = (app) => (Array.isArray(app.service_images) ? app.service_
 const askServiceUpdate = async (app, options = {}) => {
   const services = serviceImages(app).filter((service) => !options.service || service.name === options.service);
   if (!updateDialog || typeof updateDialog.showModal !== "function") {
+    if (options.policyOnly) return Promise.resolve(null);
     const selected = services.filter((item) => item.update && item.default_tag).map((item) => ({ name: item.name, tag: item.default_tag }));
     if (!selected.length) return Promise.resolve(null);
     const lines = selected.map((item) => `${item.name} → ${item.tag}`).join("\n");
@@ -2020,9 +2021,15 @@ const askServiceUpdate = async (app, options = {}) => {
   }
   if (updateDialog.open) return Promise.resolve(null);
   if (dialogClosures.has(updateDialog)) await dialogClosures.get(updateDialog);
+  updateDialog.dataset.mode = options.policyOnly ? "policy" : "update";
+  document.querySelector("#update-title").textContent = options.policyOnly ? "版本策略" : "更新服务镜像";
+  updateConfirm.textContent = options.policyOnly ? "保存策略" : "更新所选服务";
   const digestRefresh = services.some((item) => Array.isArray(item.candidates) && item.candidates.some((candidate) => candidate.digest));
   if (updateCopy) {
-    updateCopy.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}。${digestRefresh ? "有新的镜像 digest。" : ""}仅更新勾选的服务；锁定和忽略在确认后保存。取消不会改 Compose、版本策略或运行镜像。`;
+    const context = `${agentDisplayName(selectedAgent())} / ${app.id}`;
+    updateCopy.textContent = options.policyOnly
+      ? `${context} · 设置允许的版本范围和忽略项。保存策略不会更新运行镜像。`
+      : `${context} · ${digestRefresh ? "同名 tag 有新的镜像内容。" : ""}选择要更新的服务和目标版本，确认后重新创建对应服务。`;
   }
   if (updateServices) {
     updateServices.replaceChildren();
@@ -2133,6 +2140,7 @@ const renderUpdateServiceRow = (service, options = {}) => {
   row.className = "update-service";
   row.dataset.service = service.name;
   row.dataset.lock = service.lock || "";
+  row.dataset.policy = String(!!options.policyOnly);
   const candidates = Array.isArray(service.candidates) ? service.candidates : [];
   const defaultTag = service.default_tag || (candidates[0] && candidates[0].tag) || "";
   const checked = !options.policyOnly && service.update === true && !!defaultTag;
@@ -2146,6 +2154,8 @@ const renderUpdateServiceRow = (service, options = {}) => {
   selectBox.name = `update-${service.name}`;
   selectBox.checked = checked;
   selectBox.disabled = candidates.length === 0;
+  selectBox.hidden = !!options.policyOnly;
+  selectBox.setAttribute("aria-label", `更新 ${service.name}`);
   const identity = document.createElement("span");
   identity.className = "update-service-identity";
   const title = document.createElement("strong");
@@ -2190,6 +2200,8 @@ const renderUpdateServiceRow = (service, options = {}) => {
     });
     target.append(targetLabel, select);
   }
+  target.hidden = !!options.policyOnly;
+  arrow.hidden = !!options.policyOnly;
   flow.append(target);
   const tools = document.createElement("div");
   tools.className = "update-tools";
@@ -2208,7 +2220,16 @@ const renderUpdateServiceRow = (service, options = {}) => {
   const lockSelect = renderServiceLockSelect(service);
   if (lockSelect) tools.append(lockSelect);
   renderIgnoredClearControls(service).forEach((node) => tools.append(node));
-  body.append(flow, tools);
+  body.append(flow);
+  if (options.policyOnly) body.append(tools);
+  else {
+    const advanced = document.createElement("details");
+    advanced.className = "update-policies";
+    const summary = document.createElement("summary");
+    summary.textContent = "版本范围与忽略设置";
+    advanced.append(summary, tools);
+    body.append(advanced);
+  }
   row.append(head, body);
   return row;
 };
@@ -2225,7 +2246,7 @@ const collectUpdatePayload = () => {
     const ignored = row.querySelector(`input[name="ignore-${name}"]`);
     const lock = row.querySelector(`select[name="lock-${name}"]`);
     const tag = target ? String(target.value || "").trim() : "";
-    if (selected && selected.checked && tag) services.push({ name, tag });
+    if (row.dataset.policy !== "true" && selected && selected.checked && tag) services.push({ name, tag });
     if (ignored && ignored.checked && tag) ignore.push({ service: name, tag });
     row.querySelectorAll(`input[data-clear-ignore="true"]`).forEach((box) => {
       const clearTag = String(box.dataset.tag || "").trim();
@@ -2331,6 +2352,8 @@ const renderApp = (app) => {
   card.className = "app-card";
   card.dataset.id = app.id;
   card.dataset.status = app.status || "已停止";
+  card.dataset.search = [app.name, app.id, ...serviceImages(app).flatMap((service) => [service.name, service.image]), app.version].filter(Boolean).join(" ").toLocaleLowerCase();
+  card.dataset.updateAvailable = String(app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update));
   card.tabIndex = 0;
   const nameNode = card.querySelector("[data-app-name]");
   if (nameNode) nameNode.textContent = app.name || app.id;
@@ -2617,6 +2640,12 @@ const renderOverview = (app) => {
       manage.dataset.service = service.name;
       manage.addEventListener("click", () => saveServicePolicy(app, service.name));
       tools.append(manage);
+      if (service.update && (service.candidates || []).length && (app.actions || []).some((action) => action.id === "update")) {
+        const update = actionButton({id:"service-update"}, "btn-primary", "更新镜像");
+        update.dataset.service = service.name;
+        update.addEventListener("click", () => runAppAction(app, {id:"update", service:service.name}));
+        tools.append(update);
+      }
       item.append(tools);
       list.append(item);
     });
@@ -3186,12 +3215,31 @@ const scheduleImageRefresh = (apps) => {
   }, 1500);
 };
 
+const applyInventoryFilter = () => {
+  const query = (document.querySelector("#app-search")?.value || "").trim().toLocaleLowerCase();
+  const filter = document.querySelector("#app-filter")?.value || "all";
+  const rows = Array.from(listNode.children);
+  let visible = 0;
+  rows.forEach((row) => {
+    const matches = filter === "all" || filter === "running" && row.dataset.status === "运行中"
+      || filter === "updates" && row.dataset.updateAvailable === "true" || filter === "stopped" && row.dataset.status === "已停止";
+    row.hidden = !matches || !row.dataset.search.includes(query);
+    if (!row.hidden) visible += 1;
+  });
+  document.querySelector("#app-no-results").hidden = !rows.length || visible > 0;
+  const updates = rows.filter((row) => row.dataset.updateAvailable === "true").length;
+  document.querySelector("#inventory-summary").textContent = query || filter !== "all" ? `${visible} / ${rows.length} 个应用` : updates ? `${updates} 个应用可更新` : `${rows.length} 个应用`;
+};
+document.querySelector("#app-search")?.addEventListener("input", applyInventoryFilter);
+document.querySelector("#app-filter")?.addEventListener("change", applyInventoryFilter);
+
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
   listNode.replaceChildren(...list.map(renderApp));
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
+  applyInventoryFilter();
   syncListPanel();
 };
 
@@ -3352,6 +3400,8 @@ agentPicker.onChange = async (value) => {
   leaveDetail({ force: true });
   contextVersion += 1;
   selectedAgentID = String(value || "");
+  document.querySelector("#app-search").value = "";
+  document.querySelector("#app-filter").value = "all";
   const url = new URL(window.location.href);
   if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
   else url.searchParams.delete("agent_id");
@@ -3694,6 +3744,118 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     if (!busy) composeForm.requestSubmit();
   }
+});
+
+const companion = document.querySelector("#companion-assistant");
+const companionToggle = document.querySelector("#companion-toggle");
+const companionTools = document.querySelector("#companion-tools");
+const companionPanel = document.querySelector("#companion-panel");
+const companionMessage = document.querySelector("#companion-message");
+const compactCompanion = matchMedia("(max-width: 520px)");
+if (compactCompanion.matches) {
+  companion.dataset.minimized = "true";
+  companionToggle.setAttribute("aria-label", "展开看板娘");
+}
+let companionMessageTimer;
+let companionGreeting = 0;
+let companionDragged = false;
+const closeCompanion = (restoreFocus = false) => {
+  companionPanel.hidden = true;
+  companionTools.setAttribute("aria-expanded", "false");
+  if (restoreFocus) (companion.dataset.minimized === "true" || !companionTools.getClientRects().length ? companionToggle : companionTools).focus();
+};
+const greetCompanion = () => {
+  const greetings = ["在呢，今天也一起照看应用吧。", "配置记得保存哦。", "想找什么功能？点旁边的 ··· 就好。"];
+  companionMessage.textContent = busy ? "操作还在进行，稍等一下哦。" : greetings[companionGreeting++ % greetings.length];
+  companionMessage.hidden = false;
+  clearTimeout(companionMessageTimer);
+  companionMessageTimer = setTimeout(() => {companionMessage.hidden = true;}, 3500);
+  document.dispatchEvent(new CustomEvent("companion-motion"));
+};
+companionToggle.addEventListener("click", () => {
+  if (companionDragged) {companionDragged = false; return;}
+  if (companion.dataset.minimized === "true") {
+    companion.dataset.minimized = "false";
+    companionToggle.setAttribute("aria-label", "与看板娘打招呼");
+    return;
+  }
+  if (!companion.dataset.renderer || companion.dataset.renderer === "failed") {companionTools.click(); return;}
+  closeCompanion();
+  greetCompanion();
+});
+companionTools.addEventListener("click", () => {
+  if (!companionPanel.hidden) {closeCompanion(); return;}
+  companionMessage.hidden = true;
+  document.querySelector("#companion-copy").textContent = "点角色可以打招呼，拖动角色可以换位置。应用操作仍会经过原有确认。";
+  companionPanel.querySelector('[data-companion-action="deploy"]').disabled = busy || !deployToggle?.getClientRects().length || deployToggle.disabled;
+  companionPanel.querySelector('[data-companion-action="refresh"]').disabled = busy;
+  const paused = companion.dataset.motion === "paused";
+  document.querySelector("#companion-pause").setAttribute("aria-pressed", String(paused));
+  document.querySelector("#companion-pause").textContent = paused ? "播放动作" : "暂停动作";
+  companionPanel.hidden = false;
+  companionTools.setAttribute("aria-expanded", "true");
+});
+document.querySelector("#companion-close").addEventListener("click", () => closeCompanion(true));
+document.querySelector("#companion-minimize").addEventListener("click", () => {
+  companionMessage.hidden = true;
+  companion.dataset.minimized = "true";
+  companionToggle.setAttribute("aria-label", "展开看板娘");
+  closeCompanion(true);
+});
+const companionPause = document.querySelector("#companion-pause");
+companionPause.addEventListener("click", () => {
+  const paused = companion.dataset.motion !== "paused";
+  companion.dataset.motion = paused ? "paused" : "playing";
+  companionPause.setAttribute("aria-pressed", String(paused));
+  companionPause.textContent = paused ? "播放动作" : "暂停动作";
+  document.dispatchEvent(new CustomEvent("companion-pause", {detail:{paused}}));
+});
+companionPanel.querySelectorAll("[data-companion-action]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (busy) return;
+    closeCompanion();
+    const target = button.dataset.companionAction === "deploy" ? deployToggle : document.querySelector("#workspace-refresh");
+    if (target && !target.disabled && target.getClientRects().length) {target.focus(); target.click();}
+  });
+});
+let companionDrag;
+companionToggle.addEventListener("pointerdown", event => {
+  if (event.button !== 0 || companion.dataset.minimized === "true") return;
+  const bounds = companionToggle.getBoundingClientRect();
+  companionDrag = {id:event.pointerId,x:event.clientX,y:event.clientY,right:innerWidth-bounds.right,bottom:innerHeight-bounds.bottom};
+  companionDragged = false;
+  companionToggle.setPointerCapture(event.pointerId);
+});
+companionToggle.addEventListener("pointermove", event => {
+  if (!companionDrag || event.pointerId !== companionDrag.id) return;
+  const dx = event.clientX-companionDrag.x, dy = event.clientY-companionDrag.y;
+  if (!companionDragged && Math.hypot(dx,dy)<7) return;
+  companionDragged = true;
+  closeCompanion(); companionMessage.hidden = true;
+  const box = companionToggle.getBoundingClientRect();
+  companion.style.right = `${Math.max(8, Math.min(innerWidth-box.width-8, companionDrag.right-dx))}px`;
+  companion.style.bottom = `${Math.max(8, Math.min(innerHeight-box.height-8, companionDrag.bottom-dy))}px`;
+});
+const releaseCompanion = () => {companionDrag = null;};
+companionToggle.addEventListener("pointerup", releaseCompanion);
+companionToggle.addEventListener("pointercancel", releaseCompanion);
+window.addEventListener("resize", () => {
+  companion.style.right=""; companion.style.bottom=""; closeCompanion();
+  if (compactCompanion.matches) {
+    companion.dataset.minimized="true";
+    companionToggle.setAttribute("aria-label", "展开看板娘");
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {companionMessage.hidden=true; if (!companionPanel.hidden) {event.preventDefault(); closeCompanion(companion.contains(document.activeElement));}}
+});
+document.addEventListener("pointerdown", event => {if (!companion.contains(event.target)) {closeCompanion(); companionMessage.hidden=true;}});
+document.addEventListener("focusin", event => {
+  companion.classList.remove("is-yielding");
+  if (companion.contains(event.target)) return;
+  closeCompanion(); companionMessage.hidden=true;
+  const focused = event.target.getBoundingClientRect?.(), mascot = companionToggle.getBoundingClientRect();
+  if (focused && focused.right>mascot.left && focused.left<mascot.right && focused.bottom>mascot.top && focused.top<mascot.bottom) companion.classList.add("is-yielding");
 });
 
 (async () => {

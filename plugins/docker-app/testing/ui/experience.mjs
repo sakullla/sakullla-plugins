@@ -7,6 +7,20 @@ function contrast(foreground,background) {
 }
 
 export async function runExperience({page,test,navigate,capture,eventually,origin}) {
+  await test("mobile header keeps node names on one line and the companion docks outside it",async () => {
+    await navigate("?agent_id=node-a");
+    await page.evaluate(`(() => {const label=document.querySelector('.agent-search-select__label');label.textContent='debian-jnp12（预览）';})()`);
+    for (const width of [320,375,430]) {
+      await page.send("Emulation.setDeviceMetricsOverride",{width,height:900,deviceScaleFactor:1,mobile:false});
+      const bounds=await page.evaluate(`(() => {const box=s=>document.querySelector(s).getBoundingClientRect(), header=box('.page-head'), art=box('#companion-toggle'), copy=box('.page-head-copy'), node=box('.page-head-agent'), label=box('.agent-search-select__label');return {within:art.left>=0&&art.right<=innerWidth&&art.bottom<=innerHeight,apart:node.top>=copy.bottom&&art.top>=header.bottom,line:label.height,lineHeight:parseFloat(getComputedStyle(document.querySelector('.agent-search-select__label')).lineHeight),height:header.height,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+      assert.ok(bounds.within&&bounds.apart,`illustration stays clear at ${width}: ${JSON.stringify(bounds)}`);
+      assert.ok(bounds.line<=bounds.lineHeight+1,`node name remains one line at ${width}`);
+      assert.ok(bounds.height<260,`header remains compact at ${width}`);
+      assert.equal(bounds.overflow,false);
+      await capture("mobile-header",width);
+    }
+  });
+
   await test("same-origin host theme changes propagate and unknown themes fall back safely",async () => {
     await page.send("Page.navigate",{url:origin+"/theme-frame.html"});
     await eventually(() => page.evaluate(`document.querySelector('iframe')?.contentDocument?.querySelector('#app-loading')?.hidden === true`),"embedded fixture loaded");
