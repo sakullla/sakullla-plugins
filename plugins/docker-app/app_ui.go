@@ -588,6 +588,10 @@ func (controller *Controller) applyManualServiceUpdate(ctx context.Context, writ
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "update")})
 			return err
 		}
+		current, latest, known := controller.cachedServiceDigest(app.ID, app.Image)
+		if known && current == latest {
+			digestRequested = false
+		}
 	}
 	if !composeChanged && !policyChanged && !digestRequested {
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(ctx, app.AgentID))
@@ -1177,6 +1181,12 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 			ok = current != "" && latest != ""
 		}
 		if service.Image == app.Image {
+			// A fresh node observation takes precedence over deployment history,
+			// which can describe a digest no longer used by this application.
+			if ok {
+				result[service.Name] = serviceDigestState{Available: current != latest, Current: current == latest}
+				continue
+			}
 			appLatest := controller.cachedLatestDigest(app)
 			if appLatest == "" {
 				appLatest = latest
@@ -1229,9 +1239,25 @@ func (controller *Controller) rememberFloatingDigest(ctx context.Context, app Ap
 		if current == "" || latest == "" || current == latest {
 			return app, nil
 		}
-		disabled := false
-		_, err := controller.uiRollout.AutoUpdate(ctx, app, &disabled, UpdateObservation{CurrentDigest: current, LatestDigest: latest})
-		return app, err
+		// Manual confirmation must retain the observed candidate even when an
+		// earlier deployment already recorded that digest as published.
+		rollout := controller.uiRollout
+		if err := rollout.readyStore(&app); err != nil {
+			return app, err
+		}
+		record, existed, err := rollout.Store.Load(ctx, app.ID)
+		if err != nil {
+			return app, err
+		}
+		if rolloutBusy(record.Value, existed, rollout.now()) {
+			return app, ErrReconcilePending
+		}
+		if existed && record.Value.Image != app.Image && record.Value.ImageDigest != "" {
+			// The prior revision may belong to another Compose service. Keep its
+			// image/digest pair intact for rollback while publishing this candidate.
+			current = record.Value.ImageDigest
+		}
+		return app, rollout.rememberDigest(ctx, record, app, current, latest, existed)
 	}
 	return app, nil
 }
@@ -1488,6 +1514,9 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 	var autoErr error
 	if observeOK {
 		view, autoErr = controller.uiRollout.AutoUpdate(ctx, live, live.AutoUpdate, observed)
+	}
+	if autoErr == nil && view.Published && view.Digest != "" {
+		observed.CurrentDigest = view.Digest
 	}
 	controller.mu.Lock()
 	controller.clearImageRefreshIfCurrentLocked(app.ID, token, epoch)

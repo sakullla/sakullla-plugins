@@ -2362,7 +2362,7 @@ const renderApp = (app) => {
     const services = serviceImages(app);
     const images = services.length ? services : [{ image: version }];
     imageNode.replaceChildren();
-    images.forEach((service) => {
+    images.slice(0, 2).forEach((service) => {
       const shown = service.image || service.current || version;
       if (!shown) return;
       const row = document.createElement("div");
@@ -2380,6 +2380,12 @@ const renderApp = (app) => {
       row.append(image);
       imageNode.append(row);
     });
+    if (images.length > 2) {
+      const remaining = document.createElement("span");
+      remaining.className = "app-card-services-more";
+      remaining.textContent = `另有 ${images.length - 2} 个服务，可在详情查看`;
+      imageNode.append(remaining);
+    }
     imageNode.hidden = !imageNode.children.length;
   }
   const portNode = card.querySelector("[data-app-ports]");

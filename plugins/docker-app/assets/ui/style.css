@@ -1188,7 +1188,7 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 
 .app-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 26rem));
   gap: 1rem;
   align-items: stretch;
   width: 100%;
@@ -2055,6 +2055,7 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: normal;
+  flex: 0 0 auto;
 }
 
 .app-card-image-row {
@@ -2072,8 +2073,19 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 
 .app-card-image {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.app-card-service,
+.app-card-services-more {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-card-services-more { font-family: var(--font-sans); }
 
 .app-card-ports {
   display: flex;

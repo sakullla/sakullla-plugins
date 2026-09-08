@@ -177,6 +177,9 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		if output, err := controller.runCommand(ctx, workspace.Dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, composeCallFailure("apply", output, err)
 		}
+		if err := recordPublishedImages(workspace.Dir); err != nil {
+			return nil, err
+		}
 		controller.reclaimUnusedImages(ctx, root, "", staleImageRefs(previous, current), append(append([]string{}, current...), request.KeepImages...))
 		rewriteUsedImages(root, request.AppID, current)
 		return json.Marshal(map[string]any{"accepted": true, "workdir": workspace.Dir})
@@ -192,6 +195,9 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		// restart, it also applies the current Compose declaration.
 		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, composeCallFailure("start", output, err)
+		}
+		if err := recordPublishedImages(dir); err != nil {
+			return nil, err
 		}
 		return json.Marshal(map[string]any{"accepted": true})
 	case "stop", "restart", "remove", "pull", "ready", "remove-instance":
@@ -212,6 +218,7 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		if action == "remove" {
 			_ = removeAppWorkspace(dir)
+			_ = os.Remove(publishedImagesFile(dir))
 			removeUsedImagesFile(root, request.AppID)
 			controller.reclaimUnusedImages(ctx, root, request.AppID, reclaimCandidates, request.KeepImages)
 		}
@@ -237,6 +244,9 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 		}
 		if output, err := controller.runCommand(ctx, dir, "docker", "compose", "up", "-d"); err != nil {
 			return nil, composeCallFailure("start-instance", output, err)
+		}
+		if err := recordPublishedImages(dir); err != nil {
+			return nil, err
 		}
 		instanceID := strings.TrimSpace(request.InstanceID)
 		if instanceID == "" {
@@ -928,7 +938,7 @@ func (controller *Controller) callImageObserve(ctx context.Context, request imag
 	if strings.TrimSpace(request.Image) == "" {
 		return nil, errors.New(imageObserveRequiredMessage)
 	}
-	current, arch, err := controller.dockerImageInspect(ctx, request.Image)
+	current, arch, err := controller.dockerImageInspect(ctx, controller.publishedImageRef(request))
 	if err != nil {
 		return nil, err
 	}
@@ -941,6 +951,49 @@ func (controller *Controller) callImageObserve(ctx context.Context, request imag
 		"current_digest": current,
 		"latest_digest":  latest,
 	})
+}
+
+func publishedImagesFile(dir string) string {
+	return filepath.Join(filepath.Dir(dir), ".nre-published-images", filepath.Base(dir)+".json")
+}
+
+func recordPublishedImages(dir string) error {
+	document, err := os.ReadFile(filepath.Join(dir, ComposeFileName))
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(composeImageRefs(string(document)))
+	if err != nil {
+		return err
+	}
+	file := publishedImagesFile(dir)
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(file, payload, 0o600)
+}
+
+func (controller *Controller) publishedImageRef(request imageCallRequest) string {
+	// Pulling a digest-pinned Compose image does not move Docker's local tag.
+	// Inspect the published reference while continuing to query the tag remotely.
+	dir, err := AppWorkDir(controller.executionWorkDirRoot(), request.AppID)
+	if err != nil {
+		return request.Image
+	}
+	document, err := os.ReadFile(publishedImagesFile(dir))
+	if err != nil {
+		return request.Image
+	}
+	var images []string
+	if json.Unmarshal(document, &images) != nil {
+		return request.Image
+	}
+	for _, image := range images {
+		if imageRefName(image) == imageRefName(request.Image) && imageDigestSuffix(image) != "" {
+			return image
+		}
+	}
+	return request.Image
 }
 
 func (controller *Controller) callFiles(ctx context.Context, payload []byte) ([]byte, error) {

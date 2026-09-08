@@ -2732,6 +2732,51 @@ func TestAppUIManualUpdateFollowsFloatingDigest(t *testing.T) {
 	}
 }
 
+func TestAppUIManualDigestUpdateRepairsStaleDeployment(t *testing.T) {
+	t.Parallel()
+	current, latest := "sha256:old", "sha256:new"
+	executor := &uiTestRollout{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{
+		observer: &uiTestObserver{current: current, latest: latest}, rollout: executor,
+	})
+	created := uiDeployCompose(t, controller, "media", "agent-1", "services:\n  web:\n    image: example/worker:latest\n")
+	if created.Code != http.StatusOK {
+		t.Fatal(created.Body.String())
+	}
+	waitForDeployment(t, controller, "media", func(d Deployment) bool { return d.AvailableDigest == latest })
+	unlock := controller.lockImageUpdate("media")
+	record, _, err := controller.uiRollout.Store.Load(context.Background(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Value.ImageDigest, record.Value.AvailableDigest = latest, ""
+	_, err = controller.uiRollout.Store.CompareAndSwap(context.Background(), "media", record.Version, record.Value.FencingToken, record.Value)
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.storeServiceDigest("media", "example/worker:latest", current, latest)
+	detail := httptest.NewRecorder()
+	controller.ServeHTTP(detail, uiRequest(http.MethodGet, "/api/apps/media", ""))
+	view := decodeAppDetail(t, detail.Body.Bytes())
+	if !view.ServiceImages[0].Update {
+		t.Errorf("actual old image lost its candidate: %#v", view.ServiceImages[0])
+	}
+	updated := httptest.NewRecorder()
+	controller.ServeHTTP(updated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"latest"}]}`))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("stale deployment update: %d %s", updated.Code, updated.Body.String())
+	}
+	if len(executor.started) != 1 {
+		t.Fatalf("published %d times", len(executor.started))
+	}
+	repeated := httptest.NewRecorder()
+	controller.ServeHTTP(repeated, uiJSONRequest(http.MethodPost, "/api/apps/media/update", `{"services":[{"name":"web","tag":"latest"}]}`))
+	if repeated.Code != http.StatusOK || len(executor.started) != 1 {
+		t.Fatalf("already current confirmation: %d %s, published %d times", repeated.Code, repeated.Body.String(), len(executor.started))
+	}
+}
+
 func TestAppUIDetailListsFrpcHubTagsAndMiaospeedDigest(t *testing.T) {
 	t.Parallel()
 	miaospeedCurrent := "sha256:0123456789abcdef0123456789abcdef"

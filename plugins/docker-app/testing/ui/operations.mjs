@@ -89,6 +89,38 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
     assert.deepEqual(state.applied[0].body.services,[{name:"web",tag:"1.28"}]);
   });
 
+  await test("floating digest candidates are selectable from update and service policy dialogs", async () => {
+    for (const entry of ["update", "policy"]) {
+      state.reset();
+      state.apps[0].service_images[1] = {name:"db", image:"example/worker:latest", tag:"latest", update:true, default_tag:"latest", candidates:[{tag:"latest",digest:true}]};
+      await navigate("?agent_id=node-a"); await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+      if (entry === "update") await update();
+      else await page.click('#detail-overview [data-action="service-policy"][data-service="db"]');
+      await dialog("update");
+      if (entry === "update") await page.click('input[name="update-web"]');
+      else await page.click('input[name="update-db"]');
+      assert.equal(await page.evaluate(`document.querySelector('input[name="update-db"]').checked`), true);
+      await page.click('select[name="target-db"]'); await page.key("Escape");
+      assert.equal(await page.evaluate(`document.querySelector('select[name="target-db"]').value`), "latest");
+      await close(true,"update"); await status("succeeded"); await idle();
+      assert.deepEqual(state.applied[0].body.services,[{name:"db",tag:"latest"}]);
+    }
+  });
+
+  await test("application cards bound service previews and keep complete details reachable", async () => {
+    state.reset();
+    const images = Array.from({length:20}, (_, i) => ({name:`service-${i}`,image:`registry.example.test/${"namespace/".repeat(15)}worker-${i}:latest`}));
+    Object.assign(state.apps[0], {service_images:images, services:images.map(s => s.name)});
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    for (const width of [1440,375]) {
+      await capture("bounded-services",width);
+      const box = await page.evaluate(`(() => {const card=document.querySelector('[data-id="alpha"]'), preview=card.querySelector('[data-app-image]'); return {rows:preview.querySelectorAll('.app-card-image-row').length,height:preview.getBoundingClientRect().height,width:card.getBoundingClientRect().width,rem:parseFloat(getComputedStyle(document.documentElement).fontSize),copy:preview.textContent,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+      assert.equal(box.rows,2); assert.ok(box.height < box.rem*10); assert.ok(box.width <= box.rem*26+1); assert.equal(box.overflow,false); assert.match(box.copy,/另有 18 个服务/);
+    }
+    await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    assert.equal(await page.evaluate(`document.querySelectorAll('#detail-overview .overview-service').length`),20);
+  });
+
   await test("rollback identifies current and prior deployment and cancellation never submits", async () => {
     await reset();
     for (const mode of ["cancel","escape","confirm"]) {

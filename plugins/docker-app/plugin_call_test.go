@@ -1921,6 +1921,68 @@ func TestControllerCallImageUsesInjectedObserver(t *testing.T) {
 	}
 }
 
+func TestControllerCallImageObserveUsesPublishedComposeDigest(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	latest := "sha256:" + strings.Repeat("a", 64)
+	image := "example/worker:latest"
+	pinned := image + "@" + latest
+	compose := "services:\n  worker:\n    image: " + pinned + "\n"
+	if _, err := PrepareAppWorkspace(root, "media", compose); err != nil {
+		t.Fatal(err)
+	}
+	startFailed := true
+	runner := CommandRunnerFunc(func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		if name == "docker" && strings.Join(args, " ") == "compose up -d" {
+			if startFailed {
+				return nil, errors.New("start failed")
+			}
+			return nil, nil
+		}
+		switch dockerObserveCommand(name, args) {
+		case "image-inspect":
+			if args[len(args)-1] != pinned {
+				t.Fatalf("observed stale local tag instead of deployed reference: %q", args)
+			}
+			return []byte("amd64\nexample/worker@" + latest), nil
+		case "imagetools":
+			if args[len(args)-1] != image {
+				t.Fatalf("registry lookup stopped following latest: %q", args)
+			}
+			return []byte(latest), nil
+		default:
+			return nil, errors.New("unavailable")
+		}
+	})
+	controller := newCallController(t, root, runner, nil)
+	request := imageCallRequest{AppID: "media", Image: image}
+	if got := controller.publishedImageRef(request); got != image {
+		t.Fatalf("staged image counted as published: %s", got)
+	}
+	payload, _ := json.Marshal(composeCallRequest{Action: "start-instance", AppID: "media", Compose: compose})
+	if _, err := controller.callCompose(context.Background(), payload); err == nil {
+		t.Fatal("failed start succeeded")
+	}
+	if got := controller.publishedImageRef(request); got != image {
+		t.Fatalf("failed start counted as published: %s", got)
+	}
+	startFailed = false
+	if _, err := controller.callCompose(context.Background(), payload); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := controller.callImageObserve(context.Background(), imageCallRequest{AppID: "media", Image: image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed map[string]string
+	if err := json.Unmarshal(raw, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed["current_digest"] != observed["latest_digest"] {
+		t.Fatalf("published digest still offered: %s", raw)
+	}
+}
+
 func TestControllerCallImageObserveComparesRepoDigestWithRegistryManifest(t *testing.T) {
 	t.Parallel()
 	index := "sha256:" + strings.Repeat("a", 64)
