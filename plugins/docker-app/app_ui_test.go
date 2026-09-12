@@ -4736,12 +4736,17 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("cleanup preview missing %q", want)
 		}
 	}
-	for _, want := range []string{"估算值", "dangling", "keep-storage", "2GB", "数据卷"} {
+	for _, want := range []string{"估算值", "闲置镜像", "2GB", "数据卷"} {
 		if !strings.Contains(copyFn, want) {
 			t.Fatalf("cleanup confirm copy missing %q", want)
 		}
 	}
-	for _, want := range []string{"formatDiskCleanupResult", "总体状态", "images_status", "builder_cache_status", "失败阶段", "已完成"} {
+	for _, forbidden := range []string{"dangling", "keep-storage", "SIZE ", "RECLAIMABLE "} {
+		if strings.Contains(copyFn, forbidden) {
+			t.Fatalf("cleanup copy still uses raw docker jargon %q", forbidden)
+		}
+	}
+	for _, want := range []string{"formatDiskCleanupResult", "summarizeCleanupDetail", "images_status", "builder_cache_status", "失败阶段", "已完成"} {
 		if !strings.Contains(copyFn, want) {
 			t.Fatalf("cleanup result copy missing %q", want)
 		}

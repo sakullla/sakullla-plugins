@@ -89,6 +89,32 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
     assert.ok(await page.evaluate(`document.querySelector('#app-workspace').contains(document.activeElement) && document.activeElement.getClientRects().length > 0`),"returning to list restores visible focus");
   });
 
+  await test("log toolbar controls stay readable on the toolbar background", async () => {
+    await navigate("?agent_id=node-a");
+    await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    await page.click('#detail-nav [data-section="logs"]'); await page.waitVisible(".logs-toolbar");
+    for (const theme of ["light","dark"]) {
+      await page.evaluate(`localStorage.removeItem("theme"); document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      await eventually(() => page.evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`),"log toolbar theme applied");
+      const colors = await page.evaluate(`(() => {
+        const bar = document.querySelector(".logs-toolbar");
+        const bg = getComputedStyle(bar).backgroundColor;
+        return {
+          bg,
+          btn: getComputedStyle(document.querySelector("#logs-refresh")).color,
+          pause: getComputedStyle(document.querySelector("#logs-pause")).color,
+          label: getComputedStyle(bar.querySelector("label")).color,
+          select: getComputedStyle(document.querySelector("#logs-service")).color,
+        };
+      })()`);
+      assert.ok(contrast(colors.btn, colors.bg) >= 4.5, `refresh contrast ${theme}: ${JSON.stringify(colors)}`);
+      assert.ok(contrast(colors.pause, colors.bg) >= 4.5, `pause contrast ${theme}: ${JSON.stringify(colors)}`);
+      assert.ok(contrast(colors.label, colors.bg) >= 4.5, `service label contrast ${theme}: ${JSON.stringify(colors)}`);
+      assert.ok(contrast(colors.select, colors.bg) >= 4.5, `service select contrast ${theme}: ${JSON.stringify(colors)}`);
+    }
+    await capture("logs-toolbar", 1440);
+  });
+
   await test("light/dark and narrow/desktop layouts keep readable text and reachable controls",async () => {
     await navigate("?agent_id=node-a");
     for (const theme of ["light","dark"]) {

@@ -518,10 +518,12 @@ func (controller *Controller) previewDiskCleanup(ctx context.Context) ([]byte, e
 func (controller *Controller) applyDiskCleanup(ctx context.Context) ([]byte, error) {
 	imageOut, imageErr := controller.runCommand(ctx, "", "docker", imagePruneArgs()...)
 	builderOut, builderErr := controller.runCommand(ctx, "", "docker", builderPruneArgs()...)
-	imageText, imageStatus := diskCleanupStepReport(imageOut, imageErr)
-	builderText, builderStatus := diskCleanupStepReport(builderOut, builderErr)
+	imageRaw := sanitizePruneReport(normalizeCommandOutput(imageOut))
+	builderRaw := sanitizePruneReport(normalizeCommandOutput(builderOut))
+	imageText, imageStatus := diskCleanupStepFromRaw(imageRaw, imageErr)
+	builderText, builderStatus := diskCleanupStepFromRaw(builderRaw, builderErr)
 	status := diskCleanupOverallStatus(imageStatus, builderStatus)
-	empty := status == diskCleanupStatusSuccess && pruneOutputEmpty(imageText) && pruneOutputEmpty(builderText)
+	empty := status == diskCleanupStatusSuccess && pruneOutputEmpty(imageRaw) && pruneOutputEmpty(builderRaw)
 	return json.Marshal(DiskCleanupReport{
 		Accepted:           true,
 		Preview:            false,
@@ -603,14 +605,24 @@ func parseDfUsage(rest string) systemDfUsage {
 }
 
 func formatDfEstimate(usage systemDfUsage) string {
-	var lines []string
-	if usage.size != "" {
-		lines = append(lines, "SIZE "+usage.size)
+	size := strings.TrimSpace(usage.size)
+	reclaim := strings.TrimSpace(usage.reclaimable)
+	switch {
+	case size != "" && reclaim != "":
+		if dfReclaimableZero(reclaim) {
+			return "占用 " + size + "，没有可回收空间"
+		}
+		return "占用 " + size + "，约可回收 " + reclaim
+	case reclaim != "":
+		if dfReclaimableZero(reclaim) {
+			return "没有可回收空间"
+		}
+		return "约可回收 " + reclaim
+	case size != "":
+		return "占用 " + size
+	default:
+		return ""
 	}
-	if usage.reclaimable != "" {
-		lines = append(lines, "RECLAIMABLE "+usage.reclaimable)
-	}
-	return strings.Join(lines, "\n")
 }
 
 func dfReclaimableZero(reclaimable string) bool {
@@ -627,14 +639,17 @@ func dfReclaimableZero(reclaimable string) bool {
 }
 
 func diskCleanupStepReport(output []byte, err error) (string, string) {
-	text := sanitizePruneReport(normalizeCommandOutput(output))
+	return diskCleanupStepFromRaw(sanitizePruneReport(normalizeCommandOutput(output)), err)
+}
+
+func diskCleanupStepFromRaw(raw string, err error) (string, string) {
 	if err == nil {
-		return text, diskCleanupStatusSuccess
+		return summarizePruneReport(raw), diskCleanupStatusSuccess
 	}
-	if text == "" {
-		text = sanitizePruneReport(publicCause(err))
+	if raw == "" {
+		raw = sanitizePruneReport(publicCause(err))
 	}
-	return text, diskCleanupStatusFailed
+	return pruneFailureDetail(raw), diskCleanupStatusFailed
 }
 
 func diskCleanupOverallStatus(imageStatus, builderStatus string) string {
@@ -695,6 +710,7 @@ func sanitizePruneReport(text string) string {
 			continue
 		}
 		line = redactLocalDockerMarkers(line)
+		line = stripPruneDeprecation(line)
 		if line == "" || line == "***" {
 			continue
 		}
@@ -705,6 +721,97 @@ func sanitizePruneReport(text string) string {
 		report = strings.TrimSpace(report[:4096])
 	}
 	return report
+}
+
+func stripPruneDeprecation(line string) string {
+	lower := strings.ToLower(line)
+	if !strings.Contains(lower, "deprecated") && !(strings.Contains(lower, "keep-storage") && strings.Contains(lower, "reserved-space")) {
+		return line
+	}
+	if idx := strings.LastIndex(lower, "total reclaimed space:"); idx >= 0 {
+		return strings.TrimSpace(line[idx:])
+	}
+	if idx := strings.LastIndex(lower, "total:"); idx >= 0 {
+		return strings.TrimSpace(line[idx:])
+	}
+	return ""
+}
+
+func summarizePruneReport(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.EqualFold(text, "ok") {
+		return ""
+	}
+	if pruneOutputEmpty(text) {
+		return "没有可回收空间"
+	}
+	untagged, deleted := countPruneRemovals(text)
+	reclaimed := pruneReclaimedSpace(text)
+	var parts []string
+	if untagged > 0 {
+		parts = append(parts, fmt.Sprintf("已清理 %d 个闲置镜像", untagged))
+	} else if deleted > 0 {
+		parts = append(parts, fmt.Sprintf("已删除 %d 项", deleted))
+	}
+	if reclaimed != "" {
+		parts = append(parts, "回收 "+reclaimed)
+	}
+	if len(parts) == 0 {
+		return "已完成清理"
+	}
+	return strings.Join(parts, "，")
+}
+
+func pruneFailureDetail(text string) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		switch {
+		case strings.HasPrefix(lower, "untagged:"), strings.HasPrefix(lower, "deleted:"), strings.HasPrefix(lower, "deleted images"), strings.HasPrefix(lower, "deleted build cache"):
+			continue
+		case strings.HasPrefix(lower, "sha256:"), containerReferenceLine(line):
+			continue
+		case strings.HasPrefix(lower, "id") && strings.Contains(lower, "reclaimable"):
+			continue
+		default:
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+func countPruneRemovals(text string) (untagged, deleted int) {
+	for _, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(lower, "untagged:"):
+			untagged++
+		case strings.HasPrefix(lower, "deleted:"):
+			deleted++
+		}
+	}
+	return untagged, deleted
+}
+
+func pruneReclaimedSpace(text string) string {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{"total reclaimed space:", "total:"} {
+		idx := strings.LastIndex(lower, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(text[idx+len(marker):])
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		return fields[0]
+	}
+	return ""
 }
 
 func classifyDiskCleanupPreviewFailure(output []byte, err error) string {

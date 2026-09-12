@@ -360,6 +360,21 @@ try {
     } finally { apps = original; }
   });
 
+  await test("image check refresh does not show a second detail loading banner", async () => {
+    const original = apps;
+    apps = [makeApp("sample", "node-a", {image_checking:true})];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="sample"]');
+      await page.click('[data-id="sample"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+      assert.equal(await page.evaluate(`document.querySelector('#app-status').hidden`), true);
+      apps = [makeApp("sample", "node-a", {notice:"有新版本",actions:[{id:"update",label:"更新"}]})];
+      await eventually(() => page.visible('#detail-overview [data-action="update"]'), "quiet detail refresh");
+      assert.doesNotMatch(await page.evaluate(`document.querySelector('#app-status').textContent || ""`), /正在读取/);
+      assert.equal(await page.evaluate(`document.querySelector('[data-id="sample"] [data-action="detail"]').textContent`), "详情");
+      assert.ok(requests.filter((request) => request.path === "/api/apps/sample").length >= 2, "background check still refetches detail");
+    } finally { apps = original; }
+  });
+
   await test("no selection and explicit node states", async () => {
     await navigate(); await page.waitVisible("#app-node-empty");
     await page.selectAgent("node-a"); await page.waitVisible('[data-id="alpha"]');

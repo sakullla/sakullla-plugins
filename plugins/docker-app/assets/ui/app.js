@@ -180,6 +180,7 @@ let workspaceSeq = 0;
 let contextVersion = 0;
 let readVersion = 0;
 let detailRequest = 0;
+let detailInFlight = "";
 const contextSnapshot = () => ({ version: contextVersion, read: readVersion, agent: selectedAgentID });
 const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.read === readVersion && snapshot.agent === selectedAgentID;
 let view = "list";
@@ -3079,17 +3080,22 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
   const previousNavigation = navigationSnapshot();
   if (appID !== selectedAppID && !(await confirmLeaveEditor())) return;
   if (!navigationCurrent(previousNavigation)) return;
+  const quiet = view === "detail" && selectedAppID === appID;
+  if (!quiet && detailInFlight === appID) return;
   advanceNavigation();
   const navigation = navigationSnapshot();
   const request = ++detailRequest;
   const trigger = listNode.querySelector(`[data-id="${appID}"] [data-action="detail"]`);
   const loadingMessage = `正在读取 ${appID} 的详情…`;
-  if (trigger) {
-    trigger.disabled = true;
-    trigger.textContent = "加载中…";
-    trigger.setAttribute("aria-busy", "true");
+  detailInFlight = appID;
+  if (!quiet) {
+    if (trigger) {
+      trigger.disabled = true;
+      trigger.textContent = "加载中…";
+      trigger.setAttribute("aria-busy", "true");
+    }
+    showStatus(loadingMessage, false);
   }
-  showStatus(loadingMessage, false);
   try {
     const payload = await panelJSON(`api/apps/${encodeURIComponent(appID)}`);
     if (!navigationCurrent(navigation) || request !== detailRequest) return;
@@ -3121,13 +3127,14 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     showStatus(missing ? "应用已不存在。" : error.message, true);
     return false;
   } finally {
-    if (trigger) {
+    if (detailInFlight === appID && request === detailRequest) detailInFlight = "";
+    if (!quiet && trigger) {
       trigger.textContent = "详情";
       trigger.removeAttribute("aria-busy");
       trigger.disabled = busy;
       if (busy) trigger.dataset.beforeBusy = "false";
     }
-    if (request === detailRequest && statusNode.textContent === loadingMessage) showStatus("", false);
+    if (!quiet && request === detailRequest && statusNode.textContent === loadingMessage) showStatus("", false);
   }
 };
 
@@ -3483,17 +3490,34 @@ const formatDiskCleanupPreviewFailure = (cleanup) => {
   return kind || "读取节点磁盘占用失败，请稍后重试";
 };
 
+const summarizeCleanupDetail = (text) => {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  if (!/sha256:|untagged:|deleted:|deprecated|deleted images|flag --/i.test(raw)) return raw;
+  const untagged = (raw.match(/^\s*untagged:/gim) || []).length;
+  const reclaimed = raw.match(/total reclaimed space:\s*(\S+)/i)?.[1] || raw.match(/total:\s*(\S+)/i)?.[1] || "";
+  const zero = !reclaimed || /^0(b|ib)?$/i.test(reclaimed);
+  const parts = [];
+  if (untagged) parts.push(`已清理 ${untagged} 个闲置镜像`);
+  if (reclaimed && !zero) parts.push(`回收 ${reclaimed}`);
+  else if (reclaimed && untagged) parts.push(`回收 ${reclaimed}`);
+  else if (!untagged) parts.push("没有可回收空间");
+  return parts.join("，");
+};
+
 const formatDiskCleanupBody = (cleanup) => {
   if (diskCleanupPreviewFailed(cleanup)) {
     return formatDiskCleanupPreviewFailure(cleanup);
   }
-  const policy = "以下为估算值。将只删除 dangling 镜像（无标签且未被容器引用），构建缓存按 keep-storage 保留 2GB，数据卷不受影响。";
+  const policy = "以下为估算值。只会删除无标签且未被容器使用的闲置镜像；构建缓存会留下至少 2GB；数据卷不受影响。";
   if (!cleanup || cleanup.empty) {
     return `${policy}\n\n没有可清理的闲置镜像或构建缓存。关闭不会更改节点。`;
   }
   const chunks = [];
-  if (cleanup.images) chunks.push(`镜像（估算值）\n${cleanup.images}`);
-  if (cleanup.builder_cache) chunks.push(`构建缓存（估算值）\n${cleanup.builder_cache}`);
+  const images = summarizeCleanupDetail(cleanup.images);
+  const cache = summarizeCleanupDetail(cleanup.builder_cache);
+  if (images) chunks.push(`镜像（估算值）\n${images}`);
+  if (cache) chunks.push(`构建缓存（估算值）\n${cache}`);
   const lead = `${policy} 取消不会更改节点。`;
   return chunks.length ? `${lead}\n\n${chunks.join("\n\n")}` : lead;
 };
@@ -3504,11 +3528,14 @@ const formatDiskCleanupResult = (cleanup) => {
   const overall = diskCleanupStatusLabel(cleanup.status) || "未知";
   const imageState = diskCleanupStatusLabel(cleanup.images_status) || "未知";
   const builderState = diskCleanupStatusLabel(cleanup.builder_cache_status) || "未知";
+  const imageDetail = summarizeCleanupDetail(cleanup.images);
+  const builderDetail = summarizeCleanupDetail(cleanup.builder_cache);
   const lines = [];
   if (cleanup.empty) lines.push("没有可清理项。");
-  lines.push(`总体状态：${overall}`);
-  lines.push(cleanup.images ? `镜像：${imageState}\n${cleanup.images}` : `镜像：${imageState}`);
-  lines.push(cleanup.builder_cache ? `构建缓存：${builderState}\n${cleanup.builder_cache}` : `构建缓存：${builderState}`);
+  else if (overall === "完成") lines.push("清理完成。");
+  else lines.push(`清理${overall}。`);
+  lines.push(imageDetail ? `镜像：${imageState}。${imageDetail}` : `镜像：${imageState}`);
+  lines.push(builderDetail ? `构建缓存：${builderState}。${builderDetail}` : `构建缓存：${builderState}`);
   if (cleanup.status === "partial") {
     const failed = [];
     const completed = [];
@@ -3521,7 +3548,7 @@ const formatDiskCleanupResult = (cleanup) => {
       lines.push(`失败阶段：${failed.join("、")}。${other}`);
     }
   }
-  return lines.join("\n\n");
+  return lines.join("\n");
 };
 
 const runDiskCleanup = async () => {

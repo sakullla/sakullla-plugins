@@ -707,10 +707,10 @@ func TestControllerCallImagePreviewPruneDoesNotMutate(t *testing.T) {
 	}
 	images, _ := decoded["images"].(string)
 	builder, _ := decoded["builder_cache"].(string)
-	if !strings.Contains(images, "SIZE 1.2GB") || !strings.Contains(images, "RECLAIMABLE 0B (0%)") {
+	if !strings.Contains(images, "占用 1.2GB") || !strings.Contains(images, "没有可回收空间") {
 		t.Fatalf("preview missing image estimates: %#v", decoded)
 	}
-	if !strings.Contains(builder, "SIZE 2.1GB") || !strings.Contains(builder, "RECLAIMABLE 0B") {
+	if !strings.Contains(builder, "占用 2.1GB") || !strings.Contains(builder, "没有可回收空间") {
 		t.Fatalf("preview missing builder estimates: %#v", decoded)
 	}
 	if !containsCommand(commands, "system df") {
@@ -745,10 +745,10 @@ func TestControllerCallImagePreviewPruneKeepsMultilineReport(t *testing.T) {
 	}
 	images, _ := decoded["images"].(string)
 	builder, _ := decoded["builder_cache"].(string)
-	if decoded["empty"] == true || !strings.Contains(images, "SIZE 1.2GB") || !strings.Contains(images, "RECLAIMABLE 12MB (1%)") {
+	if decoded["empty"] == true || !strings.Contains(images, "占用 1.2GB") || !strings.Contains(images, "约可回收 12MB (1%)") {
 		t.Fatalf("preview dropped reclaimable image estimates: %#v", decoded)
 	}
-	if !strings.Contains(builder, "SIZE 4MB") || !strings.Contains(builder, "RECLAIMABLE 4MB") {
+	if !strings.Contains(builder, "占用 4MB") || !strings.Contains(builder, "约可回收 4MB") {
 		t.Fatalf("preview dropped builder cache estimates: %#v", decoded)
 	}
 	if strings.Contains(images, "fixture-value") || strings.Contains(images, "docker.sock") || strings.Contains(builder, "docker.sock") {
@@ -785,8 +785,30 @@ func TestControllerCallImagePreviewPruneMixedZeroImageAndBuilderCacheNotEmpty(t 
 	if decoded["empty"] == true {
 		t.Fatalf("0B images plus reclaimable builder cache reported empty: %#v", decoded)
 	}
-	if !strings.Contains(builder, "RECLAIMABLE 4MB") {
+	if !strings.Contains(builder, "约可回收 4MB") {
 		t.Fatalf("builder cache report missing: %#v", decoded)
+	}
+}
+
+func TestSummarizePruneReportHidesRawLayersAndDeprecation(t *testing.T) {
+	t.Parallel()
+	raw := "Deleted Images:\nuntagged: sha256:573fcdfd9eba68d8bee92ab7a0a53505a3fbee7bd6ff4bf787708dc05cfd1c02\ndeleted: sha256:573fcdfd9eba68d8bee92ab7a0a53505a3fbee7bd6ff4bf787708dc05cfd1c02\nuntagged: sha256:ff7ed47399382c45ecca335c9210e4cf9789fa29c87d4bdda8f7b70cb30992ca\nTotal reclaimed space: 5.787GB\n"
+	got := summarizePruneReport(raw)
+	if !strings.Contains(got, "已清理 2 个闲置镜像") || !strings.Contains(got, "回收 5.787GB") {
+		t.Fatalf("image prune summary=%q", got)
+	}
+	if strings.Contains(got, "sha256:") || strings.Contains(got, "untagged:") || strings.Contains(got, "deleted:") {
+		t.Fatalf("image prune summary leaked layer ids: %q", got)
+	}
+	builder := sanitizePruneReport("Flag --keep-storage has been deprecated, keep-storage flag has been changed to reserved-space Total: 0B")
+	if strings.Contains(builder, "deprecated") || strings.Contains(builder, "keep-storage") {
+		t.Fatalf("deprecation survived sanitize: %q", builder)
+	}
+	if summarizePruneReport(builder) != "没有可回收空间" {
+		t.Fatalf("zero builder summary=%q from %q", summarizePruneReport(builder), builder)
+	}
+	if got := summarizePruneReport("untagged: nginx:old\ndeleted: sha256:abc\nTotal reclaimed space: 12MB\n"); !strings.Contains(got, "已清理 1 个闲置镜像") || !strings.Contains(got, "回收 12MB") {
+		t.Fatalf("named image summary=%q", got)
 	}
 }
 
@@ -995,6 +1017,17 @@ func TestControllerCallImagePruneCleansUnusedImagesAndBuilderCache(t *testing.T)
 		if decoded["status"] != "success" || decoded["images_status"] != "success" || decoded["builder_cache_status"] != "success" {
 			t.Fatalf("confirmed prune status=%#v", decoded)
 		}
+		images, _ := decoded["images"].(string)
+		builder, _ := decoded["builder_cache"].(string)
+		if !strings.Contains(images, "已清理 1 个闲置镜像") || !strings.Contains(images, "回收 12MB") {
+			t.Fatalf("confirmed prune images=%#v", decoded)
+		}
+		if !strings.Contains(builder, "回收 4MB") {
+			t.Fatalf("confirmed prune builder=%#v", decoded)
+		}
+		if strings.Contains(images, "untagged:") || strings.Contains(images, "Deleted Images") || strings.Contains(builder, "Total:") {
+			t.Fatalf("confirmed prune leaked raw docker output: %#v", decoded)
+		}
 		if !containsCommand(commands, "image prune -f") || !containsCommand(commands, "builder prune -f --keep-storage 2GB") {
 			t.Fatalf("confirmed prune commands=%q", commands)
 		}
@@ -1044,7 +1077,7 @@ func TestControllerCallImagePruneCleansUnusedImagesAndBuilderCache(t *testing.T)
 		if !strings.Contains(images, "Cannot connect to the Docker daemon") {
 			t.Fatalf("missing failed image step: %#v", decoded)
 		}
-		if !strings.Contains(builder, "Total:  4MB") {
+		if !strings.Contains(builder, "回收 4MB") {
 			t.Fatalf("missing builder step: %#v", decoded)
 		}
 		if strings.Contains(images, "docker.sock") || strings.Contains(images, "fixture-value") || strings.Contains(builder, "docker.sock") {

@@ -1452,25 +1452,25 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   flex-wrap: wrap;
   gap: 0.5rem 0.75rem;
   align-items: center;
-  padding: 0.65rem 0.85rem;
-  background: color-mix(in srgb, var(--color-terminal) 88%, #fff);
-  border-bottom: 1px solid rgba(248, 250, 252, 0.08);
+  padding: 0.8rem 1rem;
+  background: var(--color-bg-sunken);
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 .logs-toolbar label {
   width: auto;
   min-width: 8.5rem;
   max-width: 14rem;
-  color: var(--color-terminal-muted);
+  color: var(--color-text-secondary);
   font-size: var(--text-xs);
 }
 
 .logs-toolbar select {
   min-height: 1.9rem;
   padding: 0.2rem 0.55rem;
-  border-color: rgba(248, 250, 252, 0.12);
-  background: rgba(248, 250, 252, 0.06);
-  color: var(--color-terminal-text);
+  border-color: var(--color-border-default);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
   font-size: var(--text-sm);
 }
 
@@ -1478,21 +1478,22 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   min-width: 0;
   min-height: 1.9rem;
   padding: 0.25rem 0.65rem;
-  border-color: rgba(248, 250, 252, 0.12);
-  background: transparent;
-  color: var(--color-terminal-text);
+  border-color: var(--color-border-default);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
   font-size: var(--text-sm);
 }
 
 .logs-toolbar .btn-secondary[aria-pressed="true"] {
-  background: rgba(248, 250, 252, 0.12);
+  background: var(--color-warning-subtle);
   color: var(--color-warning);
+  border-color: transparent;
 }
 
 .logs-state,
 #logs-status {
   margin: 0 0 0 auto;
-  color: var(--color-terminal-muted);
+  color: var(--color-text-tertiary);
   font-size: var(--text-xs);
   font-weight: 650;
 }
@@ -3094,9 +3095,12 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
   transform: none;
   width: 100%;
   max-width: none;
+  max-height: 8rem;
+  overflow: auto;
   margin: 0 0 1rem;
   border-radius: var(--radius-md);
   box-shadow: none;
+  white-space: pre-wrap;
 }
 #app-status[data-state="running"], #app-status[data-state="confirming"] {
   color: var(--color-text-primary);
@@ -3323,7 +3327,6 @@ input, select { border-radius: .65rem; }
 .template-card[aria-pressed="true"] { background: var(--color-primary-subtle); border-color: var(--color-primary); }
 .code-editor, .logs-panel, .files-list { border-radius: .85rem; overflow: hidden; border-color: var(--color-border-default); }
 .logs-terminal { min-height: 22rem; }
-.logs-toolbar { background: var(--color-bg-sunken); padding: .8rem 1rem; }
 #app-status[data-state] { border-radius: .8rem; box-shadow: var(--shadow-sm); }
 @media (max-width: 1100px) {
   .console-companion { left: calc(50% - 7rem); width: 8rem; height: 8rem; }

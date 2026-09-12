@@ -270,7 +270,7 @@ func TestNodePrunePreviewCancelAndConfirm(t *testing.T) {
 	}
 	images, _ := preview["images"].(string)
 	builder, _ := preview["builder_cache"].(string)
-	if !strings.Contains(images, "RECLAIMABLE 12MB") || !strings.Contains(builder, "RECLAIMABLE 4MB") {
+	if !strings.Contains(images, "约可回收 12MB") || !strings.Contains(builder, "约可回收 4MB") {
 		t.Fatalf("preview missing estimates: %#v", preview)
 	}
 

@@ -234,18 +234,35 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
   });
 
   await test("cleanup step results distinguish partial and success; accepted alone is insufficient", async () => {
-    for (const mode of ["partial","success","accepted-only"]) {
+    for (const mode of ["partial","success","accepted-only","raw-docker"]) {
       await reset(); await page.click("#detail-back");
       if (mode === "partial") Object.assign(state.cleanupResult,{status:"partial",builder_cache_status:"failed",builder_cache:"缓存清理失败。"});
       if (mode === "accepted-only") state.cleanupResult = null;
+      if (mode === "raw-docker") Object.assign(state.cleanupResult,{
+        status:"success", images_status:"success", builder_cache_status:"success",
+        images:"Deleted Images:\nuntagged: sha256:573fcdfd9eba\ndeleted: sha256:573fcdfd9eba\nTotal reclaimed space: 12MB\n",
+        builder_cache:"Flag --keep-storage has been deprecated, keep-storage flag has been changed to reserved-space Total: 0B",
+      });
       await page.click("#disk-cleanup"); await dialog();
       if (mode === "partial") await capture("cleanup-confirm",375);
-      await close(true); await status(mode === "partial" ? "partial" : mode === "success" ? "succeeded" : "failed"); await idle();
+      if (mode === "success") {
+        const body = await text("#confirm-body");
+        assert.match(body,/闲置镜像/);
+        assert.doesNotMatch(body,/keep-storage|dangling|SIZE |RECLAIMABLE /);
+      }
+      await close(true); await status(mode === "partial" ? "partial" : mode === "accepted-only" ? "failed" : "succeeded"); await idle();
       assert.equal(state.calls.length,1);
       assert.deepEqual(state.calls[0].body,{agent_id:"node-a",confirm:true});
       const message = await text("#app-status");
       if (mode === "partial") { assert.match(message,/镜像：完成/); assert.match(message,/构建缓存：失败/); }
       if (mode === "accepted-only") assert.match(message,/未获得可确认的清理结果/);
+      if (mode === "raw-docker") {
+        assert.doesNotMatch(message,/sha256:/);
+        assert.doesNotMatch(message,/keep-storage/);
+        assert.doesNotMatch(message,/deprecated/i);
+        assert.match(message,/已清理 1 个闲置镜像/);
+        assert.match(message,/回收 12MB/);
+      }
     }
   });
 
