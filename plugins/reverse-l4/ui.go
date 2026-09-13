@@ -35,6 +35,7 @@ type mappingView struct {
 	EntryAgentID string `json:"entry_agent_id"`
 	ExitAgentID  string `json:"exit_agent_id"`
 	Protocol     string `json:"protocol"`
+	ListenHost   string `json:"listen_host"`
 	ListenPort   int    `json:"listen_port"`
 	BackendHost  string `json:"backend_host"`
 	BackendPort  int    `json:"backend_port"`
@@ -56,6 +57,7 @@ type mappingWriteRequest struct {
 	EntryAgentID string `json:"entry_agent_id"`
 	ExitAgentID  string `json:"exit_agent_id"`
 	Protocol     string `json:"protocol"`
+	ListenHost   string `json:"listen_host,omitempty"`
 	ListenPort   int    `json:"listen_port"`
 	BackendHost  string `json:"backend_host"`
 	BackendPort  int    `json:"backend_port"`
@@ -245,6 +247,7 @@ func (body mappingWriteRequest) mapping() Mapping {
 		EntryAgentID: strings.TrimSpace(body.EntryAgentID),
 		ExitAgentID:  strings.TrimSpace(body.ExitAgentID),
 		Protocol:     strings.ToLower(strings.TrimSpace(body.Protocol)),
+		ListenHost:   strings.TrimSpace(body.ListenHost),
 		ListenPort:   body.ListenPort,
 		BackendHost:  strings.TrimSpace(body.BackendHost),
 		BackendPort:  body.BackendPort,
@@ -259,6 +262,7 @@ func newMappingView(status MappingStatus) mappingView {
 		EntryAgentID: status.EntryAgentID,
 		ExitAgentID:  status.ExitAgentID,
 		Protocol:     status.Protocol,
+		ListenHost:   status.effectiveListenHost(),
 		ListenPort:   status.ListenPort,
 		BackendHost:  status.BackendHost,
 		BackendPort:  status.BackendPort,

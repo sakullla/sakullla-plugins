@@ -17,7 +17,7 @@ import (
 
 const (
 	PluginID                 = "reverse-l4"
-	PluginVersion            = "0.3.7"
+	PluginVersion            = "0.3.8"
 	DeclaredResourceGroupRef = "resource-group/reverse-l4"
 
 	// MaxMappings bounds the durable mapping catalog.
@@ -65,6 +65,7 @@ type Mapping struct {
 	EntryAgentID string `json:"entry_agent_id"`
 	ExitAgentID  string `json:"exit_agent_id"`
 	Protocol     string `json:"protocol"`
+	ListenHost   string `json:"listen_host,omitempty"`
 	ListenPort   int    `json:"listen_port"`
 	BackendHost  string `json:"backend_host"`
 	BackendPort  int    `json:"backend_port"`
@@ -111,6 +112,9 @@ func (mapping Mapping) Validate() error {
 	if mapping.ListenPort <= 0 || mapping.ListenPort > 65535 {
 		return fmt.Errorf("%w: listen port", ErrInvalidMapping)
 	}
+	if err := (pluginsdk.L4RuleRequest{Action: pluginsdk.L4RuleActionUpdate, RuleRef: "1", ListenHost: mapping.ListenHost}).Validate(); err != nil {
+		return fmt.Errorf("%w: listen host: %v", ErrInvalidMapping, err)
+	}
 	if !validBackendHost(mapping.BackendHost) {
 		return fmt.Errorf("%w: backend host must be a bounded host or IP without scheme, path, or whitespace", ErrInvalidMapping)
 	}
@@ -154,10 +158,19 @@ func (mapping Mapping) sameUserSpec(other Mapping) bool {
 		mapping.EntryAgentID == other.EntryAgentID &&
 		mapping.ExitAgentID == other.ExitAgentID &&
 		mapping.Protocol == other.Protocol &&
+		mapping.effectiveListenHost() == other.effectiveListenHost() &&
 		mapping.ListenPort == other.ListenPort &&
 		mapping.BackendHost == other.BackendHost &&
 		mapping.BackendPort == other.BackendPort &&
 		slices.Equal(mapping.RelayChain, other.RelayChain)
+}
+
+// Older mappings omitted the listen host and inherited the host L4 default.
+func (mapping Mapping) effectiveListenHost() string {
+	if mapping.ListenHost == "" {
+		return "0.0.0.0"
+	}
+	return mapping.ListenHost
 }
 
 func validMappingID(value string) bool {

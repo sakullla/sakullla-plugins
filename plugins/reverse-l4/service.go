@@ -244,6 +244,7 @@ func (service *Service) Create(ctx context.Context, mapping Mapping) (Mapping, e
 	mapping.Enabled = true
 	mapping.Revision = 0
 	mapping.RecoveryGeneration = 0
+	mapping.ListenHost = mapping.effectiveListenHost()
 	assignID := mapping.ID == ""
 	if !assignID {
 		if err := mapping.Validate(); err != nil {
@@ -311,6 +312,7 @@ func (service *Service) Update(ctx context.Context, spec Mapping) (Mapping, erro
 		return Mapping{}, ErrMappingNotFound
 	}
 	updated := spec
+	updated.ListenHost = updated.effectiveListenHost()
 	updated.Enabled = existing.Enabled
 	updated.RuleRef, updated.SessionRef = existing.RuleRef, existing.SessionRef
 	updated.BridgeHost, updated.BridgePort = existing.BridgeHost, existing.BridgePort
@@ -916,6 +918,7 @@ func ruleRequest(mapping Mapping, session channelSession) pluginsdk.L4RuleReques
 		AgentID:    mapping.EntryAgentID,
 		Name:       "reverse-l4/" + name,
 		Protocol:   mapping.Protocol,
+		ListenHost: mapping.effectiveListenHost(),
 		ListenPort: mapping.ListenPort,
 		Backends: []pluginsdk.L4RuleBackend{{
 			Host: session.BridgeHost,

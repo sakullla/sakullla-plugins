@@ -61,12 +61,14 @@
               <span><strong id="entry-stage-title">公网入口</strong><small>客户端连接这里；监听端口属于入口节点</small></span>
             </div>
             <div class="form-stage-fields">
-              <label>入口节点
+              <label class="form-stage-field--full">入口节点
                 <input type="hidden" name="entry_agent_id" value="" autocomplete="off">
                 <div class="agent-search-select" data-agent-picker="entry"></div>
               </label>
+              <label>监听地址 <input name="listen_host" value="0.0.0.0" maxlength="253" autocomplete="off" spellcheck="false" placeholder="0.0.0.0" aria-describedby="listen-host-hint"></label>
               <label>公开监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
             </div>
+            <p id="listen-host-hint" class="hint">默认 0.0.0.0，监听所有 IPv4 网卡；可填写指定本机地址，或 :: 监听 IPv6。</p>
           </section>
           <section class="form-stage" aria-labelledby="channel-stage-title">
             <div class="form-stage-head">

@@ -257,6 +257,11 @@ func mutationOperationKey(ctx context.Context, action string, mapping Mapping, r
 	for _, hop := range mapping.RelayChain {
 		fields = append(fields, fmt.Sprintf("relay-%d", hop))
 	}
+	// Preserve operation ids for legacy/default mappings while distinguishing
+	// retries that change the listener at the same uncommitted revision.
+	if host := mapping.effectiveListenHost(); host != "0.0.0.0" {
+		fields = append(fields, "listen-host", host)
+	}
 	fields = append(fields,
 		fmt.Sprintf("enabled-%t", mapping.Enabled), mapping.RuleRef, mapping.SessionRef,
 		mapping.BridgeHost, fmt.Sprintf("bridge-%d", mapping.BridgePort),

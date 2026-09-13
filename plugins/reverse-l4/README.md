@@ -25,6 +25,11 @@ of them. A mapping may optionally reference user-managed relay listeners to
 route the channel through a relay chain; without a reference the exit agent
 dials the entry agent directly.
 
+The public entry accepts a single `listen_host`, matching the host L4 rule.
+It defaults to `0.0.0.0` (including older mappings without the field); a
+specific local address or `::` may be selected. This configures the public
+service listener, not the reverse-channel ingress or loopback bridge.
+
 ## Management page
 
 The plugin declares the generic `ui.route` extension point with `ui.nav`

@@ -865,6 +865,7 @@ const formMapping = () => {
     entry_agent_id: String(data.get("entry_agent_id") || "").trim(),
     exit_agent_id: String(data.get("exit_agent_id") || "").trim(),
     protocol: String(data.get("protocol") || "tcp").trim(),
+    listen_host: String(data.get("listen_host") || "").trim() || "0.0.0.0",
     listen_port: Number(data.get("listen_port") || 0),
     backend_host: String(data.get("backend_host") || "").trim(),
     backend_port: Number(data.get("backend_port") || 0),
@@ -885,6 +886,7 @@ const openForm = async (mapping) => {
   if (editingID) {
     formNode.querySelector('input[name="name"]').value = mapping.name || "";
     formNode.querySelector('select[name="protocol"]').value = mapping.protocol || "tcp";
+    formNode.querySelector('input[name="listen_host"]').value = mapping.listen_host || "0.0.0.0";
     formNode.querySelector('input[name="listen_port"]').value = mapping.listen_port || "";
     formNode.querySelector('input[name="backend_host"]').value = mapping.backend_host || "";
     formNode.querySelector('input[name="backend_port"]').value = mapping.backend_port || "";
@@ -1109,7 +1111,9 @@ const renderMapping = (mapping) => {
   routeHeading.textContent = "流量路径";
   const route = document.createElement("div");
   route.className = "map-route";
-  const entryMeta = `${String(mapping.protocol || "").toUpperCase()} :${mapping.listen_port} · 客户端连接此处`;
+  const listenHost = mapping.listen_host || "0.0.0.0";
+  const listenAddress = listenHost.includes(":") ? `[${listenHost}]:${mapping.listen_port}` : `${listenHost}:${mapping.listen_port}`;
+  const entryMeta = `${String(mapping.protocol || "").toUpperCase()} ${listenAddress} · 客户端连接此处`;
   const backendMeta = `${mapping.backend_host}:${mapping.backend_port} · 由出口节点访问`;
   route.append(
     routeStage("公网入口", entry.displayName, entryMeta),
@@ -1191,6 +1195,7 @@ if (formNode) {
       entry_agent_id: mapping.entry_agent_id,
       exit_agent_id: mapping.exit_agent_id,
       protocol: mapping.protocol,
+      listen_host: mapping.listen_host,
       listen_port: mapping.listen_port,
       backend_host: mapping.backend_host,
       backend_port: mapping.backend_port,

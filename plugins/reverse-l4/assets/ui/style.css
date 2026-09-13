@@ -323,6 +323,7 @@ h2 { font-size: 0.875rem; }
 }
 
 .form-stage-fields--single { grid-template-columns: minmax(0, 1fr); }
+.form-stage-field--full { grid-column: 1 / -1; }
 
 .relay-field {
   grid-column: 1 / -1;
