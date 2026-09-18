@@ -3735,6 +3735,13 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if !strings.Contains(stylesheet, "tok-key") || !strings.Contains(stylesheet, ".code-editor") {
 		t.Fatal("stylesheet missing syntax highlighter colors")
 	}
+	selection := cssRule(stylesheet, ".code-editor__input::selection")
+	if selection == "" {
+		t.Fatal("YAML/.env editors are missing a selection rule")
+	}
+	if strings.Contains(selection, "color: transparent") || !strings.Contains(selection, "-webkit-text-fill-color: var(--color-text-primary)") {
+		t.Fatal("selected YAML/.env text is still invisible")
+	}
 	if !strings.Contains(stylesheet, "max-height: 22rem") || !strings.Contains(stylesheet, "max-height: 14rem") || !strings.Contains(stylesheet, "field-sizing: fixed") {
 		t.Fatal("YAML/.env editors can still grow with content instead of scrolling")
 	}

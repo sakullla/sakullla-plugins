@@ -1022,7 +1022,13 @@ textarea {
 
 .code-editor__input::selection {
   background: var(--color-primary-200);
-  color: transparent;
+  color: var(--color-text-primary);
+  -webkit-text-fill-color: var(--color-text-primary);
+}
+
+.code-editor__input::-moz-selection {
+  background: var(--color-primary-200);
+  color: var(--color-text-primary);
 }
 
 .code-editor:focus-within .code-editor__highlight,

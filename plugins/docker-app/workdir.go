@@ -504,13 +504,27 @@ func ensureBindFilePath(hostPath string) error {
 
 func looksLikeFileBind(hostPath, containerPath string) bool {
 	for _, candidate := range []string{hostPath, containerPath} {
-		base := filepath.Base(candidate)
-		ext := filepath.Ext(base)
-		if ext != "" && ext != base {
+		if fileBindName(filepath.Base(candidate)) {
 			return true
 		}
 	}
 	return false
+}
+
+// fileBindName reports names that should materialize as files, not directories.
+// filepath.Ext(".env") and filepath.Ext(".cache") both return the whole name, so
+// extension-only checks would treat cache directories as files and env files as
+// directories.
+func fileBindName(base string) bool {
+	if base == "" {
+		return false
+	}
+	lower := strings.ToLower(base)
+	if lower == ".env" || strings.HasPrefix(lower, ".env.") {
+		return true
+	}
+	ext := filepath.Ext(base)
+	return ext != "" && ext != base
 }
 
 func resolveWorkspaceFilePath(root, appID, filePath string) (workdir, resolved string, err error) {

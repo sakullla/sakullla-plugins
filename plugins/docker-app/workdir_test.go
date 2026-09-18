@@ -123,6 +123,31 @@ func TestPrepareAppWorkspaceReplacesEmptyFileBindDirectory(t *testing.T) {
 	}
 }
 
+func TestPrepareAppWorkspaceKeepsDotDirectoryBindsAndCreatesEnvFiles(t *testing.T) {
+	root := t.TempDir()
+	compose := "services:\n  api:\n    image: nginx:1.27\n    volumes:\n      - ./config/.env:/app/config/.env\n      - ./.chche:/app/.cache\n"
+	workspace, err := PrepareAppWorkspace(root, "danmu-api", compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(workspace.Dir, "config", ".env")
+	envInfo, err := os.Lstat(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envInfo.IsDir() {
+		t.Fatal("relative ./config/.env bind created a directory")
+	}
+	cachePath := filepath.Join(workspace.Dir, ".chche")
+	cacheInfo, err := os.Lstat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cacheInfo.IsDir() {
+		t.Fatal("relative ./.chche bind was materialized as a file")
+	}
+}
+
 func TestParseComposeUser(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
