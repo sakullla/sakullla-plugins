@@ -1,6 +1,6 @@
 schema_version: 1
 id: reverse-l4
-version: 0.3.8
+version: 0.3.9
 name: 四层反向穿透
 description: 把内网 TCP/UDP 服务经入口 L4 规则与出口反向通道发布到公网入口
 compatibility:
@@ -13,8 +13,8 @@ runtime:
   entry: reverse-l4
 artifacts:
   - path: artifacts/linux-amd64/reverse-l4
-    sha256: 46c7af01daad8868660d451ddb63ff95ab9b183d85b4a2d4794df11a69ed60cc
-    size: 20254129
+    sha256: 8e22f2bab6d2d4b95504b0d524df9f53fb293a912ace7fedde1353caa5bef6f5
+    size: 20823258
     mode: executable
     goos: linux
     goarch: amd64
