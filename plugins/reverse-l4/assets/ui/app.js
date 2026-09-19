@@ -17,6 +17,7 @@ const applyHostTheme = () => {
 applyHostTheme();
 
 const statusNode = document.querySelector("#map-status");
+const toastStack = document.querySelector("#map-toasts");
 const loadingNode = document.querySelector("#map-loading");
 const unavailableNode = document.querySelector("#map-unavailable");
 const deniedNode = document.querySelector("#map-denied");
@@ -60,11 +61,41 @@ const panelAuthHeaders = () => {
   return headers;
 };
 
+const dismissToast = (toast) => {
+  if (!toast) return;
+  toast.remove();
+};
+
+// showStatus reports an operation result as an auto-dismissing toast; error
+// toasts stay until the operator closes them. #map-status remains an sr-only
+// live region so assistive tech still announces the same message.
 const showStatus = (message, isError) => {
-  if (!statusNode) return;
-  statusNode.hidden = !message;
-  statusNode.textContent = message;
-  statusNode.dataset.error = isError ? "true" : "false";
+  if (!message) return;
+  if (statusNode) {
+    statusNode.hidden = false;
+    statusNode.textContent = message;
+    statusNode.dataset.error = isError ? "true" : "false";
+  }
+  if (!toastStack) return;
+  const toast = document.createElement("div");
+  toast.className = isError ? "toast toast--error" : "toast toast--success";
+  toast.setAttribute("role", isError ? "alert" : "status");
+  const text = document.createElement("span");
+  text.className = "toast__message";
+  text.textContent = message;
+  toast.append(text);
+  if (isError) {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast__close";
+    close.setAttribute("aria-label", "关闭通知");
+    close.textContent = "×";
+    close.addEventListener("click", () => dismissToast(toast));
+    toast.append(close);
+  } else {
+    window.setTimeout(() => dismissToast(toast), 4200);
+  }
+  toastStack.append(toast);
 };
 
 const showCatalogError = (message) => {
@@ -1028,6 +1059,7 @@ const renderMapping = (mapping) => {
   const card = document.createElement("article");
   card.className = "map-card";
   card.dataset.id = mapping.id;
+  if (!mapping.enabled) card.classList.add("map-card--disabled");
 
   const head = document.createElement("div");
   head.className = "map-card-head";
@@ -1084,21 +1116,44 @@ const renderMapping = (mapping) => {
   deleteButton.type = "button";
   deleteButton.className = "btn-link danger";
   deleteButton.textContent = "删除";
-  deleteButton.addEventListener("click", async () => {
+  // Inline two-step delete: the first click swaps the action row for an
+  // in-card confirm group, the second posts delete + confirm=id.
+  deleteButton.addEventListener("click", () => {
     if (busy) return;
-    if (!window.confirm(`确认删除 ${mappingTitle(mapping)}？入口规则与反向通道会被一并释放。`)) {
+    const confirmGroup = document.createElement("span");
+    confirmGroup.className = "map-confirm";
+    const confirmText = document.createElement("span");
+    confirmText.className = "map-confirm-text";
+    confirmText.textContent = "确认删除？入口规则与反向通道会一并释放。";
+    const confirmYes = document.createElement("button");
+    confirmYes.type = "button";
+    confirmYes.className = "btn-link danger";
+    confirmYes.textContent = "确认删除";
+    const confirmNo = document.createElement("button");
+    confirmNo.type = "button";
+    confirmNo.className = "btn-link";
+    confirmNo.textContent = "取消";
+    confirmGroup.append(confirmText, confirmYes, confirmNo);
+    deleteButton.hidden = true;
+    actions.append(confirmGroup);
+    confirmNo.addEventListener("click", () => {
+      if (busy) return;
+      confirmGroup.remove();
+      deleteButton.hidden = false;
       showStatus("已取消，映射未更改。", false);
-      return;
-    }
-    setBusy(true);
-    try {
-      await postAction(mapping, "delete", { confirm: mapping.id });
-      showStatus("已删除映射。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
+    });
+    confirmYes.addEventListener("click", async () => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await postAction(mapping, "delete", { confirm: mapping.id });
+        showStatus("已删除映射。", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
   });
   actions.append(editButton, toggleButton, deleteButton);
   head.append(identity, actions);

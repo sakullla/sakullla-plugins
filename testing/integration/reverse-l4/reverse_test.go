@@ -297,25 +297,30 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	css := string(cssBytes)
 	for _, want := range []string{
 		"@media (max-width: 720px)",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"width: calc(100% - 2.5rem)",
+		"grid-template-columns: 1fr",
+		"--control-height: 32px",
+		"--content-max: 1200px",
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("management stylesheet missing viewport rule %q", want)
+			t.Fatalf("management stylesheet missing functional rule %q", want)
 		}
 	}
-	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
-		t.Fatal("management stylesheet still caps main at 52rem, 64rem, or 880px")
+	wide := cssFrom(css, "@media (min-width: 1400px)")
+	if wide == "" {
+		t.Fatal("management stylesheet missing the wide-viewport rule")
 	}
-	toolbar := cssRule(css, ".toolbar-bar")
-	if strings.Contains(toolbar, "space-between") {
-		t.Fatal(".toolbar-bar still uses space-between to fill main")
+	wideList := cssRule(wide, ".map-list")
+	if !strings.Contains(wideList, "grid-template-columns:") || !strings.Contains(wideList, "repeat(2") {
+		t.Fatal("wide viewport does not expand the mapping list into multiple columns")
 	}
-	if !strings.Contains(toolbar, "justify-content: flex-start") || !strings.Contains(toolbar, "max-width: min(46rem, 100%)") {
-		t.Fatal(".toolbar-bar is not a capped operation group")
+}
+
+func cssFrom(css, marker string) string {
+	start := strings.Index(css, marker)
+	if start < 0 {
+		return ""
 	}
+	return css[start:]
 }
 
 func cssRule(css, selector string) string {

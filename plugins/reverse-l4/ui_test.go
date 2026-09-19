@@ -93,6 +93,20 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		`data-agent-picker="exit"`,
 		`id="relay-hops"`,
 		`id="relay-add"`,
+		`id="map-loading"`,
+		`id="map-unavailable"`,
+		`id="map-denied"`,
+		`id="map-status"`,
+		`id="map-toasts"`,
+		`id="map-list"`,
+		`id="map-empty"`,
+		`id="map-count"`,
+		`id="map-form"`,
+		`id="mapping-form"`,
+		`id="form-cancel"`,
+		`id="form-submit"`,
+		`id="catalog-error"`,
+		`id="mapping-id-display"`,
 		`class="route-guide"`,
 		"公网入口",
 		"出口侧内网服务",
@@ -124,10 +138,15 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"listenerIdentity",
 		"流量路径",
 		"技术标识",
+		"确认删除",
+		"map-toasts",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing catalog %q", want)
 		}
+	}
+	if strings.Contains(js, "window.confirm") {
+		t.Fatal("script still blocks on window.confirm instead of the inline two-step delete")
 	}
 	if strings.Contains(html, `select name="entry_agent_id"`) || strings.Contains(html, `select name="exit_agent_id"`) {
 		t.Fatal("create form still uses a native agent <select>")
@@ -145,45 +164,48 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		".form-stage",
 		".map-route",
 		".map-technical",
+		".agent-search-select",
+		".agent-search-select__status--offline",
+		".chip-state-online",
+		".chip-state-unknown",
+		".map-confirm",
+		".toast",
+		".toast--error",
 		"@media (max-width: 720px)",
 		"grid-template-columns: 1fr",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"width: calc(100% - 2.5rem)",
-		".agent-search-select",
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("stylesheet missing viewport rule %q", want)
+			t.Fatalf("stylesheet missing functional rule %q", want)
 		}
 	}
-	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
-		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	htmlRule := cssRule(css, "html")
+	if !strings.Contains(htmlRule, "font-size: 14px") {
+		t.Fatal("base density is not the 14px console scale")
+	}
+	for _, legacy := range []string{"font-size: 17px", "font-size: 18px", "font-size: 20px"} {
+		if strings.Contains(css, legacy) {
+			t.Fatalf("stylesheet still scales the root font at wide viewports: %s", legacy)
+		}
+	}
+	if !strings.Contains(css, "--control-height: 32px") {
+		t.Fatal("controls are not standardized on the 32px console height")
+	}
+	if !strings.Contains(css, "--content-max: 1200px") {
+		t.Fatal("content column token is missing")
+	}
+	mainRule := cssRule(css, "main")
+	if !strings.Contains(mainRule, "max-width: var(--content-max)") || !strings.Contains(mainRule, "margin-inline: auto") {
+		t.Fatal("main is not a centered, capped content column")
+	}
+	wide := cssFrom(css, "@media (min-width: 1400px)")
+	if wide == "" {
+		t.Fatal("stylesheet missing the wide-viewport rule")
+	}
+	wideList := cssRule(wide, ".map-list")
+	if !strings.Contains(wideList, "grid-template-columns:") || !strings.Contains(wideList, "repeat(2") {
+		t.Fatal("wide viewport does not expand the mapping list into multiple columns")
 	}
 	assertConsoleSkin(t, html, js, css)
-	toolbar := cssRule(css, ".toolbar-bar")
-	if strings.Contains(toolbar, "space-between") {
-		t.Fatal(".toolbar-bar still uses space-between to fill main")
-	}
-	if !strings.Contains(toolbar, "justify-content: flex-start") || !strings.Contains(toolbar, "max-width: min(46rem, 100%)") {
-		t.Fatal(".toolbar-bar is not a capped operation group")
-	}
-	mappingForm := cssRule(css, "#mapping-form")
-	if !strings.Contains(mappingForm, "max-width: min(46rem, 100%)") {
-		t.Fatal("#mapping-form still fills main without a capped operation group")
-	}
-	for _, want := range []string{
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
-		"repeat(2, minmax(0, 1fr))",
-		"repeat(2, minmax(18rem, 1fr))",
-		"repeat(3, minmax(18rem, 1fr))",
-	} {
-		if !strings.Contains(css, want) {
-			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
-		}
-	}
 
 	anonymous := serveManagement(controller, httptest.NewRequest(http.MethodGet, "/api/mappings", nil))
 	if anonymous.Code != http.StatusForbidden || !strings.Contains(anonymous.Body.String(), ErrUnauthorized.Error()) {
@@ -447,14 +469,18 @@ func assertConsoleSkin(t *testing.T, page, script, style string) {
 	if !strings.Contains(page, `data-theme="light"`) {
 		t.Fatal("page default theme is not light")
 	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
+	light := cssRule(style, `[data-theme="light"]`)
+	dark := cssRule(style, `[data-theme="dark"]`)
+	if light == "" || dark == "" {
 		t.Fatal("stylesheet missing light/dark theme selectors")
 	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
+	if !strings.Contains(light, "--color-accent:") || !strings.Contains(dark, "--color-accent:") {
+		t.Fatal("stylesheet does not define the single accent token in both themes")
 	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
+	for _, semantic := range []string{"--color-success:", "--color-danger:", "--color-warning:"} {
+		if !strings.Contains(light, semantic) || !strings.Contains(dark, semantic) {
+			t.Fatalf("stylesheet missing semantic status token %s in a theme", semantic)
+		}
 	}
 	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
 		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
@@ -465,6 +491,14 @@ func assertConsoleSkin(t *testing.T, page, script, style string) {
 	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
 		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
 	}
+}
+
+func cssFrom(css, marker string) string {
+	start := strings.Index(css, marker)
+	if start < 0 {
+		return ""
+	}
+	return css[start:]
 }
 
 func cssRule(css, selector string) string {
