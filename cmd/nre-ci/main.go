@@ -264,15 +264,39 @@ func checkAll(ctx context.Context, args []string) error {
 	return err
 }
 
+// officialReleaseOmittedIDs is the reversible set of in-tree plugins skipped by nre-ci release.
+var officialReleaseOmittedIDs = map[string]struct{}{
+	"ip-policy":  {},
+	"rate-limit": {},
+	"waf":        {},
+}
+
 func buildAll(ctx context.Context, args []string, verify sdkVerifier) (sdklock.Lock, []verifiedPlugin, error) {
-	return buildAllWithManifests(ctx, args, verify, false)
+	return buildAllWithManifests(ctx, args, verify, false, nil)
 }
 
 func buildAllForRelease(ctx context.Context, args []string, verify sdkVerifier) (sdklock.Lock, []verifiedPlugin, error) {
-	return buildAllWithManifests(ctx, args, verify, true)
+	return buildAllWithManifests(ctx, args, verify, true, officialReleaseOmittedIDs)
 }
 
-func buildAllWithManifests(ctx context.Context, args []string, verify sdkVerifier, bindBuiltArtifacts bool) (sdklock.Lock, []verifiedPlugin, error) {
+func filterPluginIDs(ids []string, omitted map[string]struct{}) ([]string, error) {
+	if len(omitted) != 0 {
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if _, skip := omitted[id]; skip {
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		ids = filtered
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no plugin manifests found")
+	}
+	return ids, nil
+}
+
+func buildAllWithManifests(ctx context.Context, args []string, verify sdkVerifier, bindBuiltArtifacts bool, omitIDs map[string]struct{}) (sdklock.Lock, []verifiedPlugin, error) {
 	flags := flag.NewFlagSet("all", flag.ContinueOnError)
 	lockPath := flags.String("sdk-lock", "sdk.lock.json", "canonical SDK lock")
 	if err := flags.Parse(args); err != nil {
@@ -319,8 +343,9 @@ func buildAllWithManifests(ctx context.Context, args []string, verify sdkVerifie
 		}
 	}
 	sort.Strings(ids)
-	if len(ids) == 0 {
-		return sdklock.Lock{}, nil, fmt.Errorf("no plugin manifests found")
+	ids, err = filterPluginIDs(ids, omitIDs)
+	if err != nil {
+		return sdklock.Lock{}, nil, err
 	}
 	plugins := make([]verifiedPlugin, 0, len(ids))
 	for _, id := range ids {

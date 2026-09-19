@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,6 +155,107 @@ func TestReleaseReproducibilityKeepsIsolatedStrategy(t *testing.T) {
 	}
 	if isolatedCalls != 1 || inPlaceCalls != 0 {
 		t.Fatalf("release reproducibility strategies: isolated=%d in-place=%d, want isolated=1 in-place=0", isolatedCalls, inPlaceCalls)
+	}
+}
+
+func TestOfficialReleasePluginIDsOmitPolicyPlugins(t *testing.T) {
+	omitted := []string{"ip-policy", "rate-limit", "waf"}
+	remaining := []string{
+		"accelerator-sources",
+		"cloudflare-dns",
+		"docker-app",
+		"doh",
+		"reverse-l4",
+		"shadowsocks-server",
+		"webdav",
+	}
+	all := append(append([]string{}, remaining...), omitted...)
+	sort.Strings(all)
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		ids     []string
+		omitted map[string]struct{}
+		want    []string
+		wantErr string
+	}{
+		{name: "omitted three excluded remaining seven included", ids: all, omitted: officialReleaseOmittedIDs, want: remaining},
+		{name: "empty after filter fails", ids: omitted, omitted: officialReleaseOmittedIDs, wantErr: "no plugin manifests found"},
+		{name: "empty discovery fails", ids: nil, omitted: officialReleaseOmittedIDs, wantErr: "no plugin manifests found"},
+		{name: "nre-ci all keeps every official plugin", ids: all, omitted: nil, want: all},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := filterPluginIDs(append([]string{}, test.ids...), test.omitted)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("filterPluginIDs error = %v, want %q", err, test.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("filterPluginIDs ids = %v, want nil", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(test.want) {
+				t.Fatalf("filterPluginIDs ids = %v, want %v", got, test.want)
+			}
+			for index, id := range test.want {
+				if got[index] != id {
+					t.Fatalf("filterPluginIDs ids = %v, want %v", got, test.want)
+				}
+			}
+		})
+	}
+	if len(officialReleaseOmittedIDs) != len(omitted) {
+		t.Fatalf("officialReleaseOmittedIDs size = %d, want %d", len(officialReleaseOmittedIDs), len(omitted))
+	}
+	for _, id := range omitted {
+		if _, ok := officialReleaseOmittedIDs[id]; !ok {
+			t.Fatalf("officialReleaseOmittedIDs missing %q", id)
+		}
+		if _, err := pluginArtifactSpecFor(repositoryRoot, id); err != nil {
+			t.Fatalf("pluginArtifactSpecFor(%q) = %v", id, err)
+		}
+	}
+}
+
+func TestBuildAllForReleasePassesOfficialOmitSet(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passed := map[string]bool{}
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name == nil || (function.Name.Name != "buildAll" && function.Name.Name != "buildAllForRelease") {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok || ident.Name != "buildAllWithManifests" || len(call.Args) == 0 {
+				return true
+			}
+			last, ok := call.Args[len(call.Args)-1].(*ast.Ident)
+			passed[function.Name.Name] = ok && last.Name == "officialReleaseOmittedIDs"
+			return true
+		})
+	}
+	if !passed["buildAllForRelease"] {
+		t.Fatal("buildAllForRelease did not pass officialReleaseOmittedIDs into buildAllWithManifests")
+	}
+	if passed["buildAll"] {
+		t.Fatal("buildAll passed officialReleaseOmittedIDs into buildAllWithManifests")
 	}
 }
 
