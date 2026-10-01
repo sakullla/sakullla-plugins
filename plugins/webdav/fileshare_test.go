@@ -846,6 +846,237 @@ func TestWebDAVConditionalPut(t *testing.T) {
 	})
 }
 
+func TestWebDAVIfMatch(t *testing.T) {
+	putWithMatch := func(t *testing.T, handler http.Handler, target, match, contents string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, target, strings.NewReader(contents))
+		request.Header.Set("If-Match", match)
+		setBearerAuth(request, testSharePassword)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	t.Run("rejects a mismatched etag without changing the file", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "config.bin")
+		if err := os.WriteFile(target, []byte("original-body"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := putWithMatch(t, controller, "http://share.test/dav/config.bin", `"not-the-etag"`, "replacement-body")
+		if response.Code != http.StatusPreconditionFailed {
+			t.Fatalf("put status = %d, want 412 body=%q", response.Code, response.Body.String())
+		}
+		if response.Header().Get("ETag") != resourceETag(before) {
+			t.Fatalf("412 ETag = %q, want %q", response.Header().Get("ETag"), resourceETag(before))
+		}
+		body, err := os.ReadFile(target)
+		if err != nil || string(body) != "original-body" {
+			t.Fatalf("file = %q err=%v", body, err)
+		}
+		after, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Mode() != before.Mode() || resourceETag(after) != resourceETag(before) {
+			t.Fatalf("file changed: mode %v->%v etag %q->%q", before.Mode(), after.Mode(), resourceETag(before), resourceETag(after))
+		}
+	})
+
+	t.Run("does not create a missing resource", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		for _, match := range []string{"*", `"missing"`} {
+			response := putWithMatch(t, controller, "http://share.test/dav/new.bin", match, "created")
+			if response.Code != http.StatusPreconditionFailed {
+				t.Fatalf("If-Match %q status = %d, want 412 body=%q", match, response.Code, response.Body.String())
+			}
+			if _, err := os.Stat(filepath.Join(owned, "new.bin")); !os.IsNotExist(err) {
+				t.Fatalf("If-Match %q created a file: %v", match, err)
+			}
+		}
+	})
+
+	t.Run("accepts the validator advertised by GET and PROPFIND", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		created := putWithMatch(t, controller, "http://share.test/dav/config.bin", "*", "ignored")
+		if created.Code != http.StatusPreconditionFailed {
+			t.Fatalf("create with If-Match * status = %d, want 412", created.Code)
+		}
+		initial := doShareRequest(t, controller, http.MethodPut, "http://share.test/dav/config.bin", testSharePassword, strings.NewReader("version-one"))
+		if initial.Code != http.StatusCreated {
+			t.Fatalf("initial put status = %d body=%q", initial.Code, initial.Body.String())
+		}
+		got := doShareRequest(t, controller, http.MethodGet, "http://share.test/dav/config.bin", testSharePassword, nil)
+		if got.Code != http.StatusOK {
+			t.Fatalf("get status = %d body=%q", got.Code, got.Body.String())
+		}
+		info, err := os.Stat(filepath.Join(owned, "config.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		etag := resourceETag(info)
+		if got.Header().Get("ETag") != etag || initial.Header().Get("ETag") != etag {
+			t.Fatalf("etag get=%q put=%q stat=%q", got.Header().Get("ETag"), initial.Header().Get("ETag"), etag)
+		}
+		propfind := httptest.NewRequest("PROPFIND", "http://share.test/dav/config.bin", http.NoBody)
+		setBearerAuth(propfind, testSharePassword)
+		propfind.Header.Set("Depth", "0")
+		found := httptest.NewRecorder()
+		controller.ServeHTTP(found, propfind)
+		if found.Code != http.StatusMultiStatus || !strings.Contains(found.Body.String(), etag) {
+			t.Fatalf("propfind = %d %q, want etag %s", found.Code, found.Body.String(), etag)
+		}
+
+		updated := putWithMatch(t, controller, "http://share.test/dav/config.bin", etag, "version-two")
+		if updated.Code != http.StatusCreated {
+			t.Fatalf("matching put status = %d, want 201 body=%q", updated.Code, updated.Body.String())
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "config.bin"))
+		if err != nil || string(body) != "version-two" {
+			t.Fatalf("updated file = %q err=%v", body, err)
+		}
+		stale := putWithMatch(t, controller, "http://share.test/dav/config.bin", etag, "version-three")
+		if stale.Code != http.StatusPreconditionFailed {
+			t.Fatalf("stale put status = %d, want 412 body=%q", stale.Code, stale.Body.String())
+		}
+		body, err = os.ReadFile(filepath.Join(owned, "config.bin"))
+		if err != nil || string(body) != "version-two" {
+			t.Fatalf("file after stale put = %q err=%v", body, err)
+		}
+	})
+
+	t.Run("wildcard updates an existing resource", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		if err := os.WriteFile(filepath.Join(owned, "config.bin"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		response := putWithMatch(t, controller, "http://share.test/dav/config.bin", "*", "new")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("wildcard put status = %d, want 201 body=%q", response.Code, response.Body.String())
+		}
+		body, err := os.ReadFile(filepath.Join(owned, "config.bin"))
+		if err != nil || string(body) != "new" {
+			t.Fatalf("file = %q err=%v", body, err)
+		}
+	})
+
+	t.Run("delete and move honor the validator", func(t *testing.T) {
+		controller, owned := startShare(t, "")
+		target := filepath.Join(owned, "config.bin")
+		if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		etag := resourceETag(info)
+
+		move := httptest.NewRequest("MOVE", "http://share.test/dav/config.bin", nil)
+		setBearerAuth(move, testSharePassword)
+		move.Header.Set("Destination", "http://share.test/dav/moved.bin")
+		move.Header.Set("If-Match", `"stale"`)
+		moved := httptest.NewRecorder()
+		controller.ServeHTTP(moved, move)
+		if moved.Code != http.StatusPreconditionFailed {
+			t.Fatalf("move status = %d, want 412 body=%q", moved.Code, moved.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(owned, "moved.bin")); !os.IsNotExist(err) {
+			t.Fatalf("rejected move created destination: %v", err)
+		}
+
+		del := httptest.NewRequest(http.MethodDelete, "http://share.test/dav/config.bin", nil)
+		setBearerAuth(del, testSharePassword)
+		del.Header.Set("If-Match", `"stale"`)
+		deleted := httptest.NewRecorder()
+		controller.ServeHTTP(deleted, del)
+		if deleted.Code != http.StatusPreconditionFailed {
+			t.Fatalf("delete status = %d, want 412 body=%q", deleted.Code, deleted.Body.String())
+		}
+		body, err := os.ReadFile(target)
+		if err != nil || string(body) != "keep" {
+			t.Fatalf("file after rejected delete = %q err=%v", body, err)
+		}
+
+		del = httptest.NewRequest(http.MethodDelete, "http://share.test/dav/config.bin", nil)
+		setBearerAuth(del, testSharePassword)
+		del.Header.Set("If-Match", etag)
+		deleted = httptest.NewRecorder()
+		controller.ServeHTTP(deleted, del)
+		if deleted.Code != http.StatusNoContent {
+			t.Fatalf("matching delete status = %d, want 204 body=%q", deleted.Code, deleted.Body.String())
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatalf("matching delete left file: %v", err)
+		}
+	})
+
+	t.Run("concurrent conditional puts have one winner", func(t *testing.T) {
+		owned := t.TempDir()
+		target := filepath.Join(owned, "config.bin")
+		if err := os.WriteFile(target, []byte("base"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		etag := resourceETag(info)
+		handlers := make([]http.Handler, 2)
+		for index := range handlers {
+			handler, err := NewHandler(owned, testSharePassword)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handlers[index] = handler
+		}
+		contents := []string{"first-body", "second-body"}
+		responses := make([]*httptest.ResponseRecorder, len(handlers))
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for index := range handlers {
+			wait.Add(1)
+			go func(index int) {
+				defer wait.Done()
+				<-start
+				request := httptest.NewRequest(http.MethodPut, "http://share.test/dav/config.bin", strings.NewReader(contents[index]))
+				request.Header.Set("If-Match", etag)
+				setBearerAuth(request, testSharePassword)
+				response := httptest.NewRecorder()
+				handlers[index].ServeHTTP(response, request)
+				responses[index] = response
+			}(index)
+		}
+		close(start)
+		wait.Wait()
+
+		winner := -1
+		for index, response := range responses {
+			switch response.Code {
+			case http.StatusCreated:
+				if winner != -1 {
+					t.Fatalf("multiple conditional puts succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+				}
+				winner = index
+			case http.StatusPreconditionFailed:
+			default:
+				t.Fatalf("conditional put %d status = %d body=%q", index, response.Code, response.Body.String())
+			}
+		}
+		if winner == -1 {
+			t.Fatalf("no conditional put succeeded: statuses=%d,%d", responses[0].Code, responses[1].Code)
+		}
+		body, err := os.ReadFile(target)
+		if err != nil || string(body) != contents[winner] {
+			t.Fatalf("winning file = %q, want %q err=%v", body, contents[winner], err)
+		}
+	})
+}
+
 func TestRootPathSwitchAndCloseKeepExternalFiles(t *testing.T) {
 	owned := t.TempDir()
 	external := t.TempDir()

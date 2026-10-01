@@ -158,6 +158,13 @@ func writeAPIUnauthorized(writer http.ResponseWriter) {
 }
 
 func (handler *Handler) serveDAV(writer http.ResponseWriter, request *http.Request, scope requestScope) {
+	unlock, rejected := guardIfMatch(writer, request, scope.root)
+	if rejected {
+		return
+	}
+	if unlock != nil {
+		defer unlock()
+	}
 	if isConditionalCreate(request) {
 		ctx, state := withConditionalCreate(request.Context())
 		request = request.WithContext(ctx)
