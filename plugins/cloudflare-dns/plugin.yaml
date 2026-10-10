@@ -13,8 +13,8 @@ runtime:
   entry: cloudflare-dns
 artifacts:
   - path: artifacts/linux-amd64/cloudflare-dns
-    sha256: 65a3f2f4a042a5a345e5c58bf4654503261c2eb41a716bfa74f0916aa8350da1
-    size: 8611800
+    sha256: 06906dda3a4e93d3b86b9320cfce23dce3d2e2801588736b7bd2abf2d5d7de2a
+    size: 21214288
     mode: executable
     goos: linux
     goarch: amd64
