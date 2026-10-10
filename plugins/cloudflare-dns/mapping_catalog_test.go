@@ -152,6 +152,59 @@ func TestMappingPersistFailureRollsBackAndRetiresEpoch(t *testing.T) {
 	}
 }
 
+func TestLegacyCatalogMappingDefaultsToCloudflare(t *testing.T) {
+	t.Parallel()
+	catalog := newMemoryMappingCatalog()
+	if err := catalog.Save(context.Background(), mappingCatalogSnapshot{Revision: 3, Mappings: []storedMapping{{
+		Suffix: "example.com", SecretRef: "vault/cloudflare/map/legacy", Version: "version-1", UpdatedAt: 3, Epoch: 1,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(uiConfiguration(), uiRuntimeWithCatalog(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.ListMappings(context.Background(), uiAction("operation/legacy-list"))
+	if err != nil || len(listed) != 1 || listed[0].Provider != ProviderCloudflare || listed[0].Suffix != "example.com" {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	resolved, err := service.ResolveToken(context.Background(), uiAction("operation/legacy-resolve"), "www.example.com", []byte("fallback-token"))
+	if err == nil || resolved.Fallback {
+		t.Fatal("legacy mapping miss fell back or resolved without a vault token")
+	}
+}
+
+func TestDomesticProviderPersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
+	runtime := uiRuntimeWithCatalog(t, newMemoryMappingCatalog())
+	service, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := encodeProviderCredential(providerCredential{Provider: ProviderAliyun, AccessKeyID: "LTAIexampleAccessKeyId", AccessKeySecret: "exampleAccessKeySecretValue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateProviderMapping(context.Background(), uiAction("operation/aliyun-create"), "example.com", ProviderAliyun, material)
+	if err != nil || created.Provider != ProviderAliyun || strings.Contains(created.SecretRef, "exampleAccessKeySecretValue") {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewService(uiConfiguration(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := restarted.ListMappings(context.Background(), uiAction("operation/aliyun-list"))
+	if err != nil || len(listed) != 1 || listed[0].Provider != ProviderAliyun {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	if _, err := restarted.ResolveToken(context.Background(), uiAction("operation/aliyun-resolve"), "example.com", []byte("fallback-token")); err == nil {
+		t.Fatal("domestic resolve returned credential material")
+	}
+}
+
 func uiRuntimeWithCatalog(t *testing.T, catalog mappingCatalog) RuntimeAdapters {
 	t.Helper()
 	vault := newUIVault()

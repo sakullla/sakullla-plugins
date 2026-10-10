@@ -1,8 +1,8 @@
 schema_version: 1
 id: cloudflare-dns
-version: 0.1.17
+version: 0.1.18
 name: Cloudflare DNS
-description: 按域名后缀解析 Cloudflare DNS Token，并提供专门映射管理页
+description: 按域名后缀绑定一家 DNS 服务商，解析 Cloudflare Token，并写删国内 DNS 记录
 compatibility:
   host: "*"
   agent: "*"
@@ -34,6 +34,14 @@ permissions:
   - name: dns.manage
   - name: http.outbound
     resource: api.cloudflare.com
+  - name: http.outbound
+    resource: alidns.aliyuncs.com
+  - name: http.outbound
+    resource: dnsapi.cn
+  - name: http.outbound
+    resource: api.dnspod.com
+  - name: http.outbound
+    resource: dnspod.tencentcloudapi.com
   - name: secret.use
   - name: storage.read
   - name: storage.write

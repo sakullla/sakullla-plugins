@@ -1,12 +1,17 @@
 # Cloudflare DNS plugin
 
 This control-plane Go RPC plugin owns domain-suffix to Vault `secret_ref`
-mappings and answers which Cloudflare DNS Token a caller should use for a
-domain. Query names and configured suffixes are normalized (lowercased, trailing
-dot stripped) and the longest matching suffix wins. Callers ask `ResolveToken`
-with the involved domain and an optional per-call fallback Token; a mapping hit
-never falls back, and a miss with no fallback fails as that domain having no
-available Token.
+mappings. One suffix binds one provider: `cloudflare`, `aliyun`, `dnspod-cn`,
+`dnspod-com`, or `tencent-dns`. A saved mapping without a provider is
+`cloudflare`. Query names and configured suffixes are normalized (lowercased,
+trailing dot stripped) and the longest matching suffix wins. Callers ask
+`ResolveToken` with the involved domain and an optional per-call fallback Token;
+a mapping hit never falls back, and a miss with no fallback fails as that
+domain having no available Token. Cloudflare mappings return the Token.
+Domestic mappings return only the provider. `POST /.nre/providers/dns/records/ensure`
+and `POST /.nre/providers/dns/records/delete` write or remove records for a
+domestic winner; Cloudflare and unmapped suffixes return 404 and do not call a
+provider.
 
 Token material is written once into the host Vault on create or rotate and is
 not stored in plugin state. Lists, status, errors, UI projections, and audit
@@ -31,8 +36,9 @@ group from `resource_group_id` plus `resource.group.*` metadata. Instance
 Production activation uses the SDK host-runtime client. Vault writes, durable
 operation outcomes, instance state, and audit events stay in generic host
 capabilities; Cloudflare request and response semantics stay in this plugin.
-Secret-backed HTTP is restricted by the granted `http.outbound` resource to
-`api.cloudflare.com`.
+Secret-backed Cloudflare HTTP stays on `api.cloudflare.com`. Domestic record
+calls use only that provider's DNS API host: `alidns.aliyuncs.com`,
+`dnsapi.cn`, `api.dnspod.com`, or `dnspod.tencentcloudapi.com`.
 
 Cloudflare list operations consume all validated result pages within the plugin
 bounds. DNS mutations forward stable operation IDs to the durable host journal;

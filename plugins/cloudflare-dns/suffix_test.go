@@ -2,6 +2,7 @@ package cloudflaredns
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,33 @@ func TestLongestSuffixMatch(t *testing.T) {
 				t.Fatalf("LongestSuffixMatch(%q)=(%q,%v) want (%q,%v)", test.domain, got, found, test.want, test.found)
 			}
 		})
+	}
+}
+
+func TestCanonicalProviderAndRelativeRecordName(t *testing.T) {
+	t.Parallel()
+	cloudflare, err := canonicalProvider("")
+	if err != nil || cloudflare != ProviderCloudflare {
+		t.Fatalf("empty provider = %q, %v", cloudflare, err)
+	}
+	for _, provider := range []string{ProviderCloudflare, ProviderAliyun, ProviderDNSPodCN, ProviderDNSPodCOM, ProviderTencentDNS} {
+		got, err := canonicalProvider(strings.ToUpper(provider))
+		if err != nil || got != provider {
+			t.Fatalf("canonicalProvider(%q)=(%q,%v)", provider, got, err)
+		}
+	}
+	if _, err := canonicalProvider("route53"); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+	relative, err := relativeRecordName("Example.COM", "_acme-challenge.example.com.")
+	if err != nil || relative != "_acme-challenge" {
+		t.Fatalf("challenge name = %q, %v", relative, err)
+	}
+	apex, err := relativeRecordName("example.com", "example.com")
+	if err != nil || apex != "@" {
+		t.Fatalf("apex = %q, %v", apex, err)
+	}
+	if _, err := relativeRecordName("example.com", "other.test"); err == nil {
+		t.Fatal("foreign record name accepted")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,6 +216,28 @@ func TestCommittedHostOutcomeKeepsUncertainProviderEffectsUnknown(t *testing.T) 
 				t.Fatalf("outcome = %#v, %v", outcome, err)
 			}
 		})
+	}
+}
+
+func TestDomesticProviderHostsStayOffCloudflare(t *testing.T) {
+	t.Parallel()
+	if cloudflareAPIBase != "https://api.cloudflare.com/client/v4" {
+		t.Fatalf("cloudflare base = %s", cloudflareAPIBase)
+	}
+	seen := map[string]bool{}
+	for _, provider := range []string{ProviderAliyun, ProviderDNSPodCN, ProviderDNSPodCOM, ProviderTencentDNS} {
+		host, err := providerAPIHost(provider)
+		if err != nil || host == "" || host == "api.cloudflare.com" || strings.Contains(host, "cloudflare") {
+			t.Fatalf("provider %s host = %q, %v", provider, host, err)
+		}
+		if seen[host] {
+			t.Fatalf("duplicate provider host %s", host)
+		}
+		seen[host] = true
+	}
+	client := newProviderDNSClient(map[string]string{ProviderAliyun: "https://api.cloudflare.com"})
+	if _, _, err := client.resolve(ProviderAliyun); err == nil {
+		t.Fatal("domestic client accepted the Cloudflare API host")
 	}
 }
 

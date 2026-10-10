@@ -29,7 +29,49 @@ const countNode = document.querySelector("#mapping-count");
 const createSection = document.querySelector("#mapping-create");
 const createForm = document.querySelector("#create-form");
 
+const providerNames = {
+  cloudflare: "Cloudflare",
+  aliyun: "阿里云解析",
+  "dnspod-cn": "DNSPod .cn",
+  "dnspod-com": "DNSPod .com",
+  "tencent-dns": "腾讯云 DNS",
+};
+
+const credentialFields = {
+  cloudflare: ["token"],
+  aliyun: ["access_key_id", "access_key_secret"],
+  "dnspod-cn": ["token_id", "token"],
+  "dnspod-com": ["token_id", "token"],
+  "tencent-dns": ["secret_id", "secret_key"],
+};
+
+const tokenLabels = {
+  cloudflare: "Cloudflare DNS Token",
+  "dnspod-cn": "Token",
+  "dnspod-com": "Token",
+};
+
 let busy = false;
+
+const syncCredentialFields = (form) => {
+  const provider = String(new FormData(form).get("provider") || form.dataset.provider || "cloudflare");
+  const active = new Set(credentialFields[provider] || credentialFields.cloudflare);
+  form.querySelectorAll("[data-credential]").forEach((node) => {
+    const name = node.dataset.credential;
+    const enabled = active.has(name);
+    node.hidden = !enabled;
+    node.querySelectorAll("input").forEach((input) => {
+      input.disabled = !enabled;
+      input.required = enabled;
+    });
+    if (name === "token") {
+      const label = node.childNodes[0];
+      if (label) {
+        label.textContent = `${tokenLabels[provider] || "Token"} `;
+      }
+    }
+  });
+};
 
 const showStatus = (message, isError) => {
   if (!statusNode) {
@@ -81,24 +123,31 @@ const bindForm = (form) => {
     const current = form.dataset.suffix || "";
     const data = new FormData(form);
     const suffix = String(data.get("suffix") || current).trim();
-    const token = String(data.get("token") || "");
+    const provider = String(data.get("provider") || form.dataset.provider || "cloudflare");
     const label = form.querySelector("button[type='submit']").textContent;
     if ((action === "delete" || action === "rotate" || action === "rename") && !confirmAction(current, label)) {
       showStatus("已取消，映射未更改。", false);
       return;
     }
+    const body = { suffix, provider };
+    for (const name of credentialFields[provider] || []) {
+      body[name] = String(data.get(name) || "");
+    }
     setBusy(form, true);
     try {
       if (action === "create") {
-        await sendJSON("api/mappings", { suffix, token });
+        await sendJSON("api/mappings", body);
       } else if (action === "rename") {
         await sendJSON(`api/mappings/${encodeURIComponent(current)}/rename`, { suffix, confirm: current });
       } else if (action === "rotate") {
-        await sendJSON(`api/mappings/${encodeURIComponent(current)}/rotate`, { token, confirm: current });
+        await sendJSON(`api/mappings/${encodeURIComponent(current)}/rotate`, { ...body, confirm: current });
       } else if (action === "delete") {
         await sendJSON(`api/mappings/${encodeURIComponent(current)}/delete`, { confirm: current });
       }
       form.reset();
+      if (form.querySelector("[data-credential]")) {
+        syncCredentialFields(form);
+      }
       await refreshMappings();
       showStatus(action === "delete" ? "已删除映射。" : "已保存映射。", false);
     } catch (error) {
@@ -109,20 +158,42 @@ const bindForm = (form) => {
   });
 };
 
-const actionForm = (action, suffix, label, input) => {
+const credentialInputs = (provider) => (credentialFields[provider] || credentialFields.cloudflare).map((name) => ({
+  label: name === "token" ? (tokenLabels[provider] || "Token") : {
+    access_key_id: "AccessKey ID",
+    access_key_secret: "AccessKey Secret",
+    token_id: "Token ID",
+    secret_id: "SecretId",
+    secret_key: "SecretKey",
+  }[name],
+  name,
+  type: name === "access_key_id" || name === "token_id" || name === "secret_id" ? "text" : "password",
+  autocomplete: name === "access_key_id" || name === "token_id" || name === "secret_id" ? "off" : "new-password",
+}));
+
+const actionForm = (action, suffix, label, input, provider) => {
   const form = document.createElement("form");
   form.className = "inline";
   form.method = "post";
   form.dataset.action = action;
   form.dataset.suffix = suffix;
-  if (input) {
+  if (provider) {
+    form.dataset.provider = provider;
+    const hidden = document.createElement("input");
+    hidden.type = "hidden";
+    hidden.name = "provider";
+    hidden.value = provider;
+    form.append(hidden);
+  }
+  const inputs = Array.isArray(input) ? input : input ? [input] : [];
+  for (const item of inputs) {
     const fieldLabel = document.createElement("label");
-    fieldLabel.append(input.label, " ");
+    fieldLabel.append(item.label, " ");
     const field = document.createElement("input");
-    field.name = input.name;
+    field.name = item.name;
     field.required = true;
-    field.autocomplete = input.autocomplete;
-    field.type = input.type;
+    field.autocomplete = item.autocomplete;
+    field.type = item.type;
     field.spellcheck = false;
     fieldLabel.append(field);
     form.append(fieldLabel);
@@ -207,6 +278,10 @@ const renderMapping = (mapping, canWrite, canRotate) => {
   suffix.className = "suffix";
   suffix.textContent = mapping.suffix;
 
+  const provider = document.createElement("td");
+  provider.className = "provider";
+  provider.textContent = providerNames[mapping.provider] || mapping.provider || providerNames.cloudflare;
+
   const status = document.createElement("td");
   status.className = "status";
   const statusText = document.createElement("span");
@@ -227,7 +302,7 @@ const renderMapping = (mapping, canWrite, canRotate) => {
     toolbar.append(toggleButton("改后缀", "rename"));
   }
   if (canRotate) {
-    toolbar.append(toggleButton("轮换 Token", "rotate"));
+    toolbar.append(toggleButton("轮换凭证", "rotate"));
   }
   if (canWrite) {
     toolbar.append(actionForm("delete", mapping.suffix, "删除"));
@@ -236,7 +311,7 @@ const renderMapping = (mapping, canWrite, canRotate) => {
     actions.append(toolbar);
   }
 
-  row.append(suffix, status, revision, actions);
+  row.append(suffix, provider, status, revision, actions);
   if (!canWrite && !canRotate) {
     return [row];
   }
@@ -245,7 +320,7 @@ const renderMapping = (mapping, canWrite, canRotate) => {
   editorRow.className = "editor-row";
   editorRow.hidden = true;
   const editorCell = document.createElement("td");
-  editorCell.colSpan = 4;
+  editorCell.colSpan = 5;
 
   if (canWrite) {
     const rename = document.createElement("div");
@@ -260,7 +335,7 @@ const renderMapping = (mapping, canWrite, canRotate) => {
     rotate.className = "editor";
     rotate.dataset.editor = "rotate";
     rotate.hidden = true;
-    rotate.append(actionForm("rotate", mapping.suffix, "保存 Token", { label: "新 Token", name: "token", type: "password", autocomplete: "new-password" }));
+    rotate.append(actionForm("rotate", mapping.suffix, "保存凭证", credentialInputs(mapping.provider || "cloudflare"), mapping.provider || "cloudflare"));
     editorCell.append(rotate);
   }
   editorRow.append(editorCell);
@@ -282,7 +357,7 @@ const renderMappings = (payload) => {
   }
   const table = document.createElement("table");
   const head = document.createElement("thead");
-  head.innerHTML = "<tr><th>域名后缀</th><th>状态</th><th>修订</th><th>操作</th></tr>";
+  head.innerHTML = "<tr><th>域名后缀</th><th>服务商</th><th>状态</th><th>修订</th><th>操作</th></tr>";
   const body = document.createElement("tbody");
   for (const mapping of mappings) {
     body.append(...renderMapping(mapping, canWrite, canRotate));
@@ -320,6 +395,11 @@ const loadMappings = async () => {
 };
 
 if (createForm) {
+  const providerSelect = createForm.querySelector("select[name='provider']");
+  if (providerSelect) {
+    providerSelect.addEventListener("change", () => syncCredentialFields(createForm));
+  }
+  syncCredentialFields(createForm);
   bindForm(createForm);
 }
 

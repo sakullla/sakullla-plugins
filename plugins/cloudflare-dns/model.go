@@ -14,7 +14,7 @@ import (
 
 const (
 	PluginID       = "cloudflare-dns"
-	PluginVersion  = "0.1.17"
+	PluginVersion  = "0.1.18"
 	MaxConfigBytes = 1 << 20
 	MaxZones       = 256
 	MaxRecords     = 1024
@@ -51,6 +51,8 @@ var (
 	ErrMappingCatalogNotFound  = errors.New("Cloudflare mapping catalog not found")
 	ErrTokenUnavailable        = errors.New("Cloudflare domain has no available token")
 	ErrMappedTokenUnavailable  = errors.New("Cloudflare mapped token unavailable")
+	ErrRecordRouteUnmapped     = errors.New("DNS record route is not mapped to a domestic provider")
+	ErrDomesticDNSFailed       = errors.New("DNS provider request failed")
 )
 
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
@@ -98,6 +100,7 @@ type TokenMapping struct {
 	Suffix     string `json:"suffix"`
 	SecretRef  string `json:"secret_ref"`
 	Version    string `json:"version"`
+	Provider   string `json:"provider,omitempty"`
 	Configured bool   `json:"configured"`
 	UpdatedAt  uint64 `json:"updated_at"`
 }
@@ -322,6 +325,7 @@ type Service struct {
 	revision      uint64
 	catalog       mappingCatalog
 	catalogMu     sync.Mutex
+	domestic      domesticRecordAPI
 	rootCtx       context.Context
 	cancel        context.CancelFunc
 	active        sync.WaitGroup

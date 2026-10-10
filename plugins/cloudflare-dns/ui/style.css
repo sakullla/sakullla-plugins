@@ -306,14 +306,20 @@ h2 { font-size: var(--text-sm); }
 .count { margin: 0; font-size: var(--text-xs); }
 
 #create-form {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   width: min(46rem, 100%);
   max-width: min(46rem, 100%);
   margin-inline: 0;
-  grid-template-columns: minmax(10rem, 16rem) minmax(12rem, 20rem) auto;
   gap: var(--space-3) var(--space-4);
   align-items: end;
 }
+
+#create-form label { flex: 1 1 14rem; }
+
+#create-form > button { flex: 0 0 auto; }
+
+label[hidden] { display: none; }
 
 label {
   display: grid;
@@ -322,9 +328,9 @@ label {
   font-weight: 650;
 }
 
-input, button { font: inherit; }
+input, select, button { font: inherit; }
 
-input {
+input, select {
   width: 100%;
   min-height: 2.375rem;
   padding: 0.5rem 0.8rem;
@@ -335,7 +341,7 @@ input {
   transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease), background 120ms var(--ease);
 }
 
-input:focus {
+input:focus, select:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: var(--shadow-focus);
@@ -399,7 +405,8 @@ button:disabled {
 
 .btn-primary:focus-visible,
 .btn-link:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
 }

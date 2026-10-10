@@ -26,11 +26,14 @@ const (
 	mappingGroupHeader       = pluginsdk.HeaderPluginResourceGroup
 	mappingOperationHeader   = pluginsdk.HeaderPluginOperationKey
 	internalDNSResolvePath   = "/.nre/providers/dns/token"
+	internalDNSEnsurePath    = "/.nre/providers/dns/records/ensure"
+	internalDNSDeletePath    = "/.nre/providers/dns/records/delete"
 	internalDNSVersionHeader = "X-NRE-DNS-Provider-Version"
 )
 
 type MappingView struct {
 	Suffix     string `json:"suffix"`
+	Provider   string `json:"provider,omitempty"`
 	Configured bool   `json:"configured"`
 	UpdatedAt  uint64 `json:"updated_at"`
 }
@@ -42,9 +45,15 @@ type MappingPageAccess struct {
 }
 
 type mappingWriteRequest struct {
-	Suffix  string `json:"suffix"`
-	Token   string `json:"token"`
-	Confirm string `json:"confirm"`
+	Suffix          string `json:"suffix"`
+	Provider        string `json:"provider"`
+	Token           string `json:"token"`
+	AccessKeyID     string `json:"access_key_id"`
+	AccessKeySecret string `json:"access_key_secret"`
+	TokenID         string `json:"token_id"`
+	SecretID        string `json:"secret_id"`
+	SecretKey       string `json:"secret_key"`
+	Confirm         string `json:"confirm"`
 }
 
 type mappingAPIResponse struct {
@@ -60,12 +69,27 @@ type internalDNSResolveRequest struct {
 }
 
 type internalDNSResolveResponse struct {
-	Token []byte `json:"token,omitempty"`
-	Error string `json:"error,omitempty"`
+	Token    []byte `json:"token,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type internalDNSRecordRequest struct {
+	Domain  string `json:"domain"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	TTL     uint32 `json:"ttl"`
+}
+
+type internalDNSRecordResponse struct {
+	Provider string `json:"provider,omitempty"`
+	Outcome  string `json:"outcome,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 func mappingView(mapping TokenMapping) MappingView {
-	return MappingView{Suffix: mapping.Suffix, Configured: mapping.Configured, UpdatedAt: mapping.UpdatedAt}
+	return MappingView{Suffix: mapping.Suffix, Provider: displayProvider(mapping.Provider), Configured: mapping.Configured, UpdatedAt: mapping.UpdatedAt}
 }
 
 func (service *Service) MappingPageAccess(ctx context.Context, request ActionRequest) (MappingPageAccess, error) {
@@ -102,6 +126,10 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	path := request.URL.Path
 	if path == internalDNSResolvePath {
 		service.serveInternalDNSResolve(writer, request)
+		return
+	}
+	if path == internalDNSEnsurePath || path == internalDNSDeletePath {
+		service.serveInternalDNSRecord(writer, request, path == internalDNSEnsurePath)
 		return
 	}
 	if pluginsdk.ServePluginUIAsset(writer, request, mappingUIAssets, "ui") {
@@ -144,6 +172,20 @@ func (service *Service) serveInternalDNSResolve(writer http.ResponseWriter, requ
 		writeMappingJSON(writer, http.StatusForbidden, internalDNSResolveResponse{Error: ErrAuthorizationDenied.Error()})
 		return
 	}
+	mapping, err := service.LookupMapping(request.Context(), identity, body.Domain)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, ErrMappingNotFound) || errors.Is(err, ErrTokenUnavailable) {
+			status = http.StatusNotFound
+		}
+		writeMappingJSON(writer, status, internalDNSResolveResponse{Error: publicMappingError(err)})
+		return
+	}
+	providerID := displayProvider(mapping.Provider)
+	if isDomesticProvider(providerID) {
+		writeMappingJSON(writer, http.StatusOK, internalDNSResolveResponse{Provider: providerID})
+		return
+	}
 	issued, err := service.ResolveToken(request.Context(), identity, body.Domain, nil)
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -160,22 +202,72 @@ func (service *Service) serveInternalDNSResolve(writer http.ResponseWriter, requ
 		writeMappingJSON(writer, http.StatusServiceUnavailable, internalDNSResolveResponse{Error: ErrMappedTokenUnavailable.Error()})
 		return
 	}
-	writeMappingJSON(writer, http.StatusOK, internalDNSResolveResponse{Token: token})
+	writeMappingJSON(writer, http.StatusOK, internalDNSResolveResponse{Token: token, Provider: ProviderCloudflare})
+}
+
+func (service *Service) serveInternalDNSRecord(writer http.ResponseWriter, request *http.Request, ensure bool) {
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set(internalDNSVersionHeader, "1")
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSRecordResponse{Error: "method not allowed"})
+		return
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 8192))
+	decoder.DisallowUnknownFields()
+	var body internalDNSRecordRequest
+	if err := decoder.Decode(&body); err != nil {
+		writeMappingJSON(writer, http.StatusBadRequest, internalDNSRecordResponse{Error: ErrInvalidInput.Error()})
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeMappingJSON(writer, http.StatusBadRequest, internalDNSRecordResponse{Error: ErrInvalidInput.Error()})
+		return
+	}
+	action := "record-delete"
+	if ensure {
+		action = "record-ensure"
+	}
+	identity, err := service.mappingActionFromRequest(request, action)
+	if err != nil {
+		writeMappingJSON(writer, http.StatusForbidden, internalDNSRecordResponse{Error: ErrAuthorizationDenied.Error()})
+		return
+	}
+	var providerID, outcome string
+	if ensure {
+		providerID, outcome, err = service.EnsureDomesticRecord(request.Context(), identity, body.Domain, body.Type, body.Name, body.Content, body.TTL)
+	} else {
+		providerID, outcome, err = service.DeleteDomesticRecord(request.Context(), identity, body.Domain, body.Type, body.Name, body.Content)
+	}
+	if err != nil {
+		writeMappingJSON(writer, recordRouteStatus(err), internalDNSRecordResponse{Error: publicRecordError(err)})
+		return
+	}
+	writeMappingJSON(writer, http.StatusOK, internalDNSRecordResponse{Provider: providerID, Outcome: outcome})
 }
 
 func serveUnavailableMappingUI(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == internalDNSResolvePath {
+	if request.URL.Path == internalDNSResolvePath || request.URL.Path == internalDNSEnsurePath || request.URL.Path == internalDNSDeletePath {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set(internalDNSVersionHeader, "1")
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)
-			writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSResolveResponse{Error: "method not allowed"})
+			if request.URL.Path == internalDNSResolvePath {
+				writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSResolveResponse{Error: "method not allowed"})
+			} else {
+				writeMappingJSON(writer, http.StatusMethodNotAllowed, internalDNSRecordResponse{Error: "method not allowed"})
+			}
 			return
 		}
 		// An unavailable generation owns no authoritative mapping. Returning the
 		// provider contract's not-mapped status lets the host use its configured
 		// environment fallback without weakening failures from an active vault.
-		writeMappingJSON(writer, http.StatusNotFound, internalDNSResolveResponse{Error: ErrTokenUnavailable.Error()})
+		if request.URL.Path == internalDNSResolvePath {
+			writeMappingJSON(writer, http.StatusNotFound, internalDNSResolveResponse{Error: ErrTokenUnavailable.Error()})
+		} else {
+			writeMappingJSON(writer, http.StatusNotFound, internalDNSRecordResponse{Error: ErrRecordRouteUnmapped.Error()})
+		}
 		return
 	}
 	pluginsdk.SetPluginUIResponseHeaders(writer.Header())
@@ -268,9 +360,13 @@ func (service *Service) handleMappingWrite(writer http.ResponseWriter, request *
 		writeMappingJSON(writer, http.StatusBadRequest, mappingAPIResponse{Error: publicMappingError(err), Suffix: suffix})
 		return
 	}
-	token := []byte(body.Token)
-	body.Token = ""
-	defer clear(token)
+	providerID, material, err := credentialMaterial(body)
+	body.clearSecrets()
+	defer clear(material)
+	if err != nil {
+		writeMappingJSON(writer, http.StatusBadRequest, mappingAPIResponse{Error: publicMappingError(err), Suffix: suffix})
+		return
+	}
 	if action == "rename" || action == "rotate" || action == "delete" {
 		if body.Confirm != suffix {
 			writeMappingJSON(writer, http.StatusBadRequest, mappingAPIResponse{Error: "confirmation required", Suffix: suffix})
@@ -285,11 +381,15 @@ func (service *Service) handleMappingWrite(writer http.ResponseWriter, request *
 	var mapping TokenMapping
 	switch action {
 	case "create":
-		mapping, err = service.CreateMapping(request.Context(), identity, body.Suffix, token)
+		if providerID == ProviderCloudflare {
+			mapping, err = service.CreateMapping(request.Context(), identity, body.Suffix, material)
+		} else {
+			mapping, err = service.CreateProviderMapping(request.Context(), identity, body.Suffix, providerID, material)
+		}
 	case "rename":
 		mapping, err = service.RenameMapping(request.Context(), identity, suffix, body.Suffix)
 	case "rotate":
-		mapping, err = service.RotateMappingToken(request.Context(), identity, suffix, token)
+		mapping, err = service.RotateMappingToken(request.Context(), identity, suffix, material)
 	case "delete":
 		err = service.DeleteMapping(request.Context(), identity, suffix)
 	default:
@@ -389,6 +489,70 @@ func mappingStatus(err error) int {
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusBadRequest
+	}
+}
+
+func (body *mappingWriteRequest) clearSecrets() {
+	body.Token = ""
+	body.AccessKeyID = ""
+	body.AccessKeySecret = ""
+	body.TokenID = ""
+	body.SecretID = ""
+	body.SecretKey = ""
+}
+
+func credentialMaterial(body mappingWriteRequest) (string, []byte, error) {
+	providerID, err := canonicalProvider(body.Provider)
+	if err != nil {
+		return "", nil, err
+	}
+	if providerID == ProviderCloudflare {
+		return providerID, []byte(body.Token), nil
+	}
+	credential := providerCredential{Provider: providerID, AccessKeyID: body.AccessKeyID, AccessKeySecret: body.AccessKeySecret, TokenID: body.TokenID, Token: body.Token, SecretID: body.SecretID, SecretKey: body.SecretKey}
+	encoded, err := encodeProviderCredential(credential)
+	credential.clear()
+	if err != nil {
+		return "", nil, ErrInvalidInput
+	}
+	return providerID, encoded, nil
+}
+
+func recordRouteStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrAuthorizationDenied):
+		return http.StatusForbidden
+	case errors.Is(err, ErrRecordRouteUnmapped), errors.Is(err, ErrMappingNotFound), errors.Is(err, ErrTokenUnavailable):
+		return http.StatusNotFound
+	case errors.Is(err, ErrInvalidInput), errors.Is(err, ErrBoundExceeded):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrMappedTokenUnavailable), errors.Is(err, ErrRevoked):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func publicRecordError(err error) string {
+	switch {
+	case errors.Is(err, ErrRecordRouteUnmapped), errors.Is(err, ErrMappingNotFound), errors.Is(err, ErrTokenUnavailable):
+		return ErrRecordRouteUnmapped.Error()
+	case errors.Is(err, ErrAuthorizationDenied):
+		return ErrAuthorizationDenied.Error()
+	case errors.Is(err, ErrInvalidInput):
+		return ErrInvalidInput.Error()
+	case errors.Is(err, ErrBoundExceeded):
+		return ErrBoundExceeded.Error()
+	case errors.Is(err, ErrMappedTokenUnavailable):
+		return ErrMappedTokenUnavailable.Error()
+	case errors.Is(err, ErrRevoked):
+		return "Cloudflare DNS mapping page is unavailable"
+	default:
+		text := redactText(err.Error(), nil)
+		if text == "" {
+			return ErrDomesticDNSFailed.Error()
+		}
+		return text
 	}
 }
 

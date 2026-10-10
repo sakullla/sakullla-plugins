@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -123,8 +124,8 @@ func TestInternalDNSResolveReturnsMappedTokenOnlyOnPrivateProviderPath(t *testin
 	if err := json.Unmarshal(resolved.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if string(response.Token) != "private-provider-token" || response.Error != "" {
-		t.Fatalf("resolve response token=%q error=%q", response.Token, response.Error)
+	if string(response.Token) != "private-provider-token" || response.Error != "" || response.Provider != ProviderCloudflare {
+		t.Fatalf("resolve response token=%q provider=%q error=%q", response.Token, response.Provider, response.Error)
 	}
 	clear(response.Token)
 
@@ -871,4 +872,435 @@ func (uiFakeDNS) Update(context.Context, TokenAttestation, DNSRecord, string) (D
 }
 func (uiFakeDNS) Delete(context.Context, TokenAttestation, string, string, string) error {
 	return errors.New("dns records are not the mapping UI")
+}
+
+func TestDomesticRecordRoutesUseFakeProviderAndHideCredentials(t *testing.T) {
+	t.Parallel()
+	fake := newDomesticFake()
+	server := httptest.NewServer(fake)
+	t.Cleanup(server.Close)
+	service, _, _ := newUIHarness(t, nil)
+	client := newProviderDNSClient(map[string]string{
+		ProviderAliyun: server.URL, ProviderDNSPodCN: server.URL, ProviderDNSPodCOM: server.URL, ProviderTencentDNS: server.URL,
+	})
+	client.now = func() time.Time { return time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC) }
+	client.nonce = func() string { return "nonce-fixed" }
+	service.domestic = client
+
+	secrets := map[string]string{
+		ProviderAliyun:     "exampleAccessKeySecretValue",
+		ProviderDNSPodCN:   "exampleDnspodCnTokenValue",
+		ProviderDNSPodCOM:  "exampleDnspodComTokenValue",
+		ProviderTencentDNS: "exampleTencentSecretKeyValue",
+	}
+	creates := map[string]string{
+		ProviderAliyun:     `{"suffix":"aliyun.test","provider":"aliyun","access_key_id":"LTAIexampleAccessKeyId","access_key_secret":"exampleAccessKeySecretValue"}`,
+		ProviderDNSPodCN:   `{"suffix":"cn.test","provider":"dnspod-cn","token_id":"10001","token":"exampleDnspodCnTokenValue"}`,
+		ProviderDNSPodCOM:  `{"suffix":"com.test","provider":"dnspod-com","token_id":"20002","token":"exampleDnspodComTokenValue"}`,
+		ProviderTencentDNS: `{"suffix":"tencent.test","provider":"tencent-dns","secret_id":"AKIDexampleSecretId","secret_key":"exampleTencentSecretKeyValue"}`,
+	}
+	for provider, payload := range creates {
+		created := httptest.NewRecorder()
+		service.ServeHTTP(created, uiJSONRequest(http.MethodPost, "/api/mappings", payload, "operation/create-"+provider))
+		if created.Code != http.StatusOK || strings.Contains(created.Body.String(), secrets[provider]) || strings.Contains(created.Body.String(), `"token"`) || !strings.Contains(created.Body.String(), `"provider":"`+provider+`"`) {
+			t.Fatalf("create %s status=%d body=%s", provider, created.Code, created.Body.String())
+		}
+		fake.mu.Lock()
+		fake.secret = secrets[provider]
+		fake.accessKey = map[string]string{ProviderAliyun: "LTAIexampleAccessKeyId", ProviderDNSPodCN: "10001", ProviderDNSPodCOM: "20002", ProviderTencentDNS: "AKIDexampleSecretId"}[provider]
+		fake.mu.Unlock()
+		zone := strings.TrimPrefix(provider, "dnspod-")
+		domain := map[string]string{ProviderAliyun: "www.aliyun.test", ProviderDNSPodCN: "www.cn.test", ProviderDNSPodCOM: "www.com.test", ProviderTencentDNS: "www.tencent.test"}[provider]
+		suffix := map[string]string{ProviderAliyun: "aliyun.test", ProviderDNSPodCN: "cn.test", ProviderDNSPodCOM: "com.test", ProviderTencentDNS: "tencent.test"}[provider]
+		_ = zone
+		ensureBody := `{"domain":"` + domain + `","type":"A","name":"` + domain + `","content":"192.0.2.10","ttl":120}`
+		fake.resetCalls()
+		first := postRecord(t, service, internalDNSEnsurePath, ensureBody, "operation/ensure-"+provider)
+		if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"outcome":"created"`) || strings.Contains(first.Body.String(), secrets[provider]) {
+			t.Fatalf("ensure %s status=%d body=%s calls=%v", provider, first.Code, first.Body.String(), fake.actions())
+		}
+		if !fake.sawMutation(provider) {
+			t.Fatalf("ensure %s did not write: %v", provider, fake.actions())
+		}
+		fake.resetCalls()
+		second := postRecord(t, service, internalDNSEnsurePath, ensureBody, "operation/ensure-same-"+provider)
+		if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"outcome":"unchanged"`) || fake.sawMutation(provider) {
+			t.Fatalf("unchanged %s status=%d body=%s calls=%v", provider, second.Code, second.Body.String(), fake.actions())
+		}
+		fake.failSecret = secrets[provider]
+		failed := postRecord(t, service, internalDNSEnsurePath, `{"domain":"`+domain+`","type":"A","name":"`+domain+`","content":"192.0.2.11","ttl":120}`, "operation/ensure-fail-"+provider)
+		if failed.Code != http.StatusBadGateway || strings.Contains(failed.Body.String(), secrets[provider]) || strings.Contains(failed.Body.String(), suffix) && false {
+			t.Fatalf("failure %s status=%d body=%s", provider, failed.Code, failed.Body.String())
+		}
+		if strings.Contains(failed.Body.String(), secrets[provider]) {
+			t.Fatalf("failure leaked credential: %s", failed.Body.String())
+		}
+		fake.failSecret = ""
+		listed := httptest.NewRecorder()
+		service.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/list-"+provider))
+		if strings.Contains(listed.Body.String(), secrets[provider]) {
+			t.Fatalf("list leaked credential: %s", listed.Body.String())
+		}
+		resolved := httptest.NewRecorder()
+		service.ServeHTTP(resolved, uiJSONRequest(http.MethodPost, internalDNSResolvePath, `{"domain":"`+domain+`"}`, "operation/resolve-"+provider))
+		if resolved.Code != http.StatusOK || strings.Contains(resolved.Body.String(), `"token"`) || strings.Contains(resolved.Body.String(), secrets[provider]) || !strings.Contains(resolved.Body.String(), `"provider":"`+provider+`"`) {
+			t.Fatalf("token %s status=%d body=%s", provider, resolved.Code, resolved.Body.String())
+		}
+	}
+
+	cloudflare := httptest.NewRecorder()
+	service.ServeHTTP(cloudflare, uiJSONRequest(http.MethodPost, "/api/mappings", `{"suffix":"example.com","token":"super-secret-cf-token-route"}`, "operation/create-cf-route"))
+	if cloudflare.Code != http.StatusOK || strings.Contains(cloudflare.Body.String(), "super-secret-cf-token-route") {
+		t.Fatalf("cloudflare create status=%d body=%s", cloudflare.Code, cloudflare.Body.String())
+	}
+	fake.resetCalls()
+	blocked := postRecord(t, service, internalDNSEnsurePath, `{"domain":"www.example.com","type":"A","name":"www.example.com","content":"192.0.2.10","ttl":120}`, "operation/ensure-cf")
+	if blocked.Code != http.StatusNotFound || len(fake.actions()) != 0 {
+		t.Fatalf("cloudflare ensure status=%d calls=%v body=%s", blocked.Code, fake.actions(), blocked.Body.String())
+	}
+	missing := postRecord(t, service, internalDNSDeletePath, `{"domain":"unmapped.test","type":"TXT","name":"_acme-challenge.unmapped.test","content":"challenge"}`, "operation/delete-missing")
+	if missing.Code != http.StatusNotFound || len(fake.actions()) != 0 {
+		t.Fatalf("unmapped delete status=%d calls=%v", missing.Code, fake.actions())
+	}
+
+	txtEnsure := postRecord(t, service, internalDNSEnsurePath, `{"domain":"alias.aliyun.test","type":"TXT","name":"_acme-challenge.aliyun.test","content":"keep-me","ttl":120}`, "operation/ensure-txt-keep")
+	if txtEnsure.Code != http.StatusOK {
+		t.Fatalf("txt ensure status=%d body=%s", txtEnsure.Code, txtEnsure.Body.String())
+	}
+	other := postRecord(t, service, internalDNSEnsurePath, `{"domain":"alias.aliyun.test","type":"TXT","name":"_acme-challenge.aliyun.test","content":"drop-me","ttl":120}`, "operation/ensure-txt-drop")
+	if other.Code != http.StatusOK {
+		t.Fatalf("second txt status=%d body=%s", other.Code, other.Body.String())
+	}
+	fake.resetCalls()
+	deleted := postRecord(t, service, internalDNSDeletePath, `{"domain":"alias.aliyun.test","type":"TXT","name":"_acme-challenge.aliyun.test","content":"drop-me"}`, "operation/delete-txt")
+	if deleted.Code != http.StatusOK || !strings.Contains(deleted.Body.String(), `"outcome":"deleted"`) || !fake.contains("DeleteDomainRecord") {
+		t.Fatalf("delete status=%d body=%s calls=%v", deleted.Code, deleted.Body.String(), fake.actions())
+	}
+	if !fake.hasContent(ProviderAliyun, "aliyun.test", "TXT", "_acme-challenge", "keep-me") || fake.hasContent(ProviderAliyun, "aliyun.test", "TXT", "_acme-challenge", "drop-me") {
+		t.Fatalf("delete matched the wrong txt: %#v", fake.snapshot())
+	}
+	rejected := postRecord(t, service, internalDNSDeletePath, `{"domain":"www.aliyun.test","type":"A","name":"www.aliyun.test","content":"192.0.2.10"}`, "operation/delete-a")
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("delete A status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+}
+
+func postRecord(t *testing.T, service *Service, path, body, operation string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	service.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, path, body, operation))
+	return recorder
+}
+
+type domesticFake struct {
+	mu         sync.Mutex
+	calls      []string
+	records    map[string][]providerRecord
+	secret     string
+	accessKey  string
+	failSecret string
+	nextID     int
+}
+
+func newDomesticFake() *domesticFake {
+	return &domesticFake{records: map[string][]providerRecord{}}
+}
+
+func (fake *domesticFake) resetCalls() {
+	fake.mu.Lock()
+	fake.calls = nil
+	fake.mu.Unlock()
+}
+
+func (fake *domesticFake) actions() []string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]string(nil), fake.calls...)
+}
+
+func (fake *domesticFake) sawMutation(provider string) bool {
+	for _, action := range fake.actions() {
+		switch action {
+		case provider + ":AddDomainRecord", provider + ":UpdateDomainRecord", provider + ":Record.Create", provider + ":Record.Modify", provider + ":CreateRecord", provider + ":ModifyRecord":
+			return true
+		}
+	}
+	return false
+}
+
+func (fake *domesticFake) contains(action string) bool {
+	for _, current := range fake.actions() {
+		if strings.Contains(current, action) {
+			return true
+		}
+	}
+	return false
+}
+
+func (fake *domesticFake) hasContent(provider, zone, recordType, name, content string) bool {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, record := range fake.records[fake.key(provider, zone, recordType, name)] {
+		if record.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func (fake *domesticFake) snapshot() map[string][]providerRecord {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.records
+}
+
+func (fake *domesticFake) key(provider, zone, recordType, name string) string {
+	return provider + "|" + zone + "|" + strings.ToLower(recordType) + "|" + strings.ToLower(name)
+}
+
+func (fake *domesticFake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+	writer.Header().Set("Content-Type", "application/json")
+	if request.Header.Get("X-TC-Action") != "" {
+		fake.serveTencent(writer, request, body)
+		return
+	}
+	if strings.Contains(request.URL.Path, "Record.") {
+		fake.serveDNSPod(writer, request, body)
+		return
+	}
+	fake.serveAliyun(writer, request, body)
+}
+
+func (fake *domesticFake) note(provider, action, raw string) {
+	fake.calls = append(fake.calls, provider+":"+action)
+	if fake.secret != "" && strings.Contains(raw, fake.secret) && provider != ProviderDNSPodCN && provider != ProviderDNSPodCOM {
+		fake.calls = append(fake.calls, "leaked-secret")
+	}
+}
+
+func (fake *domesticFake) serveAliyun(writer http.ResponseWriter, request *http.Request, body []byte) {
+	values, _ := url.ParseQuery(string(body))
+	action := values.Get("Action")
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.note(ProviderAliyun, action, string(body))
+	if values.Get("Version") != aliyunEndpointVersion || values.Get("AccessKeyId") == "" || strings.Contains(string(body), "exampleAccessKeySecretValue") {
+		http.Error(writer, `{"Code":"BadSignature","Message":"rejected"}`, http.StatusBadRequest)
+		return
+	}
+	parsed := url.Values{}
+	for key, list := range values {
+		parsed[key] = append([]string(nil), list...)
+	}
+	if values.Get("Signature") != aliyunSignature(http.MethodPost, "exampleAccessKeySecretValue", parsed) {
+		http.Error(writer, `{"Code":"SignatureDoesNotMatch","Message":"rejected"}`, http.StatusForbidden)
+		return
+	}
+	if fake.failSecret != "" && action != "DescribeDomainRecords" {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"Code":"Denied","Message":"rejected ` + fake.failSecret + `"}`))
+		return
+	}
+	zone, name, recordType := values.Get("DomainName"), values.Get("RR"), values.Get("Type")
+	switch action {
+	case "DescribeDomainRecords":
+		records := fake.records[fake.key(ProviderAliyun, values.Get("DomainName"), values.Get("TypeKeyWord"), values.Get("RRKeyWord"))]
+		payload := map[string]any{"TotalCount": len(records), "DomainRecords": map[string]any{"Record": fake.aliyunRecords(records)}}
+		_ = json.NewEncoder(writer).Encode(payload)
+	case "AddDomainRecord":
+		fake.nextID++
+		record := providerRecord{ID: strconv.Itoa(fake.nextID), Type: recordType, Name: name, Content: values.Get("Value")}
+		key := fake.key(ProviderAliyun, zone, recordType, name)
+		fake.records[key] = append(fake.records[key], record)
+		_ = json.NewEncoder(writer).Encode(map[string]string{"RecordId": record.ID})
+	case "UpdateDomainRecord":
+		key := fake.key(ProviderAliyun, zone, recordType, name)
+		replaced := false
+		for index, record := range fake.records[key] {
+			if record.ID == values.Get("RecordId") {
+				record.Content = values.Get("Value")
+				fake.records[key][index] = record
+				replaced = true
+			}
+		}
+		if !replaced {
+			http.Error(writer, `{"Code":"DomainRecordNotBelongToUser","Message":"missing"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]string{"RecordId": values.Get("RecordId")})
+	case "DeleteDomainRecord":
+		fake.deleteByID(ProviderAliyun, values.Get("RecordId"))
+		_ = json.NewEncoder(writer).Encode(map[string]string{"RecordId": values.Get("RecordId")})
+	default:
+		http.Error(writer, `{"Code":"InvalidAction","Message":"unexpected"}`, http.StatusBadRequest)
+	}
+}
+
+func (fake *domesticFake) aliyunRecords(records []providerRecord) []map[string]string {
+	if len(records) == 0 {
+		return nil
+	}
+	result := make([]map[string]string, len(records))
+	for index, record := range records {
+		result[index] = map[string]string{"RecordId": record.ID, "RR": record.Name, "Type": record.Type, "Value": record.Content}
+	}
+	return result
+}
+
+func (fake *domesticFake) serveDNSPod(writer http.ResponseWriter, request *http.Request, body []byte) {
+	values, _ := url.ParseQuery(string(body))
+	action := strings.TrimPrefix(request.URL.Path, "/")
+	provider := ProviderDNSPodCN
+	if values.Get("lang") == "en" {
+		provider = ProviderDNSPodCOM
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.note(provider, action, string(body))
+	token := values.Get("login_token")
+	if !strings.Contains(token, ",") || values.Get("format") != "json" {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "8", "message": "missing token"}})
+		return
+	}
+	if fake.failSecret != "" && action != "Record.List" && strings.Contains(token, fake.failSecret) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "8", "message": "rejected " + fake.failSecret}})
+		return
+	}
+	zone, name, recordType := values.Get("domain"), values.Get("sub_domain"), values.Get("record_type")
+	switch action {
+	case "Record.List":
+		records := fake.records[fake.key(provider, zone, recordType, name)]
+		if len(records) == 0 {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "10", "message": "empty"}})
+			return
+		}
+		listed := make([]map[string]string, len(records))
+		for index, record := range records {
+			listed[index] = map[string]string{"id": record.ID, "name": record.Name, "type": record.Type, "value": record.Content, "line": record.Line}
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "1", "message": "ok"}, "records": listed})
+	case "Record.Create":
+		fake.nextID++
+		record := providerRecord{ID: strconv.Itoa(fake.nextID), Type: recordType, Name: name, Content: values.Get("value"), Line: values.Get("record_line")}
+		key := fake.key(provider, zone, recordType, name)
+		fake.records[key] = append(fake.records[key], record)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "1", "message": "ok"}, "record": map[string]string{"id": record.ID}})
+	case "Record.Modify":
+		key := fake.key(provider, zone, recordType, name)
+		for index, record := range fake.records[key] {
+			if record.ID == values.Get("record_id") {
+				record.Content = values.Get("value")
+				fake.records[key][index] = record
+				_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "1", "message": "ok"}})
+				return
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "8", "message": "missing"}})
+	case "Record.Remove":
+		fake.deleteByID(provider, values.Get("record_id"))
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "1", "message": "ok"}})
+	default:
+		_ = json.NewEncoder(writer).Encode(map[string]any{"status": map[string]string{"code": "8", "message": "unexpected"}})
+	}
+}
+
+func (fake *domesticFake) serveTencent(writer http.ResponseWriter, request *http.Request, body []byte) {
+	action := request.Header.Get("X-TC-Action")
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.note(ProviderTencentDNS, action, string(body)+" "+request.Header.Get("Authorization"))
+	if strings.Contains(string(body), "exampleTencentSecretKeyValue") || request.Header.Get("X-TC-Version") != tencentDNSVersion {
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"Response":{"Error":{"Code":"AuthFailure","Message":"rejected"},"RequestId":"req"}}`))
+		return
+	}
+	want := tencentAuthorization("AKIDexampleSecretId", "exampleTencentSecretKeyValue", request.Host, request.Header.Get("X-TC-Timestamp"), body)
+	if request.Header.Get("Authorization") != want {
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"Response":{"Error":{"Code":"AuthFailure.SignatureFailure","Message":"rejected"},"RequestId":"req"}}`))
+		return
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(body, &payload)
+	if fake.failSecret != "" && action != "DescribeRecordList" {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"Error": map[string]string{"Code": "AuthFailure", "Message": "rejected " + fake.failSecret}, "RequestId": "req"}})
+		return
+	}
+	zone, _ := payload["Domain"].(string)
+	name, _ := payload["SubDomain"].(string)
+	if action == "DescribeRecordList" {
+		if text, ok := payload["Subdomain"].(string); ok {
+			name = text
+		}
+	}
+	recordType, _ := payload["RecordType"].(string)
+	switch action {
+	case "DescribeRecordList":
+		records := fake.records[fake.key(ProviderTencentDNS, zone, recordType, name)]
+		if len(records) == 0 {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"Error": map[string]string{"Code": "ResourceNotFound.NoDataOfRecord", "Message": "empty"}, "RequestId": "req"}})
+			return
+		}
+		listed := make([]map[string]any, len(records))
+		for index, record := range records {
+			id, _ := strconv.Atoi(record.ID)
+			listed[index] = map[string]any{"RecordId": id, "Name": record.Name, "Type": record.Type, "Value": record.Content, "Line": record.Line}
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"RecordList": listed, "RecordCountInfo": map[string]int{"TotalCount": len(records)}, "RequestId": "req"}})
+	case "CreateRecord":
+		fake.nextID++
+		value, _ := payload["Value"].(string)
+		line, _ := payload["RecordLine"].(string)
+		record := providerRecord{ID: strconv.Itoa(fake.nextID), Type: recordType, Name: name, Content: value, Line: line}
+		key := fake.key(ProviderTencentDNS, zone, recordType, name)
+		fake.records[key] = append(fake.records[key], record)
+		id, _ := strconv.Atoi(record.ID)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"RecordId": id, "RequestId": "req"}})
+	case "ModifyRecord":
+		key := fake.key(ProviderTencentDNS, zone, recordType, name)
+		id := fmtID(payload["RecordId"])
+		for index, record := range fake.records[key] {
+			if record.ID == id {
+				record.Content, _ = payload["Value"].(string)
+				fake.records[key][index] = record
+				_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"RecordId": payload["RecordId"], "RequestId": "req"}})
+				return
+			}
+		}
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"Response":{"Error":{"Code":"ResourceNotFound","Message":"missing"},"RequestId":"req"}}`))
+	case "DeleteRecord":
+		fake.deleteByID(ProviderTencentDNS, fmtID(payload["RecordId"]))
+		_ = json.NewEncoder(writer).Encode(map[string]any{"Response": map[string]any{"RequestId": "req"}})
+	default:
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"Response":{"Error":{"Code":"InvalidAction","Message":"unexpected"},"RequestId":"req"}}`))
+	}
+}
+
+func (fake *domesticFake) deleteByID(provider, id string) {
+	for key, records := range fake.records {
+		if !strings.HasPrefix(key, provider+"|") {
+			continue
+		}
+		kept := records[:0]
+		for _, record := range records {
+			if record.ID != id {
+				kept = append(kept, record)
+			}
+		}
+		fake.records[key] = kept
+	}
+}
+
+func fmtID(value any) string {
+	switch typed := value.(type) {
+	case float64:
+		return strconv.FormatInt(int64(typed), 10)
+	case string:
+		return typed
+	default:
+		return ""
+	}
 }

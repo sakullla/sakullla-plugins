@@ -33,3 +33,15 @@ func TestReserveMappingRejectsUnliveAndNil(t *testing.T) {
 		t.Fatalf("nil reserve err=%v", err)
 	}
 }
+
+func TestDomesticProviderGuard(t *testing.T) {
+	t.Parallel()
+	if isDomesticProvider("") || isDomesticProvider(ProviderCloudflare) || isDomesticProvider("route53") {
+		t.Fatal("non-domestic provider was accepted")
+	}
+	for _, provider := range []string{ProviderAliyun, ProviderDNSPodCN, ProviderDNSPodCOM, ProviderTencentDNS} {
+		if !isDomesticProvider(provider) {
+			t.Fatalf("%s was not domestic", provider)
+		}
+	}
+}

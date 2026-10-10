@@ -12,7 +12,7 @@
     <header class="page-head">
       <p class="kicker">Cloudflare DNS</p>
       <h1>域名 Token 映射</h1>
-      <p class="lede">按域名后缀绑定 Cloudflare DNS Token。查询时取最长匹配的后缀。列表、详情和编辑框都不会回显 Token。本页不配置区域 Token，也不管理 DNS 记录。</p>
+      <p class="lede">按域名后缀绑定一家服务商。可选 Cloudflare、阿里云解析、DNSPod .cn、DNSPod .com 和腾讯云 DNS。查询时取最长匹配的后缀。列表、详情和编辑框都不会回显凭证。本页不管理 DNS 记录。</p>
       <section class="token-guide" aria-labelledby="token-guide-title">
         <h2 id="token-guide-title" class="sr-only">如何配置 Cloudflare API Token</h2>
         <div class="token-guide-step">
@@ -39,12 +39,26 @@
           <span class="setup-mark" aria-hidden="true"></span>
           <div>
             <h2 id="mapping-create-title">新增映射</h2>
-            <p class="hint">后缀按最长匹配生效。Token 只在提交时发送，保存后不会回显。</p>
+            <p class="hint">后缀按最长匹配生效。一条后缀只绑定一个服务商。凭证只在提交时发送，保存后不会回显。</p>
           </div>
         </div>
         <form id="create-form" method="post" data-action="create">
           <label>域名后缀 <input name="suffix" required autocomplete="off" placeholder="example.com" spellcheck="false"></label>
-          <label>Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
+          <label>服务商
+            <select name="provider">
+              <option value="cloudflare" selected>Cloudflare</option>
+              <option value="aliyun">阿里云解析</option>
+              <option value="dnspod-cn">DNSPod .cn</option>
+              <option value="dnspod-com">DNSPod .com</option>
+              <option value="tencent-dns">腾讯云 DNS</option>
+            </select>
+          </label>
+          <label data-credential="access_key_id" hidden>AccessKey ID <input name="access_key_id" autocomplete="off" spellcheck="false"></label>
+          <label data-credential="access_key_secret" hidden>AccessKey Secret <input name="access_key_secret" type="password" autocomplete="new-password"></label>
+          <label data-credential="token_id" hidden>Token ID <input name="token_id" autocomplete="off" spellcheck="false"></label>
+          <label data-credential="token">Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
+          <label data-credential="secret_id" hidden>SecretId <input name="secret_id" autocomplete="off" spellcheck="false"></label>
+          <label data-credential="secret_key" hidden>SecretKey <input name="secret_key" type="password" autocomplete="new-password"></label>
           <button type="submit" class="btn-primary">添加映射</button>
         </form>
       </section>

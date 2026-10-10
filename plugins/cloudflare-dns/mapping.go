@@ -14,6 +14,7 @@ type storedMapping struct {
 	Suffix    string
 	SecretRef string
 	Version   string
+	Provider  string
 	UpdatedAt uint64
 	Epoch     uint64
 }
@@ -23,6 +24,7 @@ func (mapping storedMapping) public() TokenMapping {
 		Suffix:     mapping.Suffix,
 		SecretRef:  mapping.SecretRef,
 		Version:    mapping.Version,
+		Provider:   displayProvider(mapping.Provider),
 		Configured: mapping.SecretRef != "" && mapping.Version != "",
 		UpdatedAt:  mapping.UpdatedAt,
 	}
@@ -38,6 +40,19 @@ func (service *Service) mappingOperationKey(action string, request ActionRequest
 }
 
 func (service *Service) CreateMapping(ctx context.Context, request ActionRequest, suffix string, material []byte) (TokenMapping, error) {
+	return service.createMapping(ctx, request, suffix, ProviderCloudflare, material)
+}
+
+func (service *Service) CreateProviderMapping(ctx context.Context, request ActionRequest, suffix, provider string, material []byte) (TokenMapping, error) {
+	canonical, err := canonicalProvider(provider)
+	if err != nil {
+		clear(material)
+		return TokenMapping{}, err
+	}
+	return service.createMapping(ctx, request, suffix, canonical, material)
+}
+
+func (service *Service) createMapping(ctx context.Context, request ActionRequest, suffix, providerID string, material []byte) (TokenMapping, error) {
 	ctx, finish, err := service.begin(ctx)
 	if err != nil {
 		clear(material)
@@ -61,6 +76,9 @@ func (service *Service) CreateMapping(ctx context.Context, request ActionRequest
 			clear(secret)
 		}
 	}()
+	if err := validateCredentialForProvider(providerID, secret); err != nil {
+		return TokenMapping{}, err
+	}
 	action := "mapping-create"
 	for attempt := 0; attempt < MaxMappings; attempt++ {
 		epoch := service.nextMappingEpoch(normalized)
@@ -71,7 +89,7 @@ func (service *Service) CreateMapping(ctx context.Context, request ActionRequest
 		if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
 			return TokenMapping{}, ErrReconcilePending
 		} else if outcome.State == OperationCommitted {
-			return service.finishCommittedMapping(ctx, action, operation, request, normalized, epoch, outcome.Token)
+			return service.finishCommittedMapping(ctx, action, operation, request, normalized, providerID, epoch, outcome.Token)
 		} else if outcome.State == OperationUnknown {
 			return TokenMapping{}, service.pending(ctx, action, operation, request, "operation", ErrReconcilePending)
 		} else if outcome.State == OperationFailed {
@@ -99,14 +117,14 @@ func (service *Service) CreateMapping(ctx context.Context, request ActionRequest
 			}
 			outcome, inspectErr := service.inspect(ctx, operation)
 			if inspectErr == nil && outcome.State == OperationCommitted {
-				return service.finishCommittedMapping(ctx, action, operation, request, normalized, epoch, outcome.Token)
+				return service.finishCommittedMapping(ctx, action, operation, request, normalized, providerID, epoch, outcome.Token)
 			}
 			if inspectErr == nil && outcome.State == OperationFailed {
 				return TokenMapping{}, service.fail(ctx, action, operation, request, "vault", failure)
 			}
 			return TokenMapping{}, service.pending(ctx, action, operation, request, "vault", ErrReconcilePending)
 		}
-		return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: normalized, SecretRef: metadata.SecretRef, Version: metadata.Version, Epoch: epoch})
+		return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: normalized, SecretRef: metadata.SecretRef, Version: metadata.Version, Provider: providerID, Epoch: epoch})
 	}
 	operation := service.mappingOperationKey(action, request, normalized, 0)
 	return TokenMapping{}, service.fail(ctx, action, operation, request, "bound", ErrBoundExceeded)
@@ -154,7 +172,7 @@ func (service *Service) ShareMapping(ctx context.Context, request ActionRequest,
 			return service.fail(ctx, action, operation, request, "bound", ErrBoundExceeded)
 		}
 		service.revision++
-		stored := storedMapping{Suffix: normalized, SecretRef: origin.SecretRef, Version: origin.Version, UpdatedAt: service.revision, Epoch: epoch}
+		stored := storedMapping{Suffix: normalized, SecretRef: origin.SecretRef, Version: origin.Version, Provider: origin.Provider, UpdatedAt: service.revision, Epoch: epoch}
 		service.mappings[normalized] = stored
 		current = stored.public()
 		return nil
@@ -256,6 +274,9 @@ func (service *Service) RotateMappingToken(ctx context.Context, request ActionRe
 	service.mu.Unlock()
 	if !ok {
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrMappingNotFound)
+	}
+	if err := validateCredentialForProvider(displayProvider(current.Provider), secret); err != nil {
+		return TokenMapping{}, service.fail(ctx, action, operation, request, "mapping", ErrInvalidInput)
 	}
 	if outcome, inspectErr := service.inspect(ctx, operation); inspectErr != nil {
 		return TokenMapping{}, ErrReconcilePending
@@ -472,6 +493,9 @@ func (service *Service) ResolveToken(ctx context.Context, request ActionRequest,
 		return issued, nil
 	}
 	request.Suffix = mapping.Suffix
+	if isDomesticProvider(displayProvider(mapping.Provider)) {
+		return IssuedToken{}, service.fail(ctx, action, operation, request, "provider", ErrMappedTokenUnavailable)
+	}
 	attestation, err := await(service, ctx, func(callCtx context.Context) (TokenAttestation, error) {
 		return service.runtime.Vault.Verify(callCtx, mapping.SecretRef)
 	})
@@ -660,7 +684,7 @@ func (service *Service) storeMapping(ctx context.Context, action, operation stri
 	return service.finishMapping(ctx, action, operation, request, current)
 }
 
-func (service *Service) finishCommittedMapping(ctx context.Context, action, operation string, request ActionRequest, suffix string, epoch uint64, metadata TokenMetadata) (TokenMapping, error) {
+func (service *Service) finishCommittedMapping(ctx context.Context, action, operation string, request ActionRequest, suffix, providerID string, epoch uint64, metadata TokenMetadata) (TokenMapping, error) {
 	var current TokenMapping
 	replayed := false
 	err := service.applyAndPersist(ctx, action, operation, request, func() error {
@@ -683,7 +707,7 @@ func (service *Service) finishCommittedMapping(ctx context.Context, action, oper
 	if replayed {
 		return service.finishMapping(ctx, action, operation, request, current)
 	}
-	return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: suffix, SecretRef: metadata.SecretRef, Version: metadata.Version, Epoch: epoch})
+	return service.storeMapping(ctx, action, operation, request, storedMapping{Suffix: suffix, SecretRef: metadata.SecretRef, Version: metadata.Version, Provider: providerID, Epoch: epoch})
 }
 
 func (service *Service) applyRotatedMapping(ctx context.Context, action, operation string, request ActionRequest, secretRef string, metadata TokenMetadata) (TokenMapping, error) {
