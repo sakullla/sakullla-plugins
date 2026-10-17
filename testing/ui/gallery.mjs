@@ -8,7 +8,15 @@ export const manifestName = "capture-ui-manifest.json";
 
 const escapeHtml = (value) => String(value).replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 
-const themeLabel = { light: "浅色 light", dark: "深色 dark" };
+const themeLabel = {
+  light: "浅色 light",
+  dark: "深色 dark",
+  "fresh-green": "清新绿 fresh-green",
+  "sakura-day": "昼樱 sakura-day",
+  "sakura-night": "夜樱 sakura-night",
+  "neko-dark": "猫夜 neko-dark",
+  business: "商务 business",
+};
 
 const cell = (value) => String(value ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
 
@@ -224,6 +232,11 @@ ${readmeRows.join("\n")}
       scene: item.scene,
       title: item.title,
       theme: item.theme,
+      themeMode: item.themeMode,
+      themeKey: item.themeKey,
+      expectedTheme: item.expectedTheme,
+      resolvedTheme: item.resolvedTheme,
+      themeFamily: item.themeFamily,
       width: item.width,
       height: item.height,
       file: item.file,

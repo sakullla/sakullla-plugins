@@ -16,11 +16,85 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const viewportHeight = 900;
 const namePattern = /^[a-z0-9][a-z0-9-]*$/;
 
+// Host pages read the same-origin `localStorage.theme`; standalone pages keep
+// their own `<plugin>.theme` key. The ids match the canonical ui-kit themes.
+export const HOST_THEMES = ["fresh-green", "sakura-day", "sakura-night", "neko-dark", "business"];
+const DARK_THEMES = new Set(["sakura-night", "neko-dark", "dark"]);
+const HOST_PLUGINS = new Set(["cloudflare-dns", "docker-app", "ip-policy", "reverse-l4", "shadowsocks-server", "waf"]);
+const THEME_ALIASES = ["all", "light", "dark", "host"];
+export const AVAILABLE_THEMES = [...THEME_ALIASES, ...HOST_THEMES];
+
+export function themeFamily(theme) {
+  return DARK_THEMES.has(theme) ? "dark" : "light";
+}
+
+export function expandThemes(value) {
+  const requested = String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (!requested.length) throw new Error(`--theme 需要至少一个主题。可用主题：${AVAILABLE_THEMES.join("、")}`);
+  const themes = [];
+  for (const theme of requested) {
+    if (!AVAILABLE_THEMES.includes(theme)) throw new Error(`未知主题 ${theme}。可用主题：${AVAILABLE_THEMES.join("、")}`);
+    if (theme === "all") themes.push("light", "dark");
+    else if (theme === "host") themes.push(...HOST_THEMES);
+    else themes.push(theme);
+  }
+  return unique(themes);
+}
+
+export function themeModeForPlugin(id, plugin) {
+  if (plugin?.themeMode === "host" || plugin?.themeMode === "standalone") return plugin.themeMode;
+  return HOST_PLUGINS.has(id) ? "host" : "standalone";
+}
+
+export function themeKeyForPlugin(id, mode, plugin) {
+  if (typeof plugin?.themeKey === "string" && plugin.themeKey) return plugin.themeKey;
+  return mode === "host" ? "theme" : `${id}.theme`;
+}
+
+// ui-kit resolves host themes by id; standalone pages only expose light/dark.
+export function resolveTheme(requested, mode) {
+  if (mode === "host") return requested;
+  if (requested === "light" || requested === "dark") return requested;
+  return DARK_THEMES.has(requested) ? "dark" : "light";
+}
+
+// Runs before page scripts. Capture clears stale storage first; the probe writes
+// only the requested key so a page cannot rely on an injected data-theme.
+export function themeBootstrapScript(key, theme, { clear = false } = {}) {
+  return `(() => { try { ${clear ? "localStorage.clear(); " : ""}localStorage.setItem(${JSON.stringify(key)}, ${JSON.stringify(theme)}); } catch (_) {} })();`;
+}
+
+export const themeStateExpression = `(() => {
+  const root = document.documentElement;
+  const style = root ? getComputedStyle(root) : null;
+  return {
+    top: window.top === window,
+    mode: root ? root.getAttribute("data-theme-mode") || "" : "",
+    key: root ? root.getAttribute("data-theme-key") || "" : "",
+    theme: root ? root.getAttribute("data-theme") || "" : "",
+    family: root ? root.getAttribute("data-theme-family") || "" : "",
+    colorScheme: style ? (style.colorScheme || "").trim() : "",
+  };
+})()`;
+
+// Theme verification compares the page's real root state with what the kit
+// should resolve from the requested value and the page's theme authority.
+export function themeIssues(state, requested, mode, key, expected = resolveTheme(requested, mode)) {
+  const family = themeFamily(expected);
+  const issues = [];
+  if (!state?.theme) issues.push(`主题解析不符：请求 ${requested}（${mode}），期望根主题 ${expected}，实际未设置`);
+  else if (state.theme !== expected) issues.push(`主题解析不符：请求 ${requested}（${mode}），期望根主题 ${expected}，实际 ${state.theme}`);
+  if (state?.mode && state.mode !== mode) issues.push(`主题模式不符：页面声明 ${state.mode}，捕获按 ${mode} 运行`);
+  if (state?.key && state.key !== key) issues.push(`主题存储键不符：页面声明 ${state.key}，捕获写入 ${key}`);
+  if (state?.family && state.family !== family) issues.push(`主题族不符：期望 ${family}，实际 ${state.family}`);
+  return issues;
+}
+
 const usage = `用法：node testing/ui/capture.mjs [选项]
 
   --plugin a,b    只捕获这些插件（默认全部已注册插件）
   --only 模式     按场景名筛选，支持 * 和 ?；与 --plugin 同时使用时取交集
-  --theme 值      all、light 或 dark（默认 all）
+  --theme 值      all、light、dark、host、5 个宿主主题 id，或逗号分隔组合（默认 all）
   --size 宽度     逗号分隔的视口宽度（默认 1440,768,390）
   --out 目录      输出目录（默认 dist/ui-capture）
   --list          列出当前选择的插件和场景，不写画廊
@@ -62,8 +136,7 @@ export function parseArgs(argv, base = root) {
       case "--theme": {
         const theme = take(argv, index, flag);
         index += 1;
-        if (!["all", "light", "dark"].includes(theme)) throw new Error(`未知主题 ${theme}。可用主题：all、light、dark`);
-        options.themes = theme === "all" ? ["light", "dark"] : [theme];
+        options.themes = expandThemes(theme);
         break;
       }
       case "--size": {
@@ -123,8 +196,12 @@ export function selectPlugins(plugins, { plugins: requested, only } = {}) {
   return narrowed;
 }
 
-export function formatList(plugins) {
-  return plugins.map((plugin) => [plugin.id, ...plugin.scenes.map((scene) => `  ${scene.name}  ${scene.title}`)].join("\n")).join("\n");
+export function formatList(plugins, themes = AVAILABLE_THEMES) {
+  const lines = [`可用主题：${themes.join("、")}`, ""];
+  for (const plugin of plugins) {
+    lines.push(plugin.id, ...plugin.scenes.map((scene) => `  ${scene.name}  ${scene.title}`));
+  }
+  return lines.join("\n");
 }
 
 export function normalizePlugin(plugin, directoryName = "") {
@@ -141,7 +218,11 @@ export function normalizePlugin(plugin, directoryName = "") {
     if (scene.run !== undefined && typeof scene.run !== "function") throw new Error(`插件 ${id} 的场景 ${scene.name} 无法运行`);
     return { name: scene.name, title: scene.title || scene.name, settle: scene.settle, run: scene.run };
   });
-  return { id, scenes, startPreview: plugin.startPreview };
+  const themeMode = plugin?.themeMode === undefined ? themeModeForPlugin(id) : plugin.themeMode;
+  if (themeMode !== "host" && themeMode !== "standalone") throw new Error(`插件 ${id} 的主题模式无效`);
+  const themeKey = plugin?.themeKey === undefined ? themeKeyForPlugin(id, themeMode) : plugin.themeKey;
+  if (typeof themeKey !== "string" || !themeKey.trim()) throw new Error(`插件 ${id} 的主题存储键无效`);
+  return { id, scenes, startPreview: plugin.startPreview, themeMode, themeKey };
 }
 
 export async function discoverPlugins(repo = root) {
@@ -152,7 +233,13 @@ export async function discoverPlugins(repo = root) {
     const modulePath = join(pluginsDir, entry.name, "testing", "ui", "capture-plugin.mjs");
     if (!existsSync(modulePath)) continue;
     const imported = await import(pathToFileURL(modulePath).href);
-    plugins.push(normalizePlugin({ id: imported.id, scenes: imported.scenes, startPreview: imported.startPreview }, entry.name));
+    plugins.push(normalizePlugin({
+      id: imported.id,
+      scenes: imported.scenes,
+      startPreview: imported.startPreview,
+      themeMode: imported.themeMode,
+      themeKey: imported.themeKey,
+    }, entry.name));
   }
   return plugins;
 }
@@ -204,7 +291,7 @@ const capturePng = async (page, scene, options) => {
   return Buffer.from(shot.data, "base64");
 };
 
-const createDriver = (page, theme, pageErrors, inflight) => {
+const createDriver = (page, pageErrors, inflight) => {
   const evaluate = page.evaluate;
   const find = (selector) => `(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) throw new Error("找不到元素 " + ${JSON.stringify(selector)}); return node; })()`;
   const open = async (url) => {
@@ -213,7 +300,6 @@ const createDriver = (page, theme, pageErrors, inflight) => {
     await page.send("Page.navigate", { url });
     await until(() => evaluate("document.readyState === 'complete'"), "页面加载");
     await evaluate("document.fonts ? document.fonts.ready.then(() => true) : true");
-    await evaluate(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`);
   };
   return {
     evaluate,
@@ -233,6 +319,11 @@ const blankCapture = (plugin, scene, theme, width, issue) => ({
   scene: scene.name,
   title: scene.title,
   theme,
+  themeMode: plugin.themeMode,
+  themeKey: plugin.themeKey,
+  expectedTheme: resolveTheme(theme, plugin.themeMode),
+  resolvedTheme: null,
+  themeFamily: null,
   width,
   height: viewportHeight,
   file: null,
@@ -261,14 +352,18 @@ async function capturePlugin(browser, plugin, options, report) {
     page.on("Network.requestWillBeSent", ({ requestId }) => inflight.add(requestId));
     page.on("Network.loadingFinished", ({ requestId }) => inflight.delete(requestId));
     page.on("Network.loadingFailed", ({ requestId }) => inflight.delete(requestId));
-    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: "try { localStorage.clear(); } catch (_) {}" });
+    let bootstrapId = null;
     for (const theme of options.themes) {
-      await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }, { name: "prefers-reduced-motion", value: "reduce" }] });
+      await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: themeFamily(theme) }, { name: "prefers-reduced-motion", value: "reduce" }] });
+      if (bootstrapId) await page.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: bootstrapId }).catch(() => {});
+      bootstrapId = (await page.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: themeBootstrapScript(plugin.themeKey, theme, { clear: true }),
+      })).identifier;
       for (const width of options.widths) {
         await page.send("Emulation.setDeviceMetricsOverride", { width, height: viewportHeight, deviceScaleFactor: 1, mobile: width < 600 });
         for (const scene of plugin.scenes) {
           const issues = [];
-          const driver = createDriver(page, theme, pageErrors, inflight);
+          const driver = createDriver(page, pageErrors, inflight);
           let opened = false;
           try {
             await driver.open(preview.url);
@@ -282,8 +377,18 @@ async function capturePlugin(browser, plugin, options, report) {
           }
           let file = null;
           let height = viewportHeight;
+          let resolvedTheme = null;
+          let resolvedFamily = null;
           if (opened) {
             let documentHeight = null;
+            try {
+              const themeState = await page.evaluate(themeStateExpression);
+              resolvedTheme = themeState?.theme || null;
+              resolvedFamily = themeState?.family || null;
+              for (const issue of themeIssues(themeState, theme, plugin.themeMode, plugin.themeKey)) issues.push(issue);
+            } catch (error) {
+              issues.push(`场景失败：无法读取主题状态：${error.message}`);
+            }
             try {
               const overflow = await page.evaluate(overflowExpression);
               if (Array.isArray(overflow) && overflow.length) issues.push(`横向溢出：${overflow.join("、")}`);
@@ -309,7 +414,21 @@ async function capturePlugin(browser, plugin, options, report) {
               issues.push(`场景失败：${error.message}`);
             }
           }
-          report.captures.push({ plugin: plugin.id, scene: scene.name, title: scene.title, theme, width, height, file, issues });
+          report.captures.push({
+            plugin: plugin.id,
+            scene: scene.name,
+            title: scene.title,
+            theme,
+            themeMode: plugin.themeMode,
+            themeKey: plugin.themeKey,
+            expectedTheme: resolveTheme(theme, plugin.themeMode),
+            resolvedTheme,
+            themeFamily: resolvedFamily,
+            width,
+            height,
+            file,
+            issues,
+          });
           console.log(`${issues.length ? "FAIL" : "ok  "} ${plugin.id}/${scene.name}-${theme}-${width}.png${issues.map((issue) => `\n     - ${issue}`).join("")}`);
         }
       }

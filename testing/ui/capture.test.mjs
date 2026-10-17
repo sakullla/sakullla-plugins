@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { deflateSync } from "node:zlib";
 import { buildGallery, manifestName } from "./gallery.mjs";
-import { viewportHeight } from "./capture.mjs";
+import {
+  HOST_THEMES,
+  expandThemes,
+  parseArgs,
+  resolveTheme,
+  themeIssues,
+  themeKeyForPlugin,
+  themeModeForPlugin,
+  viewportHeight,
+} from "./capture.mjs";
 
 const repo = fileURLToPath(new URL("../..", import.meta.url));
 const scenes = ["usage", "convert-github", "convert-repo", "convert-docker", "convert-unsupported", "mirrors", "mirrors-loading", "mirrors-browse", "mirrors-ready", "mirrors-error"];
@@ -121,6 +131,28 @@ test("list filters scenes with globs", () => {
   assert.equal(mirrors.stdout.includes("\n  usage"), false);
 });
 
+test("theme values expand aliases and host ids, and map the two theme authorities", () => {
+  assert.deepEqual(expandThemes("all"), ["light", "dark"]);
+  assert.deepEqual(expandThemes("host"), HOST_THEMES);
+  assert.deepEqual(expandThemes("dark, light, dark"), ["dark", "light"]);
+  assert.deepEqual(expandThemes("fresh-green"), ["fresh-green"]);
+  assert.throws(() => expandThemes("blue"), /未知主题 blue。可用主题：all、light、dark、host、fresh-green/);
+  assert.deepEqual(parseArgs(["--theme", "host,sakura-day"]).themes, HOST_THEMES);
+  assert.deepEqual(parseArgs([]).themes, ["light", "dark"]);
+  assert.equal(resolveTheme("sakura-night", "host"), "sakura-night");
+  assert.equal(resolveTheme("sakura-night", "standalone"), "dark");
+  assert.equal(resolveTheme("fresh-green", "standalone"), "light");
+  assert.equal(themeModeForPlugin("waf"), "host");
+  assert.equal(themeModeForPlugin("doh"), "standalone");
+  assert.equal(themeModeForPlugin("waf", { themeMode: "standalone" }), "standalone");
+  assert.equal(themeKeyForPlugin("waf", "host"), "theme");
+  assert.equal(themeKeyForPlugin("accelerator-sources", "standalone"), "accelerator-sources.theme");
+  assert.equal(themeKeyForPlugin("doh", "standalone"), "doh.theme");
+  assert.deepEqual(themeIssues({ theme: "dark", family: "dark", mode: "standalone", key: "doh.theme" }, "sakura-night", "standalone", "doh.theme"), []);
+  assert.match(themeIssues({ theme: "light", mode: "standalone" }, "dark", "standalone", "doh.theme").join("\n"), /主题解析不符/);
+  assert.match(themeIssues({ theme: "dark", mode: "host" }, "dark", "standalone", "doh.theme").join("\n"), /主题模式不符/);
+});
+
 test("unknown plugin, theme, width, and scene fail with available values and do not pass", async () => {
   const out = await mkdtemp(join(tmpdir(), "nre-ui-bad-"));
   try {
@@ -136,6 +168,7 @@ test("unknown plugin, theme, width, and scene fail with available values and do 
     assert.match(outputOf(theme), /light/);
     assert.match(outputOf(theme), /dark/);
     assert.match(outputOf(theme), /可用主题/);
+    for (const name of ["host", ...HOST_THEMES]) assert.match(outputOf(theme), new RegExp(name));
     assert.equal(existsSync(join(out, "index.html")), false);
 
     const width = runCli(["--size", "10", "--list"]);
@@ -232,6 +265,65 @@ test("gallery filters by plugin, scene, theme, width, and keyword", async () => 
   await dom.reset();
   assert.equal(dom.visible().length, 3);
   assert.equal(dom.nodes.empty.hidden, true);
+});
+
+
+test("gallery filters host themes recorded in the manifest", async () => {
+  const capture = (theme, family) => ({
+    plugin: "waf",
+    scene: "overview",
+    title: "概览",
+    theme,
+    themeMode: "host",
+    themeKey: "theme",
+    expectedTheme: theme,
+    resolvedTheme: theme,
+    themeFamily: family,
+    width: 1440,
+    height: 900,
+    file: `waf/overview-${theme}-1440.png`,
+    issues: [],
+  });
+  const report = {
+    capturedAt: "2026-10-17T00:00:00.000Z",
+    invocation: "node testing/ui/capture.mjs --plugin waf --theme host --size 1440",
+    themes: ["fresh-green", "sakura-day", "sakura-night", "neko-dark", "business"],
+    widths: [1440],
+    selected: [{ plugin: "waf", scenes: ["overview"] }],
+    missing: [],
+    success: true,
+    imageCount: 5,
+    failureCount: 0,
+    captures: [
+      capture("fresh-green", "light"),
+      capture("sakura-day", "light"),
+      capture("sakura-night", "dark"),
+      capture("neko-dark", "dark"),
+      capture("business", "light"),
+    ],
+    failures: [],
+  };
+  const built = buildGallery(report);
+  assert.match(built.html, /清新绿/);
+  assert.match(built.html, /夜樱/);
+  assert.match(built.html, /猫夜/);
+  assert.match(built.html, /商务/);
+  const manifest = JSON.parse(built.manifest);
+  assert.deepEqual(manifest.themes, report.themes);
+  assert.equal(manifest.captures[0].themeMode, "host");
+  assert.equal(manifest.captures[0].resolvedTheme, "fresh-green");
+  assert.equal(manifest.captures[2].themeFamily, "dark");
+  const dom = galleryDom(built.html);
+  assert.equal(dom.visible().length, 5);
+  dom.set("theme", "fresh-green");
+  assert.deepEqual(dom.visible().map((card) => card.dataset.theme), ["fresh-green"]);
+  await dom.reset();
+  dom.set("theme", "neko-dark");
+  assert.deepEqual(dom.visible().map((card) => card.dataset.theme), ["neko-dark"]);
+  await dom.reset();
+  dom.set("plugin", "waf");
+  dom.set("width", "1440");
+  assert.equal(dom.visible().length, 5);
 });
 
 test("groups scene variants with failures first and opens the full image", async () => {
@@ -467,10 +559,10 @@ test("groups scene variants with failures first and opens the full image", async
 const probePlugin = `import { createServer } from "node:http";
 
 const pages = {
-  "/home": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body><p>home</p></body></html>",
-  "/overflow": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><main id=\\"wide\\" style=\\"width:2400px;height:40px\\">overflow-marker</main></body></html>",
-  "/scrolled": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><div id=\\"strip\\" style=\\"overflow-x:auto;width:200px;max-width:100%;height:48px\\"><main id=\\"inner\\" style=\\"width:2400px;height:40px\\">scrolled-marker</main></div></body></html>",
-  "/broken": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><script>throw new Error(\\"fixture-page-error\\")</script><p>broken</p></body></html>",
+  "/home": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"layout-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('layout-probe.theme');const dark=stored==='dark'||stored==='sakura-night'||stored==='neko-dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body><p>home</p></body></html>",
+  "/overflow": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"layout-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('layout-probe.theme');const dark=stored==='dark'||stored==='sakura-night'||stored==='neko-dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><main id=\\"wide\\" style=\\"width:2400px;height:40px\\">overflow-marker</main></body></html>",
+  "/scrolled": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"layout-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('layout-probe.theme');const dark=stored==='dark'||stored==='sakura-night'||stored==='neko-dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><div id=\\"strip\\" style=\\"overflow-x:auto;width:200px;max-width:100%;height:48px\\"><main id=\\"inner\\" style=\\"width:2400px;height:40px\\">scrolled-marker</main></div></body></html>",
+  "/broken": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"layout-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('layout-probe.theme');const dark=stored==='dark'||stored==='sakura-night'||stored==='neko-dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><script>throw new Error(\\"fixture-page-error\\")</script><p>broken</p></body></html>",
 };
 
 let base = "";
@@ -534,6 +626,10 @@ process.exit(report.success ? 0 : 1);
     const byScene = Object.fromEntries(manifest.captures.map((item) => [item.scene, item]));
     assert.match(byScene.overflow.issues.join("\n"), /横向溢出/);
     assert.deepEqual(byScene.scrolled.issues, []);
+    assert.equal(byScene.scrolled.themeMode, "standalone");
+    assert.equal(byScene.scrolled.expectedTheme, "light");
+    assert.equal(byScene.scrolled.resolvedTheme, "light");
+    assert.equal(byScene.scrolled.themeFamily, "light");
     assert.match(byScene.broken.issues.join("\n"), /页面错误/);
     assert.match(byScene.broken.issues.join("\n"), /fixture-page-error/);
     assert.equal(manifest.failures.some((item) => item.scene === "scrolled"), false);
@@ -600,9 +696,9 @@ const pngHeight = (bytes) => {
 const pageProbe = `import { createServer } from "node:http";
 
 const pages = {
-  "/tall": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">below-the-fold</main></body></html>",
-  "/nested": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><div style=\\"overflow:auto;height:160px\\"><main style=\\"height:2400px\\">nested-line</main></div></body></html>",
-  "/clipped": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">clipped-below</main></body></html>",
+  "/tall": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"page-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('page-probe.theme');const dark=stored==='dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">below-the-fold</main></body></html>",
+  "/nested": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"page-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('page-probe.theme');const dark=stored==='dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><div style=\\"overflow:auto;height:160px\\"><main style=\\"height:2400px\\">nested-line</main></div></body></html>",
+  "/clipped": "<!doctype html><html data-theme-mode=\\"standalone\\" data-theme-key=\\"page-probe.theme\\"><head><meta charset=\\"utf-8\\"><script>const stored=localStorage.getItem('page-probe.theme');const dark=stored==='dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">clipped-below</main></body></html>",
 };
 
 let base = "";
@@ -717,6 +813,10 @@ test("captures the accelerator usage scene into a filterable gallery", { timeout
     assert.equal(manifest.captures[0].plugin, "accelerator-sources");
     assert.equal(manifest.captures[0].scene, "usage");
     assert.equal(manifest.captures[0].file, "accelerator-sources/usage-dark-390.png");
+    assert.equal(manifest.captures[0].theme, "dark");
+    assert.equal(manifest.captures[0].themeMode, "standalone");
+    assert.equal(manifest.captures[0].expectedTheme, "dark");
+    assert.equal(manifest.captures[0].resolvedTheme, "dark");
     assert.equal(manifest.missing.length, 0);
     const png = await readFile(join(out, "accelerator-sources", "usage-dark-390.png"));
     assert.equal(png.subarray(0, 4).toString("hex"), "89504e47");
@@ -741,4 +841,178 @@ test("captures the accelerator usage scene into a filterable gallery", { timeout
   } finally {
     await rm(out, { recursive: true, force: true });
   }
+});
+
+const themeAuditPlugin = `import { createServer } from "node:http";
+
+const pages = {
+  "/bootstrap": "<!doctype html><html data-theme-mode='standalone' data-theme-key='theme-audit.theme'><head><meta charset='utf-8'><script>const stored=localStorage.getItem('theme-audit.theme');const dark=stored==='dark'||stored==='sakura-night'||stored==='neko-dark';document.documentElement.setAttribute('data-theme',stored==='light'||stored==='dark'?stored:(dark?'dark':'light'));document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body>bootstrap</body></html>",
+  "/stubborn": "<!doctype html><html data-theme-mode='standalone' data-theme-key='theme-audit.theme'><head><meta charset='utf-8'><script>document.documentElement.setAttribute('data-theme','light');document.documentElement.setAttribute('data-theme-family','light');</script></head><body>stubborn</body></html>",
+};
+
+let base = "";
+const serverFor = async () => {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/favicon.ico") { response.writeHead(204); response.end(); return; }
+    const body = pages[path] || pages["/bootstrap"];
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(body);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  base = "http://127.0.0.1:" + server.address().port;
+  return {
+    url: base + "/bootstrap",
+    async close() {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+};
+
+export const plugin = {
+  id: "theme-audit",
+  scenes: [
+    { name: "bootstrap", title: "导航前写入", run: (ui) => ui.open(base + "/bootstrap") },
+    { name: "stubborn", title: "页面自定主题", run: (ui) => ui.open(base + "/stubborn") },
+  ],
+  startPreview: () => serverFor(),
+};
+`;
+
+const themeHostPlugin = `import { createServer } from "node:http";
+
+const page = "<!doctype html><html data-theme-mode='host' data-theme-key='theme'><head><meta charset='utf-8'><script>const stored=localStorage.getItem('theme')||'light';const dark=['sakura-night','neko-dark','dark'].includes(stored);document.documentElement.setAttribute('data-theme',stored);document.documentElement.setAttribute('data-theme-family',dark?'dark':'light');</script></head><body>host</body></html>";
+
+let base = "";
+const serverFor = async () => {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/favicon.ico") { response.writeHead(204); response.end(); return; }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(page);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  base = "http://127.0.0.1:" + server.address().port;
+  return {
+    url: base + "/host",
+    async close() {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+};
+
+export const hostPlugin = {
+  id: "theme-audit-host",
+  themeMode: "host",
+  themeKey: "theme",
+  scenes: [{ name: "host", title: "宿主主题", run: (ui) => ui.open(base + "/host") }],
+  startPreview: () => serverFor(),
+};
+`;
+
+test("captures resolve the declared theme authority and fail on a mismatch", { timeout: 240000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nre-ui-theme-"));
+  try {
+    await writeFile(join(dir, "audit-plugin.mjs"), themeAuditPlugin);
+    await writeFile(join(dir, "host-plugin.mjs"), themeHostPlugin);
+    const outs = {
+      good: join(dir, "good"),
+      bad: join(dir, "bad"),
+      host: join(dir, "host"),
+    };
+    const runner = `import { runCapture } from ${JSON.stringify(pathToFileURL(join(repo, "testing/ui/capture.mjs")).href)};
+import { plugin } from "./audit-plugin.mjs";
+import { hostPlugin } from "./host-plugin.mjs";
+const pick = (source, names) => ({ ...source, scenes: source.scenes.filter((scene) => names.includes(scene.name)) });
+const base = { root: ${JSON.stringify(repo)}, widths: [800] };
+const good = await runCapture({ ...base, plugins: [pick(plugin, ["bootstrap"])], themes: ["sakura-night"], out: ${JSON.stringify(outs.good)}, invocation: "good" });
+const bad = await runCapture({ ...base, plugins: [pick(plugin, ["stubborn"])], themes: ["dark"], out: ${JSON.stringify(outs.bad)}, invocation: "bad" });
+const host = await runCapture({ ...base, plugins: [pick(hostPlugin, ["host"])], themes: ["fresh-green"], out: ${JSON.stringify(outs.host)}, invocation: "host" });
+console.log(JSON.stringify({ good: good.success, bad: bad.success, host: host.success }));
+process.exit(good.success && !bad.success && host.success ? 0 : 1);
+`;
+    await writeFile(join(dir, "run-theme.mjs"), runner);
+    const run = spawnSync(process.execPath, [join(dir, "run-theme.mjs")], { encoding: "utf8", timeout: 210000 });
+    assert.equal(run.status, 0, outputOf(run));
+
+    const good = JSON.parse(await readFile(join(outs.good, manifestName), "utf8"));
+    assert.equal(good.success, true);
+    assert.equal(good.captures[0].theme, "sakura-night");
+    assert.equal(good.captures[0].themeMode, "standalone");
+    assert.equal(good.captures[0].expectedTheme, "dark");
+    assert.equal(good.captures[0].resolvedTheme, "dark");
+    assert.equal(good.captures[0].themeFamily, "dark");
+    assert.deepEqual(good.captures[0].issues, []);
+
+    const bad = JSON.parse(await readFile(join(outs.bad, manifestName), "utf8"));
+    assert.equal(bad.success, false);
+    assert.equal(bad.captures[0].resolvedTheme, "light");
+    assert.match(bad.captures[0].issues.join("\n"), /主题解析不符/);
+    assert.match(bad.captures[0].issues.join("\n"), /实际 light/);
+    assert.equal(bad.captures[0].themeMode, "standalone");
+
+    const host = JSON.parse(await readFile(join(outs.host, manifestName), "utf8"));
+    assert.equal(host.success, true);
+    assert.equal(host.captures[0].themeMode, "host");
+    assert.equal(host.captures[0].resolvedTheme, "fresh-green");
+    assert.equal(host.captures[0].themeFamily, "light");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const runCliAsync = (args) => new Promise((resolve) => {
+  const child = spawn(process.execPath, ["testing/ui/theme-probe.mjs", ...args], { cwd: repo });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  child.on("close", (status) => resolve({ status, output }));
+});
+
+test("theme-probe verifies a top-level page that only reads localStorage.theme", { timeout: 120000 }, async () => {
+  const server = createServer((request, response) => {
+    if (new URL(request.url, "http://127.0.0.1").pathname === "/favicon.ico") {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(`<!doctype html><html data-theme-mode="host" data-theme-key="theme"><head><meta charset="utf-8"><script>
+const stored=localStorage.getItem("theme");
+document.documentElement.setAttribute("data-theme",stored||"missing");
+document.documentElement.setAttribute("data-theme-family",["sakura-night","neko-dark"].includes(stored)?"dark":"light");
+</script></head><body>probe</body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = "http://127.0.0.1:" + server.address().port + "/";
+  try {
+    const run = await runCliAsync(["--url", url, "--theme", "neko-dark"]);
+    assert.equal(run.status, 0, run.output);
+    assert.match(run.output, /ok   neko-dark/);
+    assert.match(run.output, /1 项通过，0 项失败/);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("contrast audit covers the required kit token pairs", async () => {
+  const run = spawnSync(process.execPath, ["testing/ui/contrast.mjs"], { cwd: repo, encoding: "utf8" });
+  assert.equal(run.status, 0, outputOf(run));
+  assert.match(run.stdout, /必需组合通过/);
+  const { auditThemes } = await import(pathToFileURL(join(repo, "testing/ui/contrast.mjs")).href);
+  const tokens = `
+    --ui-text:#dddddd; --ui-bg:#ffffff; --ui-surface:#ffffff; --ui-surface-raised:#ffffff;
+    --ui-text-secondary:#dddddd; --ui-text-tertiary:#dddddd; --ui-text-muted:#dddddd;
+    --ui-danger-text:#dddddd; --ui-success-text:#dddddd; --ui-warning-text:#dddddd;
+    --ui-success-soft:#ffffff; --ui-warning-soft:#ffffff; --ui-danger-soft:#ffffff;
+    --ui-on-danger:#dddddd; --ui-danger-button:#ffffff; --ui-on-primary:#dddddd;
+    --ui-primary-hover:#ffffff; --ui-primary-active:#ffffff; --ui-primary:#dddddd;
+    --ui-danger:#dddddd; --ui-success:#dddddd; --ui-warning:#dddddd; --ui-border-strong:#dddddd;
+  `;
+  const bad = auditThemes(`:root{${tokens}}[data-theme="light"]{${tokens}}`);
+  assert.ok(bad.failures.length > 0);
+  assert.ok(bad.failures.some((item) => item.fg === "--ui-text" && item.bg === "--ui-bg"));
 });
