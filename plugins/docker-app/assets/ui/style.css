@@ -1949,6 +1949,11 @@ button:disabled { opacity: 0.48; cursor: not-allowed; text-decoration: none; }
 .app-card-mark[data-tone="3"] { color: #6d28d9; background: color-mix(in srgb, #6d28d9 12%, var(--color-bg-surface)); }
 .app-card-mark[data-tone="4"] { color: #b91c1c; background: var(--color-danger-subtle); }
 .app-card-mark[data-tone="5"] { color: #0f766e; background: color-mix(in srgb, #0f766e 12%, var(--color-bg-surface)); }
+[data-theme="dark"] .app-card-mark[data-tone="1"] { color: var(--color-success); }
+[data-theme="dark"] .app-card-mark[data-tone="2"] { color: var(--color-warning); }
+[data-theme="dark"] .app-card-mark[data-tone="3"] { color: var(--color-primary); background: var(--color-primary-subtle); }
+[data-theme="dark"] .app-card-mark[data-tone="4"] { color: var(--color-danger); }
+[data-theme="dark"] .app-card-mark[data-tone="5"] { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 16%, var(--color-bg-surface)); }
 
 .app-card-identity {
   display: flex;
@@ -3177,7 +3182,7 @@ dialog { max-width: calc(100vw - 2rem); max-height: calc(100dvh - 2rem); overflo
   --color-primary-200: #e0d6f4;
   --color-text-primary: #302c46;
   --color-text-secondary: #615c77;
-  --color-text-tertiary: #746d88;
+  --color-text-tertiary: #6c6580;
   --color-bg-canvas: #f7f5fb;
   --color-bg-sunken: #f5f3fa;
   --color-bg-hover: #f0ebf8;

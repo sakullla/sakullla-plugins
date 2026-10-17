@@ -217,6 +217,9 @@ button:disabled {
   background: var(--color-primary);
   color: #fff;
 }
+[data-theme="dark"] .btn-primary {
+  color: #0f172a;
+}
 .btn-primary:hover:not(:disabled) {
   background: var(--color-primary-hover);
 }
@@ -1122,6 +1125,10 @@ dialog::backdrop {
   padding: 1.1rem 0;
   cursor: pointer;
 }
+.managed-group summary > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .managed-group summary strong {
   font-weight: 550;
   font-size: 0.94rem;
@@ -1142,6 +1149,8 @@ dialog::backdrop {
 }
 .managed-group summary .count {
   margin-left: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .managed-rows {
   padding: 0 0.5rem 0.7rem;

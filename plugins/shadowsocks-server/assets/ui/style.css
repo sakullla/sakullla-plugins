@@ -39,7 +39,7 @@
 
   --color-text: #0f172a;
   --color-text-secondary: #334155;
-  --color-text-tertiary: #64748b;
+  --color-text-tertiary: #59687c;
 
   --color-canvas: #f4f6f9;
   --color-surface: #ffffff;
@@ -89,7 +89,7 @@
 
   --color-text: #f1f5f9;
   --color-text-secondary: #94a3b8;
-  --color-text-tertiary: #64748b;
+  --color-text-tertiary: #8494a8;
 
   --color-canvas: #090e17;
   --color-surface: #111827;
@@ -1388,6 +1388,9 @@ textarea:disabled {
   color: #ffffff;
   background: linear-gradient(160deg, color-mix(in srgb, var(--color-danger) 88%, #ffffff), var(--color-danger));
   border-color: color-mix(in srgb, var(--color-danger) 62%, transparent);
+}
+[data-theme="dark"] .btn--primary[data-danger="true"] {
+  color: #450a0a;
 }
 
 /* ---------- dialogs ---------- */

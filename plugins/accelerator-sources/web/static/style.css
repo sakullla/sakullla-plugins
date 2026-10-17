@@ -24,7 +24,7 @@
   --color-warning: #b45309;
   --color-text-primary: #141a2b;
   --color-text-secondary: #4a5367;
-  --color-text-tertiary: #7c8497;
+  --color-text-tertiary: #5e687c;
   --color-bg-canvas: #f6f7fb;
   --color-bg-surface: #ffffff;
   --color-bg-sunken: #f2f4f9;
@@ -65,7 +65,7 @@
   --color-warning: #fbbf24;
   --color-text-primary: #e8ebf4;
   --color-text-secondary: #a6aec2;
-  --color-text-tertiary: #737c91;
+  --color-text-tertiary: #8b93a8;
   --color-bg-canvas: #0a0d15;
   --color-bg-surface: #121725;
   --color-bg-sunken: #0d111d;
@@ -1300,15 +1300,13 @@ select {
   place-items: center;
   min-height: 2.6rem;
   border-radius: var(--radius-md);
-  color: #ffffff;
+  color: #062b14;
   background: var(--color-success);
   font-weight: 650;
   text-decoration: none;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 6px 14px -8px var(--color-success);
   transition: filter 0.15s var(--ease);
 }
-
-[data-theme="dark"] .download-link { color: #062b14; }
 
 .download-link:hover { filter: brightness(1.06); }
 

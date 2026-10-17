@@ -26,7 +26,7 @@
   --color-accent: var(--color-primary);
   --color-text-primary: #0f172a;
   --color-text-secondary: #475569;
-  --color-text-tertiary: #64748b;
+  --color-text-tertiary: #59687c;
   --color-text-inverse: #ffffff;
   --color-bg-canvas: #f8fafc;
   --color-bg-surface: #ffffff;
@@ -227,6 +227,8 @@ h2 { font-size: var(--text-sm); }
 }
 
 .token-guide-link {
+  display: table;
+  margin-top: 0.35rem;
   color: var(--color-primary);
   font-weight: 650;
 }
