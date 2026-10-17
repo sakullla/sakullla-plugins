@@ -22,17 +22,42 @@ const runCli = (args, cwd = repo) => spawnSync(process.execPath, ["testing/ui/ca
 const outputOf = (run) => `${run.stdout || ""}\n${run.stderr || ""}`;
 
 function galleryDom(html) {
+  const attributes = (source) => Object.fromEntries([...source.matchAll(/\bdata-([a-z]+)=\"([^\"]*)\"/g)].map((item) => [item[1], item[2]]));
   const figures = [...html.matchAll(/<figure\b([^>]*)>/g)].map((match) => ({
-    dataset: Object.fromEntries([...match[1].matchAll(/\bdata-([a-z]+)=\"([^\"]*)\"/g)].map((item) => [item[1], item[2]])),
+    dataset: attributes(match[1]),
     hidden: false,
   }));
+  const groups = [...html.matchAll(/<section\b([^>]*)>/g)].flatMap((match) => {
+    if (!/\bdata-group=/.test(match[1])) return [];
+    return [{ dataset: attributes(match[1]), hidden: false }];
+  });
+  const links = [...html.matchAll(/<a\b([^>]*)>/g)].flatMap((match) => {
+    if (!/\bclass="view"/.test(match[1])) return [];
+    const listeners = {};
+    const href = match[1].match(/\bhref=\"([^\"]*)\"/)?.[1] ?? "";
+    const alt = match[1].match(/\bdata-alt=\"([^\"]*)\"/)?.[1] ?? "";
+    return [{
+      dataset: { alt },
+      listeners,
+      getAttribute: (name) => (name === "href" ? href : ""),
+      addEventListener(type, fn) { listeners[type] = fn; },
+    }];
+  });
   const values = { plugin: "", scene: "", theme: "", width: "", query: "" };
   const listeners = {};
   const formListeners = {};
+  const button = () => {
+    const buttonListeners = {};
+    return { listeners: buttonListeners, addEventListener(type, fn) { buttonListeners[type] = fn; } };
+  };
   const nodes = {
     count: { textContent: "" },
     empty: { hidden: true },
     filters: { addEventListener(type, fn) { formListeners[type] = fn; } },
+    viewer: { hidden: true, scrollTop: 0 },
+    "viewer-image": { alt: "", setAttribute(name, value) { this[name] = value; } },
+    "viewer-close": button(),
+    "viewer-close-end": button(),
   };
   for (const id of Object.keys(values)) {
     nodes[id] = {
@@ -43,12 +68,19 @@ function galleryDom(html) {
   }
   const documentShim = {
     getElementById: (id) => nodes[id],
-    querySelectorAll: (selector) => (selector === "figure" ? figures : []),
+    querySelectorAll: (selector) => {
+      if (selector === "figure") return figures;
+      if (selector === "section[data-group]") return groups;
+      if (selector === "a.view") return links;
+      return [];
+    },
   };
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   new Function("document", script)(documentShim);
   return {
     figures,
+    groups,
+    links,
     nodes,
     visible: () => figures.filter((figure) => !figure.hidden),
     set(id, value) {
@@ -200,6 +232,172 @@ test("gallery filters by plugin, scene, theme, width, and keyword", async () => 
   await dom.reset();
   assert.equal(dom.visible().length, 3);
   assert.equal(dom.nodes.empty.hidden, true);
+});
+
+test("groups scene variants with failures first and opens the full image", async () => {
+  const capture = (plugin, scene, title, theme, width, issues = [], file = `${plugin}/${scene}-${theme}-${width}.png`) => ({
+    plugin, scene, title, theme, width, height: 1400, file, issues,
+  });
+  const report = {
+    capturedAt: "2026-10-17T00:00:00.000Z",
+    invocation: "node testing/ui/capture.mjs --theme all --size 390,1440",
+    themes: ["light", "dark"],
+    widths: [390, 1440],
+    selected: [
+      { plugin: "alpha", scenes: ["pass", "fail"] },
+      { plugin: "beta", scenes: ["empty", "later"] },
+    ],
+    missing: [
+      { plugin: "beta", scene: "empty", theme: "light", width: 390 },
+      { plugin: "beta", scene: "empty", theme: "light", width: 1440 },
+      { plugin: "beta", scene: "empty", theme: "dark", width: 390 },
+      { plugin: "beta", scene: "empty", theme: "dark", width: 1440 },
+      { plugin: "beta", scene: "later", theme: "dark", width: 1440 },
+    ],
+    success: false,
+    imageCount: 11,
+    failureCount: 6,
+    captures: [
+      capture("alpha", "pass", "通过场景", "dark", 1440),
+      capture("alpha", "pass", "通过场景", "light", 1440),
+      capture("alpha", "pass", "通过场景", "dark", 390),
+      capture("alpha", "pass", "通过场景", "light", 390),
+      capture("alpha", "fail", "失败场景", "dark", 1440, ["横向溢出：main"]),
+      capture("alpha", "fail", "失败场景", "light", 1440),
+      capture("alpha", "fail", "失败场景", "dark", 390),
+      capture("alpha", "fail", "失败场景", "light", 390),
+      { plugin: "beta", scene: "empty", title: "没有图片", theme: "light", width: 390, height: 900, file: null, issues: ["场景失败：预览启动失败"] },
+      capture("beta", "later", "靠后场景", "dark", 390),
+      capture("beta", "later", "靠后场景", "light", 1440),
+      capture("beta", "later", "靠后场景", "light", 390),
+    ],
+    failures: [{ plugin: "alpha", scene: "fail", theme: "dark", width: 1440, issues: ["横向溢出：main"] }],
+  };
+  const built = buildGallery(report);
+  assert.match(built.html, /本次结果：有失败。11 张图片，6 项失败。/);
+  assert.equal(built.html.includes("本次结果：通过"), false);
+  for (const label of ["插件", "场景", "主题", "宽度", "关键词", "重置", "没有匹配的图片"]) assert.match(built.html, new RegExp(label));
+  assert.match(built.html, /href="index\.html"/);
+  assert.match(built.html, /href="README\.md"/);
+  assert.match(built.html, new RegExp(`href="${manifestName}"`));
+  assert.equal(built.html.includes("target=\"_blank\""), false);
+  for (const word of ["标注", "评论", "对比", "历史", "baseline"]) {
+    assert.equal(built.html.includes(word), false, word);
+    assert.equal(built.readme.includes(word), false, word);
+  }
+  const viewerRule = built.html.match(/#viewer img\{([^}]*)\}/)[1];
+  assert.match(viewerRule, /width:100%/);
+  assert.match(viewerRule, /height:auto/);
+  assert.equal(viewerRule.includes("320px"), false);
+  assert.match(built.html.match(/#viewer\{([^}]*)\}/)[1], /overflow:auto/);
+  assert.match(built.html, /figure img\{[^}]*height:320px/);
+  assert.match(built.html, /id="viewer-close"/);
+  assert.match(built.html, /id="viewer-close-end"/);
+
+  const section = (scene) => {
+    const found = built.html.match(new RegExp(`<section\\b(?=[^>]*data-scene="${scene}")[^>]*>[\\s\\S]*?<\\/section>`));
+    assert.ok(found, scene);
+    return found[0];
+  };
+  const failSection = section("fail");
+  assert.match(failSection, /横向溢出：main/);
+  assert.equal(failSection.includes("通过"), false);
+  assert.deepEqual([...failSection.matchAll(/data-theme="([^"]+)"/g)].map((item) => item[1]), ["light", "light", "dark", "dark"]);
+  assert.deepEqual([...failSection.matchAll(/data-width="([^"]+)"/g)].map((item) => item[1]), ["390", "1440", "390", "1440"]);
+  const emptySection = section("empty");
+  assert.match(emptySection, /场景失败：预览启动失败/);
+  assert.match(emptySection, /缺少图片/);
+  assert.equal(emptySection.includes("<figure"), false);
+  assert.equal(emptySection.includes("通过"), false);
+  const laterSection = section("later");
+  assert.match(laterSection, /缺少图片/);
+  assert.equal(laterSection.includes("通过"), false);
+  assert.equal(laterSection.includes("dark-1440"), false);
+
+  const dom = galleryDom(built.html);
+  assert.deepEqual(dom.groups.map((group) => `${group.dataset.plugin}:${group.dataset.scene}`), [
+    "alpha:fail", "beta:empty", "beta:later", "alpha:pass",
+  ]);
+  assert.deepEqual(dom.figures.map((card) => `${card.dataset.plugin}:${card.dataset.scene}:${card.dataset.theme}:${card.dataset.width}`), [
+    "alpha:fail:light:390", "alpha:fail:light:1440", "alpha:fail:dark:390", "alpha:fail:dark:1440",
+    "beta:later:light:390", "beta:later:light:1440", "beta:later:dark:390",
+    "alpha:pass:light:390", "alpha:pass:light:1440", "alpha:pass:dark:390", "alpha:pass:dark:1440",
+  ]);
+  assert.equal(dom.groups.every((group) => !group.hidden), true);
+  assert.equal(dom.visible().length, 11);
+
+  dom.set("theme", "dark");
+  assert.deepEqual(dom.visible().map((card) => `${card.dataset.plugin}:${card.dataset.scene}:${card.dataset.width}`), [
+    "alpha:fail:390", "alpha:fail:1440", "beta:later:390", "alpha:pass:390", "alpha:pass:1440",
+  ]);
+  assert.equal(dom.groups.find((group) => group.dataset.scene === "empty").hidden, true);
+  assert.equal(dom.groups.find((group) => group.dataset.scene === "pass").hidden, false);
+  await dom.reset();
+  dom.set("query", "靠后");
+  assert.equal(dom.visible().length, 3);
+  assert.deepEqual(dom.groups.filter((group) => !group.hidden).map((group) => group.dataset.scene), ["later"]);
+  dom.set("query", "FAIL");
+  assert.deepEqual([...new Set(dom.visible().map((card) => card.dataset.scene))], ["fail"]);
+  dom.set("query", "没有这个");
+  assert.equal(dom.visible().length, 0);
+  assert.equal(dom.nodes.empty.hidden, false);
+  assert.equal(dom.groups.every((group) => group.hidden), true);
+  await dom.reset();
+  dom.set("scene", "empty");
+  assert.equal(dom.visible().length, 0);
+  assert.equal(dom.groups.find((group) => group.dataset.scene === "empty").hidden, false);
+  assert.equal(dom.nodes.empty.hidden, true);
+  await dom.reset();
+  assert.equal(dom.visible().length, 11);
+  assert.equal(dom.nodes.empty.hidden, true);
+
+  const link = dom.links.find((item) => item.getAttribute("href") === "alpha/fail-light-390.png");
+  let prevented = false;
+  link.listeners.click({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(dom.nodes.viewer.hidden, false);
+  assert.equal(dom.nodes.viewer.scrollTop, 0);
+  assert.equal(dom.nodes["viewer-image"].src, "alpha/fail-light-390.png");
+  assert.match(dom.nodes["viewer-image"].alt, /失败场景/);
+  dom.nodes["viewer-close"].listeners.click();
+  assert.equal(dom.nodes.viewer.hidden, true);
+  link.listeners.click({ preventDefault() {} });
+  dom.nodes["viewer-close-end"].listeners.click();
+  assert.equal(dom.nodes.viewer.hidden, true);
+
+  const readmeRows = built.readme.split("\n").filter((line) => line.startsWith("| alpha") || line.startsWith("| beta"));
+  assert.deepEqual(readmeRows.map((line) => line.split("|")[2].trim()), [
+    "失败场景（fail）", "没有图片（empty）", "靠后场景（later）", "通过场景（pass）",
+  ]);
+  assert.match(readmeRows[0], /横向溢出：main/);
+  assert.match(readmeRows[1], /场景失败：预览启动失败；缺少图片/);
+  assert.match(readmeRows[2], /缺少图片/);
+  assert.equal(readmeRows[2].includes("dark 1440"), false);
+  assert.match(readmeRows[3], /\| 通过 \|/);
+  assert.match(built.readme, /\[浏览画廊\]\(index\.html\)/);
+  assert.match(built.readme, new RegExp(`\\[捕获清单\\]\\(${manifestName}\\)`));
+  assert.match(built.readme, /node testing\/ui\/capture\.mjs --theme all --size 390,1440/);
+  const manifest = JSON.parse(built.manifest);
+  assert.equal(manifest.captures[0].file, "alpha/pass-dark-1440.png");
+  assert.equal(manifest.success, false);
+
+  const passed = buildGallery({
+    capturedAt: "2026-10-17T00:00:00.000Z",
+    invocation: "node testing/ui/capture.mjs",
+    themes: ["light"],
+    widths: [390],
+    selected: [{ plugin: "alpha", scenes: ["pass"] }],
+    missing: [],
+    success: true,
+    imageCount: 1,
+    failureCount: 0,
+    captures: [capture("alpha", "pass", "通过场景", "light", 390)],
+    failures: [],
+  });
+  assert.match(passed.html, /本次结果：通过。1 张图片，0 项失败。/);
+  assert.equal(passed.html.includes("本次结果：有失败"), false);
+  assert.match(passed.readme, /\| 通过 \|/);
+  assert.equal(passed.html.includes("target=\"_blank\""), false);
 });
 
 const probePlugin = `import { createServer } from "node:http";
