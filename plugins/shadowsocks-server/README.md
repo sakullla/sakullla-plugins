@@ -30,6 +30,11 @@ from `assets/ui/`; the Agent face does not serve the management page. This
 plugin does not declare `ui.schema.json`, `tunnel.provider`, or
 `http.backend-provider`.
 
+Signed metadata `rpc.execution-scope.v1: agent` opts the Agent face into the
+Host-authored execution scope. The control-plane face remains compatible with
+the SDK's legacy host-endpoint selection and does not require the optional
+execution-scope feature in its handshake.
+
 Production startup uses the canonical SDK runtime lifecycle and requires the
 Host-authored runtime instance identity plus managed-network and scoped-secret
 features. The control-plane face sends only listener and secret references to the

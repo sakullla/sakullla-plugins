@@ -466,7 +466,10 @@ func supportedFeatures() []string {
 }
 
 func requiredFeatures() []string {
-	return []string{pluginsdk.RPCFeatureManagedNetworkV1, pluginsdk.RPCFeatureScopedSecretsV1, pluginsdk.RPCFeatureRuntimeIdentityV1, pluginsdk.RPCFeatureDatasetsV1, pluginsdk.RPCFeatureDatasetResolveV1, pluginsdk.RPCFeatureExecutionScopeV1}
+	// Control-plane hosts can select their face through the legacy host endpoint.
+	// The signed manifest opts Agent hosts into explicit execution scope; support
+	// is advertised above and acknowledged when the Host requests that feature.
+	return []string{pluginsdk.RPCFeatureManagedNetworkV1, pluginsdk.RPCFeatureScopedSecretsV1, pluginsdk.RPCFeatureRuntimeIdentityV1, pluginsdk.RPCFeatureDatasetsV1, pluginsdk.RPCFeatureDatasetResolveV1}
 }
 
 type issuedSecrets struct {

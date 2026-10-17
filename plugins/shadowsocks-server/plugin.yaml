@@ -1,6 +1,6 @@
 schema_version: 1
 id: shadowsocks-server
-version: 0.1.19
+version: 0.1.20
 name: Shadowsocks 服务
 description: 管理宿主受管 Shadowsocks 入口，并按 GeoSite、GeoIP 或 CIDR 数据集选择直连、拒绝和上游
 compatibility:
@@ -15,8 +15,8 @@ runtime:
   entry: shadowsocks-server
 artifacts:
   - path: artifacts/linux-amd64/shadowsocks-server
-    sha256: e2cec116f5bf1c482e22233be41a4ecbc59149f338e702bf06bbd45b4c647ced
-    size: 8791112
+    sha256: d790063b6e05b513ca50b8231beb8c703f2905ab727af2026064270e93f6933b
+    size: 22225469
     mode: executable
     goos: linux
     goarch: amd64
@@ -26,6 +26,7 @@ extension_points:
 ui_route_id: shadowsocks-server
 resource_group_id: shadowsocks-server
 metadata:
+  rpc.execution-scope.v1: agent
   ui.nav.group: 网络
   ui.nav.label: Shadowsocks 账号
   resource.group.ref: resource-group/shadowsocks-server

@@ -94,7 +94,9 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 			t.Fatalf("plugin.yaml permissions omit %q", required)
 		}
 	}
-	requiredFeatures := supportedFeatures()
+	// The control-plane Host projects the signed permissions and extensions;
+	// it does not request every feature advertised by the guest.
+	requiredFeatures := pluginsdk.RequiredRPCFeaturesForExtensions(grants, manifest.ExtensionPoints)
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +116,50 @@ func TestPluginYAMLPermissionsSatisfyRuntimeHandshake(t *testing.T) {
 		if !slices.Contains(grants, capability) {
 			t.Fatalf("runtime handshake returned ungranted capability %q", capability)
 		}
+	}
+}
+
+func TestPluginYAMLAgentExecutionScopeHandshake(t *testing.T) {
+	raw, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest pluginsdk.Manifest
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Metadata[pluginsdk.RPCFeatureExecutionScopeV1] != pluginsdk.HostScopeAgent {
+		t.Fatal("signed manifest must opt the Agent into explicit execution scope")
+	}
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeAgent)
+	// Both hosts provide a host endpoint. Explicit scope must select the Agent
+	// face even when the legacy endpoint heuristic would select control-plane.
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "unix:/run/nre-plugin/host.sock")
+	if !agentExecutionFace() || runtimeServices().UI {
+		t.Fatal("Agent execution scope did not select the Agent services")
+	}
+	grants := make([]string, 0, len(manifest.Permissions))
+	for _, permission := range manifest.Permissions {
+		grants = append(grants, permission.Name)
+	}
+	features, err := pluginsdk.RequiredRPCFeaturesForExecutionScope(grants, manifest.ExtensionPoints, pluginsdk.HostScopeAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewController(ControllerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: manifest.ID, PluginVersion: manifest.Version,
+		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: grants,
+		Generation: "agent-generation", RequiredFeatures: features,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(response.Features, features) {
+		t.Fatalf("Agent handshake features = %v, want %v", response.Features, features)
 	}
 }
 
