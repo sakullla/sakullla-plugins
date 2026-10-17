@@ -185,6 +185,25 @@ const overflowExpression = `(() => {
   return offenders;
 })()`;
 
+const documentHeightExpression = `Math.max(document.documentElement ? document.documentElement.scrollHeight : 0, document.body ? document.body.scrollHeight : 0)`;
+
+const pngSize = (bytes) => {
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  if (buffer.length < 24 || buffer[0] !== 0x89 || buffer.toString("ascii", 1, 4) !== "PNG") throw new Error("截图不是 PNG");
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+};
+
+// fromSurface must stay true: false ignores captureBeyondViewport and returns only the viewport.
+// captureScreenshot may return PNG bytes for one scene; null keeps the browser shot.
+const capturePng = async (page, scene, options) => {
+  if (typeof options.captureScreenshot === "function") {
+    const overridden = await options.captureScreenshot({ page, scene });
+    if (overridden) return Buffer.from(overridden);
+  }
+  const shot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, fromSurface: true });
+  return Buffer.from(shot.data, "base64");
+};
+
 const createDriver = (page, theme, pageErrors, inflight) => {
   const evaluate = page.evaluate;
   const find = (selector) => `(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) throw new Error("找不到元素 " + ${JSON.stringify(selector)}); return node; })()`;
@@ -262,26 +281,35 @@ async function capturePlugin(browser, plugin, options, report) {
             issues.push(`场景失败：${error.message}`);
           }
           let file = null;
+          let height = viewportHeight;
           if (opened) {
+            let documentHeight = null;
             try {
               const overflow = await page.evaluate(overflowExpression);
               if (Array.isArray(overflow) && overflow.length) issues.push(`横向溢出：${overflow.join("、")}`);
+              documentHeight = Number(await page.evaluate(documentHeightExpression));
+              if (!Number.isFinite(documentHeight)) throw new Error("无法读取文档高度");
             } catch (error) {
               issues.push(`场景失败：${error.message}`);
             }
             for (const message of [...new Set(pageErrors)]) issues.push(`页面错误：${message}`);
             try {
-              const shot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+              const bytes = await capturePng(page, scene, options);
+              const size = pngSize(bytes);
               file = relativeFile(plugin.id, scene.name, theme, width);
               const target = join(options.out, ...file.split("/"));
               await mkdir(dirname(target), { recursive: true });
-              await writeFile(target, Buffer.from(shot.data, "base64"));
+              await writeFile(target, bytes);
+              height = size.height;
+              if (Number.isFinite(documentHeight) && documentHeight > viewportHeight && size.height <= viewportHeight) {
+                issues.push(`整页内容没有进入图片（文档 ${documentHeight}px，图片 ${size.height}px）`);
+              }
             } catch (error) {
               file = null;
               issues.push(`场景失败：${error.message}`);
             }
           }
-          report.captures.push({ plugin: plugin.id, scene: scene.name, title: scene.title, theme, width, height: viewportHeight, file, issues });
+          report.captures.push({ plugin: plugin.id, scene: scene.name, title: scene.title, theme, width, height, file, issues });
           console.log(`${issues.length ? "FAIL" : "ok  "} ${plugin.id}/${scene.name}-${theme}-${width}.png${issues.map((issue) => `\n     - ${issue}`).join("")}`);
         }
       }

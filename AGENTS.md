@@ -56,6 +56,8 @@ Place Go tests in `*_test.go`, name them `TestXxx`, and use table-driven `t.Run`
 
 `--theme` is `all` (the default, both light and dark), `light`, or `dark`. `--size` is a comma-separated list of viewport widths; the default is `1440,768,390`, and each width must be an integer from 280 to 3840. The default output directory is `dist/ui-capture/`. `--out` selects another directory. Each run deletes that directory before writing, so a narrower plugin or scene run replaces the gallery already stored there. The directory then contains `index.html`, `README.md`, `capture-ui-manifest.json`, and the PNG files.
 
+Successful PNGs include content already displayed below the first screen. The layout viewport stays 900 pixels tall, and a taller document produces a taller image. Content that is only inside a nested scroll container is kept as that container shows it. If the document is taller than the viewport but the PNG is not, that capture fails.
+
 ## Commit & Pull Request Guidelines
 
 Recent history generally follows Conventional Commit-style subjects: `fix(release): correct provenance`, `feat(waf): add rule support`, or `ci: tighten checks`. Use an imperative, focused summary and include a scope when useful. Pull requests should explain behavior changes, list affected plugins, link relevant issues, and include test evidence. Include screenshots only for UI schema or rendered interface changes. Ensure the required CI workflow passes before requesting review.

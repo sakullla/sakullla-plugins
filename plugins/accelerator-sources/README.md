@@ -45,7 +45,10 @@ node testing/ui/capture.mjs --plugin accelerator-sources --only usage --theme da
 ```
 
 The run writes `index.html`, `README.md`, `capture-ui-manifest.json`, and png
-files to `dist/ui-capture/` (override with `--out`). It exits non-zero when a
-scene does not finish, visible content overflows horizontally, or the page
-raises an error. In the mock, search terms starting with `hold` stay loading,
-and terms or image references starting with `fail` return upstream errors.
+files to `dist/ui-capture/` (override with `--out`). Successful images include
+content already displayed below the first screen; a nested scroll area stays
+as it is shown. It exits non-zero when a scene does not finish, visible
+content overflows horizontally, the page raises an error, or that
+below-the-fold content is missing from the image. In the mock, search terms
+starting with `hold` stay loading, and terms or image references starting
+with `fail` return upstream errors.

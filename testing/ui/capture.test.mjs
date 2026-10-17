@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { deflateSync } from "node:zlib";
 import { buildGallery, manifestName } from "./gallery.mjs";
+import { viewportHeight } from "./capture.mjs";
 
 const repo = fileURLToPath(new URL("../..", import.meta.url));
 const scenes = ["usage", "convert-github", "convert-repo", "convert-docker", "convert-unsupported", "mirrors", "mirrors-loading", "mirrors-browse", "mirrors-ready", "mirrors-error"];
@@ -128,7 +130,10 @@ test("old accelerator capture entry is gone and the readme points at the shared 
   assert.equal(existsSync(join(repo, "plugins/accelerator-sources/testing/ui/mock.mjs")), false);
   const readme = await readFile(join(repo, "plugins/accelerator-sources/README.md"), "utf8");
   assert.match(readme, /node testing\/ui\/capture\.mjs/);
+  assert.match(readme, /already displayed below the first screen/);
   assert.equal(readme.includes("plugins/accelerator-sources/testing/ui/capture.mjs"), false);
+  const agents = await readFile(join(repo, "AGENTS.md"), "utf8");
+  assert.match(agents, /already displayed below the first screen/);
   const plugin = await import(pathToFileURL(join(repo, "plugins/accelerator-sources/testing/ui/capture-plugin.mjs")).href);
   assert.equal(plugin.id, "accelerator-sources");
   assert.deepEqual(plugin.scenes.map((scene) => scene.name), scenes);
@@ -282,6 +287,147 @@ process.exit(report.success ? 0 : 1);
       assert.equal(bytes.subarray(0, 4).toString("hex"), "89504e47");
       assert.equal(manifest.captures.find((item) => item.scene === scene).file.includes("\\"), false);
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const crcTable = new Uint32Array(256);
+for (let index = 0; index < 256; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+  crcTable[index] = value >>> 0;
+}
+
+const crc32 = (buffer) => {
+  let value = 0xffffffff;
+  for (const byte of buffer) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
+};
+
+const pngChunk = (type, data) => {
+  const body = Buffer.concat([Buffer.from(type), data]);
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([header, body, crc]);
+};
+
+const makePng = (width, height) => {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  const row = Buffer.alloc(1 + width);
+  const raw = Buffer.alloc(row.length * height);
+  for (let y = 0; y < height; y += 1) row.copy(raw, y * row.length);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+};
+
+const pngHeight = (bytes) => {
+  assert.equal(bytes.subarray(0, 4).toString("hex"), "89504e47");
+  return bytes.readUInt32BE(20);
+};
+
+const pageProbe = `import { createServer } from "node:http";
+
+const pages = {
+  "/tall": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">below-the-fold</main></body></html>",
+  "/nested": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><div style=\\"overflow:auto;height:160px\\"><main style=\\"height:2400px\\">nested-line</main></div></body></html>",
+  "/clipped": "<!doctype html><html><head><meta charset=\\"utf-8\\"></head><body style=\\"margin:0\\"><main style=\\"height:1400px\\">clipped-below</main></body></html>",
+};
+
+let base = "";
+const serverFor = async () => {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/favicon.ico") {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    const body = pages[path] || pages["/tall"];
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(body);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  base = "http://127.0.0.1:" + server.address().port;
+  return {
+    url: base + "/tall",
+    async close() {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+};
+
+export const plugin = {
+  id: "page-probe",
+  scenes: [
+    { name: "tall", title: "高于视口", run: (ui) => ui.open(base + "/tall") },
+    { name: "nested", title: "内部滚动", run: (ui) => ui.open(base + "/nested") },
+    { name: "clipped", title: "整页缺失", run: (ui) => ui.open(base + "/clipped") },
+  ],
+  startPreview: () => serverFor(),
+};
+`;
+
+test("tall pages capture below the viewport and a short PNG fails the gallery", { timeout: 180000 }, async () => {
+  assert.equal(viewportHeight, 900);
+  const dir = await mkdtemp(join(tmpdir(), "nre-ui-tall-"));
+  const out = join(dir, "out");
+  try {
+    await writeFile(join(dir, "probe-plugin.mjs"), pageProbe);
+    await writeFile(join(dir, "short.png"), makePng(1, viewportHeight));
+    const runner = `import { readFile } from "node:fs/promises";
+import { runCapture } from ${JSON.stringify(pathToFileURL(join(repo, "testing/ui/capture.mjs")).href)};
+import { plugin } from "./probe-plugin.mjs";
+const shortPng = await readFile(new URL("./short.png", import.meta.url));
+const report = await runCapture({
+  root: ${JSON.stringify(repo)},
+  plugins: [plugin],
+  themes: ["light"],
+  widths: [800],
+  out: ${JSON.stringify(out)},
+  invocation: "node testing/ui/capture.mjs --plugin page-probe",
+  captureScreenshot: async ({ scene }) => (scene.name === "clipped" ? shortPng : null),
+});
+process.exit(report.success ? 0 : 1);
+`;
+    await writeFile(join(dir, "run-probe.mjs"), runner);
+    const run = spawnSync(process.execPath, [join(dir, "run-probe.mjs")], { encoding: "utf8", timeout: 150000 });
+    assert.notEqual(run.status, 0, outputOf(run));
+    const manifest = JSON.parse(await readFile(join(out, manifestName), "utf8"));
+    assert.equal(manifest.success, false);
+    const byScene = Object.fromEntries(manifest.captures.map((item) => [item.scene, item]));
+    const tallPng = await readFile(join(out, ...byScene.tall.file.split("/")));
+    const tallHeight = pngHeight(tallPng);
+    assert.ok(tallHeight > 900, outputOf(run));
+    assert.equal(byScene.tall.height, tallHeight);
+    assert.deepEqual(byScene.tall.issues, []);
+    const nestedPng = await readFile(join(out, ...byScene.nested.file.split("/")));
+    const nestedHeight = pngHeight(nestedPng);
+    assert.ok(nestedHeight <= 900);
+    assert.equal(byScene.nested.height, nestedHeight);
+    assert.deepEqual(byScene.nested.issues, []);
+    const clippedPng = await readFile(join(out, ...byScene.clipped.file.split("/")));
+    const clippedHeight = pngHeight(clippedPng);
+    assert.ok(clippedHeight <= 900);
+    assert.equal(byScene.clipped.height, clippedHeight);
+    assert.match(byScene.clipped.issues.join("\n"), /整页内容没有进入图片（文档 (\d+)px/);
+    const documentHeight = Number(byScene.clipped.issues.join("\n").match(/文档 (\d+)px/)[1]);
+    assert.ok(documentHeight > 900);
+    assert.equal(manifest.failures.some((item) => item.scene === "tall" || item.scene === "nested"), false);
+    const html = await readFile(join(out, "index.html"), "utf8");
+    assert.match(html, /本次结果：有失败/);
+    assert.equal(html.includes("本次结果：通过"), false);
+    assert.match(html, /整页内容没有进入图片/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
