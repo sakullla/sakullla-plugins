@@ -591,7 +591,8 @@ svg {
 }
 
 .ui-btn:focus-visible {
-  outline: none;
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 2px;
   box-shadow: var(--ui-focus-ring);
 }
 

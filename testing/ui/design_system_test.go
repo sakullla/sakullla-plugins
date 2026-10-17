@@ -345,3 +345,134 @@ func uiKitContrastRatio(t *testing.T, foregroundText, backgroundText, baseText s
 	}
 	return (high + 0.05) / (low + 0.05)
 }
+
+// TestDesignSystemButtonFocusRing locks the shared button focus indicator.
+// `.ui-btn:focus-visible` must not suppress the kit-wide outline: the ring is
+// the host primary color, separated from the button edge by an offset, and the
+// same color stays at or above the WCAG non-text 3:1 threshold on every
+// theme's canvas and card surface (R1, R3, R4).
+func TestDesignSystemButtonFocusRing(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("..", "..")
+	data, err := os.ReadFile(filepath.Join(root, "internal", "ui", "design-system", "ui-kit.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssText := string(data)
+
+	body, ok := uiKitRuleBody(cssText, ".ui-btn:focus-visible")
+	if !ok {
+		t.Fatal("ui-kit.css is missing the .ui-btn:focus-visible rule")
+	}
+	declarations := uiKitDeclarations(body)
+	if strings.EqualFold(strings.TrimSpace(declarations["outline"]), "none") {
+		t.Fatal(".ui-btn:focus-visible suppresses the focus outline with `outline: none`")
+	}
+	width, style, color := uiKitFocusOutline(t, declarations)
+	if style != "solid" {
+		t.Fatalf(".ui-btn:focus-visible outline style = %q, want solid", style)
+	}
+	if width < 2 {
+		t.Fatalf(".ui-btn:focus-visible outline width = %.1fpx, want >= 2px", width)
+	}
+	if color != "var(--ui-primary)" {
+		t.Fatalf(".ui-btn:focus-visible outline color = %q, want var(--ui-primary)", color)
+	}
+	offset, ok := uiKitPixels(declarations["outline-offset"])
+	if !ok {
+		t.Fatal(".ui-btn:focus-visible is missing a pixel outline-offset")
+	}
+	if offset < 2 {
+		t.Fatalf(".ui-btn:focus-visible outline-offset = %.1fpx, want >= 2px", offset)
+	}
+
+	themes := parseUIKitThemes(t, cssText)
+	for _, theme := range []string{"light", "business", "fresh-green", "sakura-day", "sakura-night", "neko-dark", "dark"} {
+		theme, tokens := theme, themes[theme]
+		t.Run(theme, func(t *testing.T) {
+			t.Parallel()
+			if tokens == nil {
+				t.Fatalf("ui-kit.css is missing theme %q", theme)
+			}
+			primary := resolveUIKitToken(t, tokens, "--ui-primary")
+			for _, background := range []string{"--ui-bg", "--ui-surface"} {
+				base := resolveUIKitToken(t, tokens, background)
+				ratio := uiKitContrastRatio(t, primary, base, base)
+				if ratio < 3 {
+					t.Errorf("--ui-primary on %s = %.2f, want >= 3.0 for the focus ring", background, ratio)
+				}
+			}
+		})
+	}
+}
+
+// uiKitRuleBody returns the declaration body of the first rule whose selector
+// list contains selector.
+func uiKitRuleBody(cssText, selector string) (string, bool) {
+	clean := uiKitCSSComment.ReplaceAllString(cssText, "")
+	for _, block := range uiKitCSSBlock.FindAllStringSubmatch(clean, -1) {
+		for _, candidate := range strings.Split(block[1], ",") {
+			if strings.TrimSpace(candidate) == selector {
+				return block[2], true
+			}
+		}
+	}
+	return "", false
+}
+
+func uiKitDeclarations(body string) map[string]string {
+	values := map[string]string{}
+	for _, declaration := range strings.Split(body, ";") {
+		name, value, ok := strings.Cut(declaration, ":")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		values[name] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+// uiKitFocusOutline resolves the effective width, style and color of the
+// outline shorthand or its longhand properties.
+func uiKitFocusOutline(t *testing.T, declarations map[string]string) (float64, string, string) {
+	t.Helper()
+
+	widthText := declarations["outline-width"]
+	style := declarations["outline-style"]
+	color := declarations["outline-color"]
+	if shorthand, ok := declarations["outline"]; ok {
+		widthText, style, color = "", "", ""
+		for _, part := range strings.Fields(shorthand) {
+			switch {
+			case strings.HasSuffix(part, "px"):
+				widthText = part
+			case part == "none" || part == "solid" || part == "auto" || part == "dashed" || part == "dotted" || part == "double" || part == "hidden":
+				style = part
+			default:
+				color = part
+			}
+		}
+	}
+	width, ok := uiKitPixels(widthText)
+	if !ok {
+		t.Fatalf(".ui-btn:focus-visible has no parseable outline width (outline %q)", declarations["outline"])
+	}
+	return width, style, color
+}
+
+func uiKitPixels(value string) (float64, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasSuffix(value, "px") {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSuffix(value, "px"), 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
