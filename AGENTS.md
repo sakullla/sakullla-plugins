@@ -44,6 +44,18 @@ Format Go with `gofmt`; use idiomatic exported `PascalCase` names and unexported
 
 Place Go tests in `*_test.go`, name them `TestXxx`, and use table-driven `t.Run` cases where appropriate. Rust integration tests belong in `tests/*.rs` and use `#[test]` with descriptive `snake_case` names. Add deterministic fixtures under `testing/corpus/<plugin>/` for contract behavior. Run `make test` during development and `make ci` before opening a pull request. No repository-wide coverage threshold is currently defined.
 
+## UI Capture
+
+`node testing/ui/capture.mjs` captures registered plugin pages for layout inspection. The pictures are not product acceptance.
+
+- All plugins and scenes: `node testing/ui/capture.mjs`
+- One plugin: `node testing/ui/capture.mjs --plugin <id>`
+- One scene: `node testing/ui/capture.mjs --only <scene>`
+
+`--plugin` takes a comma-separated plugin list. `--only` filters scene names and accepts `*` and `?`. When both are set, the run keeps their intersection. `node testing/ui/capture.mjs --list` prints the plugins and scenes those filters would capture.
+
+`--theme` is `all` (the default, both light and dark), `light`, or `dark`. `--size` is a comma-separated list of viewport widths; the default is `1440,768,390`, and each width must be an integer from 280 to 3840. The default output directory is `dist/ui-capture/`. `--out` selects another directory. Each run deletes that directory before writing, so a narrower plugin or scene run replaces the gallery already stored there. The directory then contains `index.html`, `README.md`, `capture-ui-manifest.json`, and the PNG files.
+
 ## Commit & Pull Request Guidelines
 
 Recent history generally follows Conventional Commit-style subjects: `fix(release): correct provenance`, `feat(waf): add rule support`, or `ci: tighten checks`. Use an imperative, focused summary and include a scope when useful. Pull requests should explain behavior changes, list affected plugins, link relevant issues, and include test evidence. Include screenshots only for UI schema or rendered interface changes. Ensure the required CI workflow passes before requesting review.
