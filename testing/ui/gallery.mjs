@@ -36,23 +36,62 @@ const uniqueIssues = (rows) => {
   return issues;
 };
 
+const variantKey = (theme, width) => `${theme}\0${Number(width)}`;
+
+function variantRows(report, plugin, scene, fallbackTitle) {
+  const missingKeys = new Set();
+  for (const entry of report.missing || []) {
+    if (entry.plugin === plugin && entry.scene === scene) missingKeys.add(variantKey(entry.theme, entry.width));
+  }
+  const rows = new Map();
+  for (const capture of report.captures) {
+    if (capture.plugin !== plugin || capture.scene !== scene) continue;
+    const key = variantKey(capture.theme, capture.width);
+    if (rows.has(key)) continue;
+    const file = capture.file && !missingKeys.has(key) ? capture.file : null;
+    const issues = [...(capture.issues || [])];
+    if (!file && !issues.includes("缺少图片")) issues.push("缺少图片");
+    rows.set(key, {
+      plugin,
+      scene,
+      title: capture.title || fallbackTitle,
+      theme: capture.theme,
+      width: capture.width,
+      height: capture.height,
+      file,
+      issues,
+    });
+  }
+  for (const entry of report.missing || []) {
+    if (entry.plugin !== plugin || entry.scene !== scene) continue;
+    const key = variantKey(entry.theme, entry.width);
+    if (rows.has(key)) continue;
+    rows.set(key, {
+      plugin,
+      scene,
+      title: fallbackTitle,
+      theme: entry.theme,
+      width: entry.width,
+      file: null,
+      issues: ["缺少图片"],
+    });
+  }
+  return [...rows.values()].sort(compareVariants(report));
+}
+
 function sceneGroups(report) {
   const titles = new Map(report.captures.map((item) => [sceneKey(item.plugin, item.scene), item.title || item.scene]));
-  const order = compareVariants(report);
   const groups = [];
   for (const item of report.selected) {
     for (const name of item.scenes) {
-      const rows = report.captures
-        .filter((capture) => capture.plugin === item.plugin && capture.scene === name)
-        .slice()
-        .sort(order);
+      const title = titles.get(sceneKey(item.plugin, name)) || name;
+      const rows = variantRows(report, item.plugin, name, title);
       const issues = uniqueIssues(rows);
-      const missing = (report.missing || []).some((entry) => entry.plugin === item.plugin && entry.scene === name);
-      if ((missing || !rows.length || rows.some((row) => !row.file)) && !issues.includes("缺少图片")) issues.push("缺少图片");
+      if (!rows.length && !issues.includes("缺少图片")) issues.push("缺少图片");
       groups.push({
         plugin: item.plugin,
         scene: name,
-        title: titles.get(sceneKey(item.plugin, name)) || name,
+        title,
         rows,
         issues,
         failed: issues.length > 0,
@@ -67,11 +106,14 @@ const figure = (item) => {
   const issues = (item.issues || []).map((issue) => `<small class="issue">${escapeHtml(issue)}</small>`).join("");
   const alt = `${item.plugin} ${item.title} ${item.theme} ${item.width}`;
   const failed = (item.issues || []).length ? "bad" : "";
-  return `<figure class="${failed}" data-plugin="${escapeHtml(item.plugin)}" data-scene="${escapeHtml(item.scene)}" data-theme="${escapeHtml(item.theme)}" data-width="${escapeHtml(item.width)}" data-keywords="${escapeHtml(keywords)}"><a class="view" href="${escapeHtml(item.file)}" data-alt="${escapeHtml(alt)}"><img loading="lazy" src="${escapeHtml(item.file)}" alt="${escapeHtml(alt)}"></a><figcaption><b>${escapeHtml(item.plugin)}</b> ${escapeHtml(item.title)}<small>${escapeHtml(item.scene)} · ${escapeHtml(item.theme)} · ${item.width}px</small>${issues}</figcaption></figure>`;
+  const media = item.file
+    ? `<a class="view" href="${escapeHtml(item.file)}" data-alt="${escapeHtml(alt)}"><img loading="lazy" src="${escapeHtml(item.file)}" alt="${escapeHtml(alt)}"></a>`
+    : "";
+  return `<figure class="${failed}" data-plugin="${escapeHtml(item.plugin)}" data-scene="${escapeHtml(item.scene)}" data-theme="${escapeHtml(item.theme)}" data-width="${escapeHtml(item.width)}" data-keywords="${escapeHtml(keywords)}">${media}<figcaption><b>${escapeHtml(item.plugin)}</b> ${escapeHtml(item.title)}<small>${escapeHtml(item.scene)} · ${escapeHtml(item.theme)} · ${item.width}px</small>${issues}</figcaption></figure>`;
 };
 
 const groupHtml = (group) => {
-  const cards = group.rows.filter((row) => row.file).map(figure).join("");
+  const cards = group.rows.map(figure).join("");
   const reasons = group.issues.map((issue) => `<p class="issue">${escapeHtml(issue)}</p>`).join("");
   return `<section class="scene${group.failed ? " bad" : ""}" data-group="1" data-plugin="${escapeHtml(group.plugin)}" data-scene="${escapeHtml(group.scene)}"><h2>${escapeHtml(group.plugin)} ${escapeHtml(group.title)}<small>${escapeHtml(group.scene)}</small></h2>${reasons}<div class="variants">${cards}</div></section>`;
 };
@@ -142,9 +184,13 @@ filter();
 </script></body></html>\n`;
 
   const readmeRows = groups.map((group) => {
-    const links = group.rows.filter((row) => row.file).map((row) => `[${row.theme} ${row.width}](${row.file})`).join(" · ") || "—";
+    const links = group.rows.map((row) => {
+      if (row.file) return `[${row.theme} ${row.width}](${row.file})`;
+      const reasons = row.issues.length ? row.issues.join("；") : "缺少图片";
+      return `${row.theme} ${row.width}：${reasons}`;
+    }).join(" · ") || "—";
     const result = group.issues.length ? group.issues.join("；") : "通过";
-    return `| ${cell(group.plugin)} | ${cell(`${group.title}（${group.scene}）`)} | ${cell(result)} | ${links} |`;
+    return `| ${cell(group.plugin)} | ${cell(`${group.title}（${group.scene}）`)} | ${cell(result)} | ${cell(links)} |`;
   });
   const readme = `# UI 捕获
 
