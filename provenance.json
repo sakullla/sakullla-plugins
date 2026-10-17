@@ -1,0 +1,77 @@
+{
+  "schema_version": 2,
+  "repository_commit": "26a4a281c6da5fe92bccae387145c8dd1e614225",
+  "market_sha256": "169acafdbda943864e5a7bce95e2ec4ef4212245f51685b32f367582bc7053fd",
+  "sdk_repository_commit": "2e6f7e338802022fb1648386fb2631d65d130454",
+  "sdk_descriptor_sha256": "2abec011209434be336af2a245d10268c891914aa6f12b60c8eea2d71a8d5170",
+  "sdk_abis": [
+    "nre:policy/v1",
+    "nre:rpc/v1"
+  ],
+  "signer_identity": "sakullla-official-root-2026",
+  "packages": [
+    {
+      "id": "accelerator-sources",
+      "version": "0.1.14",
+      "package_sha256": "a8ce88aef41140f80fe667bcd2ae33674f5c5ae823b92fc29f6209b2f9c20531",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/accelerator-sources-0.1.14-dc9fb1b7ae31ef4d060bb4b98a41007c3e20ddb646843a2d1fe127f541ba539c.nrepkg",
+      "blob_sha256": "dc9fb1b7ae31ef4d060bb4b98a41007c3e20ddb646843a2d1fe127f541ba539c",
+      "blob_size": 11430394,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "cloudflare-dns",
+      "version": "0.1.18",
+      "package_sha256": "50b02b38dc88eab92f7092f23c0902c5940d8ce110b273e26d03f84d8cc208a6",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/cloudflare-dns-0.1.18-69eb5eb365edc790b0b544fef4ecd5c3646d722c7047de3ea422f74683fafd26.nrepkg",
+      "blob_sha256": "69eb5eb365edc790b0b544fef4ecd5c3646d722c7047de3ea422f74683fafd26",
+      "blob_size": 11210165,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "docker-app",
+      "version": "0.1.49",
+      "package_sha256": "31ae8f9d517d51f20e7ba860fc7b18e9438d153e0937292d704a3b00c43e6150",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/docker-app-0.1.49-3aa45a794cbc5d7443b567a7684f7427e4ce3b2e53412db016c9dd0e8e0ff407.nrepkg",
+      "blob_sha256": "3aa45a794cbc5d7443b567a7684f7427e4ce3b2e53412db016c9dd0e8e0ff407",
+      "blob_size": 13718453,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "doh",
+      "version": "0.2.5",
+      "package_sha256": "3d4a218b2964f046a457a57f2fe7457994a9a4cb7d82bd8df9a294a005c628df",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/doh-0.2.5-484df6c8be288fc83fd49b7f46a4bdd77c1c90b85a688feb436c25ffa35e89d5.nrepkg",
+      "blob_sha256": "484df6c8be288fc83fd49b7f46a4bdd77c1c90b85a688feb436c25ffa35e89d5",
+      "blob_size": 10950421,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "reverse-l4",
+      "version": "0.3.9",
+      "package_sha256": "dbf61b15e494dbfad755b7e89aecd573696bf6fe2ae5b9da7c5e126585841b88",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/reverse-l4-0.3.9-b8be9a6b5eb8377f10ddbadf75ce54d8c242b4649af6f179192a95b30de62d2f.nrepkg",
+      "blob_sha256": "b8be9a6b5eb8377f10ddbadf75ce54d8c242b4649af6f179192a95b30de62d2f",
+      "blob_size": 11055204,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "shadowsocks-server",
+      "version": "0.1.21",
+      "package_sha256": "8da8bc61f9d032b11ce3f289dac39b04556602ef51ba5710e5467946e0c65749",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/shadowsocks-server-0.1.21-63b0e7dd64870e54db1253c13fa55a19290a8bb06d081850b3bf8e3c921f52f5.nrepkg",
+      "blob_sha256": "63b0e7dd64870e54db1253c13fa55a19290a8bb06d081850b3bf8e3c921f52f5",
+      "blob_size": 11775818,
+      "blob_format": "tar+gzip-v1"
+    },
+    {
+      "id": "webdav",
+      "version": "0.1.10",
+      "package_sha256": "c380f34ee1a789039c4f791a3457c860c1b50b67716c9459e943544d2f8f0390",
+      "package_url": "https://github.com/sakullla/sakullla-plugins/releases/download/official-26a4a281c6da5fe92bccae387145c8dd1e614225/webdav-0.1.10-ca2cd97465a05e975a63c0fbe7692081ccaefab5f85106c7c2e24b75e981a672.nrepkg",
+      "blob_sha256": "ca2cd97465a05e975a63c0fbe7692081ccaefab5f85106c7c2e24b75e981a672",
+      "blob_size": 10730856,
+      "blob_format": "tar+gzip-v1"
+    }
+  ]
+}

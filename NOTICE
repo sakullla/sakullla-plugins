@@ -1,0 +1,11 @@
+Sakullla Official Plugins
+Copyright (C) 2026 Sakullla contributors
+
+This repository is distributed under GPL-3.0-only. The complete license text
+is in LICENSE. Redistributed third-party components retain their respective
+licenses and notices; the reviewed dependency inventory is recorded in
+THIRD_PARTY_LICENSES.json and SBOM.spdx.json.
+
+No GeoLite database, private signing key, service credential, or other
+separately licensed runtime data is included in this repository or its
+official plugin packages.
