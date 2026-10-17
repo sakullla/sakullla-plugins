@@ -73,10 +73,15 @@
 
   --ui-success: #10b981;
   --ui-success-soft: rgba(16, 185, 129, 0.1);
+  --ui-success-text: #047857;
   --ui-danger: #ef4444;
   --ui-danger-soft: rgba(239, 68, 68, 0.1);
+  --ui-danger-text: #b91c1c;
+  --ui-danger-button: #dc2626;
+  --ui-on-danger: #ffffff;
   --ui-warning: #f59e0b;
   --ui-warning-soft: rgba(245, 158, 11, 0.1);
+  --ui-warning-text: #b45309;
   --ui-overlay: rgb(15 23 42 / 0.42);
   --ui-focus-ring: 0 0 0 3px var(--ui-primary-soft);
 
@@ -111,10 +116,15 @@
   --ui-border-strong: rgba(18, 32, 25, 0.15);
   --ui-success: #059669;
   --ui-success-soft: rgba(5, 150, 105, 0.1);
+  --ui-success-text: #047857;
   --ui-danger: #dc2626;
   --ui-danger-soft: rgba(220, 38, 38, 0.1);
+  --ui-danger-text: #b91c1c;
+  --ui-danger-button: #dc2626;
+  --ui-on-danger: #ffffff;
   --ui-warning: #d97706;
   --ui-warning-soft: rgba(217, 119, 6, 0.1);
+  --ui-warning-text: #b45309;
   --ui-shadow-rgb: 18 32 25;
   --ui-overlay: rgb(18 32 25 / 0.42);
   color-scheme: light;
@@ -143,10 +153,15 @@
   --ui-border-strong: #a5abc5;
   --ui-success: #23775e;
   --ui-success-soft: #e3f3ec;
+  --ui-success-text: #23775e;
   --ui-danger: #b83b54;
   --ui-danger-soft: #fce8eb;
+  --ui-danger-text: #a53165;
+  --ui-danger-button: #b83b54;
+  --ui-on-danger: #ffffff;
   --ui-warning: #936021;
   --ui-warning-soft: #fbefd8;
+  --ui-warning-text: #936021;
   --ui-shadow-rgb: 68 31 51;
   --ui-overlay: rgb(41 43 66 / 0.4);
   color-scheme: light;
@@ -175,10 +190,15 @@
   --ui-border-strong: #616b8e;
   --ui-success: #85ccb5;
   --ui-success-soft: #223a32;
+  --ui-success-text: #85ccb5;
   --ui-danger: #f1a2a7;
   --ui-danger-soft: #422b38;
+  --ui-danger-text: #f1a2a7;
+  --ui-danger-button: #f1a2a7;
+  --ui-on-danger: #221a35;
   --ui-warning: #e4c18a;
   --ui-warning-soft: #3b3336;
+  --ui-warning-text: #e4c18a;
   --ui-shadow-rgb: 8 5 12;
   --ui-overlay: rgb(8 5 12 / 0.55);
   color-scheme: dark;
@@ -208,10 +228,15 @@
   --ui-border-strong: rgba(255, 255, 255, 0.14);
   --ui-success: #34d399;
   --ui-success-soft: rgba(52, 211, 153, 0.12);
+  --ui-success-text: #34d399;
   --ui-danger: #f87171;
   --ui-danger-soft: rgba(248, 113, 113, 0.12);
+  --ui-danger-text: #f87171;
+  --ui-danger-button: #f87171;
+  --ui-on-danger: #0f172a;
   --ui-warning: #fbbf24;
   --ui-warning-soft: rgba(251, 191, 36, 0.12);
+  --ui-warning-text: #fbbf24;
   --ui-shadow-rgb: 0 0 0;
   --ui-overlay: rgb(2 6 23 / 0.6);
   color-scheme: dark;
@@ -602,17 +627,18 @@ svg {
 }
 
 .ui-btn--danger {
-  background: var(--ui-danger);
-  color: #ffffff;
+  background: var(--ui-danger-button, var(--ui-danger));
+  color: var(--ui-on-danger, #ffffff);
 }
 
 .ui-btn--danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--ui-danger) 88%, black);
+  background: var(--ui-danger-button, var(--ui-danger));
+  filter: brightness(1.03);
 }
 
 .ui-btn--danger-soft {
   background: var(--ui-danger-soft);
-  color: var(--ui-danger);
+  color: var(--ui-danger-text, var(--ui-danger));
   border-color: color-mix(in srgb, var(--ui-danger) 22%, transparent);
 }
 
@@ -748,7 +774,7 @@ svg {
 .ui-error-text {
   margin: 0;
   font-size: var(--ui-text-xs);
-  color: var(--ui-danger);
+  color: var(--ui-danger-text, var(--ui-danger));
 }
 
 .ui-field--inline {
@@ -1028,17 +1054,17 @@ svg {
 
 .ui-badge--success {
   background: var(--ui-success-soft);
-  color: var(--ui-success);
+  color: var(--ui-success-text, var(--ui-success));
 }
 
 .ui-badge--warning {
   background: var(--ui-warning-soft);
-  color: var(--ui-warning);
+  color: var(--ui-warning-text, var(--ui-warning));
 }
 
 .ui-badge--danger {
   background: var(--ui-danger-soft);
-  color: var(--ui-danger);
+  color: var(--ui-danger-text, var(--ui-danger));
 }
 
 .ui-badge--info {
