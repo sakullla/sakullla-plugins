@@ -1,6 +1,6 @@
 schema_version: 1
 id: accelerator-sources
-version: 0.1.13
+version: 0.1.14
 name: 资源加速
 description: 为零配置发布的自有域名提供 Docker、GitHub 与 Hugging Face 加速
 compatibility:
@@ -13,8 +13,8 @@ runtime:
   entry: accelerator-sources
 artifacts:
   - path: artifacts/linux-amd64/accelerator-sources
-    sha256: 4e470d1a8ad3938997c4db79b0cc82882a07c4bf4a5b39827a1e3fc38fe2c93a
-    size: 8618950
+    sha256: ae3e6f2cb8ff0f2b6ad94c9dbd5bfbc06b98dcc4eacd710ec1758b09588b201e
+    size: 21509599
     mode: executable
     goos: linux
     goarch: amd64

@@ -13,7 +13,7 @@ import (
 func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	handler := NewHandler()
 	bodies := map[string]string{}
-	for _, route := range []string{"/", "/app.js", "/style.css"} {
+	for _, route := range []string{"/", "/app.js", "/style.css", "/theme.js"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
@@ -35,6 +35,20 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	page := bodies["/"]
 	script := bodies["/app.js"]
 	style := bodies["/style.css"]
+	if !strings.Contains(page, `<script src="/theme.js"></script>`) || strings.Index(page, "/theme.js") > strings.Index(page, "/style.css") {
+		t.Fatal("theme bootstrap must load before the stylesheet to avoid a light flash")
+	}
+	if !strings.Contains(bodies["/theme.js"], "prefers-color-scheme: dark") || !strings.Contains(script, "#theme-toggle") {
+		t.Fatal("visitor page does not follow the system theme with a manual toggle")
+	}
+	for _, fragment := range []string{"isSecureContext", `execCommand("copy")`, `method: "HEAD"`, "registryHosts", "release-assets.githubusercontent.com"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("visitor script missing UX safeguard %q", fragment)
+		}
+	}
+	if strings.Contains(script, "github-releases.githubusercontent.com") {
+		t.Fatal("converter advertises a host that the service does not route")
+	}
 	for _, fragment := range []string{"资源加速", `data-panel="usage"`, `data-panel="mirrors"`} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("visitor page missing %q", fragment)

@@ -1,18 +1,24 @@
 {
   "entry": "/",
   "title": "资源加速",
-  "assets": ["/app.js", "/style.css"],
+  "assets": ["/app.js", "/style.css", "/theme.js"],
   "external_dependencies": [],
   "views": ["usage", "mirrors"],
   "nav": ["用法", "镜像"],
   "mirror_sections": ["search", "tags", "offline"],
-  "apis": ["/api/search", "/api/tags", "/api/offline/prepare"],
+  "apis": ["/api/search", "/api/tags", "/api/offline/prepare", "/api/offline"],
   "converter": {
     "input": "#convert-input",
     "output": "#convert-result",
     "copy": "#convert-copy",
     "scheme_normalization": "strip any leading scheme, then prefix window.location.origin",
-    "supported_hosts": ["github.com", "gist.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com", "github-releases.githubusercontent.com", "huggingface.co"]
+    "supported_hosts": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github.githubassets.com", "huggingface.co"],
+    "image_registries": ["docker.io", "ghcr.io", "gcr.io", "quay.io", "registry.k8s.io"],
+    "formats": {
+      "file": ["link", "curl", "wget"],
+      "repo": ["clone", "link"],
+      "image": ["pull", "ref"]
+    }
   },
   "command_blocks": {
     "copy": [".snippet-copy", "#convert-copy", "[data-copy]"],
@@ -20,6 +26,11 @@
     "light_background": "--color-code-bg"
   },
   "offline_fields": ["images", "platform", "compressed_layers"],
+  "offline_preflight": "HEAD the prepared download_url (not consumed by HEAD); on failure HEAD /api/offline?image= per image",
+  "theme": {
+    "bootstrap": "/theme.js",
+    "order": ["saved choice", "host theme alias", "prefers-color-scheme"]
+  },
   "example_hosts": ["window.location.origin", "window.location.host"],
   "viewport": {
     "mobile_max_width": "640px",
