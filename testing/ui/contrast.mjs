@@ -2,10 +2,13 @@
 // Static contrast audit for the canonical ui-kit theme tokens.
 //
 // Text pairs use WCAG AA 4.5:1; non-text indicators use 3:1. Required pairs are
-// every combination the kit actually renders, including the normal primary
-// button, the danger badge and the control boundaries, so a failing required
-// pair exits non-zero. Advisory pairs are decorative accents that never carry
-// the only cue for a control; they print warnings and only fail with --strict.
+// every combination the kit actually renders: links and their hover state,
+// eyebrows and selected tabs (--ui-primary as text), the default and info/
+// success/warning/danger badges, the primary button with its hover/active
+// states, the danger button, table headers, the error-state icon and the
+// control boundaries, so a failing required pair exits non-zero. Advisory pairs
+// are the decorative toast accent stripes that never carry the only cue for a
+// control; they print warnings and only fail with --strict.
 //
 //   node testing/ui/contrast.mjs
 //   node testing/ui/contrast.mjs --strict
@@ -21,9 +24,12 @@ export const REQUIRED_PAIRS = [
   { fg: "--ui-text", bg: "--ui-bg", min: 4.5, use: "正文 on 画布" },
   { fg: "--ui-text", bg: "--ui-surface", min: 4.5, use: "正文 on 卡片" },
   { fg: "--ui-text", bg: "--ui-surface-raised", min: 4.5, use: "正文 on 抬升面" },
+  { fg: "--ui-text", bg: "--ui-hover", min: 4.5, use: "标签/幽灵按钮悬停文字 on 悬停底" },
   { fg: "--ui-text-secondary", bg: "--ui-bg", min: 4.5, use: "次要文字 on 画布" },
   { fg: "--ui-text-secondary", bg: "--ui-surface", min: 4.5, use: "次要文字 on 卡片" },
+  { fg: "--ui-text-secondary", bg: "--ui-subtle", min: 4.5, use: "默认徽章文字 on 中性软底" },
   { fg: "--ui-text-tertiary", bg: "--ui-surface", min: 4.5, use: "辅助文字 on 卡片" },
+  { fg: "--ui-text-tertiary", bg: "--ui-sunken", min: 4.5, use: "表头文字 on 下沉底" },
   { fg: "--ui-text-muted", bg: "--ui-surface", min: 4.5, use: "弱化文字 on 卡片" },
   { fg: "--ui-danger-text", bg: "--ui-surface", min: 4.5, use: "危险文字 on 卡片" },
   { fg: "--ui-success-text", bg: "--ui-surface", min: 4.5, use: "成功文字 on 卡片" },
@@ -35,9 +41,13 @@ export const REQUIRED_PAIRS = [
   { fg: "--ui-on-primary", bg: "--ui-primary", min: 4.5, use: "主按钮文字" },
   { fg: "--ui-on-primary", bg: "--ui-primary-hover", min: 4.5, use: "主按钮悬停文字" },
   { fg: "--ui-on-primary", bg: "--ui-primary-active", min: 4.5, use: "主按钮按下文字" },
-  { fg: "--ui-primary", bg: "--ui-bg", min: 3, use: "主色指示 on 画布" },
-  { fg: "--ui-primary", bg: "--ui-surface", min: 3, use: "主色指示 on 卡片" },
+  { fg: "--ui-primary", bg: "--ui-bg", min: 4.5, use: "链接/eyebrow/选中标签文字 on 画布" },
+  { fg: "--ui-primary", bg: "--ui-surface", min: 4.5, use: "链接/eyebrow/选中标签文字 on 卡片" },
+  { fg: "--ui-primary", bg: "--ui-primary-soft", min: 4.5, use: "info 徽章文字 on 主色软底" },
+  { fg: "--ui-primary-hover", bg: "--ui-bg", min: 4.5, use: "链接悬停文字 on 画布" },
+  { fg: "--ui-primary-hover", bg: "--ui-surface", min: 4.5, use: "链接悬停文字 on 卡片" },
   { fg: "--ui-danger", bg: "--ui-surface", min: 3, use: "危险指示 on 卡片" },
+  { fg: "--ui-danger", bg: "--ui-danger-soft", min: 3, use: "错误态图标 on 危险软底" },
   { fg: "--ui-border", bg: "--ui-surface", min: 3, use: "控件边界 on 卡片" },
   { fg: "--ui-border-strong", bg: "--ui-surface", min: 3, use: "控件悬停边界 on 卡片" },
 ];

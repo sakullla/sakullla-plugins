@@ -1000,6 +1000,7 @@ document.documentElement.setAttribute("data-theme-family",["sakura-night","neko-
 
 const contrastFixtureTokens = [
   "--ui-text:#000000", "--ui-bg:#ffffff", "--ui-surface:#ffffff", "--ui-surface-raised:#ffffff",
+  "--ui-primary-soft:#ffffff", "--ui-sunken:#ffffff", "--ui-subtle:#ffffff", "--ui-hover:#ffffff",
   "--ui-text-secondary:#000000", "--ui-text-tertiary:#000000", "--ui-text-muted:#000000",
   "--ui-danger-text:#000000", "--ui-success-text:#000000", "--ui-warning-text:#000000",
   "--ui-success-soft:#ffffff", "--ui-warning-soft:#ffffff", "--ui-danger-soft:#ffffff",
@@ -1011,17 +1012,36 @@ const contrastFixtureTokens = [
 
 test("contrast audit requires every rendered kit pair and gates on failures", async () => {
   const { auditThemes, REQUIRED_PAIRS, ADVISORY_PAIRS } = await import(pathToFileURL(join(repo, "testing/ui/contrast.mjs")).href);
-  const renderedPairs = [
-    ["--ui-on-primary", "--ui-primary"],
-    ["--ui-danger-text", "--ui-danger-soft"],
-    ["--ui-border", "--ui-surface"],
-    ["--ui-border-strong", "--ui-surface"],
+  const requiredMins = [
+    ["--ui-primary", "--ui-bg", 4.5],
+    ["--ui-primary", "--ui-surface", 4.5],
+    ["--ui-primary", "--ui-primary-soft", 4.5],
+    ["--ui-primary-hover", "--ui-bg", 4.5],
+    ["--ui-primary-hover", "--ui-surface", 4.5],
+    ["--ui-text-tertiary", "--ui-sunken", 4.5],
+    ["--ui-text-secondary", "--ui-subtle", 4.5],
+    ["--ui-text", "--ui-hover", 4.5],
+    ["--ui-on-primary", "--ui-primary", 4.5],
+    ["--ui-on-primary", "--ui-primary-hover", 4.5],
+    ["--ui-on-primary", "--ui-primary-active", 4.5],
+    ["--ui-on-danger", "--ui-danger-button", 4.5],
+    ["--ui-danger-text", "--ui-danger-soft", 4.5],
+    ["--ui-border", "--ui-surface", 3],
+    ["--ui-border-strong", "--ui-surface", 3],
+    ["--ui-danger", "--ui-danger-soft", 3],
   ];
-  for (const [fg, bg] of renderedPairs) {
-    assert.ok(REQUIRED_PAIRS.some((pair) => pair.fg === fg && pair.bg === bg), fg + " on " + bg + " 必须是必需组合");
-    assert.ok(!ADVISORY_PAIRS.some((pair) => pair.fg === fg && pair.bg === bg), fg + " on " + bg + " 不能只作为可选警告");
+  for (const [fg, bg, min] of requiredMins) {
+    const pair = REQUIRED_PAIRS.find((item) => item.fg === fg && item.bg === bg);
+    assert.ok(pair, fg + " on " + bg + " 必须是必需组合");
+    assert.equal(pair.min, min, fg + " on " + bg + " 的阈值必须是 " + min);
+    assert.ok(pair.use && pair.use.trim(), fg + " on " + bg + " 必须说明实际渲染位置");
+    assert.ok(!ADVISORY_PAIRS.some((item) => item.fg === fg && item.bg === bg), fg + " on " + bg + " 不能只作为可选警告");
   }
-  assert.ok(ADVISORY_PAIRS.length > 0);
+  assert.deepEqual(
+    ADVISORY_PAIRS.map((pair) => pair.fg + " on " + pair.bg).sort(),
+    ["--ui-success on --ui-surface", "--ui-warning on --ui-surface"],
+    "可选组合只保留真正装饰性的 toast 色条",
+  );
   for (const pair of ADVISORY_PAIRS) assert.match(pair.use, /装饰性/, "可选组合只保留装饰性值：" + pair.fg + " on " + pair.bg);
 
   const kit = await readFile(join(repo, "internal/ui/design-system/ui-kit.css"), "utf8");
@@ -1044,14 +1064,22 @@ test("contrast audit requires every rendered kit pair and gates on failures", as
     assert.doesNotMatch(passing.stdout, /^FAIL /m, outputOf(passing));
 
     const failingTokens = contrastFixtureTokens
-      .replace("--ui-on-primary:#ffffff", "--ui-on-primary:#333333")
+      .replace("--ui-on-primary:#ffffff", "--ui-on-primary:#d8d8d8")
+      .replace("--ui-primary:#000000", "--ui-primary:#d8d8d8")
+      .replace("--ui-primary-hover:#000000", "--ui-primary-hover:#ffffff")
+      .replace("--ui-primary-active:#000000", "--ui-primary-active:#ffffff")
+      .replace("--ui-text:#000000", "--ui-text:#d8d8d8")
+      .replace("--ui-text-secondary:#000000", "--ui-text-secondary:#d8d8d8")
+      .replace("--ui-text-tertiary:#000000", "--ui-text-tertiary:#d8d8d8")
       .replace("--ui-danger-text:#000000", "--ui-danger-text:#f87171")
+      .replace("--ui-danger:#000000", "--ui-danger:#d8d8d8")
+      .replace("--ui-on-danger:#000000", "--ui-on-danger:#f0a0a0")
       .replace("--ui-border:#000000", "--ui-border:rgba(255, 255, 255, 0.08)")
       .replace("--ui-border-strong:#000000", "--ui-border-strong:rgba(255, 255, 255, 0.08)");
     await writeFile(fixture, ":root{" + failingTokens + "}\n[data-theme=\"light\"]{" + failingTokens + "}\n");
     const failing = spawnSync(process.execPath, ["testing/ui/contrast.mjs", "--file", fixture], { cwd: repo, encoding: "utf8", timeout: 30000 });
     assert.equal(failing.status, 1, outputOf(failing));
-    for (const [fg, bg] of renderedPairs) {
+    for (const [fg, bg] of requiredMins) {
       assert.match(failing.stdout, new RegExp("^FAIL light: " + fg + " on " + bg + " ", "m"), outputOf(failing));
     }
   } finally {
