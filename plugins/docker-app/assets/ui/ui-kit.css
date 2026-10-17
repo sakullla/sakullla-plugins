@@ -1489,6 +1489,17 @@ svg {
     min-height: var(--ui-touch);
   }
 
+  .ui-input,
+  .ui-select,
+  .ui-tab,
+  .ui-btn--sm {
+    min-height: var(--ui-touch);
+  }
+
+  .ui-btn--icon {
+    width: var(--ui-touch);
+  }
+
   .ui-toolbar {
     padding: var(--ui-space-2);
   }
