@@ -2,9 +2,10 @@
 // Static contrast audit for the canonical ui-kit theme tokens.
 //
 // Text pairs use WCAG AA 4.5:1; non-text indicators use 3:1. Required pairs are
-// the combinations the kit styles itself use and every theme must satisfy.
-// Advisory pairs cover host theme values and decorative borders that can carry
-// an upstream palette; they print warnings and only fail with --strict.
+// every combination the kit actually renders, including the normal primary
+// button, the danger badge and the control boundaries, so a failing required
+// pair exits non-zero. Advisory pairs are decorative accents that never carry
+// the only cue for a control; they print warnings and only fail with --strict.
 //
 //   node testing/ui/contrast.mjs
 //   node testing/ui/contrast.mjs --strict
@@ -16,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const defaultFile = resolve(root, "internal/ui/design-system/ui-kit.css");
 
-const REQUIRED_PAIRS = [
+export const REQUIRED_PAIRS = [
   { fg: "--ui-text", bg: "--ui-bg", min: 4.5, use: "正文 on 画布" },
   { fg: "--ui-text", bg: "--ui-surface", min: 4.5, use: "正文 on 卡片" },
   { fg: "--ui-text", bg: "--ui-surface-raised", min: 4.5, use: "正文 on 抬升面" },
@@ -29,20 +30,21 @@ const REQUIRED_PAIRS = [
   { fg: "--ui-warning-text", bg: "--ui-surface", min: 4.5, use: "警告文字 on 卡片" },
   { fg: "--ui-success-text", bg: "--ui-success-soft", min: 4.5, use: "成功徽章文字 on 软底" },
   { fg: "--ui-warning-text", bg: "--ui-warning-soft", min: 4.5, use: "警告徽章文字 on 软底" },
+  { fg: "--ui-danger-text", bg: "--ui-danger-soft", min: 4.5, use: "危险徽章文字 on 软底" },
   { fg: "--ui-on-danger", bg: "--ui-danger-button", min: 4.5, use: "危险按钮文字" },
+  { fg: "--ui-on-primary", bg: "--ui-primary", min: 4.5, use: "主按钮文字" },
   { fg: "--ui-on-primary", bg: "--ui-primary-hover", min: 4.5, use: "主按钮悬停文字" },
   { fg: "--ui-on-primary", bg: "--ui-primary-active", min: 4.5, use: "主按钮按下文字" },
   { fg: "--ui-primary", bg: "--ui-bg", min: 3, use: "主色指示 on 画布" },
   { fg: "--ui-primary", bg: "--ui-surface", min: 3, use: "主色指示 on 卡片" },
   { fg: "--ui-danger", bg: "--ui-surface", min: 3, use: "危险指示 on 卡片" },
+  { fg: "--ui-border", bg: "--ui-surface", min: 3, use: "控件边界 on 卡片" },
+  { fg: "--ui-border-strong", bg: "--ui-surface", min: 3, use: "控件悬停边界 on 卡片" },
 ];
 
-const ADVISORY_PAIRS = [
-  { fg: "--ui-on-primary", bg: "--ui-primary", min: 4.5, use: "主按钮文字（宿主主题原值）" },
-  { fg: "--ui-danger-text", bg: "--ui-danger-soft", min: 4.5, use: "危险徽章文字 on 软底" },
-  { fg: "--ui-success", bg: "--ui-surface", min: 3, use: "成功图标 on 卡片" },
-  { fg: "--ui-warning", bg: "--ui-surface", min: 3, use: "警告图标 on 卡片" },
-  { fg: "--ui-border-strong", bg: "--ui-surface", min: 3, use: "强边框 on 卡片" },
+export const ADVISORY_PAIRS = [
+  { fg: "--ui-success", bg: "--ui-surface", min: 3, use: "成功 toast 装饰性色条 on 卡片" },
+  { fg: "--ui-warning", bg: "--ui-surface", min: 3, use: "警告 toast 装饰性色条 on 卡片" },
 ];
 
 const NAMED = { white: [255, 255, 255, 1], black: [0, 0, 0, 1], transparent: [0, 0, 0, 0] };

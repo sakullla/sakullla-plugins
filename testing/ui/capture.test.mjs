@@ -998,21 +998,63 @@ document.documentElement.setAttribute("data-theme-family",["sakura-night","neko-
   }
 });
 
-test("contrast audit covers the required kit token pairs", async () => {
-  const run = spawnSync(process.execPath, ["testing/ui/contrast.mjs"], { cwd: repo, encoding: "utf8" });
-  assert.equal(run.status, 0, outputOf(run));
-  assert.match(run.stdout, /必需组合通过/);
-  const { auditThemes } = await import(pathToFileURL(join(repo, "testing/ui/contrast.mjs")).href);
-  const tokens = `
-    --ui-text:#dddddd; --ui-bg:#ffffff; --ui-surface:#ffffff; --ui-surface-raised:#ffffff;
-    --ui-text-secondary:#dddddd; --ui-text-tertiary:#dddddd; --ui-text-muted:#dddddd;
-    --ui-danger-text:#dddddd; --ui-success-text:#dddddd; --ui-warning-text:#dddddd;
-    --ui-success-soft:#ffffff; --ui-warning-soft:#ffffff; --ui-danger-soft:#ffffff;
-    --ui-on-danger:#dddddd; --ui-danger-button:#ffffff; --ui-on-primary:#dddddd;
-    --ui-primary-hover:#ffffff; --ui-primary-active:#ffffff; --ui-primary:#dddddd;
-    --ui-danger:#dddddd; --ui-success:#dddddd; --ui-warning:#dddddd; --ui-border-strong:#dddddd;
-  `;
-  const bad = auditThemes(`:root{${tokens}}[data-theme="light"]{${tokens}}`);
-  assert.ok(bad.failures.length > 0);
-  assert.ok(bad.failures.some((item) => item.fg === "--ui-text" && item.bg === "--ui-bg"));
+const contrastFixtureTokens = [
+  "--ui-text:#000000", "--ui-bg:#ffffff", "--ui-surface:#ffffff", "--ui-surface-raised:#ffffff",
+  "--ui-text-secondary:#000000", "--ui-text-tertiary:#000000", "--ui-text-muted:#000000",
+  "--ui-danger-text:#000000", "--ui-success-text:#000000", "--ui-warning-text:#000000",
+  "--ui-success-soft:#ffffff", "--ui-warning-soft:#ffffff", "--ui-danger-soft:#ffffff",
+  "--ui-on-danger:#000000", "--ui-danger-button:#ffffff", "--ui-on-primary:#ffffff",
+  "--ui-primary-hover:#000000", "--ui-primary-active:#000000", "--ui-primary:#000000",
+  "--ui-danger:#000000", "--ui-success:#000000", "--ui-warning:#000000",
+  "--ui-border:#000000", "--ui-border-strong:#000000",
+].join("; ") + ";";
+
+test("contrast audit requires every rendered kit pair and gates on failures", async () => {
+  const { auditThemes, REQUIRED_PAIRS, ADVISORY_PAIRS } = await import(pathToFileURL(join(repo, "testing/ui/contrast.mjs")).href);
+  const renderedPairs = [
+    ["--ui-on-primary", "--ui-primary"],
+    ["--ui-danger-text", "--ui-danger-soft"],
+    ["--ui-border", "--ui-surface"],
+    ["--ui-border-strong", "--ui-surface"],
+  ];
+  for (const [fg, bg] of renderedPairs) {
+    assert.ok(REQUIRED_PAIRS.some((pair) => pair.fg === fg && pair.bg === bg), fg + " on " + bg + " 必须是必需组合");
+    assert.ok(!ADVISORY_PAIRS.some((pair) => pair.fg === fg && pair.bg === bg), fg + " on " + bg + " 不能只作为可选警告");
+  }
+  assert.ok(ADVISORY_PAIRS.length > 0);
+  for (const pair of ADVISORY_PAIRS) assert.match(pair.use, /装饰性/, "可选组合只保留装饰性值：" + pair.fg + " on " + pair.bg);
+
+  const kit = await readFile(join(repo, "internal/ui/design-system/ui-kit.css"), "utf8");
+  const audit = auditThemes(kit);
+  const real = spawnSync(process.execPath, ["testing/ui/contrast.mjs"], { cwd: repo, encoding: "utf8", timeout: 30000 });
+  assert.equal(real.status, audit.failures.length ? 1 : 0, outputOf(real));
+  assert.match(real.stdout, /必需组合通过/);
+  const failLines = real.stdout.split("\n").filter((line) => line.startsWith("FAIL "));
+  assert.equal(failLines.length, audit.failures.length, outputOf(real));
+  for (const failure of audit.failures) {
+    assert.ok(failLines.some((line) => line.startsWith("FAIL " + failure.theme + ": " + failure.fg + " on " + failure.bg + " ")), failure.theme + " 的 " + failure.fg + " on " + failure.bg + " 必须逐项 FAIL");
+  }
+
+  const dir = await mkdtemp(join(tmpdir(), "ui-contrast-"));
+  const fixture = join(dir, "kit.css");
+  try {
+    await writeFile(fixture, ":root{" + contrastFixtureTokens + "}\n[data-theme=\"light\"]{" + contrastFixtureTokens + "}\n");
+    const passing = spawnSync(process.execPath, ["testing/ui/contrast.mjs", "--file", fixture], { cwd: repo, encoding: "utf8", timeout: 30000 });
+    assert.equal(passing.status, 0, outputOf(passing));
+    assert.doesNotMatch(passing.stdout, /^FAIL /m, outputOf(passing));
+
+    const failingTokens = contrastFixtureTokens
+      .replace("--ui-on-primary:#ffffff", "--ui-on-primary:#333333")
+      .replace("--ui-danger-text:#000000", "--ui-danger-text:#f87171")
+      .replace("--ui-border:#000000", "--ui-border:rgba(255, 255, 255, 0.08)")
+      .replace("--ui-border-strong:#000000", "--ui-border-strong:rgba(255, 255, 255, 0.08)");
+    await writeFile(fixture, ":root{" + failingTokens + "}\n[data-theme=\"light\"]{" + failingTokens + "}\n");
+    const failing = spawnSync(process.execPath, ["testing/ui/contrast.mjs", "--file", fixture], { cwd: repo, encoding: "utf8", timeout: 30000 });
+    assert.equal(failing.status, 1, outputOf(failing));
+    for (const [fg, bg] of renderedPairs) {
+      assert.match(failing.stdout, new RegExp("^FAIL light: " + fg + " on " + bg + " ", "m"), outputOf(failing));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
