@@ -26,12 +26,12 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		}
 		bodies[route] = body
 	}
-	for _, required := range []string{"数据集分流", "route-upstreams", "route-rules", "route-default-action"} {
+	for _, required := range []string{"数据集分流", "route-upstreams", "route-rules", "route-default-action", `id="routing-panel" role="tabpanel" aria-labelledby="tab-btn-routing" hidden`, `id="upstream-dialog"`, `id="route-dialog"`} {
 		if !strings.Contains(bodies["/"], required) {
 			t.Fatalf("routing page missing %q", required)
 		}
 	}
-	for _, required := range []string{"api/upstreams", "api/routing", "moveRoute", "removeRoute", "default_upstream_id", "secret_ref"} {
+	for _, required := range []string{"api/upstreams", "api/routing", "moveRoute", "removeRoute", "default_upstream_id", "secret_ref", "switchWorkspaceTab", "ROUTE_PRESETS"} {
 		if !strings.Contains(bodies["/app.js"], required) {
 			t.Fatalf("routing interaction missing %q", required)
 		}

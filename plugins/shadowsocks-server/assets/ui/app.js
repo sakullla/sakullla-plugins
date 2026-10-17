@@ -22,6 +22,18 @@ const unavailableNode = document.querySelector("#app-unavailable");
 const deniedNode = document.querySelector("#app-denied");
 const contextNode = document.querySelector("#app-context");
 const workspaceNode = document.querySelector("#app-workspace");
+const workspaceMetrics = document.querySelector("#workspace-metrics");
+const metricListens = document.querySelector("#metric-listens");
+const metricUsers = document.querySelector("#metric-users");
+const metricRouting = document.querySelector("#metric-routing");
+const metricRoutingBtn = document.querySelector("#metric-routing-btn");
+const listPanel = document.querySelector("#app-list-panel");
+const routingPanel = document.querySelector("#routing-panel");
+const tabBtnListens = document.querySelector("#tab-btn-listens");
+const tabBtnRouting = document.querySelector("#tab-btn-routing");
+const routingCountNode = document.querySelector("#routing-count");
+const routingQuickRule = document.querySelector("#routing-quick-rule");
+const routingQuickUpstream = document.querySelector("#routing-quick-upstream");
 const listNode = document.querySelector("#listen-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#listen-count");
@@ -62,12 +74,30 @@ const qrCaption = document.querySelector("#qr-caption");
 const qrImage = document.querySelector("#qr-image");
 const qrCopy = document.querySelector("#qr-copy");
 const advancedKeys = document.querySelector("#advanced-keys");
+const upstreamDialog = document.querySelector("#upstream-dialog");
 const upstreamForm = document.querySelector("#upstream-form");
+const upstreamCancel = document.querySelector("#upstream-cancel");
+const openUpstreamDialogBtn = document.querySelector("#open-upstream-dialog");
 const upstreamList = document.querySelector("#route-upstreams");
+const upstreamEmpty = document.querySelector("#route-upstreams-empty");
+const upstreamBadge = document.querySelector("#route-upstreams-badge");
+const routeDialog = document.querySelector("#route-dialog");
 const routeForm = document.querySelector("#route-form");
+const routeCancel = document.querySelector("#route-cancel");
+const openRouteDialogBtn = document.querySelector("#open-route-dialog");
 const routeList = document.querySelector("#route-rules");
+const routeEmpty = document.querySelector("#route-rules-empty");
+const routeBadge = document.querySelector("#route-rules-badge");
+const routeKindSelect = document.querySelector("#route-kind-select");
+const routeSourceInput = document.querySelector("#route-source-input");
+const routeClassInput = document.querySelector("#route-class-input");
+const routeAttrInput = document.querySelector("#route-attr-input");
+const routeActionSelect = document.querySelector("#route-action-select");
+const routeUpstreamField = document.querySelector("#route-upstream-field");
 const routeUpstreamSelect = document.querySelector("#route-upstream-select");
+const routeIdInput = document.querySelector("#route-id-input");
 const routeDefaultAction = document.querySelector("#route-default-action");
+const routeDefaultUpstreamField = document.querySelector("#route-default-upstream-field");
 const routeDefaultUpstream = document.querySelector("#route-default-upstream");
 const routeSaveDefault = document.querySelector("#route-save-default");
 const appendDialog = document.querySelector("#append-dialog");
@@ -81,6 +111,72 @@ const METHOD_LABELS = {
   "2022-blake3-aes-256-gcm": "SS2022 · AES-256",
   "aes-128-gcm": "AES-128-GCM",
   "aes-256-gcm": "AES-256-GCM",
+};
+
+const KIND_LABELS = {
+  domain: "域名",
+  cidr: "网段",
+  country: "国家",
+  region: "地区",
+};
+
+const ACTION_LABELS = {
+  direct: "直连",
+  reject: "拒绝",
+  upstream: "转发上游",
+};
+
+const FAILURE_LABELS = {
+  "dataset-unavailable": "数据源不可用",
+  "upstream-missing": "上游不存在",
+  "upstream-disabled": "上游已停用",
+  "upstream-disabled-or-missing": "上游不可用",
+  "tcp-unsupported": "上游未开启 TCP",
+  "udp-unsupported": "上游未开启 UDP",
+  "protocol-unsupported": "协议不支持",
+};
+
+const ROUTE_PRESETS = {
+  "ai-upstream": {
+    id: "ai-not-cn",
+    source_id: "geosite",
+    kind: "domain",
+    classification: "category-ai",
+    attribute: "!cn",
+    action: "upstream",
+  },
+  "cn-direct": {
+    id: "cn-domain-direct",
+    source_id: "geosite",
+    kind: "domain",
+    classification: "cn",
+    attribute: "",
+    action: "direct",
+  },
+  "cn-ip-direct": {
+    id: "cn-ip-direct",
+    source_id: "geoip",
+    kind: "country",
+    classification: "cn",
+    attribute: "",
+    action: "direct",
+  },
+  "ads-reject": {
+    id: "ads-reject",
+    source_id: "geosite",
+    kind: "domain",
+    classification: "category-ads-all",
+    attribute: "",
+    action: "reject",
+  },
+  "private-reject": {
+    id: "private-reject",
+    source_id: "geoip",
+    kind: "cidr",
+    classification: "private",
+    attribute: "",
+    action: "reject",
+  },
 };
 
 const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger = false } = {}) => {
@@ -107,10 +203,12 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
 };
 
 let busy = false;
+let activeTab = "listens";
 let selectedAgentID = "";
 let agentsCache = [];
 let listensCache = [];
 let routingCache = { upstreams: [], rules: [], default_action: "direct" };
+let routeStatusCache = [];
 let openListenID = "";
 let pendingAppendListen = null;
 let executionReady = false;
@@ -213,6 +311,43 @@ const sendPluginJSON = async (path, body) => {
   return payload;
 };
 
+const switchWorkspaceTab = (tab) => {
+  activeTab = tab === "routing" ? "routing" : "listens";
+  const isRouting = activeTab === "routing";
+  if (tabBtnListens) tabBtnListens.setAttribute("aria-selected", isRouting ? "false" : "true");
+  if (tabBtnRouting) tabBtnRouting.setAttribute("aria-selected", isRouting ? "true" : "false");
+  if (listPanel) listPanel.hidden = isRouting;
+  if (routingPanel) routingPanel.hidden = !isRouting;
+  syncListPanel();
+};
+
+if (tabBtnListens) tabBtnListens.addEventListener("click", () => switchWorkspaceTab("listens"));
+if (tabBtnRouting) tabBtnRouting.addEventListener("click", () => switchWorkspaceTab("routing"));
+if (metricRoutingBtn) metricRoutingBtn.addEventListener("click", () => switchWorkspaceTab("routing"));
+
+const updateOverviewMetrics = () => {
+  const visible = Boolean(selectedAgentID && agentOnline && executionReady === true);
+  if (workspaceMetrics) workspaceMetrics.hidden = !visible;
+  if (!visible) return;
+  if (metricListens) metricListens.textContent = String(listensCache.length);
+  if (metricUsers) {
+    let totalEnabled = 0;
+    listensCache.forEach((listen) => {
+      ((listen && listen.users) || []).forEach((user) => {
+        if (user && user.enabled) totalEnabled += 1;
+      });
+    });
+    metricUsers.textContent = String(totalEnabled);
+  }
+  if (metricRouting) {
+    const rulesCount = (routingCache.rules || []).length;
+    const defAction = ACTION_LABELS[routingCache.default_action || "direct"] || "直连";
+    metricRouting.textContent = rulesCount
+      ? `${rulesCount} 条规则 · 默认${defAction}`
+      : `默认${defAction}`;
+  }
+};
+
 const syncSelectionActions = () => {
   const blocked = busy || !selectedAgentID || !agentOnline || executionReady !== true;
   if (createToggle) createToggle.disabled = blocked;
@@ -227,7 +362,7 @@ const syncSelectionActions = () => {
 
 const setBusy = (next) => {
   busy = next;
-  const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel, upstreamDialog, routeDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
@@ -737,9 +872,13 @@ const resetDetailPrompt = () => {
 
 const syncListPanel = () => {
   const hasListens = listNode && listNode.children.length > 0;
-  if (emptyNode) emptyNode.hidden = !selectedAgentID || !agentOnline || hasListens;
+  const isRouting = activeTab === "routing";
+  const canOperate = Boolean(selectedAgentID && agentOnline);
+  if (emptyNode) emptyNode.hidden = isRouting || !canOperate || hasListens;
   if (workspaceHead) workspaceHead.hidden = false;
-  if (createToggle) createToggle.hidden = !(selectedAgentID && agentOnline);
+  if (createToggle) createToggle.hidden = isRouting || !canOperate;
+  if (routingQuickRule) routingQuickRule.hidden = !isRouting || !canOperate;
+  if (routingQuickUpstream) routingQuickUpstream.hidden = !isRouting || !canOperate;
 };
 
 const closeCreate = () => {
@@ -889,18 +1028,18 @@ const userManageButtons = (user) => {
   actions.className = "account-actions";
   const toggle = document.createElement("button");
   toggle.type = "button";
-  toggle.className = "btn btn--ghost";
+  toggle.className = "btn btn--ghost btn--sm";
   toggle.dataset.mutate = "true";
   toggle.textContent = user.enabled ? "停用" : "再启用";
   toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
   const rotate = document.createElement("button");
   rotate.type = "button";
-  rotate.className = "btn btn--ghost";
+  rotate.className = "btn btn--ghost btn--sm";
   rotate.textContent = "轮换密钥";
   rotate.addEventListener("click", () => mutateUser(user, "rotate", true));
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn btn--text btn--danger";
+  remove.className = "btn btn--text btn--danger btn--sm";
   remove.dataset.mutate = "true";
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
@@ -985,7 +1124,15 @@ const renderListen = (listen) => {
   meta.className = "listen-card-meta";
   const users = listen.users || [];
   meta.textContent = [methodLabel(listen.method), `${users.length} 个用户`].filter(Boolean).join(" · ");
-  identity.append(titleRow, meta);
+  const endpointBox = document.createElement("div");
+  endpointBox.className = "listen-endpoint-box";
+  const endpointText = document.createElement("span");
+  endpointText.textContent = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
+  const protoTag = document.createElement("span");
+  protoTag.className = "listen-endpoint-protocol";
+  protoTag.textContent = "TCP + UDP";
+  endpointBox.append(endpointText, protoTag);
+  identity.append(titleRow, meta, endpointBox);
   head.append(identity);
   card.append(head);
 
@@ -995,7 +1142,9 @@ const renderListen = (listen) => {
   if (first && first.share_available && first.uri) {
     const copy = copyURIButton(first);
     copy.addEventListener("click", (event) => event.stopPropagation());
-    actions.append(copy);
+    const qr = qrButton(first);
+    qr.addEventListener("click", (event) => event.stopPropagation());
+    actions.append(copy, qr);
   }
   const open = document.createElement("button");
   open.type = "button";
@@ -1060,8 +1209,9 @@ const renderListens = (listens) => {
   listensCache.forEach((listen) => listNode.append(renderListen(listen)));
   if (countNode) {
     countNode.hidden = !listensCache.length;
-    countNode.textContent = listensCache.length ? `${listensCache.length} 条监听` : "";
+    countNode.textContent = listensCache.length ? `${listensCache.length}` : "";
   }
+  updateOverviewMetrics();
   syncListPanel();
   refreshOpenDetail();
   syncSelectionActions();
@@ -1215,6 +1365,7 @@ const clearWorkspace = (kind) => {
   lastExecution = null;
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
+  if (workspaceMetrics) workspaceMetrics.hidden = true;
   renderListens([]);
   renderExecutionBadge(null);
   showContext(kind);
@@ -1223,7 +1374,7 @@ const clearWorkspace = (kind) => {
 };
 
 const escapeHTML = (value) => String(value || "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
-const upstreamOptions = () => `<option value="">请选择上游</option>` + (routingCache.upstreams || []).map((upstream) => `<option value="${escapeHTML(upstream.id)}">${escapeHTML(upstream.id)}</option>`).join("");
+const upstreamOptions = () => `<option value="">请选择上游</option>` + (routingCache.upstreams || []).map((upstream) => `<option value="${escapeHTML(upstream.id)}">${escapeHTML(upstream.id)} (${escapeHTML(upstream.host)}:${upstream.port})</option>`).join("");
 
 const routingIssue = (rule) => {
   if (rule.action !== "upstream") return "";
@@ -1234,55 +1385,210 @@ const routingIssue = (rule) => {
   return "";
 };
 
+const syncDefaultUpstreamVisibility = () => {
+  if (!routeDefaultAction || !routeDefaultUpstreamField) return;
+  routeDefaultUpstreamField.hidden = routeDefaultAction.value !== "upstream";
+};
+
+const syncRouteModalActionVisibility = () => {
+  if (!routeActionSelect || !routeUpstreamField) return;
+  const isUpstream = routeActionSelect.value === "upstream";
+  routeUpstreamField.hidden = !isUpstream;
+  if (routeUpstreamSelect && isUpstream && !routeUpstreamSelect.value && routingCache.upstreams && routingCache.upstreams.length) {
+    routeUpstreamSelect.value = routingCache.upstreams[0].id;
+  }
+};
+
+const uniqueRuleID = (base) => {
+  const clean = String(base || "rule")
+    .toLowerCase()
+    .replace(/[^a-z0-9._:/-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "rule";
+  const existing = new Set((routingCache.rules || []).map((item) => item.id));
+  if (!existing.has(clean)) return clean;
+  let counter = 2;
+  while (existing.has(`${clean}-${counter}`)) counter += 1;
+  return `${clean}-${counter}`;
+};
+
+const fillRoutePreset = (presetKey) => {
+  const preset = ROUTE_PRESETS[presetKey];
+  if (!preset || !routeForm) return;
+  if (routeKindSelect) routeKindSelect.value = preset.kind;
+  if (routeSourceInput) routeSourceInput.value = preset.source_id;
+  if (routeClassInput) routeClassInput.value = preset.classification;
+  if (routeAttrInput) routeAttrInput.value = preset.attribute || "";
+  if (routeActionSelect) routeActionSelect.value = preset.action;
+  if (routeIdInput) routeIdInput.value = uniqueRuleID(preset.id);
+  syncRouteModalActionVisibility();
+};
+
+const openUpstreamModal = () => {
+  if (!upstreamDialog) return;
+  if (upstreamForm) upstreamForm.reset();
+  if (upstreamDialog.open) upstreamDialog.close();
+  if (typeof upstreamDialog.showModal === "function") upstreamDialog.showModal();
+};
+
+const closeUpstreamModal = () => {
+  if (upstreamForm) upstreamForm.reset();
+  if (upstreamDialog && upstreamDialog.open) upstreamDialog.close();
+};
+
+const openRouteModal = (presetKey = "") => {
+  if (!routeDialog) return;
+  if (routeForm) routeForm.reset();
+  const options = upstreamOptions();
+  if (routeUpstreamSelect) routeUpstreamSelect.innerHTML = options;
+  if (presetKey && ROUTE_PRESETS[presetKey]) {
+    fillRoutePreset(presetKey);
+  } else {
+    if (routeSourceInput) routeSourceInput.value = "geosite";
+    if (routeClassInput) routeClassInput.value = "category-ai";
+    if (routeIdInput) routeIdInput.value = uniqueRuleID("ai-not-cn");
+    syncRouteModalActionVisibility();
+  }
+  if (routeDialog.open) routeDialog.close();
+  if (typeof routeDialog.showModal === "function") routeDialog.showModal();
+};
+
+const closeRouteModal = () => {
+  if (routeForm) routeForm.reset();
+  if (routeDialog && routeDialog.open) routeDialog.close();
+};
+
 const renderRouting = (routing, routeStatus = []) => {
   routingCache = routing || { upstreams: [], rules: [], default_action: "direct" };
   routingCache.upstreams ||= [];
   routingCache.rules ||= [];
-  upstreamList.innerHTML = "";
-  routingCache.upstreams.forEach((upstream) => {
-    const row = document.createElement("article");
-    row.className = "account";
-    const label = document.createElement("strong");
-    label.textContent = `${upstream.id} · ${upstream.host}:${upstream.port}`;
-    const detail = document.createElement("p");
-    detail.className = "hint";
-    detail.textContent = `${methodLabel(upstream.method)} · ${upstream.tcp ? "TCP" : ""}${upstream.tcp && upstream.udp ? "/" : ""}${upstream.udp ? "UDP" : ""} · ${upstream.enabled ? "启用" : "停用"} · ${upstream.secret_ref}@${upstream.secret_version}`;
-    const toggle = document.createElement("button");
-    toggle.type = "button"; toggle.className = "btn btn--ghost"; toggle.textContent = upstream.enabled ? "停用" : "启用";
-    toggle.onclick = () => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable");
-    const remove = document.createElement("button");
-    remove.type = "button"; remove.className = "btn btn--text btn--danger"; remove.textContent = "删除";
-    remove.onclick = () => mutateUpstream(upstream.id, "delete");
-    row.append(label, detail, toggle, remove);
-    upstreamList.append(row);
-  });
+  if (routeStatus && routeStatus.length) routeStatusCache = routeStatus;
+
+  const rulesCount = routingCache.rules.length;
+  const upstreamsCount = routingCache.upstreams.length;
+  if (routingCountNode) {
+    routingCountNode.hidden = !rulesCount;
+    routingCountNode.textContent = rulesCount ? `${rulesCount}` : "";
+  }
+  if (routeBadge) routeBadge.textContent = `${rulesCount} 条`;
+  if (upstreamBadge) upstreamBadge.textContent = `${upstreamsCount} 个`;
+  if (routeEmpty) routeEmpty.hidden = rulesCount > 0;
+  if (upstreamEmpty) upstreamEmpty.hidden = upstreamsCount > 0;
+
+  if (upstreamList) {
+    upstreamList.innerHTML = "";
+    routingCache.upstreams.forEach((upstream) => {
+      const row = document.createElement("article");
+      row.className = "route-item-card";
+
+      const top = document.createElement("div");
+      top.className = "route-item-top";
+      const main = document.createElement("div");
+      main.className = "route-item-main";
+      const label = document.createElement("strong");
+      label.className = "route-item-title";
+      label.textContent = `${upstream.id} · ${upstream.host}:${upstream.port}`;
+      main.append(label, renderStatusPill(upstream.enabled ? "启用" : "停用", upstream.enabled));
+
+      const controls = document.createElement("div");
+      controls.className = "route-item-controls";
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "btn btn--ghost btn--sm";
+      toggle.textContent = upstream.enabled ? "停用" : "启用";
+      toggle.onclick = () => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "btn btn--text btn--danger btn--sm";
+      remove.textContent = "删除";
+      remove.onclick = () => mutateUpstream(upstream.id, "delete");
+      controls.append(toggle, remove);
+      top.append(main, controls);
+
+      const bottom = document.createElement("div");
+      bottom.className = "route-item-bottom";
+      const detail = document.createElement("p");
+      detail.className = "hint";
+      detail.textContent = `${methodLabel(upstream.method)} · ${upstream.tcp ? "TCP" : ""}${upstream.tcp && upstream.udp ? "/" : ""}${upstream.udp ? "UDP" : ""} · ${upstream.secret_ref}@${upstream.secret_version}`;
+      bottom.append(detail);
+
+      row.append(top, bottom);
+      upstreamList.append(row);
+    });
+  }
+
   const options = upstreamOptions();
-  routeUpstreamSelect.innerHTML = options;
-  routeDefaultUpstream.innerHTML = options;
-  routeDefaultAction.value = routingCache.default_action || "direct";
-  routeDefaultUpstream.value = routingCache.default_upstream_id || "";
-  routeList.innerHTML = "";
-  routingCache.rules.forEach((rule, index) => {
-    const row = document.createElement("article");
-    row.className = "account";
-    const label = document.createElement("strong");
-    label.textContent = `${index + 1}. ${rule.id} · ${rule.action}${rule.upstream_id ? ` → ${rule.upstream_id}` : ""}`;
-    const detail = document.createElement("p"); detail.className = "hint";
-    const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
-    const applied = routeStatus.find((item) => item.rule_id === rule.id) || {};
-    const issue = applied.failure || routingIssue(rule);
-    detail.textContent = `${rule.source_id} · ${rule.classification.kind}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.version_digest ? ` · ${applied.version_digest}` : ""}${applied.domain_source ? ` · 域名来源 ${applied.domain_source}` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issue ? ` · ${issue}` : ""}`;
-    [
-      ["上移", () => moveRoute(index, -1)], ["下移", () => moveRoute(index, 1)], ["删除", () => removeRoute(index)],
-    ].forEach(([text, action]) => { const button = document.createElement("button"); button.type = "button"; button.className = "btn btn--ghost"; button.textContent = text; button.onclick = action; row.append(button); });
-    row.prepend(label, detail);
-    routeList.append(row);
-  });
+  if (routeUpstreamSelect) routeUpstreamSelect.innerHTML = options;
+  if (routeDefaultUpstream) routeDefaultUpstream.innerHTML = options;
+  if (routeDefaultAction) routeDefaultAction.value = routingCache.default_action || "direct";
+  if (routeDefaultUpstream) routeDefaultUpstream.value = routingCache.default_upstream_id || "";
+  syncDefaultUpstreamVisibility();
+  syncRouteModalActionVisibility();
+
+  if (routeList) {
+    routeList.innerHTML = "";
+    routingCache.rules.forEach((rule, index) => {
+      const row = document.createElement("article");
+      row.className = "route-item-card";
+
+      const top = document.createElement("div");
+      top.className = "route-item-top";
+      const main = document.createElement("div");
+      main.className = "route-item-main";
+      const orderBadge = document.createElement("span");
+      orderBadge.className = "route-order-badge";
+      orderBadge.textContent = `#${index + 1}`;
+      const label = document.createElement("strong");
+      label.className = "route-item-title";
+      label.textContent = `${rule.id}`;
+      const actionBadge = document.createElement("span");
+      actionBadge.className = "route-action-badge";
+      actionBadge.dataset.action = rule.action;
+      const actionText = ACTION_LABELS[rule.action] || rule.action;
+      actionBadge.textContent = rule.upstream_id ? `${actionText} → ${rule.upstream_id}` : actionText;
+      main.append(orderBadge, label, actionBadge);
+
+      const controls = document.createElement("div");
+      controls.className = "route-item-controls";
+      [
+        ["上移", () => moveRoute(index, -1), index === 0],
+        ["下移", () => moveRoute(index, 1), index === routingCache.rules.length - 1],
+        ["删除", () => removeRoute(index), false],
+      ].forEach(([text, action, isDisabled]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = text === "删除" ? "btn btn--text btn--danger btn--sm" : "btn btn--ghost btn--sm";
+        button.textContent = text;
+        button.disabled = isDisabled;
+        button.onclick = action;
+        controls.append(button);
+      });
+      top.append(main, controls);
+
+      const bottom = document.createElement("div");
+      bottom.className = "route-item-bottom";
+      const detail = document.createElement("p");
+      detail.className = "hint";
+      const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
+      const applied = (routeStatus.length ? routeStatus : routeStatusCache).find((item) => item.rule_id === rule.id) || {};
+      const rawIssue = applied.failure || routingIssue(rule);
+      const issueLabel = FAILURE_LABELS[rawIssue] || rawIssue;
+      const kindName = KIND_LABELS[rule.classification.kind] || rule.classification.kind;
+      detail.textContent = `数据源 ${rule.source_id} · ${kindName}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issueLabel ? ` · 异常: ${issueLabel}` : ""}`;
+      const healthPill = renderStatusPill(issueLabel ? issueLabel : "规则就绪", !issueLabel);
+      bottom.append(detail, healthPill);
+
+      row.append(top, bottom);
+      routeList.append(row);
+    });
+  }
+
+  updateOverviewMetrics();
 };
 
 const loadRouting = async () => {
   const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
-  renderRouting(payload.routing, payload.route_status || []);
+  routeStatusCache = payload.route_status || [];
+  renderRouting(payload.routing, routeStatusCache);
 };
 
 const saveRoutingRules = async () => {
@@ -1294,27 +1600,88 @@ const moveRoute = async (index, delta) => {
   const next = index + delta;
   if (next < 0 || next >= routingCache.rules.length) return;
   [routingCache.rules[index], routingCache.rules[next]] = [routingCache.rules[next], routingCache.rules[index]];
-  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+  try {
+    await saveRoutingRules();
+    showStatus("已调整规则匹配顺序。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  }
 };
 
 const removeRoute = async (index) => {
+  const target = routingCache.rules[index];
+  const ok = await askConfirm({
+    title: "删除分流规则",
+    body: target ? `确定删除规则「${target.id}」吗？` : "确定删除这条分流规则吗？",
+    confirm: "删除",
+    danger: true,
+  });
+  if (!ok) return;
   routingCache.rules.splice(index, 1);
-  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+  try {
+    await saveRoutingRules();
+    showStatus("已删除分流规则。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  }
 };
 
 const mutateUpstream = async (id, action) => {
+  if (action === "delete") {
+    const ok = await askConfirm({
+      title: "删除上游节点",
+      body: `确定删除上游节点「${id}」吗？已被规则引用的上游无法直接删除。`,
+      confirm: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+  }
   try {
     const payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/${action}`, {});
     renderRouting(payload.routing);
-  } catch (error) { showStatus(error.message, true); }
+    showStatus(action === "delete" ? "已删除上游节点。" : "已更新上游节点状态。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  }
 };
+
+if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", openUpstreamModal);
+if (routingQuickUpstream) routingQuickUpstream.addEventListener("click", openUpstreamModal);
+if (upstreamCancel) upstreamCancel.addEventListener("click", closeUpstreamModal);
+if (upstreamDialog) {
+  upstreamDialog.addEventListener("click", (event) => {
+    if (event.target === upstreamDialog) closeUpstreamModal();
+  });
+}
+
+if (openRouteDialogBtn) openRouteDialogBtn.addEventListener("click", () => openRouteModal(""));
+if (routingQuickRule) routingQuickRule.addEventListener("click", () => openRouteModal(""));
+if (routeCancel) routeCancel.addEventListener("click", closeRouteModal);
+if (routeDialog) {
+  routeDialog.addEventListener("click", (event) => {
+    if (event.target === routeDialog) closeRouteModal();
+  });
+}
+
+document.querySelectorAll("[data-preset]").forEach((btn) => {
+  btn.addEventListener("click", () => openRouteModal(btn.dataset.preset));
+});
+
+document.querySelectorAll("[data-fill-preset]").forEach((btn) => {
+  btn.addEventListener("click", () => fillRoutePreset(btn.dataset.fillPreset));
+});
+
+if (routeActionSelect) routeActionSelect.addEventListener("change", syncRouteModalActionVisibility);
+if (routeDefaultAction) routeDefaultAction.addEventListener("change", syncDefaultUpstreamVisibility);
 
 if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(upstreamForm);
   try {
-    const payload = await sendPluginJSON("api/upstreams", { id: String(form.get("id") || ""), host: String(form.get("host") || ""), port: Number(form.get("port") || 0), method: String(form.get("method") || ""), password: String(form.get("password") || ""), tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
-    upstreamForm.reset(); renderRouting(payload.routing);
+    const payload = await sendPluginJSON("api/upstreams", { id: String(form.get("id") || "").trim(), host: String(form.get("host") || "").trim(), port: Number(form.get("port") || 0), method: String(form.get("method") || ""), password: String(form.get("password") || ""), tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
+    closeUpstreamModal();
+    renderRouting(payload.routing);
+    showStatus("已添加上游节点。", false);
   } catch (error) { showStatus(error.message, true); }
 });
 
@@ -1322,17 +1689,30 @@ if (routeForm) routeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(routeForm);
   const attribute = String(form.get("attribute") || "").trim();
-  const classification = { name: String(form.get("classification") || ""), kind: String(form.get("kind") || "") };
+  const classification = { name: String(form.get("classification") || "").trim(), kind: String(form.get("kind") || "") };
   if (attribute) classification.attributes = [{ name: attribute, boolean: true }];
   const action = String(form.get("action") || "");
-  routingCache.rules.push({ id: String(form.get("id") || ""), source_id: String(form.get("source_id") || ""), classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
-  try { await saveRoutingRules(); routeForm.reset(); } catch (error) { routingCache.rules.pop(); showStatus(error.message, true); }
+  const ruleID = String(form.get("id") || "").trim() || uniqueRuleID(`${classification.name}-${action}`);
+  routingCache.rules.push({ id: ruleID, source_id: String(form.get("source_id") || "").trim(), classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
+  try {
+    await saveRoutingRules();
+    closeRouteModal();
+    showStatus("已添加分流规则。", false);
+  } catch (error) {
+    routingCache.rules.pop();
+    showStatus(error.message, true);
+  }
 });
 
 if (routeSaveDefault) routeSaveDefault.addEventListener("click", async () => {
   routingCache.default_action = routeDefaultAction.value;
   routingCache.default_upstream_id = routeDefaultAction.value === "upstream" ? routeDefaultUpstream.value : "";
-  try { await saveRoutingRules(); } catch (error) { showStatus(error.message, true); }
+  try {
+    await saveRoutingRules();
+    showStatus("已保存默认路由设置。", false);
+  } catch (error) {
+    showStatus(error.message, true);
+  }
 });
 
 const renderWorkspace = async () => {
@@ -1414,6 +1794,8 @@ agentPicker.onChange = async (value) => {
   closeCreate();
   closeDetail();
   closeAppend();
+  closeUpstreamModal();
+  closeRouteModal();
   fillShareHost(null, []);
   syncShareHostBar(Boolean(selectedAgentID));
   try {
