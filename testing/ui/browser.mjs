@@ -1,6 +1,5 @@
-// Minimal Chrome DevTools Protocol driver for the accelerator-sources UI
-// capture tool. It has no npm dependencies: Node's built-in WebSocket talks to
-// a locally installed Chromium-family browser started in headless mode.
+// Minimal Chrome DevTools Protocol driver. Node's built-in WebSocket talks to
+// a locally installed Chromium-family browser; there is no npm dependency.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -40,8 +39,18 @@ export const until = async (fn, label, ms = 10000) => {
   throw new Error(`等待超时：${label}`);
 };
 
+const readJson = async (response) => {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
 export async function launch({ executable = findBrowser() } = {}) {
-  const profile = await mkdtemp(join(tmpdir(), "accelerator-sources-ui-"));
+  const profile = await mkdtemp(join(tmpdir(), "nre-ui-capture-"));
   const child = spawn(executable, [
     "--headless=new",
     "--no-sandbox",
@@ -72,7 +81,18 @@ export async function launch({ executable = findBrowser() } = {}) {
   };
 
   const openPage = async () => {
-    const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
+    let target = null;
+    for (const method of ["PUT", "GET"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method });
+      if (!response.ok) continue;
+      target = await readJson(response);
+      if (target?.webSocketDebuggerUrl) break;
+    }
+    if (!target?.webSocketDebuggerUrl) {
+      const listed = await readJson(await fetch(`http://127.0.0.1:${port}/json/list`));
+      target = Array.isArray(listed) ? listed.find((item) => item.type === "page" && item.webSocketDebuggerUrl) : null;
+    }
+    if (!target?.webSocketDebuggerUrl) throw new Error("无法打开浏览器页面");
     const socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       socket.addEventListener("open", resolve, { once: true });

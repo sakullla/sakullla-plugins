@@ -33,22 +33,19 @@ self-contained (no external requests, production CSP `default-src 'self'`).
 
 ## UI capture tool
 
-`testing/ui/capture.mjs` renders the page in headless Chrome/Edge against a
-deterministic mock of the catalog and offline APIs (served with the same CSP
-as `web/handler.go`) and captures every scene in light and dark themes at
-several widths. It needs only Node 22+ and a local Chromium-family browser.
+`testing/ui/capture.mjs` renders this plugin's scenes in headless Chrome, Edge,
+or Chromium against a deterministic mock of the catalog and offline APIs
+(served with the same CSP as `web/handler.go`). It needs Node 22+ and a local
+browser. Set `NRE_UI_BROWSER` to choose the browser binary.
 
 ```sh
-node plugins/accelerator-sources/testing/ui/capture.mjs                 # all scenes, light+dark, 1440/768/390
-node plugins/accelerator-sources/testing/ui/capture.mjs --list          # list scenes
-node plugins/accelerator-sources/testing/ui/capture.mjs --scenes mirrors-browse --themes dark --widths 390 --scale 2
-node plugins/accelerator-sources/testing/ui/capture.mjs --serve         # interactive preview on 127.0.0.1:4180
+node testing/ui/capture.mjs --plugin accelerator-sources
+node testing/ui/capture.mjs --list
+node testing/ui/capture.mjs --plugin accelerator-sources --only usage --theme dark --size 390
 ```
 
-Screenshots, `report.json`, and a browsable `index.html` contact sheet are
-written to `dist/accelerator-sources-ui/` (override with `--out`). The run
-exits non-zero when any capture has horizontal overflow, script errors, CSP
-violations, or requests leaving the page origin. Set `NRE_UI_BROWSER` to use a
-specific browser binary. In the mock, search terms starting with `hold` stay
-loading and terms or image references starting with `fail` return upstream
-errors.
+The run writes `index.html`, `README.md`, `capture-ui-manifest.json`, and png
+files to `dist/ui-capture/` (override with `--out`). It exits non-zero when a
+scene does not finish, visible content overflows horizontally, or the page
+raises an error. In the mock, search terms starting with `hold` stay loading,
+and terms or image references starting with `fail` return upstream errors.

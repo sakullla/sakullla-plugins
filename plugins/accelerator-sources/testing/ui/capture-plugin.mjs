@@ -1,14 +1,13 @@
-// Same-origin preview server for the accelerator-sources UI. It serves the
-// embedded web/static assets with the production security headers and answers
-// the catalog / offline APIs from deterministic fixtures, so captures never
-// depend on Docker Hub or the network.
+// Accelerator-sources scenes and the deterministic catalog/offline preview.
+// The shared runner owns the browser, viewport, and gallery.
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize, sep } from "node:path";
+import { extname, join, normalize, sep, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
+const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
-
 const day = 24 * 3600 * 1000;
 const stamp = (daysAgo) => new Date(Date.UTC(2026, 9, 17) - daysAgo * day).toISOString();
 
@@ -26,13 +25,13 @@ const repositories = [
 const tagNames = ["latest", "stable", "mainline", "alpine", "alpine-slim", "1.27", "1.27.3", "1.27.3-alpine", "1.27-alpine", "1.26", "1.26.2", "1.26-alpine", "stable-alpine", "mainline-alpine", "bookworm", "perl", "otel", "1.25", "1.25.5", "1.24"];
 const images = [{ architecture: "amd64", os: "linux" }, { architecture: "arm64", os: "linux", variant: "v8" }, { architecture: "arm", os: "linux", variant: "v7" }];
 
-const tagsFor = (image, page, size) => {
+const tagsFor = (page, size) => {
   const all = tagNames.map((name, index) => ({ name, full_size: 18_000_000 + index * 1_350_000, last_updated: stamp(index * 3 + 1), tag_status: "active", images }));
   const start = (page - 1) * size;
   return { count: all.length, next: start + size < all.length ? `page=${page + 1}` : null, previous: null, results: all.slice(start, start + size) };
 };
 
-export async function startMockServer({ root, port = 0, latency = 0, csp }) {
+async function startMockServer({ root, port = 0, latency = 0, csp }) {
   const staticRoot = join(root, "plugins/accelerator-sources/web/static");
   const requests = [];
   const held = new Set();
@@ -51,7 +50,6 @@ export async function startMockServer({ root, port = 0, latency = 0, csp }) {
         if (latency) await delay(latency);
         const query = url.searchParams.get("q") || url.searchParams.get("image") || "";
         if (query.startsWith("hold")) {
-          // Keep the request pending so captures can show loading states.
           held.add(response);
           response.on("close", () => held.delete(response));
           return;
@@ -74,7 +72,7 @@ export async function startMockServer({ root, port = 0, latency = 0, csp }) {
         if (image === "empty/none") return json(200, { count: 0, next: null, results: [] });
         const page = Number(url.searchParams.get("page") || 1);
         const size = Number(url.searchParams.get("page_size") || 25);
-        return json(200, tagsFor(image, page, size));
+        return json(200, tagsFor(page, size));
       }
       if (path === "/api/offline/prepare") {
         if (request.method !== "POST") return json(405, { error: "offline prepare requires POST" });
@@ -83,8 +81,6 @@ export async function startMockServer({ root, port = 0, latency = 0, csp }) {
         const body = JSON.parse(raw || "{}");
         const list = Array.isArray(body.images) ? body.images : [];
         if (list.length === 0 || list.length > 16) return json(400, { error: "offline request requires 1-16 images" });
-        // Like the real handler, prepare only records the plan; resolution
-        // (and therefore failure) happens on HEAD/GET of the download URL.
         const token = (plans.size + 1).toString(16).padStart(48, "0");
         plans.set(token, list);
         return json(200, { download_url: `/api/offline/${token}`, expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() });
@@ -118,23 +114,102 @@ export async function startMockServer({ root, port = 0, latency = 0, csp }) {
       json(500, { error: error.message });
     }
   });
-  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
   return {
     url: `http://127.0.0.1:${server.address().port}/`,
     requests,
     close: async () => {
       for (const response of held) response.destroy();
       server.closeAllConnections?.();
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise((resolveClose) => server.close(resolveClose));
     },
   };
 }
 
-// readProductionCSP keeps the preview header in lockstep with web/handler.go so
-// inline styles or scripts that production would block also fail here.
-export async function readProductionCSP(root) {
-  const source = await readFile(join(root, "plugins/accelerator-sources/web/handler.go"), "utf8");
+async function readProductionCSP(repo) {
+  const source = await readFile(join(repo, "plugins/accelerator-sources/web/handler.go"), "utf8");
   const match = source.match(/"Content-Security-Policy",\s*"([^"]+)"/);
   if (!match) throw new Error("无法从 web/handler.go 读取 Content-Security-Policy");
   return match[1];
+}
+
+export const id = "accelerator-sources";
+
+export const scenes = [
+  { name: "usage", title: "用法首页", run: async () => {} },
+  {
+    name: "convert-github",
+    title: "链接转换 · GitHub 发行包",
+    run: async (ui) => { await ui.fill("#convert-input", "https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_amd64.tar.gz"); },
+  },
+  {
+    name: "convert-repo",
+    title: "链接转换 · 仓库克隆",
+    run: async (ui) => { await ui.fill("#convert-input", "https://github.com/cli/cli"); },
+  },
+  {
+    name: "convert-docker",
+    title: "链接转换 · 镜像引用",
+    run: async (ui) => { await ui.fill("#convert-input", "ghcr.io/home-assistant/home-assistant:stable"); },
+  },
+  {
+    name: "convert-unsupported",
+    title: "链接转换 · 不支持的域名",
+    run: async (ui) => { await ui.fill("#convert-input", "https://example.com/files/archive.zip"); },
+  },
+  { name: "mirrors", title: "镜像工作台", run: async (ui) => { await ui.view("mirrors"); } },
+  {
+    name: "mirrors-loading",
+    title: "镜像 · 搜索加载中",
+    settle: false,
+    run: async (ui) => {
+      await ui.view("mirrors");
+      await ui.fill("#query", "hold");
+      await ui.submit("#search-form");
+      await delay(350);
+    },
+  },
+  {
+    name: "mirrors-browse",
+    title: "镜像 · 搜索结果与标签",
+    run: async (ui) => {
+      await ui.view("mirrors");
+      await ui.fill("#query", "nginx");
+      await ui.submit("#search-form");
+      await ui.waitFor("#results .result-card");
+      await ui.click("#results .result-card");
+      await ui.waitFor("#tag-results .tag-chip");
+      await ui.click("#tag-results .tag-chip:nth-of-type(1)");
+      await ui.click("#tag-results .tag-chip:nth-of-type(4)");
+      await ui.evaluate("window.scrollTo(0, 0)");
+    },
+  },
+  {
+    name: "mirrors-ready",
+    title: "镜像 · 离线包已就绪",
+    run: async (ui) => {
+      await ui.view("mirrors");
+      await ui.fill("#images", "alpine:latest\nlibrary/nginx:stable\nghcr.io/home-assistant/home-assistant:stable");
+      await ui.submit("#offline-form");
+      await ui.waitFor("#download a");
+    },
+  },
+  {
+    name: "mirrors-error",
+    title: "镜像 · 上游错误",
+    run: async (ui) => {
+      await ui.view("mirrors");
+      await ui.fill("#query", "fail");
+      await ui.submit("#search-form");
+      await ui.fill("#images", "alpine:latest\nfail/unknown:1");
+      await ui.submit("#offline-form");
+      await ui.waitFor("#download .status-error");
+    },
+  },
+];
+
+export async function startPreview({ root = moduleRoot } = {}) {
+  const csp = await readProductionCSP(root);
+  const server = await startMockServer({ root, csp });
+  return { url: server.url, close: () => server.close() };
 }
