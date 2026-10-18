@@ -13,12 +13,14 @@ import (
 )
 
 const (
-	pageIndexName  = "static/index.html"
-	pageScriptName = "static/app.js"
-	pageStyleName  = "static/style.css"
+	pageIndexName     = "static/index.html"
+	pageScriptName    = "static/app.js"
+	pageStyleName     = "static/style.css"
+	pageKitStyleName  = "static/ui-kit.css"
+	pageKitScriptName = "static/ui-kit.js"
 )
 
-//go:embed static/index.html static/app.js static/style.css
+//go:embed static/index.html static/app.js static/style.css static/ui-kit.css static/ui-kit.js
 var pageAssets embed.FS
 
 func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -50,10 +52,12 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 }
 
 const (
-	publicPathDNS  = "dns"
-	publicPathHTML = "html"
-	publicPathJS   = "js"
-	publicPathCSS  = "css"
+	publicPathDNS    = "dns"
+	publicPathHTML   = "html"
+	publicPathJS     = "js"
+	publicPathCSS    = "css"
+	publicPathKitJS  = "kit-js"
+	publicPathKitCSS = "kit-css"
 )
 
 func classifyPublicPath(raw string) (kind, redirect string) {
@@ -71,6 +75,10 @@ func classifyPublicPath(raw string) (kind, redirect string) {
 		return publicPathJS, ""
 	case cleaned == "/style.css" || strings.HasSuffix(cleaned, "/style.css"):
 		return publicPathCSS, ""
+	case cleaned == "/ui-kit.js" || strings.HasSuffix(cleaned, "/ui-kit.js"):
+		return publicPathKitJS, ""
+	case cleaned == "/ui-kit.css" || strings.HasSuffix(cleaned, "/ui-kit.css"):
+		return publicPathKitCSS, ""
 	case cleaned == "/index.html" || strings.HasSuffix(cleaned, "/index.html"):
 		return publicPathHTML, ""
 	}
@@ -101,6 +109,10 @@ func (service *Service) servePage(writer http.ResponseWriter, request *http.Requ
 		name = pageScriptName
 	case publicPathCSS:
 		name = pageStyleName
+	case publicPathKitJS:
+		name = pageKitScriptName
+	case publicPathKitCSS:
+		name = pageKitStyleName
 	}
 	serveEmbeddedPage(writer, request, name)
 }

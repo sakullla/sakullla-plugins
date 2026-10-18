@@ -17,6 +17,7 @@ export const scenes = [
     run: async (ui) => {
       await ui.waitFor("#doh-url");
       await ui.waitFor("#copy-doh-url");
+      await ui.waitFor(".doh-help > summary");
     },
   },
 ];

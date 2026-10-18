@@ -1,20 +1,6 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = "light";
-  try {
-    const raw = window.parent && window.parent !== window
-      ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) theme = mapped;
-  } catch (_error) {
-    theme = "light";
-  }
-  document.documentElement.setAttribute("data-theme", theme);
-};
-
-applyHostTheme();
+/* DoH endpoint page.
+   The endpoint URL is derived from the page's own origin and pathname; the
+   shared ui-kit owns theme resolution and clipboard/toast behaviour. */
 
 const publicBase = () => {
   const origin = window.location.origin.replace(/\/$/, "");
@@ -23,44 +9,89 @@ const publicBase = () => {
   pathname = pathname.replace(/\/+$/, "");
   return origin + pathname;
 };
+
 const dohUrl = publicBase() + "/dns-query";
 
 const urlNode = document.querySelector("#doh-url");
+const copyButton = document.querySelector("#copy-doh-url");
+const statusNode = document.querySelector("#copy-status");
+
 if (urlNode) {
   urlNode.textContent = dohUrl;
 }
 
-const copyButton = document.querySelector("#copy-doh-url");
-const statusNode = document.querySelector("#copy-status");
-
-const showStatus = (message, isError) => {
+const showStatus = (message, state) => {
   if (!statusNode) {
     return;
   }
   statusNode.hidden = !message;
   statusNode.textContent = message || "";
-  statusNode.dataset.error = isError ? "true" : "false";
+  if (state) {
+    statusNode.dataset.state = state;
+  } else {
+    delete statusNode.dataset.state;
+  }
 };
 
-const copyText = async (text) => {
-  const value = String(text || "");
-  if (!value) {
-    return;
+const copyText = (text) => {
+  if (window.NREUI && typeof window.NREUI.copyText === "function") {
+    return Promise.resolve(window.NREUI.copyText(text));
   }
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(value);
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => false
+    );
+  }
+  return Promise.resolve(false);
+};
+
+const setBusy = (busy) => {
+  if (!copyButton) {
     return;
   }
-  throw new Error("当前环境无法复制");
+  if (window.NREUI && typeof window.NREUI.setBusy === "function") {
+    window.NREUI.setBusy(copyButton, busy);
+    return;
+  }
+  copyButton.disabled = busy;
 };
+
+const selectUrl = () => {
+  if (!urlNode) {
+    return;
+  }
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (!selection) {
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(urlNode);
+  selection.removeAllRanges();
+  selection.addRange(range);
+};
+
+if (urlNode) {
+  urlNode.title = "点击全选";
+  urlNode.addEventListener("click", selectUrl);
+}
 
 if (copyButton) {
   copyButton.addEventListener("click", async () => {
+    setBusy(true);
     try {
-      await copyText(dohUrl);
-      showStatus("已复制。", false);
+      const copied = await copyText(dohUrl);
+      if (copied) {
+        showStatus("已复制地址。", "success");
+      } else {
+        selectUrl();
+        showStatus("复制失败，请手动选择地址。", "error");
+      }
     } catch (_error) {
-      showStatus("当前环境无法复制，请手动选择地址。", true);
+      selectUrl();
+      showStatus("复制失败，请手动选择地址。", "error");
+    } finally {
+      setBusy(false);
     }
   });
 }

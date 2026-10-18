@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 func TestHomepageServesChineseGuideWithoutDNS(t *testing.T) {
@@ -29,29 +31,39 @@ func TestHomepageServesChineseGuideWithoutDNS(t *testing.T) {
 	if strings.Contains(contentType, "application/dns-message") {
 		t.Fatal("homepage returned DNS media type")
 	}
+	assertSelfOnlyUIHeaders(t, recorder)
 	page := recorder.Body.String()
 	for _, want := range []string{
 		`lang="zh-CN"`,
+		`data-theme="light"`,
+		`data-theme-mode="standalone"`,
+		`data-theme-key="doh.theme"`,
 		"DNS over HTTPS",
 		"/dns-query",
 		"Chrome",
 		"Edge",
-		"Firefox",
 		"Windows 11",
 		"安全 DNS",
 		"加密 DNS",
 		`id="doh-url"`,
 		`id="copy-doh-url"`,
+		`id="copy-status"`,
 		"复制地址",
+		`href="ui-kit.css"`,
+		`src="ui-kit.js"`,
 		`href="style.css"`,
 		`src="app.js"`,
+		"<details",
+		"ui-help",
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("homepage missing %q", want)
 		}
 	}
-	if strings.Contains(page, "私人 DNS") {
-		t.Fatal("homepage treats Android private DNS as a fill-in for this URL")
+	for _, banned := range []string{"私人 DNS", `<style`, "onclick=", `src="http`, `href="http`} {
+		if strings.Contains(page, banned) {
+			t.Fatalf("homepage must not contain %q", banned)
+		}
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("homepage entered upstream calls=%d", calls.Load())
@@ -60,11 +72,8 @@ func TestHomepageServesChineseGuideWithoutDNS(t *testing.T) {
 
 func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 	service, calls := homepageService(t)
-	script := httptest.NewRecorder()
-	service.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "/app.js", nil))
-	if script.Code != http.StatusOK {
-		t.Fatalf("script status=%d", script.Code)
-	}
+
+	script := servePageAsset(t, service, "/app.js", "text/javascript")
 	js := script.Body.String()
 	for _, want := range []string{
 		"window.location.origin",
@@ -72,71 +81,72 @@ func TestHomepageAssetsAndUnknownPaths(t *testing.T) {
 		`"/dns-query"`,
 		"navigator.clipboard",
 		"#copy-doh-url",
+		"NREUI.copyText",
+		"已复制地址。",
+		"复制失败，请手动选择地址。",
+		"selectUrl",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing %q", want)
 		}
 	}
 
-	stylesheet := httptest.NewRecorder()
-	service.ServeHTTP(stylesheet, httptest.NewRequest(http.MethodGet, "/style.css", nil))
-	if stylesheet.Code != http.StatusOK {
-		t.Fatalf("stylesheet status=%d", stylesheet.Code)
-	}
+	stylesheet := servePageAsset(t, service, "/style.css", "text/css")
 	css := stylesheet.Body.String()
 	for _, want := range []string{
-		"@media (max-width: 720px)",
-		"grid-template-columns: 1fr",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"width: calc(100% - 2.5rem)",
+		"var(--ui-primary-soft",
+		"var(--ui-text-secondary",
+		"var(--ui-danger-text",
 		"overflow-wrap: anywhere",
+		"@media (max-width: 720px)",
+		"@media (max-width: 480px)",
+		".doh-endpoint__value",
+		".doh-help",
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("stylesheet missing viewport rule %q", want)
+			t.Fatalf("stylesheet missing %q", want)
 		}
 	}
-	if strings.Contains(css, "min(52rem") || strings.Contains(css, "min(64rem") || strings.Contains(css, "min(880px") {
-		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	if strings.Contains(css, "[data-theme=") {
+		t.Fatal("page stylesheet must not own theme palettes; use ui-kit tokens")
 	}
-	endpoint := cssRule(css, ".endpoint")
-	if !strings.Contains(endpoint, "max-width: min(46rem, 100%)") {
-		t.Fatal(".endpoint still fills main without a capped operation group")
+	if strings.Contains(css, "#d94880") || strings.Contains(css, "#f4a0c0") || strings.Contains(css, "#f5f4f2") {
+		t.Fatal("stylesheet still contains sakura theme colors")
 	}
-	for _, want := range []string{
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
-		"repeat(3, minmax(0, 1fr))",
-		"repeat(3, minmax(14rem, 1fr))",
-		"repeat(3, minmax(16rem, 1fr))",
-	} {
-		if !strings.Contains(css, want) {
-			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
+
+	kitCSS := servePageAsset(t, service, "/ui-kit.css", "text/css")
+	for _, want := range []string{`[data-theme="fresh-green"]`, `[data-theme="dark"]`, "--ui-primary:", ".ui-help"} {
+		if !strings.Contains(kitCSS.Body.String(), want) {
+			t.Fatalf("ui-kit.css missing %q", want)
+		}
+	}
+	kitJS := servePageAsset(t, service, "/ui-kit.js", "text/javascript")
+	for _, want := range []string{"NREUI", "data-theme-mode", "resolveTheme", "copyText"} {
+		if !strings.Contains(kitJS.Body.String(), want) {
+			t.Fatalf("ui-kit.js missing %q", want)
 		}
 	}
 
-	index := httptest.NewRecorder()
-	service.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/index.html", nil))
-	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), "DNS over HTTPS") {
-		t.Fatalf("index.html status=%d", index.Code)
+	index := servePageAsset(t, service, "/index.html", "text/html")
+	if !strings.Contains(index.Body.String(), "DNS over HTTPS") {
+		t.Fatal("index.html served an unexpected page")
 	}
-	assertConsoleSkin(t, index.Body.String(), js, css)
 
-	prefixed := httptest.NewRecorder()
-	service.ServeHTTP(prefixed, httptest.NewRequest(http.MethodGet, "/doh/", nil))
-	if prefixed.Code != http.StatusOK || !strings.Contains(prefixed.Body.String(), "DNS over HTTPS") || calls.Load() != 0 {
-		t.Fatalf("prefixed homepage status=%d calls=%d", prefixed.Code, calls.Load())
+	prefixed := servePageAsset(t, service, "/doh/", "text/html")
+	if !strings.Contains(prefixed.Body.String(), "DNS over HTTPS") {
+		t.Fatalf("prefixed homepage status=%d", prefixed.Code)
 	}
 	redirect := httptest.NewRecorder()
 	service.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/doh", nil))
 	if redirect.Code != http.StatusPermanentRedirect || redirect.Header().Get("Location") != "/doh/" {
 		t.Fatalf("prefix redirect status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
 	}
-	prefixedScript := httptest.NewRecorder()
-	service.ServeHTTP(prefixedScript, httptest.NewRequest(http.MethodGet, "/doh/app.js", nil))
-	if prefixedScript.Code != http.StatusOK || !strings.Contains(prefixedScript.Body.String(), "window.location.pathname") {
+	prefixedKit := servePageAsset(t, service, "/doh/ui-kit.css", "text/css")
+	if !strings.Contains(prefixedKit.Body.String(), "--ui-primary:") {
+		t.Fatal("prefixed ui-kit.css served an unexpected body")
+	}
+	prefixedScript := servePageAsset(t, service, "/doh/app.js", "text/javascript")
+	if !strings.Contains(prefixedScript.Body.String(), "window.location.pathname") {
 		t.Fatalf("prefixed script status=%d", prefixedScript.Code)
 	}
 
@@ -194,12 +204,16 @@ func TestClassifyPublicPath(t *testing.T) {
 		{path: "/index.html", kind: publicPathHTML},
 		{path: "/app.js", kind: publicPathJS},
 		{path: "/style.css", kind: publicPathCSS},
+		{path: "/ui-kit.js", kind: publicPathKitJS},
+		{path: "/ui-kit.css", kind: publicPathKitCSS},
 		{path: "/dns-query", kind: publicPathDNS},
 		{path: "/doh", kind: publicPathHTML, redirect: "/doh/"},
 		{path: "/doh/", kind: publicPathHTML},
 		{path: "/doh/index.html", kind: publicPathHTML},
 		{path: "/doh/app.js", kind: publicPathJS},
 		{path: "/doh/style.css", kind: publicPathCSS},
+		{path: "/doh/ui-kit.js", kind: publicPathKitJS},
+		{path: "/doh/ui-kit.css", kind: publicPathKitCSS},
 		{path: "/doh/dns-query", kind: publicPathDNS},
 		{path: "/gateway/v1/dns-query", kind: publicPathDNS},
 	}
@@ -221,6 +235,33 @@ func TestPluginYAMLHasNoControlPlaneUI(t *testing.T) {
 		if strings.Contains(text, banned) {
 			t.Fatalf("plugin.yaml must not declare %q", banned)
 		}
+	}
+}
+
+func servePageAsset(t *testing.T, service *Service, target, wantContentType string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	service.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s status=%d", target, recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, wantContentType) {
+		t.Fatalf("%s content-type=%q want prefix %q", target, got, wantContentType)
+	}
+	assertSelfOnlyUIHeaders(t, recorder)
+	return recorder
+}
+
+func assertSelfOnlyUIHeaders(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := recorder.Header().Get("Content-Security-Policy"); got != pluginsdk.PluginUIContentSecurityPolicy {
+		t.Fatalf("content-security-policy=%q", got)
+	}
+	if got := recorder.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("referrer-policy=%q", got)
+	}
+	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("x-content-type-options=%q", got)
 	}
 }
 
@@ -278,49 +319,4 @@ func homepagePositiveResponse(query []byte) []byte {
 	binary.BigEndian.PutUint16(response[2:4], 0x8180)
 	binary.BigEndian.PutUint16(response[6:8], 1)
 	return append(response, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 1)
-}
-
-func assertConsoleSkin(t *testing.T, page, script, style string) {
-	t.Helper()
-	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
-		t.Fatal("stylesheet still contains sakura theme colors")
-	}
-	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
-		t.Fatal("page still uses sakura-day as the rendered theme")
-	}
-	if !strings.Contains(page, `data-theme="light"`) {
-		t.Fatal("page default theme is not light")
-	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
-		t.Fatal("stylesheet missing light/dark theme selectors")
-	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
-	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
-	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
-	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
-	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
-	}
-}
-
-func cssRule(css, selector string) string {
-	needle := selector + " {"
-	start := strings.Index(css, needle)
-	if start < 0 {
-		return ""
-	}
-	rest := css[start:]
-	end := strings.Index(rest, "}")
-	if end < 0 {
-		return rest
-	}
-	return rest[:end]
 }
