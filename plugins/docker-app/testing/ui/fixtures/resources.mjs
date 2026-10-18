@@ -5,7 +5,7 @@ export function createResourcesState() {
     Object.assign(this, {
       files:new Map([[".",null],["docs",null],["docs/config.txt","initial text\n"],["compose.yaml","services:\n  web:\n    image: nginx:1.27\n"],["root.txt","root text\n"],["binary.bin","\u0000binary"],["large.txt","x".repeat(1048577)]]),
       calls:[], logsCalls:[], readError:false, writeError:false, listError:false, listErrorOwner:"", listErrorAfterMkdir:false, rulesError:false, rulesWriteError:false, rulesErrorAfterWrite:false,
-      logs:{web:"web ready\n",worker:"worker ready\n"}, logsError:false,
+      logs:{web:"\x1b[1;34mweb ready\x1b[0m\n\x1b[32mGET / 200\x1b[0m\n\x1b[33mcache warming\x1b[0m\n",worker:"worker ready\n"}, logsError:false,
       apps:[
         makeApp("alpha","node-a",{ports:[8080,9090],services:["web","worker"],rules:[
           {ref:"web-entry",domain:"http://web.example.test/media",port:8080,enabled:true},

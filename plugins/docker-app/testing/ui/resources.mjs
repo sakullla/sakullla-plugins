@@ -235,6 +235,32 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     assert.equal(await value("#agent-select"),"node-b");
   });
 
+  await test("logs render ANSI colors and resets as safe text", async () => {
+    await reset("logs", "alpha", () => {
+      state.logs.web = "\x1b[1;34mblue\ncontinued\x1b[0m plain\n\x1b[38;5;196mindexed\x1b[0m \x1b[38;2;12;34;56mrgb\x1b[0m\n\x1b]8;;https://example.test\x07<script>unsafe</script>\x1b]8;;\x07\x1b[2K done\n";
+    });
+    await eventually(() => text("#logs-view").then((value) => value.includes("unsafe")), "ANSI snapshot");
+    const actual = await page.evaluate(`(() => {
+      const root = document.querySelector('#logs-view');
+      const spans = [...root.querySelectorAll('.log-line > span')];
+      const find = (text) => spans.find((span) => span.textContent === text);
+      return {text:root.textContent, blue:getComputedStyle(find('blue')).color,
+        continued:getComputedStyle(find('continued')).color, bold:getComputedStyle(find('blue')).fontWeight,
+        plain:find(' plain').style.color, indexed:getComputedStyle(find('indexed')).color,
+        rgb:getComputedStyle(find('rgb')).color, markup:root.querySelectorAll('script,a').length};
+    })()`);
+    assert.equal(actual.blue,"rgb(96, 165, 250)");
+    assert.equal(actual.continued,actual.blue);
+    assert.equal(actual.bold,"700");
+    assert.equal(actual.plain,"");
+    assert.equal(actual.indexed,"rgb(255, 0, 0)");
+    assert.equal(actual.rgb,"rgb(12, 34, 56)");
+    assert.equal(actual.markup,0);
+    assert.match(actual.text,/<script>unsafe<\/script>/);
+    assert.doesNotMatch(actual.text,/\x1b/);
+    await capture("logs-ansi",1440); await capture("logs-ansi",375);
+  });
+
   await test("logs distinguish empty, failure and retained snapshots and reject old services", async () => {
     await reset("logs"); await eventually(() => text("#logs-view").then((value) => value.includes("web ready")),"initial web snapshot");
     const previous = await text("#logs-view");

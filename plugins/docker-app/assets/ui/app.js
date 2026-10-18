@@ -2882,11 +2882,73 @@ const setLogsState = (text, isError) => {
   logsStatus.dataset.error = isError ? "true" : "false";
 };
 
+const logPalette = ["#1e293b", "#f87171", "#4ade80", "#facc15", "#60a5fa", "#e879f9", "#22d3ee", "#e2e8f0", "#94a3b8", "#fca5a5", "#86efac", "#fde68a", "#93c5fd", "#f0abfc", "#67e8f9", "#ffffff"];
+const logIndexedColor = (index) => {
+  if (index < 16) return logPalette[index];
+  if (index >= 232) return `rgb(${Array(3).fill(8 + (index - 232) * 10).join(",")})`;
+  const value = index - 16;
+  const channel = (n) => n ? 55 + n * 40 : 0;
+  return `rgb(${channel(Math.floor(value / 36))},${channel(Math.floor(value / 6) % 6)},${channel(value % 6)})`;
+};
+const appendLogANSI = (node, line, state) => {
+  const append = (text) => {
+    if (!text) return;
+    const span = document.createElement("span");
+    span.textContent = text;
+    if (state.fg) span.style.color = state.fg;
+    if (state.bg) span.style.backgroundColor = state.bg;
+    if (state.bold) span.style.fontWeight = "700";
+    if (state.dim) span.style.opacity = "0.7";
+    if (state.italic) span.style.fontStyle = "italic";
+    if (state.underline) span.style.textDecoration = "underline";
+    node.append(span);
+  };
+  // Only SGR changes presentation. OSC links, cursor movement and other
+  // terminal commands are discarded; log content always stays a text node.
+  const controls = /\x1b(?:\[([0-?]*)([ -/]*)([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\|$)|[@-_])|[\x00-\x08\x0b-\x1f\x7f]/g;
+  let start = 0;
+  for (const match of line.matchAll(controls)) {
+    append(line.slice(start, match.index));
+    start = match.index + match[0].length;
+    if (match[3] !== "m" || match[2] || !/^[\d;]*$/.test(match[1])) continue;
+    const codes = match[1].split(";").map((value) => Number(value || 0));
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
+      if (code === 0) { for (const key of Object.keys(state)) delete state[key]; }
+      else if (code === 1) state.bold = true;
+      else if (code === 2) state.dim = true;
+      else if (code === 3) state.italic = true;
+      else if (code === 4) state.underline = true;
+      else if (code === 22) { delete state.bold; delete state.dim; }
+      else if (code === 23) delete state.italic;
+      else if (code === 24) delete state.underline;
+      else if (code === 39) delete state.fg;
+      else if (code === 49) delete state.bg;
+      else if (code >= 30 && code <= 37) state.fg = logPalette[code - 30];
+      else if (code >= 90 && code <= 97) state.fg = logPalette[code - 90 + 8];
+      else if (code >= 40 && code <= 47) state.bg = logPalette[code - 40];
+      else if (code >= 100 && code <= 107) state.bg = logPalette[code - 100 + 8];
+      else if (code === 38 || code === 48) {
+        const key = code === 38 ? "fg" : "bg";
+        const mode = codes[++i];
+        const size = mode === 5 ? 1 : mode === 2 ? 3 : 0;
+        const values = codes.slice(i + 1, i + 1 + size);
+        if (size && values.length === size && values.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+          state[key] = mode === 5 ? logIndexedColor(values[0]) : `rgb(${values.join(",")})`;
+        }
+        i += size;
+      }
+    }
+  }
+  append(line.slice(start));
+};
+
 const paintLogsView = () => {
   if (!logsView) return;
   const raw = logsView.textContent || "";
   if (!raw) return;
   const frag = document.createDocumentFragment();
+  const ansi = {};
   raw.replace(/\n$/, "").split("\n").forEach((line) => {
     const row = document.createElement("span");
     row.className = "log-line";
@@ -2895,7 +2957,9 @@ const paintLogsView = () => {
     else if (/\b(warn|warning)\b/.test(lower)) row.dataset.level = "warn";
     else if (/\b(ready|started|listening)\b/.test(lower)) row.dataset.level = "ok";
     const time = line.match(/^(\d{4}-\d{2}-\d{2}[T ][\d:.Z+-]+)\s*(.*)$/);
-    if (time) {
+    if (line.includes("\x1b") || Object.keys(ansi).length) {
+      appendLogANSI(row, line || " ", ansi);
+    } else if (time) {
       const stamp = document.createElement("span");
       stamp.className = "log-time";
       stamp.textContent = `${time[1]} `;
@@ -2931,7 +2995,7 @@ const fetchLogs = async () => {
   const appID = detailApp.id;
   const key = `${selectedAgentID}/${appID}/${service}`;
   if (logsSnapshotKey !== key) { resetLogsTerminal(); logsSnapshotKey = key; }
-  logsContext.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${appID} · 服务 ${service} · 每 4 秒读取快照`;
+  logsContext.textContent = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${appID} · 服务 ${service} · 最近 200 行 · 每 4 秒读取快照`;
   const seq = ++logsSeq;
   const context = contextSnapshot();
   const current = () => seq === logsSeq && contextCurrent(context) && logsContextCurrent() && detailApp.id === appID && logsService.value === service;
