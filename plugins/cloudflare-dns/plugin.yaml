@@ -1,6 +1,6 @@
 schema_version: 1
 id: cloudflare-dns
-version: 0.1.18
+version: 0.1.19
 name: Cloudflare DNS
 description: 按域名后缀绑定一家 DNS 服务商，解析 Cloudflare Token，并写删国内 DNS 记录
 compatibility:
