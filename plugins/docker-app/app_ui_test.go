@@ -787,7 +787,7 @@ func TestAppUIPageOffersGroupHTTPIngressOnPublishedPorts(t *testing.T) {
 		"app-actions-primary",
 		"app-actions-secondary",
 		"app-actions-danger",
-		`isPrimary ? "btn-primary" : "btn-secondary"`,
+		`isPrimary ? "ui-btn ui-btn--sm" : "ui-btn ui-btn--secondary ui-btn--sm"`,
 	} {
 		if !strings.Contains(script, token) {
 			t.Fatalf("app.js missing %q", token)
@@ -3575,7 +3575,7 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if strings.Contains(page, "Agent 执行面") {
 		t.Fatal("first screen still presents Agent 执行面 as primary copy")
 	}
-	if !strings.Contains(page, `id="agent-select"`) || !strings.Contains(page, `data-agent-picker="workspace"`) || !strings.Contains(page, `class="page-head-agent"`) {
+	if !strings.Contains(page, `id="agent-select"`) || !strings.Contains(page, `data-agent-picker="workspace"`) || !strings.Contains(page, `class="ui-page-actions page-head-agent"`) {
 		t.Fatal("node picker is no longer in the page head")
 	}
 	if !strings.Contains(page, `id="app-list"`) || !strings.Contains(page, `data-card-wall="apps"`) || !strings.Contains(page, `id="app-detail"`) {
@@ -3623,7 +3623,7 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 		t.Fatal("card renderer is missing")
 	}
 	listRender := js[renderStart:renderEnd]
-	if !strings.Contains(listRender, `className = "app-card"`) {
+	if !strings.Contains(listRender, `className = "ui-card app-card"`) {
 		t.Fatal("application list is not a card wall")
 	}
 	if !strings.Contains(listRender, "[data-app-name]") || !strings.Contains(listRender, "[data-app-status]") {
@@ -3739,13 +3739,13 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if selection == "" {
 		t.Fatal("YAML/.env editors are missing a selection rule")
 	}
-	if strings.Contains(selection, "color: transparent") || !strings.Contains(selection, "-webkit-text-fill-color: var(--color-text-primary)") {
+	if strings.Contains(selection, "color: transparent") || !strings.Contains(selection, "-webkit-text-fill-color: var(--ui-text)") {
 		t.Fatal("selected YAML/.env text is still invisible")
 	}
 	if !strings.Contains(stylesheet, "max-height: 22rem") || !strings.Contains(stylesheet, "max-height: 14rem") || !strings.Contains(stylesheet, "field-sizing: fixed") {
 		t.Fatal("YAML/.env editors can still grow with content instead of scrolling")
 	}
-	headStart := strings.Index(page, `class="page-head"`)
+	headStart := strings.Index(page, `class="page-head ui-page-head"`)
 	headEnd := strings.Index(page, `id="app-loading"`)
 	if headStart < 0 || headEnd < 0 || headEnd < headStart {
 		t.Fatal("page is missing page-head / loading regions")
@@ -3755,7 +3755,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		`id="agent-select"`,
 		`data-agent-picker="workspace"`,
 		`class="agent-search-select"`,
-		`class="page-head-agent"`,
+		`class="ui-page-actions page-head-agent"`,
 		`id="engine-status"`,
 	} {
 		if !strings.Contains(head, want) {
@@ -3765,7 +3765,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	for _, want := range []string{
 		`id="app-context"`,
 		`class="context-region"`,
-		`class="state-panel"`,
+		`class="state-panel ui-empty"`,
 		`id="app-undeployed"`,
 		`id="app-node-empty"`,
 		`id="app-offline"`,
@@ -3837,7 +3837,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("refresh is not beside the node picker")
 	}
 	selectedMark := cssRule(stylesheet, `.files-list li[aria-selected="true"] .files-list-name::before`)
-	if !strings.Contains(selectedMark, "var(--color-primary") || !strings.Contains(selectedMark, "background-image") {
+	if !strings.Contains(selectedMark, "var(--ui-primary") || !strings.Contains(selectedMark, "background-image") {
 		t.Fatal("selected file row does not check the leading control")
 	}
 	for _, want := range []string{
@@ -3938,23 +3938,20 @@ func assertConsoleSkin(t *testing.T, page, script, style string) {
 	if !strings.Contains(page, `data-theme="light"`) {
 		t.Fatal("page default theme is not light")
 	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
-		t.Fatal("stylesheet missing light/dark theme selectors")
+	if !strings.Contains(page, `data-theme-mode="host"`) {
+		t.Fatal("page does not follow the host theme mode")
 	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
+	if !strings.Contains(page, `src="ui-kit.js"`) || !strings.Contains(page, `href="ui-kit.css"`) {
+		t.Fatal("page does not load the shared ui-kit")
 	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
+	if !strings.Contains(style, "var(--ui-primary)") || !strings.Contains(style, "var(--ui-text)") {
+		t.Fatal("stylesheet does not use ui-kit tokens")
 	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	if strings.Contains(style, `[data-theme=`) {
+		t.Fatal("stylesheet duplicates theme blocks instead of using ui-kit")
 	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
-	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	if strings.Contains(script, "applyHostTheme") {
+		t.Fatal("script still owns host theme mapping instead of ui-kit")
 	}
 }
 
@@ -4158,9 +4155,9 @@ func assertFilesManagerPage(t *testing.T) {
 		t.Fatal("files manager does not start with no file selected")
 	}
 	for _, markup := range []string{
-		`id="files-edit" type="button" class="btn-secondary" disabled`,
-		`id="files-download" type="button" class="btn-secondary" disabled`,
-		`id="files-delete" type="button" class="btn-link danger" disabled`,
+		`id="files-edit" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled`,
+		`id="files-download" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled`,
+		`id="files-delete" type="button" class="ui-btn ui-btn--danger-soft ui-btn--sm" disabled`,
 	} {
 		if !strings.Contains(template, markup) {
 			t.Fatalf("selection action is not disabled before a file is selected: %s", markup)
@@ -4218,7 +4215,7 @@ func assertFilesManagerPage(t *testing.T) {
 			t.Fatalf("stylesheet missing files-manager rule %q", want)
 		}
 	}
-	if !strings.Contains(cssRule(style, `.files-list li[aria-selected="true"]`), "var(--color-primary") {
+	if !strings.Contains(cssRule(style, `.files-list li[aria-selected="true"]`), "var(--ui-primary") {
 		t.Fatal("selected file row does not use theme variables")
 	}
 	if strings.Contains(cssRule(style, ".files-toolbar"), "flex-wrap: wrap") || strings.Contains(cssRule(style, ".files-toolbar label"), "flex: 1 1") {
@@ -4227,7 +4224,7 @@ func assertFilesManagerPage(t *testing.T) {
 	if !strings.Contains(cssRule(style, ".files-selection"), "flex-wrap: nowrap") {
 		t.Fatal("selection toolbar is not a contextual action row")
 	}
-	if !strings.Contains(cssRule(style, ".files-path"), "var(--color-bg-sunken)") || !strings.Contains(cssRule(style, ".files-browser"), "var(--color-bg-surface)") {
+	if !strings.Contains(cssRule(style, ".files-path"), "var(--ui-sunken)") || !strings.Contains(cssRule(style, ".files-browser"), "var(--ui-surface)") {
 		t.Fatal("file browser chrome does not keep theme variables")
 	}
 
@@ -4591,7 +4588,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("application list still embeds %q", forbidden)
 		}
 	}
-	if !strings.Contains(listRender, `className = "app-card"`) {
+	if !strings.Contains(listRender, `className = "ui-card app-card"`) {
 		t.Fatal("application list is not a card wall")
 	}
 	if !strings.Contains(js, `textContent = "详情"`) || !strings.Contains(js, "无发布端口") {
@@ -4763,17 +4760,17 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("management page grew %q copy", forbidden)
 		}
 	}
-	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", ".files-breadcrumb", ".files-path", ".files-selection", `li[aria-selected="true"]`, "--shadow-focus", ".detail-head", ".http-rule-open", ".create-templates", `[data-theme="light"]`, `[data-theme="dark"]`} {
+	for _, want := range []string{".app-card", ".detail-nav", ".logs-terminal", ".files-browser", ".files-breadcrumb", ".files-path", ".files-selection", `li[aria-selected="true"]`, "--ui-focus-ring", ".detail-head", ".http-rule-open", ".create-templates", ".ui-page", ".ui-tab"} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("stylesheet missing workspace rule %q", want)
 		}
 	}
 	detailHeadCSS := cssRule(style, ".detail-head")
-	if !strings.Contains(detailHeadCSS, "position: sticky") || !strings.Contains(detailHeadCSS, "background: var(--color-bg-surface)") {
+	if !strings.Contains(detailHeadCSS, "position: sticky") || !strings.Contains(detailHeadCSS, "background: var(--ui-surface)") {
 		t.Fatal("detail header is not a persistent theme-aware chrome")
 	}
-	if !strings.Contains(style, `#app-workspace:has(#app-create:not([hidden])) #app-list-panel`) {
-		t.Fatal("deploy form can still stack on the card wall")
+	if !strings.Contains(html, `class="ui-dialog ui-dialog--drawer"`) || !strings.Contains(html, `id="app-create"`) {
+		t.Fatal("deploy form is not a drawer")
 	}
 	setStart := strings.Index(js, "const setDetailSection = async (section) => {")
 	setEnd := strings.Index(js, "const leaveDetail = async ({ force } = {}) => {")
@@ -4841,7 +4838,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("syncListPanel is missing")
 	}
 	syncFn := js[syncStart:syncEnd]
-	if !strings.Contains(syncFn, "listPanel.hidden = inDetail || creating") {
+	if !strings.Contains(syncFn, "listPanel.hidden = inDetail") {
 		t.Fatal("deploy form still stacks over the card wall as the main operation")
 	}
 	if !strings.Contains(fetchFn, "logsView.textContent = payload.logs") {
@@ -5687,4 +5684,110 @@ func (store *delayedDeploymentStore) CompareAndSwap(ctx context.Context, id stri
 
 func (store *delayedDeploymentStore) DeleteCAS(ctx context.Context, id string, version, fence uint64) error {
 	return store.base.DeleteCAS(ctx, id, version, fence)
+}
+
+func TestAppUIPageUsesSharedKitHostThemeAndDeployDrawer(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := appUIAssets.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := appUIAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssBytes, err := appUIAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	companionBytes, err := appUIAssets.ReadFile("assets/ui/companion.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(htmlBytes)
+	js := string(scriptBytes)
+	css := string(cssBytes)
+	companion := string(companionBytes)
+
+	for _, want := range []string{
+		`data-theme-mode="host"`,
+		`src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`class="page-head ui-page-head"`,
+		`class="ui-dialog ui-dialog--drawer"`,
+		`id="app-create"`,
+		`id="detail-domain"`,
+		`class="ui-tabs detail-nav"`,
+		`role="tablist"`,
+		`role="tab"`,
+		`class="ui-tab detail-nav-item"`,
+		`class="ui-card app-card"`,
+		`class="ui-card panel"`,
+		`class="ui-input"`,
+		`class="ui-select"`,
+		`data-minimized="true"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing shared-kit hook %q", want)
+		}
+	}
+	for _, want := range []string{
+		`openDialog(createPanel, idInput)`,
+		`createPanel.close()`,
+		`companion-expand`,
+		`className = "ui-card app-card"`,
+		`ui-btn ui-btn--danger-soft`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing kit behavior %q", want)
+		}
+	}
+	if strings.Contains(js, "applyHostTheme") {
+		t.Fatal("app.js still owns host theme mapping instead of ui-kit")
+	}
+	if strings.Contains(css, "[data-theme=") || strings.Contains(css, "--color-") {
+		t.Fatal("style.css duplicates theme tokens instead of using ui-kit tokens")
+	}
+	for _, want := range []string{"var(--ui-primary)", "var(--ui-text)", "var(--ui-surface)", "var(--ui-border", "@media (max-width: 420px)"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("style.css missing ui-kit token/rule %q", want)
+		}
+	}
+	for _, want := range []string{
+		`document.addEventListener("companion-expand"`,
+		`if(companion.dataset.minimized!=="true")load();`,
+		`companion.dataset.renderer="idle"`,
+		`if(loaded)return;`,
+	} {
+		if !strings.Contains(companion, want) {
+			t.Fatalf("companion.js is not lazy about artwork: %q", want)
+		}
+	}
+	if !strings.Contains(page, `id="deploy-toggle"`) || !strings.Contains(page, `id="app-search"`) || !strings.Contains(page, `id="app-filter"`) {
+		t.Fatal("list first screen lost search/filter/deploy hooks")
+	}
+	for _, section := range []string{"overview", "compose", "files", "logs", "http"} {
+		if !strings.Contains(page, `data-section-panel="`+section+`"`) {
+			t.Fatalf("detail section %q is missing", section)
+		}
+	}
+	controller := newUIController(t)
+	for _, name := range []string{"ui-kit.css", "ui-kit.js"} {
+		if !strings.Contains(string(manifest), "- assets/ui/"+name) {
+			t.Fatalf("ui-kit asset omitted from package: %s", name)
+		}
+		want, err := appUIAssets.ReadFile("assets/ui/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		controller.ServeHTTP(response, uiRequest(http.MethodGet, "/"+name, ""))
+		if response.Code != http.StatusOK || response.Body.String() != string(want) {
+			t.Fatalf("ui-kit asset response status=%d bytes=%d", response.Code, response.Body.Len())
+		}
+	}
 }

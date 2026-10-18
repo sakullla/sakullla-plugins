@@ -39,6 +39,8 @@ assets:
   - assets/ui/companion-idle.webp
   - assets/ui/companion-blink.webp
   - assets/ui/companion-wink.webp
+  - assets/ui/ui-kit.css
+  - assets/ui/ui-kit.js
   - assets/companion-art.json
 permissions:
   - name: http.rule

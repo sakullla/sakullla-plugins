@@ -1,25 +1,5 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = "light";
-  try {
-    const embedded = window.parent && window.parent !== window;
-    const raw = embedded
-      ? window.parent.document.documentElement.getAttribute("data-theme")
-      : (window.localStorage.getItem("theme") || document.documentElement.getAttribute("data-theme"));
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) theme = mapped;
-  } catch (_error) {
-    theme = "light";
-  }
-  if (document.documentElement.getAttribute("data-theme") !== theme) document.documentElement.setAttribute("data-theme", theme);
-};
-applyHostTheme();
-try {
-  const root = window.parent && window.parent !== window ? window.parent.document.documentElement : document.documentElement;
-  new MutationObserver(applyHostTheme).observe(root, {attributes:true,attributeFilter:["data-theme"]});
-} catch (_error) { /* Cross-origin parents use the safe initial fallback. */ }
-window.addEventListener("storage", (event) => { if (event.key === "theme" || event.key === null) applyHostTheme(); });
+// Theme resolution is owned by ui-kit.js: host mode follows localStorage.theme,
+// migrates legacy host values, and writes data-theme/data-theme-family before paint.
 
 const statusNode = document.querySelector("#app-status");
 const loadingNode = document.querySelector("#app-loading");
@@ -38,6 +18,7 @@ const detailPanel = document.querySelector("#app-detail");
 const detailTitle = document.querySelector("#detail-title");
 const detailStatus = document.querySelector("#detail-status");
 const detailOpen = document.querySelector("#detail-open");
+const detailDomain = document.querySelector("#detail-domain");
 const detailStart = document.querySelector("#detail-start");
 const detailStop = document.querySelector("#detail-stop");
 const detailRestart = document.querySelector("#detail-restart");
@@ -370,7 +351,7 @@ const setBusy = (next) => {
   }
   busy = next;
   if (next) showStatus("正在执行操作…", false, "running");
-  const roots = [workspaceNode, contextNode, document.querySelector(".page-head")].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createPanel, document.querySelector(".page-head")].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === copyScript || node === copyDaemon) return;
@@ -961,7 +942,6 @@ const mountCodeEditor = (textarea) => {
   textarea.addEventListener("scroll", () => paintCodeEditor(textarea));
   textarea.addEventListener("keydown", (event) => {
     if (event.key !== "Tab" || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
-    if (textarea.closest("dialog")) return;
     event.preventDefault();
     indentCodeEditor(textarea, event.shiftKey);
   });
@@ -1088,6 +1068,7 @@ const openCreate = async () => {
   document.querySelector("#create-context").textContent = `目标节点：${agentDisplayName(selectedAgent())}`;
   showFormFeedback(createForm, "");
   createPanel.hidden = false;
+  openDialog(createPanel, idInput);
   syncListPanel();
   if (idInput) idInput.focus();
 };
@@ -1100,7 +1081,10 @@ const closeCreate = () => {
   if (idInput) idInput.readOnly = false;
   if (createTitle) createTitle.textContent = "部署应用";
   if (createSubmit) createSubmit.textContent = "部署";
-  if (createPanel) createPanel.hidden = true;
+  if (createPanel) {
+    if (createPanel.open) createPanel.close();
+    createPanel.hidden = true;
+  }
   markCreateTemplate("blank");
   requestAnimationFrame(() => {
     paintCodeEditor(composeInput);
@@ -1111,15 +1095,14 @@ const closeCreate = () => {
 
 const syncListPanel = () => {
   const hasApps = listNode && listNode.children.length > 0;
-  const creating = createPanel && createPanel.hidden === false;
   const inDetail = view === "detail";
-  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps || creating;
-  if (listPanel) listPanel.hidden = inDetail || creating;
+  if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps;
+  if (listPanel) listPanel.hidden = inDetail;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (workspaceHead) workspaceHead.hidden = inDetail || creating;
+  if (workspaceHead) workspaceHead.hidden = inDetail;
   const canOperate = selectedAgentID && engineReady && agentOnline;
-  if (deployToggle) deployToggle.hidden = inDetail || creating || !canOperate;
-  if (diskCleanup) diskCleanup.hidden = inDetail || creating || !canOperate;
+  if (deployToggle) deployToggle.hidden = inDetail || !canOperate;
+  if (diskCleanup) diskCleanup.hidden = inDetail || !canOperate;
 };
 
 const parsePublishedPorts = (compose) => {
@@ -1518,7 +1501,7 @@ const mountAppFiles = () => {
       }
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "btn-link";
+      button.className = "ui-btn ui-btn--ghost ui-btn--sm";
       button.textContent = label;
       button.addEventListener("click", () => { if (snapshotCurrent(snapshot)) requestList(path); });
       breadcrumb.append(button);
@@ -2120,7 +2103,7 @@ const renderIgnoredClearControls = (service, { buttons = false } = {}) => persis
   if (buttons) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "btn-link";
+    button.className = "ui-btn ui-btn--ghost ui-btn--sm";
     button.dataset.tag = tag;
     button.textContent = `取消忽略 ${tag}`;
     return button;
@@ -2279,7 +2262,7 @@ const actionGroups = (app, options = {}) => {
     const isDelete = action.id === "delete";
     const button = actionButton(
       action,
-      isDelete ? "btn-link danger" : (isPrimary ? "btn-primary" : "btn-secondary"),
+      isDelete ? "ui-btn ui-btn--danger-soft ui-btn--sm" : (isPrimary ? "ui-btn ui-btn--sm" : "ui-btn ui-btn--secondary ui-btn--sm"),
       action.label || action.id,
     );
     button.addEventListener("click", (event) => {
@@ -2350,7 +2333,7 @@ const displayHost = (url) => {
 const renderApp = (app) => {
   const source = appCardTemplate && appCardTemplate.content.querySelector(".app-card");
   const card = source ? source.cloneNode(true) : document.createElement("article");
-  card.className = "app-card";
+  card.className = "ui-card app-card";
   card.dataset.id = app.id;
   card.dataset.status = app.status || "已停止";
   card.dataset.search = [app.name, app.id, ...serviceImages(app).flatMap((service) => [service.name, service.image]), app.version].filter(Boolean).join(" ").toLocaleLowerCase();
@@ -2374,7 +2357,7 @@ const renderApp = (app) => {
     else delete statusHook.dataset.status;
     if (hasUpdate && statusHook.parentNode) {
       const notice = document.createElement("span");
-      notice.className = "app-card-status";
+      notice.className = "app-card-status ui-badge";
       notice.dataset.status = "有新版本";
       notice.textContent = "有新版本";
       statusHook.parentNode.append(notice);
@@ -2637,12 +2620,12 @@ const renderOverview = (app) => {
         candidates.textContent = `候选：${candidateTags.join("、")}`;
         tools.append(candidates);
       }
-      const manage = actionButton({ id: "service-policy" }, "btn-secondary", "管理版本策略");
+      const manage = actionButton({ id: "service-policy" }, "ui-btn ui-btn--secondary ui-btn--sm", "管理版本策略");
       manage.dataset.service = service.name;
       manage.addEventListener("click", () => saveServicePolicy(app, service.name));
       tools.append(manage);
       if (service.update && (service.candidates || []).length && (app.actions || []).some((action) => action.id === "update")) {
-        const update = actionButton({id:"service-update"}, "btn-primary", "更新镜像");
+        const update = actionButton({id:"service-update"}, "ui-btn ui-btn--sm", "更新镜像");
         update.dataset.service = service.name;
         update.addEventListener("click", () => runAppAction(app, {id:"update", service:service.name}));
         tools.append(update);
@@ -2782,7 +2765,7 @@ const renderHTTP = (app) => {
   feedback.textContent = app.rules_error || "";
   feedback.hidden = !app.rules_error;
   httpPanel.append(feedback);
-  const retry = actionButton({id:"refresh-http"}, "btn-secondary", "刷新入口");
+  const retry = actionButton({id:"refresh-http"}, "ui-btn ui-btn--secondary ui-btn--sm", "刷新入口");
   retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
   httpPanel.append(retry);
   if (rules.length) {
@@ -2815,7 +2798,7 @@ const renderHTTP = (app) => {
       }
       item.append(main);
       if (rule.ref) {
-        const deleteRule = actionButton({id:"delete-http"}, "btn-link danger", "删除");
+        const deleteRule = actionButton({id:"delete-http"}, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
         deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:domain || rule.ref}));
         item.append(deleteRule);
       }
@@ -2853,7 +2836,7 @@ const renderHTTP = (app) => {
     domain.value = draft?.domain || "";
     domainLabel.append(domain);
     const submit = document.createElement("button");
-    submit.type = "submit"; submit.className = "btn-primary"; submit.textContent = "添加入口";
+    submit.type = "submit"; submit.className = "ui-btn ui-btn--sm"; submit.textContent = "添加入口";
     form.append(title,portLabel,domainLabel,submit);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2983,7 +2966,8 @@ const paintDetail = (app, composeRevision) => {
   if (detailTitle) detailTitle.textContent = app.name || app.id;
   document.querySelector("#detail-context").textContent = `节点：${agentDisplayName(selectedAgent())} · 应用：${app.id}`;
   if (detailStatus) {
-    const status = app.status && app.status !== "有新版本" ? app.status : "";
+    const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
+    const status = app.status && app.status !== "有新版本" ? app.status : (hasUpdate ? "有新版本" : "");
     detailStatus.textContent = status;
     detailStatus.hidden = !status;
     if (status) detailStatus.dataset.status = status;
@@ -2995,6 +2979,15 @@ const paintDetail = (app, composeRevision) => {
     detailOpen.textContent = "打开";
     if (openURL) detailOpen.setAttribute("href", openURL);
     else detailOpen.removeAttribute("href");
+  }
+  if (detailDomain) {
+    const rule = (Array.isArray(app.rules) ? app.rules : []).find((item) => item.enabled !== false && String(item.domain || "").trim());
+    const domain = rule ? String(rule.domain || "").trim() : "";
+    detailDomain.hidden = !domain;
+    detailDomain.textContent = domain ? displayHost(openURL || domain) : "";
+    if (openURL) detailDomain.setAttribute("href", openURL);
+    else if (domain) detailDomain.setAttribute("href", /^https?:\/\//i.test(domain) ? domain : `https://${domain}`);
+    else detailDomain.removeAttribute("href");
   }
   const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
   [
@@ -3029,7 +3022,10 @@ const setDetailSection = async (section) => {
   });
   if (detailNav) {
     detailNav.querySelectorAll("[data-section]").forEach((button) => {
-      button.setAttribute("aria-current", button.dataset.section === next ? "page" : "false");
+      const selected = button.dataset.section === next;
+      button.setAttribute("aria-current", selected ? "page" : "false");
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
     });
   }
   if (next === "files" && detailApp) filesWorkspace.bind(detailApp);
@@ -3596,6 +3592,12 @@ const requestCloseCreate = async () => {
 };
 if (createCancel) createCancel.addEventListener("click", requestCloseCreate);
 if (createBack) createBack.addEventListener("click", requestCloseCreate);
+if (createPanel) {
+  createPanel.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestCloseCreate();
+  });
+}
 
 const templateRoot = createTemplates || createPanel;
 if (templateRoot) {
@@ -3783,11 +3785,8 @@ const companionToggle = document.querySelector("#companion-toggle");
 const companionTools = document.querySelector("#companion-tools");
 const companionPanel = document.querySelector("#companion-panel");
 const companionMessage = document.querySelector("#companion-message");
-const compactCompanion = matchMedia("(max-width: 520px)");
-if (compactCompanion.matches) {
-  companion.dataset.minimized = "true";
-  companionToggle.setAttribute("aria-label", "展开看板娘");
-}
+// The companion starts as a small, closable helper at every width. Its artwork
+// is loaded by companion.js on the first expand, so the first screen stays light.
 let companionMessageTimer;
 let companionGreeting = 0;
 let companionDragged = false;
@@ -3809,6 +3808,7 @@ companionToggle.addEventListener("click", () => {
   if (companion.dataset.minimized === "true") {
     companion.dataset.minimized = "false";
     companionToggle.setAttribute("aria-label", "与看板娘打招呼");
+    document.dispatchEvent(new CustomEvent("companion-expand"));
     return;
   }
   if (!companion.dataset.renderer || companion.dataset.renderer === "failed") {companionTools.click(); return;}
@@ -3826,8 +3826,13 @@ companionTools.addEventListener("click", () => {
   document.querySelector("#companion-pause").textContent = paused ? "播放动作" : "暂停动作";
   companionPanel.hidden = false;
   companionTools.setAttribute("aria-expanded", "true");
+  document.dispatchEvent(new CustomEvent("companion-expand"));
 });
 document.querySelector("#companion-close").addEventListener("click", () => closeCompanion(true));
+document.querySelector("#companion-dismiss")?.addEventListener("click", () => {
+  closeCompanion();
+  companion.hidden = true;
+});
 document.querySelector("#companion-minimize").addEventListener("click", () => {
   companionMessage.hidden = true;
   companion.dataset.minimized = "true";
@@ -3873,7 +3878,7 @@ companionToggle.addEventListener("pointerup", releaseCompanion);
 companionToggle.addEventListener("pointercancel", releaseCompanion);
 window.addEventListener("resize", () => {
   companion.style.right=""; companion.style.bottom=""; closeCompanion();
-  if (compactCompanion.matches) {
+  if (matchMedia("(max-width: 520px)").matches) {
     companion.dataset.minimized="true";
     companionToggle.setAttribute("aria-label", "展开看板娘");
   }
