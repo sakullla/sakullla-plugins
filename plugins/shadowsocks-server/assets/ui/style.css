@@ -486,6 +486,44 @@
   line-height: 1.6;
 }
 
+.form-error {
+  margin: 0 0 var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid color-mix(in srgb, var(--ui-danger) 32%, transparent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-danger-soft);
+  color: var(--ui-danger-text);
+  font-size: var(--ui-text-sm);
+  line-height: 1.5;
+}
+
+.detail-status {
+  margin: 0 0 var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid var(--ui-border-subtle);
+  border-left: 3px solid var(--ui-success);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+  color: var(--ui-success-text);
+  font-size: var(--ui-text-sm);
+  line-height: 1.5;
+}
+
+.detail-status[data-error="true"] {
+  border-left-color: var(--ui-danger);
+  color: var(--ui-danger-text);
+}
+
+#confirm-ok[data-danger="true"] {
+  background: var(--ui-danger-button, var(--ui-danger));
+  border-color: var(--ui-danger-button, var(--ui-danger));
+  color: var(--ui-on-danger, #ffffff);
+}
+
+#confirm-ok[data-danger="true"]:hover:not(:disabled) {
+  filter: brightness(1.03);
+}
+
 .listen-detail-actions {
   flex-wrap: wrap;
 }
@@ -636,6 +674,30 @@
 
 .agent-search-select__status--pending {
   background: var(--ui-warning);
+}
+
+.agent-search-select__state {
+  flex: none;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--ui-text-secondary);
+}
+
+.agent-search-select__state[data-state="online"] {
+  color: var(--ui-success-text);
+}
+
+.agent-search-select__state[data-state="offline"] {
+  color: var(--ui-text-tertiary);
+}
+
+.agent-search-select__state[data-state="failed"] {
+  color: var(--ui-danger-text);
+}
+
+.agent-search-select__state[data-state="pending"] {
+  color: var(--ui-warning-text);
 }
 
 .agent-search-select__engine {
@@ -935,6 +997,14 @@
   .workspace-metrics .ui-badge {
     flex: 1 1 auto;
     justify-content: center;
+    min-height: var(--ui-touch);
+  }
+
+  .agent-search-select__trigger,
+  .agent-search-select__search-input,
+  .agent-search-select__chip,
+  .agent-search-select__option {
+    min-height: var(--ui-touch);
   }
 
   .share-host-controls .ui-btn {

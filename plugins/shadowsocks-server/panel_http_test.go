@@ -2,6 +2,7 @@ package shadowsocksserver
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,12 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		controller.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
 			t.Fatalf("embedded route %q failed: status=%d", route, recorder.Code)
+		}
+		policy := recorder.Header().Get("Content-Security-Policy")
+		for _, directive := range []string{"default-src 'self'", "script-src 'self'", "frame-ancestors 'none'"} {
+			if !strings.Contains(policy, directive) {
+				t.Fatalf("embedded route %q lacks CSP %q: %q", route, directive, policy)
+			}
 		}
 		body := recorder.Body.String()
 		if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
@@ -74,6 +81,14 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		`id="detail-actions"`,
 		`id="create-dialog"`,
 		`id="create-form"`,
+		`id="create-error"`,
+		`id="append-error"`,
+		`id="upstream-error"`,
+		`id="route-error"`,
+		`id="detail-status"`,
+		`id="append-submit"`,
+		`id="upstream-submit"`,
+		`id="route-submit"`,
 		`id="advanced-keys"`,
 		`id="server-psk-field"`,
 		`id="append-dialog"`,
@@ -190,6 +205,19 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"setListenLoading",
 		"showListenError",
 		"nameInput.focus()",
+		"beforeunload",
+		"draftDialogs",
+		"requestCloseDraft",
+		"confirmDiscardDraft",
+		"aria-busy",
+		"errorText",
+		"网络连接失败",
+		"正在保存",
+		"正在追加用户",
+		"正在添加上游",
+		"正在添加规则",
+		"停用用户",
+		"停用上游节点",
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("panel script missing %q", required)
@@ -222,6 +250,11 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		".agent-search-select__status--offline",
 		".account-ops",
 		".qr-image",
+		".form-error",
+		".detail-status",
+		".agent-search-select__state",
+		`#confirm-ok[data-danger="true"]`,
+		"min-height: var(--ui-touch)",
 		"@media (max-width: 1100px)",
 		"@media (max-width: 900px)",
 		"@media (max-width: 768px)",
@@ -550,4 +583,130 @@ func cssRule(css, selector string) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+func TestPanelDialogsGuardDirtyStateAndReportErrors(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	style, err := os.ReadFile(filepath.Join("assets", "ui", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(page)
+	source := string(script)
+
+	for _, id := range []string{"create-error", "append-error", "upstream-error", "route-error"} {
+		want := fmt.Sprintf(`id=%q class="form-error" role="alert" hidden`, id)
+		if !strings.Contains(markup, want) {
+			t.Fatalf("dialog %s must expose an in-dialog role=alert error region", id)
+		}
+	}
+	for _, id := range []string{"create-submit", "append-submit", "upstream-submit", "route-submit"} {
+		if !strings.Contains(markup, fmt.Sprintf(`id=%q`, id)) {
+			t.Fatalf("dialog submit control %s is missing", id)
+		}
+	}
+	for _, id := range []string{"detail-status"} {
+		if !strings.Contains(markup, fmt.Sprintf(`id=%q`, id)) {
+			t.Fatalf("detail feedback region %s is missing", id)
+		}
+	}
+
+	for _, want := range []string{
+		`window.addEventListener("beforeunload"`,
+		"confirmDiscardDraft",
+		"requestCloseDraft",
+		"trackDraft",
+		`dialog.addEventListener("cancel"`,
+		"isDialogDirty",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("unsaved-change guard missing %q", want)
+		}
+	}
+	if got := strings.Count(source, "if (busy) return;"); got < 6 {
+		t.Fatalf("write handlers only guard %d busy paths; expected route, upstream, default, append, create, and mutation guards", got)
+	}
+	for _, want := range []string{`setAttribute("aria-busy", "true")`, "正在保存", "正在追加用户", "正在添加上游", "正在添加规则"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("busy submit feedback missing %q", want)
+		}
+	}
+	for _, want := range []string{"该节点已使用此端口或端口不可用", "markFieldError", "showModalError", "showDetailStatus", "showFeedback"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("in-dialog error handling missing %q", want)
+		}
+	}
+	for _, want := range []string{`title: "停用用户"`, `title: "停用上游节点"`, "删除后不能恢复"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("destructive confirmation copy missing %q", want)
+		}
+	}
+	for _, want := range []string{"网络连接失败", "无权执行该操作", "目标不存在", "请稍后重试", "const errorText = (error"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("Chinese error mapping missing %q", want)
+		}
+	}
+
+	statusLabels := jsConstFunction(source, "agentStatusLabel")
+	if !strings.Contains(statusLabels, `online: "在线"`) || !strings.Contains(statusLabels, `offline: "离线"`) {
+		t.Fatal("agent picker must expose textual online/offline labels instead of color alone")
+	}
+	for _, want := range []string{"statusText", "[agentStatusLabel(status), timeAgo(agent.last_seen_at)]"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("agent picker does not render textual state via %q", want)
+		}
+	}
+
+	touch := cssMediaBlock(string(style), "@media (max-width: 480px)")
+	if touch == "" {
+		t.Fatal("stylesheet is missing the 480px touch-target block")
+	}
+	for _, want := range []string{
+		".workspace-metrics .ui-badge",
+		".agent-search-select__trigger",
+		".agent-search-select__search-input",
+		".agent-search-select__chip",
+		".agent-search-select__option",
+		"min-height: var(--ui-touch)",
+	} {
+		if !strings.Contains(touch, want) {
+			t.Fatalf("480px touch rules missing %q", want)
+		}
+	}
+	confirm := cssRule(string(style), `#confirm-ok[data-danger="true"]`)
+	if confirm == "" || !strings.Contains(confirm, "var(--ui-danger-button") {
+		t.Fatal("danger confirmation button does not use the danger button colors")
+	}
+}
+
+func cssMediaBlock(css, query string) string {
+	start := strings.Index(css, query)
+	if start < 0 {
+		return ""
+	}
+	open := strings.Index(css[start:], "{")
+	if open < 0 {
+		return ""
+	}
+	open += start
+	depth := 0
+	for i := open; i < len(css); i++ {
+		switch css[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return css[open : i+1]
+			}
+		}
+	}
+	return ""
 }

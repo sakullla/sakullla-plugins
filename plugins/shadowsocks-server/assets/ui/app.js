@@ -96,6 +96,14 @@ const routingErrorDesc = document.querySelector("#routing-error-desc");
 const routingRetry = document.querySelector("#routing-retry");
 const rulesTable = document.querySelector("#route-rules-table");
 const upstreamsTable = document.querySelector("#route-upstreams-table");
+const appendSubmit = document.querySelector("#append-submit");
+const upstreamSubmit = document.querySelector("#upstream-submit");
+const routeSubmit = document.querySelector("#route-submit");
+const createError = document.querySelector("#create-error");
+const appendError = document.querySelector("#append-error");
+const upstreamError = document.querySelector("#upstream-error");
+const routeError = document.querySelector("#route-error");
+const detailStatus = document.querySelector("#detail-status");
 
 const METHOD_LABELS = {
   "2022-blake3-aes-128-gcm": "SS2022 · AES-128",
@@ -193,7 +201,134 @@ const askConfirm = ({ title, body, confirm = "确定", cancel = "取消", danger
   });
 };
 
+const agentStatusLabel = (status) => ({ online: "在线", offline: "离线", failed: "异常", pending: "等待中" }[status] || "离线");
+
+const NETWORK_ERROR_TEXT = "网络连接失败，请检查网络或宿主连接后重试。";
+
+const errorText = (error, fallback = "操作失败，请稍后重试。") => {
+  const raw = String((error && error.message) || "").trim();
+  if (error && (error.denied || error.status === 403)) return "无权执行该操作，请联系管理员授予权限后重试。";
+  if (error && (error.network || error.name === "TypeError" || /failed to fetch|networkerror|load failed/i.test(raw))) return NETWORK_ERROR_TEXT;
+  if (error && error.status === 404) return "目标不存在，可能已被删除。请刷新页面后重试。";
+  if (error && error.status === 503) return "宿主服务暂时不可用，请稍后重试或刷新页面。";
+  if (error && error.status >= 500) return "服务暂时出错，请稍后重试。";
+  const hasChinese = /[\u4e00-\u9fff]/.test(raw);
+  const englishOnly = !hasChinese && /[A-Za-z]{3,}/.test(raw);
+  if (!raw || englishOnly) return fallback;
+  const message = raw.replace(/[。.!！]+$/u, "");
+  if (error && error.status === 409) return `${message}。请调整后重试。`;
+  if (error && error.status === 400) return `${message}。请检查填写内容后重试。`;
+  return `${message}。`;
+};
+
+const draftSnapshot = (form) => {
+  if (!form) return "";
+  return Array.from(new FormData(form).entries())
+    .map(([name, value]) => `${name}=${String(value)}`)
+    .join("&");
+};
+
+const draftDialogs = new Map();
+
+const trackDraft = (dialog, form, close) => {
+  if (!dialog || !form) return;
+  draftDialogs.set(dialog, { form, close, baseline: draftSnapshot(form) });
+};
+
+const releaseDraft = (dialog) => {
+  draftDialogs.delete(dialog);
+};
+
+const isDialogDirty = (dialog) => {
+  const draft = draftDialogs.get(dialog);
+  return Boolean(draft && draft.form && draftSnapshot(draft.form) !== draft.baseline);
+};
+
+const openDirtyDialog = () => {
+  for (const dialog of draftDialogs.keys()) {
+    if (dialog.open && isDialogDirty(dialog)) return dialog;
+  }
+  return null;
+};
+
+const confirmDiscardDraft = async (dialog, title = "放弃未保存的修改？") => {
+  if (!isDialogDirty(dialog)) return true;
+  return askConfirm({
+    title,
+    body: "关闭后本次填写的内容会丢失，且不能恢复。",
+    confirm: "放弃修改",
+    cancel: "继续编辑",
+    danger: true,
+  });
+};
+
+const requestCloseDraft = async (dialog, close, title) => {
+  if (busy) return false;
+  if (!(await confirmDiscardDraft(dialog, title))) return false;
+  releaseDraft(dialog);
+  close();
+  return true;
+};
+
+const bindDraftDialog = (dialog, form, close) => {
+  if (!dialog || !form) return;
+  trackDraft(dialog, form, close);
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    window.setTimeout(() => requestCloseDraft(dialog, close), 0);
+  });
+  dialog.addEventListener("close", () => releaseDraft(dialog));
+};
+
+const topmostOpenDraftDialog = () => {
+  const openDialogs = Array.from(document.querySelectorAll("dialog[open]"));
+  const topmost = openDialogs[openDialogs.length - 1];
+  return topmost && draftDialogs.has(topmost) ? topmost : null;
+};
+
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    const dialog = topmostOpenDraftDialog();
+    if (!dialog) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const draft = draftDialogs.get(dialog);
+    if (draft) requestCloseDraft(dialog, draft.close);
+  },
+  true
+);
+
+window.addEventListener("beforeunload", (event) => {
+  if (!openDirtyDialog()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+document.addEventListener(
+  "click",
+  (event) => {
+    const dialog = event.target;
+    if (!dialog || dialog.tagName !== "DIALOG" || !dialog.open) return;
+    if (busy) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (!isDialogDirty(dialog)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const draft = draftDialogs.get(dialog);
+    requestCloseDraft(dialog, draft && draft.close ? draft.close : () => dialog.close());
+  },
+  true
+);
+
 let busy = false;
+let busyControl = null;
+let busyControlLabel = "";
+let busyScope = null;
 let activeTab = "listens";
 let selectedAgentID = "";
 let agentsCache = [];
@@ -246,14 +381,62 @@ const showStatus = (message, isError) => {
   }
 };
 
+const showModalError = (node, message) => {
+  if (!node) return;
+  node.hidden = !message;
+  node.textContent = message || "";
+};
+
+const clearFormErrors = (form) => {
+  if (!form) return;
+  form.querySelectorAll('[aria-invalid="true"]').forEach((input) => {
+    if (window.NREUI && typeof window.NREUI.clearFieldError === "function") window.NREUI.clearFieldError(input);
+    else {
+      input.removeAttribute("aria-invalid");
+      input.removeAttribute("aria-describedby");
+    }
+  });
+};
+
+const markFieldError = (input, message) => {
+  if (!input) return;
+  if (window.NREUI && typeof window.NREUI.fieldError === "function") window.NREUI.fieldError(input, message);
+  else input.setAttribute("aria-invalid", "true");
+};
+
+const formField = (form, name) => (form ? form.querySelector(`[name="${name}"]`) : null);
+
+const showDetailStatus = (message, isError) => {
+  if (!detailStatus) return;
+  detailStatus.hidden = !message;
+  detailStatus.textContent = message || "";
+  detailStatus.dataset.error = isError ? "true" : "false";
+};
+
+const showFeedback = (message, isError) => {
+  if (detailPanel && detailPanel.open && detailStatus) {
+    showDetailStatus(message, isError);
+    return;
+  }
+  showStatus(message, isError);
+};
+
 const newOperationKey = () => {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return `operation/ui/${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 };
 
+const fetchPanel = async (path, options) => {
+  try {
+    return await fetch(path, options);
+  } catch (cause) {
+    throw Object.assign(new Error(NETWORK_ERROR_TEXT), { network: true, cause });
+  }
+};
+
 const panelJSON = async (path, options = {}) => {
-  const response = await fetch(path, {
+  const response = await fetchPanel(path, {
     credentials: "same-origin",
     ...options,
     headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
@@ -286,7 +469,7 @@ const agentIdentityFields = () => {
 const mutateBody = (extra = {}) => ({ agent_id: selectedAgentID, ...agentIdentityFields(), ...extra });
 
 const sendPluginJSON = async (path, body) => {
-  const response = await fetch(path, {
+  const response = await fetchPanel(path, {
     method: "POST",
     credentials: "same-origin",
     headers: {
@@ -296,8 +479,11 @@ const sendPluginJSON = async (path, body) => {
     body: JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 403) {
+    throw Object.assign(new Error(payload.error || payload.message || "无权访问"), { denied: true, status: 403 });
+  }
   if (!response.ok) {
-    throw new Error(payload.error || payload.message || "保存失败");
+    throw Object.assign(new Error(payload.error || payload.message || "保存失败"), { status: response.status });
   }
   return payload;
 };
@@ -357,17 +543,38 @@ const syncSelectionActions = () => {
   });
 };
 
-const setBusy = (next) => {
-  busy = next;
+const setBusy = (next, control = null, label = "") => {
+  busy = Boolean(next);
+  if (busy && control) {
+    if (busyControl && busyControl !== control) {
+      busyControl.textContent = busyControlLabel;
+      busyControl.removeAttribute("aria-busy");
+    }
+    busyControl = control;
+    busyControlLabel = control.textContent;
+    control.textContent = label || "处理中…";
+    control.setAttribute("aria-busy", "true");
+    busyScope = control.closest("dialog") || workspaceNode || null;
+    if (busyScope) busyScope.setAttribute("aria-busy", "true");
+  } else if (!busy) {
+    if (busyControl) {
+      busyControl.textContent = busyControlLabel;
+      busyControl.removeAttribute("aria-busy");
+    }
+    if (busyScope) busyScope.removeAttribute("aria-busy");
+    busyControl = null;
+    busyControlLabel = "";
+    busyScope = null;
+  }
   const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel, upstreamDialog, routeDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
       if (agentPickerRoot && agentPickerRoot.contains(node)) return;
-      node.disabled = next;
+      node.disabled = busy;
     });
   });
-  if (!next) syncSelectionActions();
+  if (!busy) syncSelectionActions();
 };
 
 const parseAgentTime = (value) => {
@@ -500,6 +707,9 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const statusDot = document.createElement("span");
   statusDot.className = "agent-search-select__status";
   statusDot.hidden = true;
+  const statusText = document.createElement("span");
+  statusText.className = "agent-search-select__state";
+  statusText.hidden = true;
   const label = document.createElement("span");
   label.className = "agent-search-select__label";
   const triggerEngine = document.createElement("span");
@@ -508,7 +718,7 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const chevron = document.createElement("span");
   chevron.className = "agent-search-select__chevron";
   chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-  trigger.append(statusDot, label, triggerEngine, chevron);
+  trigger.append(statusDot, label, statusText, triggerEngine, chevron);
 
   const dropdown = document.createElement("div");
   dropdown.className = "agent-search-select__dropdown";
@@ -581,20 +791,26 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
     const agent = currentAgent();
     const execution = picker.selected ? cachedExecution(picker.selected) : null;
     if (agent) {
+      const status = getAgentStatus(agent);
       label.textContent = agentDisplayName(agent);
       label.dataset.empty = "false";
       statusDot.hidden = false;
-      statusDot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
+      statusDot.className = `agent-search-select__status agent-search-select__status--${status}`;
+      statusText.hidden = false;
+      statusText.dataset.state = status;
+      statusText.textContent = agentStatusLabel(status);
       trigger.title = agentLabel(agent);
     } else if (picker.selected) {
       label.textContent = picker.selected;
       label.dataset.empty = "false";
       statusDot.hidden = true;
+      statusText.hidden = true;
       trigger.title = picker.selected;
     } else {
       label.textContent = placeholder;
       label.dataset.empty = "true";
       statusDot.hidden = true;
+      statusText.hidden = true;
       trigger.title = placeholder;
     }
     if (execution && !execution.ready && agent && isAgentOnline(agent)) {
@@ -666,14 +882,15 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       option.className = "agent-search-select__option";
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", agent.id === picker.selected ? "true" : "false");
+      const status = getAgentStatus(agent);
       const dot = document.createElement("span");
-      dot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
+      dot.className = `agent-search-select__status agent-search-select__status--${status}`;
       const name = document.createElement("span");
       name.className = "agent-search-select__option-name";
       name.textContent = agentDisplayName(agent);
       const meta = document.createElement("span");
       meta.className = "agent-search-select__option-meta";
-      meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
+      meta.textContent = [agentStatusLabel(status), timeAgo(agent.last_seen_at)].filter(Boolean).join(" · ");
       option.append(dot, name, meta);
       const execution = cachedExecution(agent.id);
       if (execution && !execution.ready && isAgentOnline(agent)) option.append(executionMark(execution));
@@ -906,6 +1123,7 @@ const resetDetailPrompt = () => {
   }
   if (detailUsers) detailUsers.replaceChildren();
   if (detailActions) detailActions.replaceChildren();
+  showDetailStatus("", false);
 };
 
 const syncListPanel = () => {
@@ -919,11 +1137,16 @@ const syncListPanel = () => {
 };
 
 const closeCreate = () => {
+  releaseDraft(createDialog);
+  showModalError(createError, "");
+  clearFormErrors(createForm);
   if (createForm) createForm.reset();
   if (advancedKeys) advancedKeys.open = false;
   if (createDialog && createDialog.open) createDialog.close();
   syncListPanel();
 };
+
+const requestCloseCreate = () => requestCloseDraft(createDialog, closeCreate);
 
 const methodInput = () => (createForm ? createForm.querySelector('select[name="method"]') : null);
 
@@ -949,10 +1172,13 @@ const openCreate = async () => {
     const payload = await panelJSON(`api/defaults?agent_id=${encodeURIComponent(selectedAgentID)}`);
     fillDefaults(payload.defaults);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error, "暂时无法读取默认值，请稍后重试。"), true);
     return;
   }
   if (createDialog) {
+    clearFormErrors(createForm);
+    showModalError(createError, "");
+    trackDraft(createDialog, createForm, closeCreate);
     createDialog._returnFocus = document.activeElement;
     if (createDialog.open) createDialog.close();
     createDialog.showModal();
@@ -1037,7 +1263,7 @@ const copyURIButton = (user) => {
       await copyText(user.uri);
       markCopied(copy);
     } catch (error) {
-      showStatus(error.message, true);
+      showFeedback(errorText(error), true);
     }
   });
   return copy;
@@ -1071,18 +1297,18 @@ const userManageButtons = (user) => {
   toggle.className = "ui-btn ui-btn--ghost ui-btn--sm";
   toggle.dataset.mutate = "true";
   toggle.textContent = user.enabled ? "停用" : "再启用";
-  toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
+  toggle.addEventListener("click", (event) => mutateUser(user, user.enabled ? "disable" : "enable", false, event.currentTarget));
   const rotate = document.createElement("button");
   rotate.type = "button";
   rotate.className = "ui-btn ui-btn--ghost ui-btn--sm";
   rotate.textContent = "轮换密钥";
-  rotate.addEventListener("click", () => mutateUser(user, "rotate", true));
+  rotate.addEventListener("click", (event) => mutateUser(user, "rotate", true, event.currentTarget));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
   remove.dataset.mutate = "true";
   remove.textContent = "删除用户";
-  remove.addEventListener("click", () => mutateUser(user, "delete", true));
+  remove.addEventListener("click", (event) => mutateUser(user, "delete", true, event.currentTarget));
   actions.append(toggle, rotate, remove);
   return actions;
 };
@@ -1129,7 +1355,7 @@ const listenFooterActions = (listen) => {
     rotateServer.type = "button";
     rotateServer.className = "ui-btn ui-btn--ghost ui-btn--sm";
     rotateServer.textContent = "轮换 Server PSK";
-    rotateServer.addEventListener("click", () => rotateServerPSK(listen));
+    rotateServer.addEventListener("click", (event) => rotateServerPSK(listen, event.currentTarget));
     actions.append(rotateServer);
   }
   const remove = document.createElement("button");
@@ -1137,7 +1363,7 @@ const listenFooterActions = (listen) => {
   remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
   remove.dataset.mutate = "true";
   remove.textContent = "删除监听";
-  remove.addEventListener("click", () => deleteListen(listen));
+  remove.addEventListener("click", (event) => deleteListen(listen, event.currentTarget));
   actions.append(remove);
   return actions;
 };
@@ -1255,7 +1481,7 @@ const refreshOpenDetail = () => {
   else closeDetail();
 };
 
-const renderListens = (listens) => {
+const renderListens = (listens, options = {}) => {
   if (!listNode) return;
   listensCache = listens || [];
   listNode.replaceChildren();
@@ -1266,28 +1492,37 @@ const renderListens = (listens) => {
   }
   updateOverviewMetrics();
   syncListPanel();
-  refreshOpenDetail();
+  if (!options.keepDetail) refreshOpenDetail();
   syncSelectionActions();
   if (busy) setBusy(true);
 };
 
-const mutateUser = async (user, action, confirmDelete = false) => {
-  if (!canMutate()) return;
-  if (confirmDelete || action === "rotate") {
+const mutateUser = async (user, action, confirmDelete = false, control = null) => {
+  if (busy || !canMutate()) return;
+  const label = user.name || user.id;
+  if (action === "disable") {
+    const ok = await askConfirm({
+      title: "停用用户",
+      body: `停用「${label}」后，该用户的 ss:// 链接立即无法连接；可随时再启用。`,
+      confirm: "停用",
+      danger: true,
+    });
+    if (!ok) return;
+  } else if (confirmDelete || action === "rotate") {
     const rotating = action === "rotate";
     const ok = await askConfirm(rotating
-      ? { title: "轮换用户密钥", body: "轮换后该用户的旧分享将立即失效。", confirm: "轮换" }
-      : { title: "删除用户", body: "删掉后不能恢复。同一端口的其他人不受影响。", confirm: "删除", danger: true });
+      ? { title: "轮换用户密钥", body: "轮换后该用户的旧分享将立即失效。", confirm: "轮换", danger: true }
+      : { title: "删除用户", body: `删除「${label}」后不能恢复，其 ss:// 链接会一起失效。`, confirm: "删除", danger: true });
     if (!ok) return;
   }
-  setBusy(true);
+  setBusy(true, control);
   try {
     await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, mutateBody());
     await renderWorkspace();
-    const message = action === "enable" ? "已启用该用户。" : action === "disable" ? "已停用该用户。" : action === "rotate" ? "已轮换用户密钥。" : "已删除用户。";
-    showStatus(message, false);
+    const message = action === "enable" ? "已启用该用户。" : action === "disable" ? "已停用该用户，链接已失效。" : action === "rotate" ? "已轮换用户密钥，旧分享已失效。" : "已删除用户。";
+    showFeedback(message, false);
   } catch (error) {
-    showStatus(error.message, true);
+    showFeedback(errorText(error), true);
   } finally {
     setBusy(false);
   }
@@ -1295,9 +1530,14 @@ const mutateUser = async (user, action, confirmDelete = false) => {
 
 const closeAppend = () => {
   pendingAppendListen = null;
+  releaseDraft(appendDialog);
+  showModalError(appendError, "");
+  clearFormErrors(appendForm);
   if (appendForm) appendForm.reset();
   if (appendDialog && appendDialog.open) appendDialog.close();
 };
+
+const requestCloseAppend = () => requestCloseDraft(appendDialog, closeAppend);
 
 const openAppend = (listen) => {
   if (!canMutate() || !listen) return;
@@ -1307,6 +1547,9 @@ const openAppend = (listen) => {
     appendMeta.hidden = !appendMeta.textContent;
   }
   if (appendForm) appendForm.reset();
+  clearFormErrors(appendForm);
+  showModalError(appendError, "");
+  trackDraft(appendDialog, appendForm, closeAppend);
   if (appendDialog && typeof appendDialog.showModal === "function") {
     if (appendDialog.open) appendDialog.close();
     appendDialog.showModal();
@@ -1318,40 +1561,46 @@ const appendUser = (listen) => {
   openAppend(listen);
 };
 
-const deleteListen = async (listen) => {
-  if (!canMutate()) return;
-  const ok = await askConfirm({ title: "删除监听", body: "会关掉这个端口，上面的用户也会一起删掉。", confirm: "删除", danger: true });
+const deleteListen = async (listen, control = null) => {
+  if (busy || !canMutate()) return;
+  const ok = await askConfirm({
+    title: "删除监听",
+    body: "删除后不能恢复；这个端口上的用户与分享链接会一起失效。",
+    confirm: "删除",
+    danger: true,
+  });
   if (!ok) return;
-  setBusy(true);
+  setBusy(true, control);
   try {
     if (openListenID === listen.id) closeDetail();
     await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, mutateBody());
     await renderWorkspace();
-    showStatus("已删除监听。", false);
+    showFeedback("已删除监听。", false);
   } catch (error) {
-    showStatus(error.message, true);
+    showFeedback(errorText(error), true);
   } finally {
     setBusy(false);
   }
 };
 
-const rotateServerPSK = async (listen) => {
-  if (!canMutate()) return;
-  const ok = await askConfirm({ title: "轮换 Server PSK", body: "轮换后该端口的旧分享将立即失效。", confirm: "轮换" });
+const rotateServerPSK = async (listen, control = null) => {
+  if (busy || !canMutate()) return;
+  const ok = await askConfirm({ title: "轮换 Server PSK", body: "轮换后该端口的旧分享将立即失效。", confirm: "轮换", danger: true });
   if (!ok) return;
-  setBusy(true);
+  setBusy(true, control);
   try {
     await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/rotate-server`, mutateBody());
     await renderWorkspace();
-    showStatus("已轮换 Server PSK。", false);
+    showFeedback("已轮换 Server PSK，旧分享已失效。", false);
   } catch (error) {
-    showStatus(error.message, true);
+    showFeedback(errorText(error), true);
   } finally {
     setBusy(false);
   }
 };
 
 const canMutate = () => {
+  if (busy) return false;
   if (!selectedAgentID) {
     showStatus("请先选择一台节点。", true);
     return false;
@@ -1482,14 +1731,22 @@ const fillRoutePreset = (presetKey) => {
 const openUpstreamModal = () => {
   if (!upstreamDialog) return;
   if (upstreamForm) upstreamForm.reset();
+  clearFormErrors(upstreamForm);
+  showModalError(upstreamError, "");
+  trackDraft(upstreamDialog, upstreamForm, closeUpstreamModal);
   if (upstreamDialog.open) upstreamDialog.close();
   if (typeof upstreamDialog.showModal === "function") upstreamDialog.showModal();
 };
 
 const closeUpstreamModal = () => {
+  releaseDraft(upstreamDialog);
+  showModalError(upstreamError, "");
+  clearFormErrors(upstreamForm);
   if (upstreamForm) upstreamForm.reset();
   if (upstreamDialog && upstreamDialog.open) upstreamDialog.close();
 };
+
+const requestCloseUpstreamModal = () => requestCloseDraft(upstreamDialog, closeUpstreamModal);
 
 const openRouteModal = (presetKey = "") => {
   if (!routeDialog) return;
@@ -1504,14 +1761,27 @@ const openRouteModal = (presetKey = "") => {
     if (routeIdInput) routeIdInput.value = uniqueRuleID("ai-not-cn");
     syncRouteModalActionVisibility();
   }
+  clearFormErrors(routeForm);
+  showModalError(routeError, "");
+  trackDraft(routeDialog, routeForm, closeRouteModal);
   if (routeDialog.open) routeDialog.close();
   if (typeof routeDialog.showModal === "function") routeDialog.showModal();
 };
 
 const closeRouteModal = () => {
+  releaseDraft(routeDialog);
+  showModalError(routeError, "");
+  clearFormErrors(routeForm);
   if (routeForm) routeForm.reset();
   if (routeDialog && routeDialog.open) routeDialog.close();
 };
+
+const requestCloseRouteModal = () => requestCloseDraft(routeDialog, closeRouteModal);
+
+bindDraftDialog(createDialog, createForm, closeCreate);
+bindDraftDialog(appendDialog, appendForm, closeAppend);
+bindDraftDialog(upstreamDialog, upstreamForm, closeUpstreamModal);
+bindDraftDialog(routeDialog, routeForm, closeRouteModal);
 
 const tableCell = (text, className = "", label = "") => {
   const cell = document.createElement("td");
@@ -1582,12 +1852,12 @@ const renderRouting = (routing, routeStatus = []) => {
       toggle.type = "button";
       toggle.className = "ui-btn ui-btn--ghost ui-btn--sm";
       toggle.textContent = upstream.enabled ? "停用" : "启用";
-      toggle.onclick = () => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable");
+      toggle.onclick = (event) => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable", event.currentTarget);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
       remove.textContent = "删除";
-      remove.onclick = () => mutateUpstream(upstream.id, "delete");
+      remove.onclick = (event) => mutateUpstream(upstream.id, "delete", event.currentTarget);
       actions.append(toggle, remove);
 
       row.append(identity, address, capability, status, actions);
@@ -1655,9 +1925,9 @@ const renderRouting = (routing, routeStatus = []) => {
       actions.className = "ui-table__actions";
       actions.dataset.label = "操作";
       const buttons = [
-        ["上移", () => moveRoute(index, -1), index === 0],
-        ["下移", () => moveRoute(index, 1), index === routingCache.rules.length - 1],
-        ["删除", () => removeRoute(index), false],
+        ["上移", (event) => moveRoute(index, -1, event.currentTarget), index === 0],
+        ["下移", (event) => moveRoute(index, 1, event.currentTarget), index === routingCache.rules.length - 1],
+        ["删除", (event) => removeRoute(index, event.currentTarget), false],
       ];
       buttons.forEach(([text, action, disabled]) => {
         const button = document.createElement("button");
@@ -1685,7 +1955,7 @@ const loadRouting = async () => {
     renderRouting(payload.routing, routeStatusCache);
   } catch (error) {
     if (error && error.denied) throw error;
-    showRoutingError(error.message);
+    showRoutingError(errorText(error, "暂时无法读取规则与上游。刷新页面，或稍后重试。"));
   }
 };
 
@@ -1694,57 +1964,81 @@ const saveRoutingRules = async () => {
   renderRouting(payload.routing);
 };
 
-const moveRoute = async (index, delta) => {
+const moveRoute = async (index, delta, control = null) => {
+  if (busy) return;
   const next = index + delta;
   if (next < 0 || next >= routingCache.rules.length) return;
   [routingCache.rules[index], routingCache.rules[next]] = [routingCache.rules[next], routingCache.rules[index]];
+  setBusy(true, control);
   try {
     await saveRoutingRules();
     showStatus("已调整规则匹配顺序。", false);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
   }
 };
 
-const removeRoute = async (index) => {
+const removeRoute = async (index, control = null) => {
+  if (busy) return;
   const target = routingCache.rules[index];
   const ok = await askConfirm({
     title: "删除分流规则",
-    body: target ? `确定删除规则「${target.id}」吗？` : "确定删除这条分流规则吗？",
+    body: target
+      ? `删除规则「${target.id}」后不能恢复；命中它的流量会改走后续规则或默认出口。`
+      : "删除后不能恢复；命中它的流量会改走后续规则或默认出口。",
     confirm: "删除",
     danger: true,
   });
   if (!ok) return;
   routingCache.rules.splice(index, 1);
+  setBusy(true, control);
   try {
     await saveRoutingRules();
     showStatus("已删除分流规则。", false);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
   }
 };
 
-const mutateUpstream = async (id, action) => {
+const mutateUpstream = async (id, action, control = null) => {
+  if (busy) return;
+  if (action === "disable") {
+    const ok = await askConfirm({
+      title: "停用上游节点",
+      body: `停用「${id}」后，引用它的分流规则会暂时不可用；可随时再启用。`,
+      confirm: "停用",
+      danger: true,
+    });
+    if (!ok) return;
+  }
   if (action === "delete") {
     const ok = await askConfirm({
       title: "删除上游节点",
-      body: `确定删除上游节点「${id}」吗？已被规则引用的上游无法直接删除。`,
+      body: `删除「${id}」后不能恢复；已被规则引用的上游无法直接删除。`,
       confirm: "删除",
       danger: true,
     });
     if (!ok) return;
   }
+  setBusy(true, control);
   try {
     const payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/${action}`, {});
     renderRouting(payload.routing);
-    showStatus(action === "delete" ? "已删除上游节点。" : "已更新上游节点状态。", false);
+    const message = action === "delete" ? "已删除上游节点。" : action === "disable" ? "已停用上游节点。" : "已启用上游节点。";
+    showStatus(message, false);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
   }
 };
 
 if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", openUpstreamModal);
-if (upstreamCancel) upstreamCancel.addEventListener("click", closeUpstreamModal);
+if (upstreamCancel) upstreamCancel.addEventListener("click", requestCloseUpstreamModal);
 if (upstreamDialog) {
   upstreamDialog.addEventListener("click", (event) => {
     if (event.target === upstreamDialog) closeUpstreamModal();
@@ -1752,7 +2046,7 @@ if (upstreamDialog) {
 }
 
 if (openRouteDialogBtn) openRouteDialogBtn.addEventListener("click", () => openRouteModal(""));
-if (routeCancel) routeCancel.addEventListener("click", closeRouteModal);
+if (routeCancel) routeCancel.addEventListener("click", requestCloseRouteModal);
 if (routeDialog) {
   routeDialog.addEventListener("click", (event) => {
     if (event.target === routeDialog) closeRouteModal();
@@ -1772,42 +2066,118 @@ if (routeDefaultAction) routeDefaultAction.addEventListener("change", syncDefaul
 
 if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (busy) return;
+  clearFormErrors(upstreamForm);
+  showModalError(upstreamError, "");
   const form = new FormData(upstreamForm);
+  const id = String(form.get("id") || "").trim();
+  const host = String(form.get("host") || "").trim();
+  const port = Number(form.get("port") || 0);
+  const method = String(form.get("method") || "");
+  const password = String(form.get("password") || "").trim();
+  const idInput = formField(upstreamForm, "id");
+  const hostInput = formField(upstreamForm, "host");
+  const portInput = formField(upstreamForm, "port");
+  const passwordInput = formField(upstreamForm, "password");
+  if (!id) {
+    markFieldError(idInput, "请填写上游标识。");
+    if (idInput) idInput.focus();
+    return;
+  }
+  if ((routingCache.upstreams || []).some((item) => item && item.id === id)) {
+    markFieldError(idInput, "该上游标识已存在，请换一个。");
+    if (idInput) idInput.focus();
+    return;
+  }
+  if (!host) {
+    markFieldError(hostInput, "请填写服务器地址。");
+    if (hostInput) hostInput.focus();
+    return;
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    markFieldError(portInput, "端口需为 1-65535 的整数。");
+    if (portInput) portInput.focus();
+    return;
+  }
+  if (!password) {
+    markFieldError(passwordInput, "请填写连接密钥。");
+    if (passwordInput) passwordInput.focus();
+    return;
+  }
+  setBusy(true, upstreamSubmit, "正在添加上游…");
   try {
-    const payload = await sendPluginJSON("api/upstreams", { id: String(form.get("id") || "").trim(), host: String(form.get("host") || "").trim(), port: Number(form.get("port") || 0), method: String(form.get("method") || ""), password: String(form.get("password") || ""), tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
+    const payload = await sendPluginJSON("api/upstreams", { id, host, port, method, password, tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
     closeUpstreamModal();
     renderRouting(payload.routing);
     showStatus("已添加上游节点。", false);
-  } catch (error) { showStatus(error.message, true); }
+  } catch (error) {
+    showModalError(upstreamError, errorText(error, "添加上游失败，请检查标识、地址和密钥后重试。"));
+    if (error && error.status === 400) markFieldError(idInput, "标识无效或已存在，请检查后重试。");
+    else if (/端口/.test(String((error && error.message) || ""))) markFieldError(portInput, errorText(error));
+  } finally {
+    setBusy(false);
+  }
 });
 
 if (routeForm) routeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (busy) return;
+  clearFormErrors(routeForm);
+  showModalError(routeError, "");
   const form = new FormData(routeForm);
+  const sourceID = String(form.get("source_id") || "").trim();
   const attribute = String(form.get("attribute") || "").trim();
   const classification = { name: String(form.get("classification") || "").trim(), kind: String(form.get("kind") || "") };
   if (attribute) classification.attributes = [{ name: attribute, boolean: true }];
   const action = String(form.get("action") || "");
   const ruleID = String(form.get("id") || "").trim() || uniqueRuleID(`${classification.name}-${action}`);
-  routingCache.rules.push({ id: ruleID, source_id: String(form.get("source_id") || "").trim(), classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
+  if (!sourceID) {
+    markFieldError(routeSourceInput, "请填写数据源 ID，例如 geosite 或 geoip。");
+    if (routeSourceInput) routeSourceInput.focus();
+    return;
+  }
+  if (!classification.name) {
+    markFieldError(routeClassInput, "请填写分类名称，例如 category-ai 或 cn。");
+    if (routeClassInput) routeClassInput.focus();
+    return;
+  }
+  if ((routingCache.rules || []).some((rule) => rule && rule.id === ruleID)) {
+    markFieldError(routeIdInput, "该规则标识已存在，请换一个。");
+    if (routeIdInput) routeIdInput.focus();
+    return;
+  }
+  if (action === "upstream" && !String(form.get("upstream_id") || "")) {
+    markFieldError(routeUpstreamSelect, "请选择要转发的上游节点。");
+    if (routeUpstreamSelect) routeUpstreamSelect.focus();
+    return;
+  }
+  routingCache.rules.push({ id: ruleID, source_id: sourceID, classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
+  setBusy(true, routeSubmit, "正在添加规则…");
   try {
     await saveRoutingRules();
     closeRouteModal();
     showStatus("已添加分流规则。", false);
   } catch (error) {
     routingCache.rules.pop();
-    showStatus(error.message, true);
+    showModalError(routeError, errorText(error, "添加规则失败，请检查数据源、分类和上游后重试。"));
+    if (error && error.status === 400) markFieldError(routeClassInput, "请确认数据源与分类名称存在后重试。");
+  } finally {
+    setBusy(false);
   }
 });
 
 if (routeSaveDefault) routeSaveDefault.addEventListener("click", async () => {
+  if (busy) return;
   routingCache.default_action = routeDefaultAction.value;
   routingCache.default_upstream_id = routeDefaultAction.value === "upstream" ? routeDefaultUpstream.value : "";
+  setBusy(true, routeSaveDefault, "正在保存…");
   try {
     await saveRoutingRules();
     showStatus("已保存默认路由设置。", false);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
   }
 });
 
@@ -1851,7 +2221,7 @@ const renderWorkspace = async () => {
   workspaceNode.hidden = false;
   setListenLoading(true);
   hideListenError();
-  renderListens([]);
+  renderListens([], { keepDetail: true });
   let payload = null;
   try {
     payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
@@ -1859,7 +2229,8 @@ const renderWorkspace = async () => {
     if (seq !== workspaceSeq) return;
     setListenLoading(false);
     if (error && error.denied) throw error;
-    showListenError(error.message);
+    showListenError(errorText(error, "暂时无法读取监听列表。刷新页面，或稍后重试。"));
+    if (openListenID) closeDetail();
     fillShareHost(execution, []);
     syncShareHostBar(true);
     return;
@@ -1897,7 +2268,28 @@ const loadAgents = async () => {
 };
 
 agentPicker.onChange = async (value) => {
-  selectedAgentID = String(value || "");
+  const next = String(value || "");
+  if (next === selectedAgentID) return;
+  if (busy) {
+    agentPicker.refresh(selectedAgentID);
+    return;
+  }
+  const dirty = openDirtyDialog();
+  if (dirty) {
+    const ok = await askConfirm({
+      title: "切换节点？",
+      body: "当前对话框里有未保存的修改，切换节点会丢弃这些内容。",
+      confirm: "丢弃并切换",
+      cancel: "继续编辑",
+      danger: true,
+    });
+    if (!ok) {
+      agentPicker.refresh(selectedAgentID);
+      return;
+    }
+    releaseDraft(dirty);
+  }
+  selectedAgentID = next;
   const url = new URL(window.location.href);
   if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
   else url.searchParams.delete("agent_id");
@@ -1912,7 +2304,7 @@ agentPicker.onChange = async (value) => {
   try {
     await renderWorkspace();
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
   }
 };
 
@@ -1923,7 +2315,7 @@ const openCreateFromButton = () => {
 if (createToggle) createToggle.addEventListener("click", openCreateFromButton);
 if (emptyCreate) emptyCreate.addEventListener("click", openCreateFromButton);
 
-if (createCancel) createCancel.addEventListener("click", closeCreate);
+if (createCancel) createCancel.addEventListener("click", requestCloseCreate);
 if (createDialog) {
   createDialog.addEventListener("click", (event) => {
     if (event.target === createDialog) closeCreate();
@@ -1962,7 +2354,7 @@ if (qrCopy) {
       await copyText(pendingQRURI);
       markCopied(qrCopy);
     } catch (error) {
-      showStatus(error.message, true);
+      showStatus(errorText(error), true);
     }
   });
 }
@@ -1971,38 +2363,38 @@ if (listenRetry) listenRetry.addEventListener("click", async () => {
   try {
     await renderWorkspace();
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
   }
 });
 if (routingRetry) routingRetry.addEventListener("click", () => loadRouting());
 
-const saveShareHost = async (host, message) => {
-  if (!canMutate()) return;
-  setBusy(true);
+const saveShareHost = async (host, message, control = null) => {
+  if (busy || !canMutate()) return;
+  setBusy(true, control);
   try {
     await sendPluginJSON("api/share-host", mutateBody({ host }));
     await renderWorkspace();
     showStatus(message, false);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(errorText(error), true);
   } finally {
     setBusy(false);
   }
 };
 
 if (shareHostSave) {
-  shareHostSave.addEventListener("click", () => {
+  shareHostSave.addEventListener("click", (event) => {
     const host = shareHostInput ? String(shareHostInput.value || "").trim() : "";
-    saveShareHost(host, "已更新连接地址。");
+    saveShareHost(host, "已更新连接地址。", event.currentTarget);
   });
 }
 if (shareHostAuto) {
-  shareHostAuto.addEventListener("click", () => {
-    saveShareHost("", "已恢复为节点自动地址。");
+  shareHostAuto.addEventListener("click", (event) => {
+    saveShareHost("", "已恢复为节点自动地址。", event.currentTarget);
   });
 }
 
-if (appendCancel) appendCancel.addEventListener("click", closeAppend);
+if (appendCancel) appendCancel.addEventListener("click", requestCloseAppend);
 if (appendDialog) {
   appendDialog.addEventListener("click", (event) => {
     if (event.target === appendDialog) closeAppend();
@@ -2011,10 +2403,13 @@ if (appendDialog) {
 if (appendForm) {
   appendForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (busy) return;
     const listen = pendingAppendListen;
     if (!listen || !canMutate()) return;
+    clearFormErrors(appendForm);
+    showModalError(appendError, "");
     const name = String(new FormData(appendForm).get("name") || "").trim();
-    setBusy(true);
+    setBusy(true, appendSubmit, "正在追加用户…");
     try {
       await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, mutateBody({ name }));
       const listenID = listen.id;
@@ -2022,9 +2417,9 @@ if (appendForm) {
       await renderWorkspace();
       const updated = listensCache.find((item) => item && item.id === listenID);
       if (updated) openDetail(updated);
-      showStatus("已追加用户。", false);
+      showFeedback("已追加用户，新的 ss:// 链接已生成。", false);
     } catch (error) {
-      showStatus(error.message, true);
+      showModalError(appendError, errorText(error, "追加用户失败，请稍后重试。"));
     } finally {
       setBusy(false);
     }
@@ -2034,24 +2429,40 @@ if (appendForm) {
 if (createForm) {
   createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!canMutate()) return;
+    if (busy || !canMutate()) return;
+    clearFormErrors(createForm);
+    showModalError(createError, "");
     const data = new FormData(createForm);
+    const portValue = String(data.get("port") || "").trim();
+    const port = Number(portValue);
+    if (portValue && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      const portInput = formField(createForm, "port");
+      markFieldError(portInput, "端口需为 1-65535 的整数。");
+      if (portInput) portInput.focus();
+      return;
+    }
     const body = mutateBody({
       name: String(data.get("name") || "").trim(),
       method: String(data.get("method") || "").trim(),
       password: String(data.get("password") || "").trim(),
       server_psk: String(data.get("server_psk") || "").trim(),
     });
-    const port = Number(data.get("port"));
-    if (Number.isFinite(port) && port > 0) body.port = port;
-    setBusy(true);
+    if (portValue) body.port = port;
+    setBusy(true, createSubmit, "正在保存…");
     try {
       await sendPluginJSON("api/listens", body);
-      showStatus("已保存。", false);
       closeCreate();
+      showStatus("已保存监听，可在卡片上复制 ss:// 或查看二维码。", false);
       await renderWorkspace();
     } catch (error) {
-      showStatus(error.message, true);
+      showModalError(createError, errorText(error, "新增监听失败，请检查端口和密钥后重试。"));
+      if (/端口/.test(String((error && error.message) || ""))) {
+        const portInput = formField(createForm, "port");
+        markFieldError(portInput, "该节点已使用此端口或端口不可用，请换一个端口后重试。");
+        if (portInput) portInput.focus();
+      } else if (/密钥|加密/.test(String((error && error.message) || ""))) {
+        markFieldError(formField(createForm, "password"), "密钥格式无效，请留空自动生成或检查后重试。");
+      }
     } finally {
       setBusy(false);
     }
@@ -2071,7 +2482,9 @@ const boot = async () => {
       return;
     }
     if (unavailableNode) unavailableNode.hidden = false;
-    if (unavailableDescNode) unavailableDescNode.textContent = error.message || "暂时无法管理 Shadowsocks 服务。";
+    if (unavailableDescNode) {
+      unavailableDescNode.textContent = `${errorText(error, "暂时无法管理 Shadowsocks 服务。")}请刷新页面，或确认宿主与 shadowsocks-server 插件状态。`;
+    }
   } finally {
     if (loadingNode) loadingNode.hidden = true;
   }
