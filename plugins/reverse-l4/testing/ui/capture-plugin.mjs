@@ -49,7 +49,8 @@ const saved = [
     relay_chain: [],
     enabled: false,
     channel_state: "offline",
-    last_error: "出口节点暂时离线",
+    // 宿主真实返回的英文诊断，用于确认卡片只显示中文原因。
+    last_error: "reverse channel is not established",
   },
 ];
 
@@ -72,6 +73,19 @@ export const scenes = [
     run: async (ui) => {
       await ui.waitFor("#map-list .map-card");
       await ui.waitFor("#create-toggle");
+      // The fixture returns a real host diagnostic in English; the card must
+      // show a Chinese reason with a next step and keep the raw text as title.
+      const channelError = await ui.evaluate(`(() => {
+        const node = document.querySelector("#map-list .map-error");
+        return node ? { text: node.textContent, title: node.getAttribute("title") || "" } : null;
+      })()`);
+      if (!channelError) throw new Error("映射卡片缺少通道错误说明");
+      if (channelError.title !== "reverse channel is not established") {
+        throw new Error(`映射卡片没有保留宿主技术标识：${channelError.title}`);
+      }
+      if (!/[\u4e00-\u9fff]/.test(channelError.text) || /reverse channel|no session|dial refused/i.test(channelError.text)) {
+        throw new Error(`映射卡片必须本地化宿主错误：${channelError.text}`);
+      }
     },
   },
   {

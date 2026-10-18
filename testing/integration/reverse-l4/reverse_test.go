@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -363,7 +364,78 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	if strings.Contains(css, "--color-") {
 		t.Fatal("management stylesheet must consume --ui-* kit tokens")
 	}
+	// Assert the wide-viewport behaviour, not just the media-query marker: the
+	// mapping list must switch to two columns at 1400px or wider.
+	wide := wideViewportRule(css, 1400)
+	if wide == "" {
+		t.Fatal("management stylesheet missing the wide-viewport rule at 1400px or above")
+	}
+	wideList := cssRule(wide, ".map-list")
+	if !strings.Contains(wideList, "grid-template-columns:") || !strings.Contains(wideList, "repeat(2") {
+		t.Fatal("wide viewport does not expand the mapping list into multiple columns")
+	}
 }
+
+// wideViewportRule returns the first @media (min-width: Npx) block whose N is
+// at least minWidth, so the assertion follows the declared breakpoint instead
+// of hard-coding today's value.
+func wideViewportRule(css string, minWidth int) string {
+	const marker = "@media (min-width: "
+	rest := css
+	for {
+		start := strings.Index(rest, marker)
+		if start < 0 {
+			return ""
+		}
+		block := cssRuleBlock(rest[start:])
+		if block == "" {
+			return ""
+		}
+		header := block[:strings.Index(block, "{")]
+		widthText := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(header, marker)), "px)"))
+		if width, err := strconv.Atoi(widthText); err == nil && width >= minWidth {
+			return block
+		}
+		rest = rest[start+len(marker):]
+	}
+}
+
+// cssRuleBlock returns the top-level brace-balanced rule that starts at the
+// beginning of css.
+func cssRuleBlock(css string) string {
+	open := strings.Index(css, "{")
+	if open < 0 {
+		return ""
+	}
+	depth := 0
+	for i := open; i < len(css); i++ {
+		switch css[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return css[:i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func cssRule(css, selector string) string {
+	needle := selector + " {"
+	start := strings.Index(css, needle)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: reversel4.PluginID, PluginVersion: reversel4.PluginVersion,

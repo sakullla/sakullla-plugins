@@ -213,9 +213,11 @@ const errorCopy = (error) => {
       ? "登录状态已失效。请重新登录宿主，然后刷新页面重试。"
       : "当前账号没有反向穿透映射的管理权限。请联系管理员授予权限后刷新页面。";
   }
+  // Only a rejected fetch or an explicitly network-tagged failure is a network
+  // problem. A plain Error without a status is a local data-shape failure and
+  // must keep its own Chinese reason instead of blaming connectivity.
   if (
-    (error && (error.network || error.name === "TypeError")) ||
-    status === 0 ||
+    (error && (error.network === true || error.name === "TypeError")) ||
     /Failed to fetch|NetworkError|Load failed|network error/i.test(raw)
   ) {
     return "网络连接失败。请检查网络或宿主连接，然后重试。";
@@ -238,7 +240,43 @@ const errorCopy = (error) => {
   }
   if (status === 404) return "该映射不存在或已被删除。请刷新列表后重试。";
   if (status === 409) return "已存在相同 ID 的映射。请刷新列表后重试。";
+  if (!status && chineseText(raw)) {
+    // Data-shape failures carry their own Chinese reason; keep it and add a
+    // generic retry hint instead of the network copy above.
+    return `${raw}请刷新页面后重试；若持续失败，请联系管理员。`;
+  }
   return chineseText(raw) ? raw : "请求未完成。请刷新页面后重试；若持续失败，请联系管理员。";
+};
+
+// channelErrorCopy maps the bounded host reverse-channel diagnostics onto
+// Chinese reasons with a next step. Unknown English text falls back to a
+// generic explanation; the raw value stays in the card's title/data attribute.
+const channelErrorCopy = (raw) => {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  if (/^timeout:/i.test(text) || /deadline exceeded/i.test(text)) {
+    return "查询反向通道状态超时。请稍后重试；若持续失败，请确认宿主反向通道可用。";
+  }
+  if (/^cancel:/i.test(text) || /context canceled/i.test(text)) {
+    return "查询反向通道状态被中断。请稍后重试。";
+  }
+  if (/^host-error:/i.test(text) || /host runtime|channel status is unavailable/i.test(text)) {
+    return "宿主暂时无法返回反向通道状态。请确认宿主反向通道已就绪后重试。";
+  }
+  if (/reverse channel is not established|reverse channel.*not established/i.test(text)) {
+    return "反向通道尚未建立。请确认入口和出口节点在线，然后重新启用映射。";
+  }
+  if (/reverse channel session is gone|no session|session is gone/i.test(text)) {
+    return "反向通道会话已失效。请确认节点在线后重新启用映射。";
+  }
+  if (/dial refused|connection refused/i.test(text)) {
+    return "出口节点无法连接入口监听。请确认入口地址可达、监听端口未被防火墙拦截。";
+  }
+  if (/offline|unreachable/i.test(text)) {
+    return "出口节点目前不可达。请确认节点已启动并联网后重试。";
+  }
+  if (chineseText(text)) return text;
+  return "反向通道状态异常。请确认出口节点在线后重试；若持续失败，请联系管理员。";
 };
 
 const parseAgentTime = (value) => {
@@ -1399,7 +1437,11 @@ const renderMapping = (mapping) => {
   if (mapping.last_error) {
     const error = document.createElement("p");
     error.className = "map-error";
-    error.textContent = mapping.last_error;
+    error.textContent = channelErrorCopy(mapping.last_error);
+    // Keep the bounded host diagnostic reachable for support without showing
+    // raw English as the primary copy.
+    error.title = mapping.last_error;
+    error.dataset.technical = mapping.last_error;
     identity.append(error);
   }
 

@@ -199,10 +199,23 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"入口与出口节点不能相同",
 		"ui-card map-card",
 		"ui-badge",
+		"channelErrorCopy",
+		"error.network === true",
+		"reverse channel is not established",
+		"no session",
+		"dial refused",
+		"反向通道尚未建立",
+		"反向通道会话已失效",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("script missing behaviour %q", want)
 		}
+	}
+	if strings.Contains(js, "error.textContent = mapping.last_error") {
+		t.Fatal("mapping card must localize the host channel diagnostic instead of rendering it raw")
+	}
+	if strings.Contains(js, "status === 0") {
+		t.Fatal("plain data-shape errors must not be classified as network failures")
 	}
 	if strings.Contains(js, "window.confirm") {
 		t.Fatal("script still blocks on window.confirm instead of the confirm dialog")
