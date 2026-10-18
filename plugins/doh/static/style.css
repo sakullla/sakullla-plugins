@@ -95,6 +95,14 @@
   margin-top: var(--ui-space-6);
 }
 
+/* The shared kit only lifts buttons and fields to `--ui-touch` on small
+   screens and leaves the help disclosure at the 38px control height. Keep the
+   only other tappable row on this page at the 44px touch floor; the ui-kit
+   copy stays untouched so the canonical kit and its copies do not drift. */
+.doh-help > summary {
+  min-height: var(--ui-touch);
+}
+
 .doh-help .ui-help__body > p {
   margin: 0 0 var(--ui-space-4);
 }

@@ -111,7 +111,7 @@ func TestDoHHomepageGuidesConfigurationWithoutUpstream(t *testing.T) {
 		t.Fatalf("status=%d type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
 	}
 	page := recorder.Body.String()
-	for _, want := range []string{"DNS over HTTPS", "/dns-query", "Chrome", "Firefox", "Windows 11", "复制地址"} {
+	for _, want := range []string{"DNS over HTTPS", "/dns-query", "Chrome", "Edge", "Windows 11", "复制地址", "<details", "ui-help"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("homepage missing %q", want)
 		}
