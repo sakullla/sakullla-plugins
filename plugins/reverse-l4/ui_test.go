@@ -28,6 +28,8 @@ func TestPluginYAMLDeclaresUIRouteAndNavMetadata(t *testing.T) {
 		"- assets/ui/index.html",
 		"- assets/ui/app.js",
 		"- assets/ui/style.css",
+		"- assets/ui/ui-kit.css",
+		"- assets/ui/ui-kit.js",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plugin.yaml must declare %q: %s", want, text)
@@ -87,6 +89,11 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		t.Fatalf("create form still has a mapping id input: %s", html)
 	}
 	for _, want := range []string{
+		`class="ui-page"`,
+		`data-theme-mode="host"`,
+		`src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`class="ui-help map-help"`,
 		`name="entry_agent_id"`,
 		`name="exit_agent_id"`,
 		`data-agent-picker="entry"`,
@@ -101,14 +108,28 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		`id="map-list"`,
 		`id="map-empty"`,
 		`id="map-count"`,
-		`id="map-form"`,
+		`id="mapping-dialog"`,
 		`id="mapping-form"`,
+		`id="wizard-steps"`,
+		`id="wizard-step-1"`,
+		`id="wizard-step-2"`,
+		`id="wizard-step-3"`,
+		`id="wizard-next"`,
+		`id="wizard-back"`,
+		`id="wizard-error"`,
 		`id="form-cancel"`,
 		`id="form-submit"`,
 		`id="catalog-error"`,
 		`id="mapping-id-display"`,
+		`id="confirm-dialog"`,
+		`id="create-empty"`,
 		`class="route-guide"`,
+		`class="ui-dialog`,
+		`class="ui-btn`,
+		`class="ui-empty`,
+		"还没有映射",
 		"公网入口",
+		"反向通道",
 		"出口侧内网服务",
 		"127.0.0.1</code> 表示出口节点自身",
 		"入口 → 第 1 跳",
@@ -118,9 +139,25 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 			t.Fatalf("page missing %q: %s", want, html)
 		}
 	}
+	if strings.Contains(html, `id="map-form"`) {
+		t.Fatal("create form is still an inline panel instead of the wizard dialog")
+	}
 	if strings.Contains(html, `name="relay_chain"`) || strings.Contains(html, "逗号分隔") {
 		t.Fatalf("create form still uses a free-text relay chain: %s", html)
 	}
+	// First screen: create action, collapsed help, then the mapping list.
+	createIndex := strings.Index(html, `id="create-toggle"`)
+	helpIndex := strings.Index(html, `class="ui-help map-help"`)
+	listIndex := strings.Index(html, `id="map-list"`)
+	if createIndex < 0 || helpIndex < 0 || listIndex < 0 || createIndex > helpIndex || helpIndex > listIndex {
+		t.Fatal("first screen must lead with the create action, collapsed help, and the mapping list")
+	}
+	mainEnd := strings.Index(html, "</main>")
+	dialogIndex := strings.Index(html, `id="mapping-dialog"`)
+	if mainEnd < 0 || dialogIndex < mainEnd {
+		t.Fatal("the create wizard must be a dialog outside the first-screen flow")
+	}
+
 	script := serveManagement(controller, managementRequest(http.MethodGet, "/app.js", ""))
 	if script.Code != http.StatusOK || !strings.Contains(script.Body.String(), "channel_state") {
 		t.Fatalf("script status=%d", script.Code)
@@ -140,13 +177,28 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		"技术标识",
 		"确认删除",
 		"map-toasts",
+		"openForm",
+		"closeForm",
+		"resetWizard",
+		"applyStep",
+		"checkStep",
+		"checkAllSteps",
+		"wizard-next",
+		"wizard-back",
+		"请选择入口节点",
+		"入口与出口节点不能相同",
+		"ui-card map-card",
+		"ui-badge",
 	} {
 		if !strings.Contains(js, want) {
-			t.Fatalf("script missing catalog %q", want)
+			t.Fatalf("script missing behaviour %q", want)
 		}
 	}
 	if strings.Contains(js, "window.confirm") {
-		t.Fatal("script still blocks on window.confirm instead of the inline two-step delete")
+		t.Fatal("script still blocks on window.confirm instead of the confirm dialog")
+	}
+	if strings.Contains(js, "applyHostTheme") || strings.Contains(js, `document.documentElement.setAttribute("data-theme"`) {
+		t.Fatal("theme resolution must come from ui-kit.js host mode")
 	}
 	if strings.Contains(html, `select name="entry_agent_id"`) || strings.Contains(html, `select name="exit_agent_id"`) {
 		t.Fatal("create form still uses a native agent <select>")
@@ -154,8 +206,9 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 	if strings.Contains(js, `.split(",")`) {
 		t.Fatal("script still parses relay hops from comma-separated text")
 	}
+
 	stylesheet := serveManagement(controller, managementRequest(http.MethodGet, "/style.css", ""))
-	if stylesheet.Code != http.StatusOK || !strings.Contains(stylesheet.Body.String(), "chip-state-offline") {
+	if stylesheet.Code != http.StatusOK || !strings.Contains(stylesheet.Body.String(), ".map-route") {
 		t.Fatalf("stylesheet status=%d", stylesheet.Code)
 	}
 	css := stylesheet.Body.String()
@@ -166,46 +219,38 @@ func TestManagementPageServesAssetsAndRequiresActorIdentity(t *testing.T) {
 		".map-technical",
 		".agent-search-select",
 		".agent-search-select__status--offline",
-		".chip-state-online",
-		".chip-state-unknown",
-		".map-confirm",
-		".toast",
-		".toast--error",
-		"@media (max-width: 720px)",
-		"grid-template-columns: 1fr",
+		".wizard-steps",
+		".wizard-step",
+		".map-card",
+		".map-toast__text",
+		"@media (max-width: 900px)",
+		"@media (max-width: 640px)",
+		"@media (max-width: 480px)",
+		"@media (min-width: 1600px)",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("stylesheet missing functional rule %q", want)
 		}
 	}
-	htmlRule := cssRule(css, "html")
-	if !strings.Contains(htmlRule, "font-size: 14px") {
-		t.Fatal("base density is not the 14px console scale")
+	if strings.Contains(css, "--color-") {
+		t.Fatal("style.css must consume --ui-* tokens instead of legacy --color-* tokens")
 	}
-	for _, legacy := range []string{"font-size: 17px", "font-size: 18px", "font-size: 20px"} {
-		if strings.Contains(css, legacy) {
-			t.Fatalf("stylesheet still scales the root font at wide viewports: %s", legacy)
+	if !strings.Contains(css, "var(--ui-") {
+		t.Fatal("style.css must consume kit tokens")
+	}
+	assertSharedKitSkin(t, html, js, css)
+	for _, asset := range []struct {
+		name   string
+		marker string
+	}{
+		{"ui-kit.css", `[data-theme="fresh-green"]`},
+		{"ui-kit.js", "HOST_THEMES"},
+	} {
+		response := serveManagement(controller, managementRequest(http.MethodGet, "/"+asset.name, ""))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), asset.marker) {
+			t.Fatalf("kit asset %s status=%d body=%s", asset.name, response.Code, response.Body.String())
 		}
 	}
-	if !strings.Contains(css, "--control-height: 32px") {
-		t.Fatal("controls are not standardized on the 32px console height")
-	}
-	if !strings.Contains(css, "--content-max: 1200px") {
-		t.Fatal("content column token is missing")
-	}
-	mainRule := cssRule(css, "main")
-	if !strings.Contains(mainRule, "max-width: var(--content-max)") || !strings.Contains(mainRule, "margin-inline: auto") {
-		t.Fatal("main is not a centered, capped content column")
-	}
-	wide := cssFrom(css, "@media (min-width: 1400px)")
-	if wide == "" {
-		t.Fatal("stylesheet missing the wide-viewport rule")
-	}
-	wideList := cssRule(wide, ".map-list")
-	if !strings.Contains(wideList, "grid-template-columns:") || !strings.Contains(wideList, "repeat(2") {
-		t.Fatal("wide viewport does not expand the mapping list into multiple columns")
-	}
-	assertConsoleSkin(t, html, js, css)
 
 	anonymous := serveManagement(controller, httptest.NewRequest(http.MethodGet, "/api/mappings", nil))
 	if anonymous.Code != http.StatusForbidden || !strings.Contains(anonymous.Body.String(), ErrUnauthorized.Error()) {
@@ -458,59 +503,23 @@ func TestStatusesDegradesPollFailureToUnknown(t *testing.T) {
 	}
 }
 
-func assertConsoleSkin(t *testing.T, page, script, style string) {
+func assertSharedKitSkin(t *testing.T, page, script, style string) {
 	t.Helper()
-	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
-		t.Fatal("stylesheet still contains sakura theme colors")
-	}
-	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
-		t.Fatal("page still uses sakura-day as the rendered theme")
-	}
-	if !strings.Contains(page, `data-theme="light"`) {
-		t.Fatal("page default theme is not light")
-	}
-	light := cssRule(style, `[data-theme="light"]`)
-	dark := cssRule(style, `[data-theme="dark"]`)
-	if light == "" || dark == "" {
-		t.Fatal("stylesheet missing light/dark theme selectors")
-	}
-	if !strings.Contains(light, "--color-accent:") || !strings.Contains(dark, "--color-accent:") {
-		t.Fatal("stylesheet does not define the single accent token in both themes")
-	}
-	for _, semantic := range []string{"--color-success:", "--color-danger:", "--color-warning:"} {
-		if !strings.Contains(light, semantic) || !strings.Contains(dark, semantic) {
-			t.Fatalf("stylesheet missing semantic status token %s in a theme", semantic)
+	for _, legacy := range []string{"#d94880", "#f4a0c0", "#f5f4f2", "--color-accent", "--color-success"} {
+		if strings.Contains(style, legacy) {
+			t.Fatalf("stylesheet still contains the retired skin value %q", legacy)
 		}
 	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	if strings.Contains(page, `data-theme="sakura-day"`) {
+		t.Fatal("page still hard-codes a host theme instead of deferring to ui-kit.js")
 	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
+	if !strings.Contains(page, `data-theme-mode="host"`) {
+		t.Fatal("page must run ui-kit.js in host theme mode")
 	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	if !strings.Contains(script, "NREUI") {
+		t.Fatal("app.js must use the shared kit behaviours")
 	}
-}
-
-func cssFrom(css, marker string) string {
-	start := strings.Index(css, marker)
-	if start < 0 {
-		return ""
+	if !strings.Contains(style, "var(--ui-") {
+		t.Fatal("style.css must consume kit tokens")
 	}
-	return css[start:]
-}
-
-func cssRule(css, selector string) string {
-	needle := selector + " {"
-	start := strings.Index(css, needle)
-	if start < 0 {
-		return ""
-	}
-	rest := css[start:]
-	end := strings.Index(rest, "}")
-	if end < 0 {
-		return rest
-	}
-	return rest[:end]
 }

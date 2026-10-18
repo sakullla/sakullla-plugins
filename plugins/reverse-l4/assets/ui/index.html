@@ -1,123 +1,224 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-theme-mode="host">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>四层反向穿透</title>
+  <script src="ui-kit.js"></script>
+  <link rel="stylesheet" href="ui-kit.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="map-toasts" class="toast-stack" aria-live="polite"></div>
-  <main>
-    <header class="page-head">
-      <p class="kicker">四层反向穿透</p>
-      <h1>反向穿透映射</h1>
-      <p class="lede">公网客户端连接入口节点上的端口。出口节点主动建立反向通道（可选中继），再访问它能到达的内网服务。回程沿同一条链路返回。</p>
-      <section class="route-guide" aria-labelledby="route-guide-title">
-        <h2 id="route-guide-title" class="sr-only">流量关系说明</h2>
-        <div class="route-guide-step">
-          <span class="route-guide-index">1</span>
-          <span><strong>公网客户端连接入口</strong><small>连的是入口节点上的监听端口，不是出口，也不是面板</small></span>
-        </div>
-        <span class="route-guide-arrow" aria-hidden="true">→</span>
-        <div class="route-guide-step">
-          <span class="route-guide-index">2</span>
-          <span><strong>反向通道送到出口</strong><small>出口主动建链。无中继则直连入口；有中继则按添加顺序从入口走到出口</small></span>
-        </div>
-        <span class="route-guide-arrow" aria-hidden="true">→</span>
-        <div class="route-guide-step">
-          <span class="route-guide-index">3</span>
-          <span><strong>出口连接内网服务</strong><small>由出口节点访问这个地址；不是入口去连</small></span>
-        </div>
-      </section>
-      <p class="route-guide-flow"><strong>转发顺序：</strong>客户端 → 入口 → 第 1 跳中继 → 第 2 跳中继 → … → 出口 → 内网服务。不添加中继时，入口与出口直连。</p>
-      <p class="route-guide-note"><strong>地址归属：</strong><code>127.0.0.1</code> 表示出口节点自身，不是入口节点，也不是管理面板所在机器。</p>
-    </header>
-    <p id="map-loading" role="status">正在加载映射…</p>
-    <p id="map-unavailable" role="status" hidden>暂时无法管理反向穿透映射。</p>
-    <p id="map-denied" role="alert" hidden>无权管理反向穿透映射。</p>
-    <div id="map-workspace" hidden>
-      <div class="toolbar-bar">
-        <p class="engine-status">通道状态由宿主反向通道实时投影</p>
-        <button id="create-toggle" class="btn-primary" type="button">新建映射</button>
+  <div id="map-toasts" class="ui-toast-region" aria-live="polite"></div>
+  <main class="ui-page">
+    <header class="ui-page-head">
+      <div class="ui-page-head__copy">
+        <p class="ui-eyebrow">网络 / 四层反向穿透</p>
+        <h1 class="ui-title">反向穿透映射</h1>
+        <p class="ui-lede">
+          公网客户端连接入口节点的公开端口，出口节点主动建立反向通道，再访问它能到达的内网服务。回程沿同一条链路返回。
+        </p>
       </div>
-      <section class="panel" id="map-form" aria-labelledby="map-form-title" hidden>
-        <div class="section-head">
-          <h2 id="map-form-title">新建映射</h2>
-          <button id="form-cancel" class="btn-link" type="button">取消</button>
-        </div>
-        <form id="mapping-form" method="post">
-          <p id="mapping-id-display" class="mapping-id" hidden></p>
-          <label>名称 <input name="name" autocomplete="off" spellcheck="false" maxlength="128" placeholder="内网 Web"></label>
-          <label>协议
-            <select name="protocol" required>
-              <option value="tcp">TCP</option>
-              <option value="udp">UDP</option>
-            </select>
-          </label>
-          <section class="form-stage" aria-labelledby="entry-stage-title">
-            <div class="form-stage-head">
-              <span class="form-stage-index">1</span>
-              <span><strong id="entry-stage-title">公网入口</strong><small>客户端连接这里；监听端口属于入口节点</small></span>
-            </div>
-            <div class="form-stage-fields">
-              <label class="form-stage-field--full">入口节点
-                <input type="hidden" name="entry_agent_id" value="" autocomplete="off">
-                <div class="agent-search-select" data-agent-picker="entry"></div>
-              </label>
-              <label>监听地址 <input name="listen_host" value="0.0.0.0" maxlength="253" autocomplete="off" spellcheck="false" placeholder="0.0.0.0" aria-describedby="listen-host-hint"></label>
-              <label>公开监听端口 <input name="listen_port" type="number" required min="1" max="65535" placeholder="8443"></label>
-            </div>
-            <p id="listen-host-hint" class="hint">默认 0.0.0.0，监听所有 IPv4 网卡；可填写指定本机地址，或 :: 监听 IPv6。</p>
-          </section>
-          <section class="form-stage" aria-labelledby="channel-stage-title">
-            <div class="form-stage-head">
-              <span class="form-stage-index">2</span>
-              <span><strong id="channel-stage-title">反向通道</strong><small>出口节点主动建链。无中继时直连入口；有中继时按下方列表从入口侧依次走到出口侧</small></span>
-            </div>
-            <div class="form-stage-fields form-stage-fields--single">
-              <label>出口节点
-                <input type="hidden" name="exit_agent_id" value="" autocomplete="off">
-                <div class="agent-search-select" data-agent-picker="exit"></div>
-              </label>
-            </div>
-            <div class="relay-field">
-              <div class="relay-head">
-                <span>中继链路（可选）</span>
-                <button id="relay-add" class="btn-link" type="button">添加一跳</button>
-              </div>
-              <div id="relay-hops" class="relay-hops"></div>
-              <p class="hint">从上到下就是实际转发顺序：入口 → 第 1 跳 → 第 2 跳 → … → 出口。不添加则出口直连入口。选项末尾的数字是监听器 ID，不是跳号。</p>
-            </div>
-          </section>
-          <section class="form-stage" aria-labelledby="backend-stage-title">
-            <div class="form-stage-head">
-              <span class="form-stage-index">3</span>
-              <span><strong id="backend-stage-title">出口侧内网服务</strong><small>由出口节点访问这个地址；127.0.0.1 表示出口节点本机</small></span>
-            </div>
-            <div class="form-stage-fields">
-              <label>内网服务地址 <input name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
-              <label>内网服务端口 <input name="backend_port" type="number" required min="1" max="65535" placeholder="9443"></label>
-            </div>
-          </section>
-          <p id="catalog-error" class="map-error" role="alert" hidden></p>
-          <div class="form-footer">
-            <p class="hint">入口与出口节点不能相同。回程沿同一条链路原路返回。映射 ID 由系统创建且不可更改。</p>
-            <button type="submit" class="btn-primary" id="form-submit">创建</button>
+      <div class="ui-page-actions">
+        <button id="create-toggle" class="ui-btn" type="button">新建映射</button>
+      </div>
+    </header>
+
+    <details class="ui-help map-help">
+      <summary>入口、反向通道和出口是怎么走通的？</summary>
+      <div class="ui-help__body">
+        <h2 id="route-guide-title" class="ui-sr-only">流量关系说明</h2>
+        <div class="route-guide">
+          <div class="route-guide-step">
+            <span class="route-guide-index">1</span>
+            <span><strong>公网客户端连接入口</strong><small>连的是入口节点上的监听端口，不是出口，也不是面板</small></span>
           </div>
-        </form>
-      </section>
-      <section class="panel" aria-labelledby="map-list-title">
-        <div class="section-head">
-          <h2 id="map-list-title">映射</h2>
-          <p id="map-count" class="count" hidden></p>
+          <span class="route-guide-arrow" aria-hidden="true">→</span>
+          <div class="route-guide-step">
+            <span class="route-guide-index">2</span>
+            <span><strong>反向通道送到出口</strong><small>出口主动建链。无中继则直连入口；有中继则按添加顺序从入口走到出口</small></span>
+          </div>
+          <span class="route-guide-arrow" aria-hidden="true">→</span>
+          <div class="route-guide-step">
+            <span class="route-guide-index">3</span>
+            <span><strong>出口连接内网服务</strong><small>由出口节点访问这个地址；不是入口去连</small></span>
+          </div>
         </div>
-        <div id="map-list" class="map-list"></div>
-        <p id="map-empty" hidden>还没有映射。点上方新建映射。</p>
-      </section>
-      <p id="map-status" class="sr-only" role="status" hidden></p>
-    </div>
+        <p class="route-guide-flow"><strong>转发顺序：</strong>客户端 → 入口 → 第 1 跳中继 → 第 2 跳中继 → … → 出口 → 内网服务。不添加中继时，入口与出口直连。</p>
+        <p class="route-guide-note"><strong>中继顺序：</strong>从上到下就是实际转发顺序：入口 → 第 1 跳 → 第 2 跳 → … → 出口。选项末尾的数字是监听器 ID，不是跳号。</p>
+        <p class="route-guide-note"><strong>地址归属：</strong><code>127.0.0.1</code> 表示出口节点自身，不是入口节点，也不是管理面板所在机器。</p>
+      </div>
+    </details>
+
+    <p id="map-loading" class="ui-loading" role="status">
+      <span class="ui-spinner" aria-hidden="true"></span>
+      <span>正在加载映射…</span>
+    </p>
+    <section id="map-unavailable" class="ui-error-state map-message" role="alert" hidden>
+      <span class="ui-error-state__icon" aria-hidden="true">!</span>
+      <h2 class="ui-error-state__title">暂时无法管理反向穿透映射</h2>
+      <p class="ui-error-state__desc" id="map-unavailable-desc">页面已打开，但还不能读取映射列表。刷新页面，或确认宿主反向通道已就绪。</p>
+    </section>
+    <section id="map-denied" class="ui-denied map-message" role="alert" hidden>
+      <h2 class="ui-empty__title">无权管理反向穿透映射</h2>
+      <p class="ui-denied__desc">当前操作人没有读取或改动反向穿透映射的权限。请联系管理员授予对应权限。</p>
+    </section>
+
+    <section id="map-workspace" class="map-workspace" aria-labelledby="map-list-title" hidden>
+      <div class="map-toolbar">
+        <div class="map-toolbar__copy">
+          <h2 id="map-list-title" class="ui-section-title">映射</h2>
+          <p class="ui-section-desc">每条映射把入口端口经反向通道接到出口侧的内网服务。</p>
+        </div>
+        <p id="map-count" class="ui-badge ui-badge--plain" hidden></p>
+      </div>
+      <p class="engine-status">通道状态由宿主反向通道实时投影。</p>
+      <div id="map-list" class="map-list"></div>
+      <div id="map-empty" class="ui-empty" hidden>
+        <span class="ui-empty__icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" width="22" height="22" fill="none" focusable="false" aria-hidden="true">
+            <path d="M3 5.5h14v9H3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+            <path d="M6.5 9.5h7M6.5 12.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </span>
+        <h2 class="ui-empty__title">还没有映射</h2>
+        <p class="ui-empty__desc">新建第一条映射，把入口端口经反向通道接到出口侧的内网服务。</p>
+        <div class="ui-empty__actions">
+          <button id="create-empty" class="ui-btn" type="button">新建映射</button>
+        </div>
+      </div>
+      <p id="map-status" class="ui-sr-only" role="status" aria-live="polite" hidden></p>
+    </section>
   </main>
-  <script src="app.js" defer></script>
+
+  <dialog id="mapping-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="map-form-title" aria-describedby="map-form-desc">
+    <div class="ui-dialog__head">
+      <div>
+        <p class="ui-eyebrow">反向穿透映射</p>
+        <h2 class="ui-dialog__title" id="map-form-title">新建映射</h2>
+        <p class="ui-dialog__desc" id="map-form-desc">按公网入口、反向通道、出口内网服务三步填写。</p>
+      </div>
+      <button id="form-close" class="ui-btn ui-btn--icon ui-btn--ghost" type="button" aria-label="关闭">×</button>
+    </div>
+    <form id="mapping-form" method="post" novalidate>
+      <div class="ui-dialog__body">
+        <ol id="wizard-steps" class="wizard-steps" aria-label="新建映射步骤">
+          <li class="wizard-step" data-step="1" aria-current="step">
+            <span class="wizard-step__index" aria-hidden="true">1</span>
+            <span class="wizard-step__copy"><strong>公网入口</strong><small>客户端连接的入口端口</small></span>
+          </li>
+          <li class="wizard-step" data-step="2">
+            <span class="wizard-step__index" aria-hidden="true">2</span>
+            <span class="wizard-step__copy"><strong>反向通道</strong><small>出口主动建链，可选中继</small></span>
+          </li>
+          <li class="wizard-step" data-step="3">
+            <span class="wizard-step__index" aria-hidden="true">3</span>
+            <span class="wizard-step__copy"><strong>出口内网服务</strong><small>由出口访问的内网地址</small></span>
+          </li>
+        </ol>
+        <p id="mapping-id-display" class="mapping-id" hidden></p>
+
+        <section id="wizard-step-1" class="form-stage" data-wizard-step="1" aria-labelledby="entry-stage-title">
+          <div class="form-stage-head">
+            <span class="wizard-step__index" aria-hidden="true">1</span>
+            <span><strong id="entry-stage-title">公网入口</strong><small>客户端连接这里；监听端口属于入口节点</small></span>
+          </div>
+          <div class="ui-form-grid">
+            <div class="ui-field">
+              <label class="ui-label" for="map-name">名称 <span class="ui-label__optional">可选</span></label>
+              <input class="ui-input" id="map-name" name="name" autocomplete="off" spellcheck="false" maxlength="128" placeholder="内网 Web">
+            </div>
+            <div class="ui-field">
+              <label class="ui-label" for="map-protocol">协议</label>
+              <select class="ui-select" id="map-protocol" name="protocol" required>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+            </div>
+            <div class="ui-field ui-field--full">
+              <span class="ui-label" id="entry-agent-label">入口节点</span>
+              <input type="hidden" name="entry_agent_id" value="" autocomplete="off">
+              <div class="agent-search-select" data-agent-picker="entry" aria-labelledby="entry-agent-label"></div>
+            </div>
+            <div class="ui-field">
+              <label class="ui-label" for="map-listen-host">监听地址</label>
+              <input class="ui-input" id="map-listen-host" name="listen_host" value="0.0.0.0" maxlength="253" autocomplete="off" spellcheck="false" placeholder="0.0.0.0" aria-describedby="listen-host-hint">
+            </div>
+            <div class="ui-field">
+              <label class="ui-label" for="map-listen-port">公开监听端口</label>
+              <input class="ui-input" id="map-listen-port" name="listen_port" type="number" required min="1" max="65535" inputmode="numeric" placeholder="8443">
+            </div>
+            <p class="ui-help-text ui-field--full" id="listen-host-hint">默认 0.0.0.0，监听所有 IPv4 网卡；可填写指定本机地址，或 :: 监听 IPv6。</p>
+          </div>
+        </section>
+
+        <section id="wizard-step-2" class="form-stage" data-wizard-step="2" aria-labelledby="channel-stage-title" hidden>
+          <div class="form-stage-head">
+            <span class="wizard-step__index" aria-hidden="true">2</span>
+            <span><strong id="channel-stage-title">反向通道</strong><small>出口节点主动建链；有中继时按下方列表从入口侧依次走到出口侧</small></span>
+          </div>
+          <div class="ui-form-grid">
+            <div class="ui-field ui-field--full">
+              <span class="ui-label" id="exit-agent-label">出口节点</span>
+              <input type="hidden" name="exit_agent_id" value="" autocomplete="off">
+              <div class="agent-search-select" data-agent-picker="exit" aria-labelledby="exit-agent-label"></div>
+            </div>
+            <div class="ui-field ui-field--full relay-field">
+              <div class="relay-head">
+                <span class="ui-label" id="relay-label">中继链路（可选）</span>
+                <button id="relay-add" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">添加一跳</button>
+              </div>
+              <div id="relay-hops" class="relay-hops" role="group" aria-labelledby="relay-label"></div>
+              <p class="ui-help-text">从上到下就是实际转发顺序：入口 → 第 1 跳 → 第 2 跳 → … → 出口。不添加则出口直连入口。</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="wizard-step-3" class="form-stage" data-wizard-step="3" aria-labelledby="backend-stage-title" hidden>
+          <div class="form-stage-head">
+            <span class="wizard-step__index" aria-hidden="true">3</span>
+            <span><strong id="backend-stage-title">出口侧内网服务</strong><small>由出口节点访问这个地址；127.0.0.1 表示出口节点本机</small></span>
+          </div>
+          <div class="ui-form-grid">
+            <div class="ui-field">
+              <label class="ui-label" for="map-backend-host">内网服务地址</label>
+              <input class="ui-input" id="map-backend-host" name="backend_host" required autocomplete="off" spellcheck="false" placeholder="127.0.0.1">
+            </div>
+            <div class="ui-field">
+              <label class="ui-label" for="map-backend-port">内网服务端口</label>
+              <input class="ui-input" id="map-backend-port" name="backend_port" type="number" required min="1" max="65535" inputmode="numeric" placeholder="9443">
+            </div>
+            <p class="ui-help-text ui-field--full">出口与入口节点不能相同。回程沿同一条链路原路返回。</p>
+          </div>
+        </section>
+
+        <p id="wizard-error" class="ui-error-text map-dialog-error" role="alert" hidden></p>
+        <p id="catalog-error" class="ui-error-text map-dialog-error" role="alert" hidden></p>
+      </div>
+      <div class="ui-dialog__footer map-dialog-footer">
+        <button id="form-cancel" class="ui-btn ui-btn--secondary" type="button">取消</button>
+        <span class="ui-spacer"></span>
+        <button id="wizard-back" class="ui-btn ui-btn--secondary" type="button" hidden>上一步</button>
+        <button id="wizard-next" class="ui-btn" type="button">下一步</button>
+        <button id="form-submit" class="ui-btn" type="submit" hidden>创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="confirm-title" aria-describedby="confirm-desc">
+    <div class="ui-dialog__head">
+      <div>
+        <p class="ui-eyebrow">确认操作</p>
+        <h2 class="ui-dialog__title" id="confirm-title">删除映射</h2>
+        <p class="ui-dialog__desc" id="confirm-desc"></p>
+      </div>
+    </div>
+    <div class="ui-dialog__footer">
+      <button id="confirm-cancel" class="ui-btn ui-btn--secondary" type="button">取消</button>
+      <button id="confirm-accept" class="ui-btn ui-btn--danger" type="button">确认删除</button>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
 </body>
 </html>

@@ -1,21 +1,3 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = "light";
-  try {
-    const raw = window.parent && window.parent !== window
-      ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) theme = mapped;
-  } catch (_error) {
-    theme = "light";
-  }
-  document.documentElement.setAttribute("data-theme", theme);
-};
-
-applyHostTheme();
-
 const statusNode = document.querySelector("#map-status");
 const toastStack = document.querySelector("#map-toasts");
 const loadingNode = document.querySelector("#map-loading");
@@ -25,12 +7,21 @@ const workspaceNode = document.querySelector("#map-workspace");
 const listNode = document.querySelector("#map-list");
 const emptyNode = document.querySelector("#map-empty");
 const countNode = document.querySelector("#map-count");
-const formPanel = document.querySelector("#map-form");
-const formTitle = document.querySelector("#map-form-title");
+const createToggle = document.querySelector("#create-toggle");
+const createEmpty = document.querySelector("#create-empty");
+const mappingDialog = document.querySelector("#mapping-dialog");
 const formNode = document.querySelector("#mapping-form");
+const formTitle = document.querySelector("#map-form-title");
+const formDesc = document.querySelector("#map-form-desc");
 const formSubmit = document.querySelector("#form-submit");
 const formCancel = document.querySelector("#form-cancel");
-const createToggle = document.querySelector("#create-toggle");
+const formClose = document.querySelector("#form-close");
+const wizardNext = document.querySelector("#wizard-next");
+const wizardBack = document.querySelector("#wizard-back");
+const wizardErrorNode = document.querySelector("#wizard-error");
+const wizardStepList = document.querySelector("#wizard-steps");
+const wizardStepNodes = wizardStepList ? Array.from(wizardStepList.querySelectorAll(".wizard-step")) : [];
+const wizardSections = Array.from(document.querySelectorAll("[data-wizard-step]"));
 const entryInput = formNode ? formNode.querySelector('input[name="entry_agent_id"]') : null;
 const exitInput = formNode ? formNode.querySelector('input[name="exit_agent_id"]') : null;
 const entryPickerRoot = formNode ? formNode.querySelector('[data-agent-picker="entry"]') : null;
@@ -39,14 +30,31 @@ const relayHops = document.querySelector("#relay-hops");
 const relayAdd = document.querySelector("#relay-add");
 const catalogErrorNode = document.querySelector("#catalog-error");
 const mappingIDDisplay = document.querySelector("#mapping-id-display");
+const confirmDialog = document.querySelector("#confirm-dialog");
+const confirmTitle = document.querySelector("#confirm-title");
+const confirmDesc = document.querySelector("#confirm-desc");
+const confirmAccept = document.querySelector("#confirm-accept");
+const confirmCancel = document.querySelector("#confirm-cancel");
 
+const fieldNodes = {
+  name: formNode ? formNode.querySelector('input[name="name"]') : null,
+  protocol: formNode ? formNode.querySelector('select[name="protocol"]') : null,
+  listenHost: formNode ? formNode.querySelector('input[name="listen_host"]') : null,
+  listenPort: formNode ? formNode.querySelector('input[name="listen_port"]') : null,
+  backendHost: formNode ? formNode.querySelector('input[name="backend_host"]') : null,
+  backendPort: formNode ? formNode.querySelector('input[name="backend_port"]') : null,
+};
+
+const totalSteps = 3;
 const maxRelayHops = 32;
 
 let busy = false;
 let editingID = "";
+let wizardStep = 1;
 let catalogReady = false;
 let agentsCache = [];
 let listenersCache = [];
+let pendingConfirm = null;
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -61,15 +69,7 @@ const panelAuthHeaders = () => {
   return headers;
 };
 
-const dismissToast = (toast) => {
-  if (!toast) return;
-  toast.remove();
-};
-
-// showStatus reports an operation result as an auto-dismissing toast; error
-// toasts stay until the operator closes them. #map-status remains an sr-only
-// live region so assistive tech still announces the same message.
-const showStatus = (message, isError) => {
+const pushToast = (message, isError) => {
   if (!message) return;
   if (statusNode) {
     statusNode.hidden = false;
@@ -78,30 +78,59 @@ const showStatus = (message, isError) => {
   }
   if (!toastStack) return;
   const toast = document.createElement("div");
-  toast.className = isError ? "toast toast--error" : "toast toast--success";
+  toast.className = `ui-toast ${isError ? "ui-toast--danger" : "ui-toast--success"}`;
   toast.setAttribute("role", isError ? "alert" : "status");
   const text = document.createElement("span");
-  text.className = "toast__message";
+  text.className = "map-toast__text";
   text.textContent = message;
   toast.append(text);
   if (isError) {
     const close = document.createElement("button");
     close.type = "button";
-    close.className = "toast__close";
-    close.setAttribute("aria-label", "关闭通知");
+    close.className = "ui-btn ui-btn--icon ui-btn--ghost ui-btn--sm";
+    close.setAttribute("aria-label", "关闭提示");
     close.textContent = "×";
-    close.addEventListener("click", () => dismissToast(toast));
+    close.addEventListener("click", () => toast.remove());
     toast.append(close);
   } else {
-    window.setTimeout(() => dismissToast(toast), 4200);
+    window.setTimeout(() => toast.remove(), 4200);
   }
   toastStack.append(toast);
 };
+
+const showStatus = (message, isError) => pushToast(message, isError);
 
 const showCatalogError = (message) => {
   if (!catalogErrorNode) return;
   catalogErrorNode.hidden = !message;
   catalogErrorNode.textContent = message || "";
+};
+
+const showWizardError = (message) => {
+  if (!wizardErrorNode) return;
+  wizardErrorNode.hidden = !message;
+  wizardErrorNode.textContent = message || "";
+};
+
+const clearFieldErrors = () => {
+  Object.values(fieldNodes).forEach((node) => {
+    if (node && window.NREUI && window.NREUI.clearFieldError) window.NREUI.clearFieldError(node);
+  });
+  [entryInput, exitInput].forEach((node) => {
+    if (node && window.NREUI && window.NREUI.clearFieldError) window.NREUI.clearFieldError(node);
+  });
+  if (formNode) {
+    formNode.querySelectorAll('[aria-invalid="true"]').forEach((node) => node.removeAttribute("aria-invalid"));
+  }
+};
+
+const markFieldError = (node, message) => {
+  if (!node) return;
+  if (window.NREUI && window.NREUI.fieldError) {
+    window.NREUI.fieldError(node, message);
+    return;
+  }
+  node.setAttribute("aria-invalid", "true");
 };
 
 const newOperationKey = () => {
@@ -204,6 +233,7 @@ const agentLabel = (agent) => {
   return isAgentOnline(agent) ? label : `${label}（离线）`;
 };
 
+const agentPickers = [];
 const listenerPickers = [];
 
 const closeAllPickers = (except) => {
@@ -456,12 +486,15 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   return picker;
 };
 
-const agentPickers = [];
 const entryPicker = mountAgentSearchSelect(entryPickerRoot, entryInput, "选择入口节点");
 const exitPicker = mountAgentSearchSelect(exitPickerRoot, exitInput, "选择出口节点");
 if (entryPicker.root) agentPickers.push(entryPicker);
 if (exitPicker.root) agentPickers.push(exitPicker);
 
+const fillAgentPickers = (entryID, exitID) => {
+  entryPicker.refresh(entryID || "");
+  exitPicker.refresh(exitID || "");
+};
 const listenerLabel = (listener, id) => {
   const name = String((listener && listener.name) || "").trim();
   const agent = String((listener && (listener.agent_name || listener.agent_id || listener.agent)) || "").trim();
@@ -483,11 +516,6 @@ const listenerIdentity = (id) => {
     : (agent && agent !== String(normalizedID) ? agent : `监听器 ${normalizedID}`);
   const owner = name && agent && agent !== name ? agent : "";
   return { displayName, id: normalizedID, owner };
-};
-
-const fillAgentPickers = (entryID, exitID) => {
-  entryPicker.refresh(entryID || "");
-  exitPicker.refresh(exitID || "");
 };
 
 const isListenerEnabled = (listener) => !listener || listener.enabled !== false;
@@ -789,23 +817,29 @@ const relabelRelayHops = () => {
 };
 
 const syncFormControls = () => {
-  if (formSubmit) formSubmit.disabled = busy || !catalogReady;
+  const ready = catalogReady;
+  if (formSubmit) formSubmit.disabled = busy || !ready;
+  if (wizardNext) wizardNext.disabled = busy || !ready;
+  if (wizardBack) wizardBack.disabled = busy;
   if (relayAdd) {
     const hopCount = relayHops ? relayHops.children.length : 0;
-    relayAdd.disabled = busy || !catalogReady || listenersCache.length === 0 || hopCount >= maxRelayHops;
+    relayAdd.disabled = busy || !ready || listenersCache.length === 0 || hopCount >= maxRelayHops;
   }
 };
 
 const setBusy = (next) => {
-  busy = next;
-  if (next) closeAllPickers();
-  workspaceNode.querySelectorAll("button, input, select").forEach((node) => {
-    node.disabled = next;
+  busy = Boolean(next);
+  if (busy) closeAllPickers();
+  [workspaceNode, mappingDialog, confirmDialog].forEach((root) => {
+    if (!root) return;
+    root.querySelectorAll("button, input, select").forEach((node) => {
+      node.disabled = busy;
+    });
   });
-  entryPicker.setDisabled(next);
-  exitPicker.setDisabled(next);
-  listenerPickers.forEach((picker) => picker.setDisabled(next));
-  if (!next) syncFormControls();
+  entryPicker.setDisabled(busy);
+  exitPicker.setDisabled(busy);
+  listenerPickers.forEach((picker) => picker.setDisabled(busy));
+  if (!busy) syncFormControls();
 };
 
 const addRelayHop = (selected) => {
@@ -821,7 +855,7 @@ const addRelayHop = (selected) => {
   pickerRoot.dataset.listenerPicker = "true";
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn-link danger";
+  remove.className = "ui-btn ui-btn--ghost ui-btn--sm map-relay-remove";
   remove.textContent = "移除";
   row.append(hidden, pickerRoot, remove);
   relayHops.append(row);
@@ -855,7 +889,7 @@ const renderRelayHops = (hops) => {
   syncFormControls();
 };
 
-const collectRelayHops = () => {
+const relaySelection = () => {
   if (!relayHops) return { hops: [], error: "" };
   const hops = [];
   for (const input of relayHops.querySelectorAll("input[data-relay-hop]")) {
@@ -870,6 +904,7 @@ const collectRelayHops = () => {
 
 const loadCatalogs = async () => {
   catalogReady = false;
+  syncFormControls();
   const [agentsPayload, listenersPayload] = await Promise.all([
     panelJSON("/panel-api/agents"),
     panelJSON("/panel-api/relay-listeners"),
@@ -886,45 +921,138 @@ const loadCatalogs = async () => {
   listenersCache = nextListeners;
   catalogReady = true;
   listenerPickers.forEach((picker) => picker.refresh());
+  syncFormControls();
 };
 
-const formMapping = () => {
-  const data = new FormData(formNode);
-  const relay = collectRelayHops();
-  return {
-    name: String(data.get("name") || "").trim(),
-    entry_agent_id: String(data.get("entry_agent_id") || "").trim(),
-    exit_agent_id: String(data.get("exit_agent_id") || "").trim(),
-    protocol: String(data.get("protocol") || "tcp").trim(),
-    listen_host: String(data.get("listen_host") || "").trim() || "0.0.0.0",
-    listen_port: Number(data.get("listen_port") || 0),
-    backend_host: String(data.get("backend_host") || "").trim(),
-    backend_port: Number(data.get("backend_port") || 0),
-    relay_chain: relay.hops,
-    relayError: relay.error,
-  };
+const portNumber = (node) => {
+  const raw = String((node && node.value) || "").trim();
+  if (!raw) return 0;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : 0;
+};
+
+const checkStep = (step) => {
+  if (step === 1) {
+    if (!entryInput || !entryInput.value) {
+      markFieldError(entryInput, "请选择入口节点。");
+      return "请选择入口节点。";
+    }
+    if (!portNumber(fieldNodes.listenPort)) {
+      markFieldError(fieldNodes.listenPort, "监听端口需为 1–65535 的整数。");
+      return "监听端口需为 1–65535 的整数。";
+    }
+    return "";
+  }
+  if (step === 2) {
+    if (!exitInput || !exitInput.value) {
+      markFieldError(exitInput, "请选择出口节点。");
+      return "请选择出口节点。";
+    }
+    if (entryInput && entryInput.value === exitInput.value) {
+      markFieldError(exitInput, "入口与出口节点不能相同。");
+      return "入口与出口节点不能相同。";
+    }
+    return relaySelection().error;
+  }
+  if (step === 3) {
+    if (!String((fieldNodes.backendHost && fieldNodes.backendHost.value) || "").trim()) {
+      markFieldError(fieldNodes.backendHost, "请填写内网服务地址。");
+      return "请填写内网服务地址。";
+    }
+    if (!portNumber(fieldNodes.backendPort)) {
+      markFieldError(fieldNodes.backendPort, "内网服务端口需为 1–65535 的整数。");
+      return "内网服务端口需为 1–65535 的整数。";
+    }
+    return "";
+  }
+  return "";
+};
+
+const checkAllSteps = () => {
+  for (let step = 1; step <= totalSteps; step += 1) {
+    const error = checkStep(step);
+    if (error) {
+      applyStep(step, { clear: false });
+      showWizardError(error);
+      return false;
+    }
+  }
+  return true;
+};
+
+const applyStep = (step, options = {}) => {
+  wizardStep = Math.min(totalSteps, Math.max(1, Number(step) || 1));
+  wizardSections.forEach((section) => {
+    section.hidden = Number(section.dataset.wizardStep) !== wizardStep;
+  });
+  wizardStepNodes.forEach((node) => {
+    const index = Number(node.dataset.step);
+    node.setAttribute("aria-current", index === wizardStep ? "step" : "false");
+    node.dataset.state = index < wizardStep ? "done" : index === wizardStep ? "current" : "upcoming";
+  });
+  if (wizardBack) wizardBack.hidden = wizardStep === 1;
+  if (wizardNext) wizardNext.hidden = wizardStep === totalSteps;
+  if (formSubmit) {
+    formSubmit.hidden = wizardStep !== totalSteps;
+    formSubmit.textContent = editingID ? "保存" : "创建";
+  }
+  if (options.clear !== false) {
+    showWizardError("");
+    clearFieldErrors();
+  }
+  syncFormControls();
+};
+
+const resetWizard = () => {
+  editingID = "";
+  if (formNode) formNode.reset();
+  closeAllAgentPickers();
+  fillAgentPickers("", "");
+  if (relayHops) relayHops.replaceChildren();
+  listenerPickers.slice().forEach((picker) => picker.close());
+  listenerPickers.splice(0, listenerPickers.length);
+  showCatalogError("");
+  if (mappingIDDisplay) {
+    mappingIDDisplay.hidden = true;
+    mappingIDDisplay.textContent = "";
+  }
+  if (formTitle) formTitle.textContent = "新建映射";
+  if (formDesc) formDesc.textContent = "按公网入口、反向通道、出口内网服务三步填写。";
+  applyStep(1, { clear: true });
+  syncFormControls();
 };
 
 const openForm = async (mapping) => {
   editingID = mapping ? String(mapping.id || "") : "";
-  formTitle.textContent = editingID ? "编辑映射" : "新建映射";
-  formSubmit.textContent = editingID ? "保存" : "创建";
-  formNode.reset();
+  if (formTitle) formTitle.textContent = editingID ? "编辑映射" : "新建映射";
+  if (formDesc) {
+    formDesc.textContent = editingID
+      ? `映射 ID ${editingID} 创建后不可更改；保存后按新配置重建通道。`
+      : "按公网入口、反向通道、出口内网服务三步填写。";
+  }
+  if (formNode) formNode.reset();
+  clearFieldErrors();
+  showWizardError("");
+  showCatalogError("");
+  fillAgentPickers("", "");
+  if (relayHops) relayHops.replaceChildren();
+  listenerPickers.slice().forEach((picker) => picker.close());
+  listenerPickers.splice(0, listenerPickers.length);
   if (mappingIDDisplay) {
     mappingIDDisplay.hidden = !editingID;
     mappingIDDisplay.textContent = editingID ? `映射 ID ${editingID}（创建后不可更改）` : "";
   }
   if (editingID) {
-    formNode.querySelector('input[name="name"]').value = mapping.name || "";
-    formNode.querySelector('select[name="protocol"]').value = mapping.protocol || "tcp";
-    formNode.querySelector('input[name="listen_host"]').value = mapping.listen_host || "0.0.0.0";
-    formNode.querySelector('input[name="listen_port"]').value = mapping.listen_port || "";
-    formNode.querySelector('input[name="backend_host"]').value = mapping.backend_host || "";
-    formNode.querySelector('input[name="backend_port"]').value = mapping.backend_port || "";
+    if (fieldNodes.name) fieldNodes.name.value = mapping.name || "";
+    if (fieldNodes.protocol) fieldNodes.protocol.value = mapping.protocol || "tcp";
+    if (fieldNodes.listenHost) fieldNodes.listenHost.value = mapping.listen_host || "0.0.0.0";
+    if (fieldNodes.listenPort) fieldNodes.listenPort.value = mapping.listen_port || "";
+    if (fieldNodes.backendHost) fieldNodes.backendHost.value = mapping.backend_host || "";
+    if (fieldNodes.backendPort) fieldNodes.backendPort.value = mapping.backend_port || "";
   }
-  showCatalogError("");
-  formPanel.hidden = false;
-  createToggle.hidden = true;
+  catalogReady = false;
+  applyStep(1, { clear: true });
+  if (mappingDialog && !mappingDialog.open) mappingDialog.showModal();
   try {
     await loadCatalogs();
     fillAgentPickers(mapping ? mapping.entry_agent_id : "", mapping ? mapping.exit_agent_id : "");
@@ -941,61 +1069,70 @@ const openForm = async (mapping) => {
     showCatalogError(error.message || "无法加载节点或中继目录，不能手输 ID 创建映射。");
   }
   syncFormControls();
-  formNode.querySelector('input[name="name"]').focus();
+  if (fieldNodes.name) fieldNodes.name.focus();
 };
 
 const closeForm = () => {
-  editingID = "";
-  formNode.reset();
-  closeAllAgentPickers();
-  fillAgentPickers("", "");
-  if (relayHops) relayHops.replaceChildren();
-  if (mappingIDDisplay) {
-    mappingIDDisplay.hidden = true;
-    mappingIDDisplay.textContent = "";
+  if (mappingDialog && mappingDialog.open) mappingDialog.close();
+  resetWizard();
+  if (createToggle) createToggle.focus();
+};
+
+const goNext = () => {
+  if (busy || wizardStep >= totalSteps) return;
+  clearFieldErrors();
+  showWizardError("");
+  const error = checkStep(wizardStep);
+  if (error) {
+    showWizardError(error);
+    return;
   }
-  showCatalogError("");
-  formTitle.textContent = "新建映射";
-  formSubmit.textContent = "创建";
-  formPanel.hidden = true;
-  createToggle.hidden = false;
-  syncFormControls();
+  applyStep(wizardStep + 1, { clear: true });
 };
 
-const refresh = async (loadNames = false) => {
-  const payload = await pluginJSON("api/mappings");
-  if (loadNames) {
-    try {
-      await loadCatalogs();
-    } catch (_error) {
-      // Mappings remain usable with ID fallbacks when a panel catalog is temporarily unavailable.
-    }
-  }
-  renderMappings(payload.mappings);
+const goBack = () => {
+  if (busy || wizardStep <= 1) return;
+  applyStep(wizardStep - 1, { clear: true });
 };
 
-const postAction = async (mapping, action, body = {}) => {
-  const payload = await pluginJSON(`api/mappings/${encodeURIComponent(mapping.id)}/${action}`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-  renderMappings(payload.mappings);
+const formMapping = () => {
+  const data = new FormData(formNode);
+  const relay = relaySelection();
+  return {
+    name: String(data.get("name") || "").trim(),
+    entry_agent_id: String(data.get("entry_agent_id") || "").trim(),
+    exit_agent_id: String(data.get("exit_agent_id") || "").trim(),
+    protocol: String(data.get("protocol") || "tcp").trim(),
+    listen_host: String(data.get("listen_host") || "").trim() || "0.0.0.0",
+    listen_port: Number(data.get("listen_port") || 0),
+    backend_host: String(data.get("backend_host") || "").trim(),
+    backend_port: Number(data.get("backend_port") || 0),
+    relay_chain: relay.hops,
+  };
 };
+const mappingTitle = (mapping) => mapping.name || mapping.id;
 
-const chip = (text, className) => {
+const badge = (text, tone) => {
   const node = document.createElement("span");
-  node.className = className ? `chip ${className}` : "chip";
+  node.className = `ui-badge${tone ? ` ui-badge--${tone}` : " ui-badge--plain"}`;
   node.textContent = text;
   return node;
 };
 
-const channelChip = (mapping) => {
-  if (mapping.channel_state === "online") return chip("通道在线", "chip-state-online");
-  if (mapping.channel_state === "offline") return chip("通道离线", "chip-state-offline");
-  return chip("通道未知", "chip-state-unknown");
+const channelBadge = (mapping) => {
+  if (mapping.channel_state === "online") return badge("通道在线", "success");
+  if (mapping.channel_state === "offline") return badge("通道离线", "danger");
+  return badge("通道未知", "warning");
 };
 
-const mappingTitle = (mapping) => mapping.name || mapping.id;
+const actionButton = (text, toneClass, handler) => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `ui-btn ui-btn--sm ${toneClass}`;
+  button.textContent = text;
+  button.addEventListener("click", handler);
+  return button;
+};
 
 const routeConnector = () => {
   const node = document.createElement("span");
@@ -1057,21 +1194,25 @@ const relayRoute = (relayChain) => {
 
 const renderMapping = (mapping) => {
   const card = document.createElement("article");
-  card.className = "map-card";
+  card.className = "ui-card map-card";
   card.dataset.id = mapping.id;
   if (!mapping.enabled) card.classList.add("map-card--disabled");
 
   const head = document.createElement("div");
   head.className = "map-card-head";
   const identity = document.createElement("div");
+  identity.className = "map-card__identity";
   const title = document.createElement("h3");
+  title.className = "map-card__title";
   title.textContent = mappingTitle(mapping);
-  const chips = document.createElement("div");
-  chips.className = "map-chips";
-  chips.append(channelChip(mapping));
-  chips.append(chip(mapping.enabled ? "已启用" : "已停用", mapping.enabled ? "chip-state-online" : "chip-state-offline"));
-  chips.append(chip(String(mapping.protocol || "").toUpperCase(), "chip-protocol"));
-  identity.append(title, chips);
+  const badges = document.createElement("div");
+  badges.className = "map-badges";
+  badges.append(channelBadge(mapping));
+  badges.append(badge(mapping.enabled ? "已启用" : "已停用", mapping.enabled ? "success" : ""));
+  const protocol = badge(String(mapping.protocol || "").toUpperCase());
+  protocol.classList.add("map-protocol");
+  badges.append(protocol);
+  identity.append(title, badges);
   if (mapping.last_error) {
     const error = document.createElement("p");
     error.className = "map-error";
@@ -1081,11 +1222,7 @@ const renderMapping = (mapping) => {
 
   const actions = document.createElement("div");
   actions.className = "map-actions";
-  const editButton = document.createElement("button");
-  editButton.type = "button";
-  editButton.className = "btn-link";
-  editButton.textContent = "编辑";
-  editButton.addEventListener("click", async () => {
+  const editButton = actionButton("编辑", "ui-btn--ghost", async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -1096,11 +1233,7 @@ const renderMapping = (mapping) => {
       setBusy(false);
     }
   });
-  const toggleButton = document.createElement("button");
-  toggleButton.type = "button";
-  toggleButton.className = "btn-link";
-  toggleButton.textContent = mapping.enabled ? "停用" : "启用";
-  toggleButton.addEventListener("click", async () => {
+  const toggleButton = actionButton(mapping.enabled ? "停用" : "启用", "ui-btn--ghost", async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -1112,48 +1245,26 @@ const renderMapping = (mapping) => {
       setBusy(false);
     }
   });
-  const deleteButton = document.createElement("button");
-  deleteButton.type = "button";
-  deleteButton.className = "btn-link danger";
-  deleteButton.textContent = "删除";
-  // Inline two-step delete: the first click swaps the action row for an
-  // in-card confirm group, the second posts delete + confirm=id.
-  deleteButton.addEventListener("click", () => {
+  const deleteButton = actionButton("删除", "ui-btn--danger-soft", async () => {
     if (busy) return;
-    const confirmGroup = document.createElement("span");
-    confirmGroup.className = "map-confirm";
-    const confirmText = document.createElement("span");
-    confirmText.className = "map-confirm-text";
-    confirmText.textContent = "确认删除？入口规则与反向通道会一并释放。";
-    const confirmYes = document.createElement("button");
-    confirmYes.type = "button";
-    confirmYes.className = "btn-link danger";
-    confirmYes.textContent = "确认删除";
-    const confirmNo = document.createElement("button");
-    confirmNo.type = "button";
-    confirmNo.className = "btn-link";
-    confirmNo.textContent = "取消";
-    confirmGroup.append(confirmText, confirmYes, confirmNo);
-    deleteButton.hidden = true;
-    actions.append(confirmGroup);
-    confirmNo.addEventListener("click", () => {
-      if (busy) return;
-      confirmGroup.remove();
-      deleteButton.hidden = false;
+    const confirmed = await askConfirm({
+      title: "删除映射",
+      desc: `将删除“${mappingTitle(mapping)}”。入口 L4 规则与反向通道会一并释放，删除后无法恢复。`,
+      label: "确认删除",
+    });
+    if (!confirmed) {
       showStatus("已取消，映射未更改。", false);
-    });
-    confirmYes.addEventListener("click", async () => {
-      if (busy) return;
-      setBusy(true);
-      try {
-        await postAction(mapping, "delete", { confirm: mapping.id });
-        showStatus("已删除映射。", false);
-      } catch (error) {
-        showStatus(error.message, true);
-      } finally {
-        setBusy(false);
-      }
-    });
+      return;
+    }
+    setBusy(true);
+    try {
+      await postAction(mapping, "delete", { confirm: mapping.id });
+      showStatus("已删除映射。", false);
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      setBusy(false);
+    }
   });
   actions.append(editButton, toggleButton, deleteButton);
   head.append(identity, actions);
@@ -1180,8 +1291,10 @@ const renderMapping = (mapping) => {
   const technical = document.createElement("details");
   technical.className = "map-technical";
   const technicalSummary = document.createElement("summary");
+  technicalSummary.className = "ui-help-text";
   technicalSummary.textContent = "技术标识";
   const technicalIDs = document.createElement("p");
+  technicalIDs.className = "ui-mono";
   technicalIDs.textContent = `入口节点 ID ${entry.id} · 出口节点 ID ${exit.id} · 映射 ID ${mapping.id}`;
   technical.append(technicalSummary, technicalIDs);
   card.append(routeHeading, route, technical);
@@ -1190,14 +1303,82 @@ const renderMapping = (mapping) => {
 
 const renderMappings = (mappings) => {
   const list = Array.isArray(mappings) ? mappings : [];
-  listNode.replaceChildren(...list.map(renderMapping));
-  emptyNode.hidden = list.length > 0;
-  countNode.hidden = list.length === 0;
-  countNode.textContent = `${list.length} 条`;
+  if (listNode) listNode.replaceChildren(...list.map(renderMapping));
+  if (emptyNode) emptyNode.hidden = list.length > 0;
+  if (countNode) {
+    countNode.hidden = list.length === 0;
+    countNode.textContent = `${list.length} 条映射`;
+  }
 };
 
-if (createToggle) {
-  createToggle.addEventListener("click", async () => {
+const postAction = async (mapping, action, body = {}) => {
+  const payload = await pluginJSON(`api/mappings/${encodeURIComponent(mapping.id)}/${action}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  renderMappings(payload.mappings);
+};
+
+const refresh = async (loadNames = false) => {
+  const payload = await pluginJSON("api/mappings");
+  if (loadNames) {
+    try {
+      await loadCatalogs();
+    } catch (_error) {
+      // Mappings remain usable with ID fallbacks when a panel catalog is temporarily unavailable.
+    }
+  }
+  renderMappings(payload.mappings);
+};
+
+const settleConfirm = (value) => {
+  if (!pendingConfirm || pendingConfirm.done) return;
+  const pending = pendingConfirm;
+  pending.done = true;
+  pendingConfirm = null;
+  if (confirmDialog && confirmDialog.open) confirmDialog.close();
+  pending.resolve(Boolean(value));
+};
+
+const askConfirm = ({ title, desc, label }) => new Promise((resolve) => {
+  if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
+    resolve(false);
+    return;
+  }
+  if (pendingConfirm) settleConfirm(false);
+  if (confirmTitle) confirmTitle.textContent = title || "确认操作";
+  if (confirmDesc) confirmDesc.textContent = desc || "";
+  if (confirmAccept) confirmAccept.textContent = label || "确认";
+  pendingConfirm = { resolve, done: false };
+  confirmDialog.showModal();
+});
+
+if (confirmCancel) confirmCancel.addEventListener("click", () => settleConfirm(false));
+if (confirmAccept) confirmAccept.addEventListener("click", () => settleConfirm(true));
+if (confirmDialog) {
+  confirmDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    settleConfirm(false);
+  });
+  confirmDialog.addEventListener("close", () => {
+    // 关闭事件是异步派发的：若用户已重新打开确认框，旧事件不能结算新请求。
+    if (pendingConfirm && !confirmDialog.open) settleConfirm(false);
+  });
+}
+
+if (mappingDialog) {
+  mappingDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeForm();
+  });
+  mappingDialog.addEventListener("close", () => {
+    if (!mappingDialog.open) resetWizard();
+  });
+}
+
+[createToggle, createEmpty].forEach((button) => {
+  if (!button) return;
+  button.addEventListener("click", async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -1208,11 +1389,12 @@ if (createToggle) {
       setBusy(false);
     }
   });
-}
+});
 
-if (formCancel) {
-  formCancel.addEventListener("click", closeForm);
-}
+if (formCancel) formCancel.addEventListener("click", closeForm);
+if (formClose) formClose.addEventListener("click", closeForm);
+if (wizardNext) wizardNext.addEventListener("click", goNext);
+if (wizardBack) wizardBack.addEventListener("click", goBack);
 
 if (relayAdd) {
   relayAdd.addEventListener("click", () => {
@@ -1225,48 +1407,30 @@ if (formNode) {
   formNode.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (busy) return;
+    clearFieldErrors();
+    showWizardError("");
     if (!catalogReady) {
-      showStatus(catalogErrorNode && catalogErrorNode.textContent
-        ? catalogErrorNode.textContent
-        : "节点或中继目录不可用，无法保存映射。", true);
+      const message = (catalogErrorNode && catalogErrorNode.textContent)
+        || "节点或中继目录不可用，无法保存映射。";
+      showWizardError(message);
+      showStatus(message, true);
       return;
     }
+    if (!checkAllSteps()) return;
     const mapping = formMapping();
-    if (mapping.relayError) {
-      showStatus(mapping.relayError, true);
-      return;
-    }
-    if (!mapping.entry_agent_id || !mapping.exit_agent_id) {
-      showStatus("请选择入口节点和出口节点。", true);
-      return;
-    }
-    if (mapping.entry_agent_id === mapping.exit_agent_id) {
-      showStatus("入口与出口节点不能相同。", true);
-      return;
-    }
     const updating = Boolean(editingID);
-    const body = {
-      name: mapping.name,
-      entry_agent_id: mapping.entry_agent_id,
-      exit_agent_id: mapping.exit_agent_id,
-      protocol: mapping.protocol,
-      listen_host: mapping.listen_host,
-      listen_port: mapping.listen_port,
-      backend_host: mapping.backend_host,
-      backend_port: mapping.backend_port,
-      relay_chain: mapping.relay_chain,
-    };
     setBusy(true);
     try {
       if (updating) {
-        await postAction({ id: editingID }, "update", body);
+        await postAction({ id: editingID }, "update", mapping);
       } else {
-        const payload = await pluginJSON("api/mappings", { method: "POST", body: JSON.stringify(body) });
+        const payload = await pluginJSON("api/mappings", { method: "POST", body: JSON.stringify(mapping) });
         renderMappings(payload.mappings);
       }
       closeForm();
       showStatus(updating ? "已保存映射。" : "已创建映射。", false);
     } catch (error) {
+      showWizardError(error.message);
       showStatus(error.message, true);
     } finally {
       setBusy(false);
@@ -1277,14 +1441,16 @@ if (formNode) {
 (async () => {
   try {
     await refresh(true);
-    loadingNode.hidden = true;
-    workspaceNode.hidden = false;
+    if (loadingNode) loadingNode.hidden = true;
+    if (workspaceNode) workspaceNode.hidden = false;
   } catch (error) {
-    loadingNode.hidden = true;
-    if (error.denied) deniedNode.hidden = false;
-    else {
+    if (loadingNode) loadingNode.hidden = true;
+    if (error.denied) {
+      if (deniedNode) deniedNode.hidden = false;
+    } else if (unavailableNode) {
       unavailableNode.hidden = false;
-      unavailableNode.textContent = error.message || unavailableNode.textContent;
+      const desc = document.querySelector("#map-unavailable-desc");
+      if (desc) desc.textContent = error.message || desc.textContent;
     }
   }
 })();

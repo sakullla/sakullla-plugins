@@ -73,11 +73,19 @@ export const scenes = [
   },
   {
     name: "create",
-    title: "新建映射",
+    title: "新建映射向导",
     run: async (ui) => {
       await ui.waitFor("#create-toggle");
       await ui.click("#create-toggle");
-      await ui.waitFor("#mapping-form");
+      await ui.waitFor("#wizard-step-1");
+      // 节点目录加载完成后“下一步”才可用；先等它，避免在下拉还空时点击。
+      await ui.waitFor("#wizard-next:not([disabled])");
+      await ui.click('[data-agent-picker="entry"] .agent-search-select__trigger');
+      await ui.waitFor('[data-agent-picker="entry"] .agent-search-select__option');
+      await ui.click('[data-agent-picker="entry"] .agent-search-select__option');
+      await ui.fill('input[name="listen_port"]', "8443");
+      await ui.click("#wizard-next");
+      await ui.waitFor("#wizard-step-2");
       await ui.waitFor("#relay-add");
     },
   },
