@@ -166,6 +166,7 @@ export const scenes = [
       await ui.view("mirrors");
       await ui.fill("#query", "hold");
       await ui.submit("#search-form");
+      await ui.waitFor("#results .ui-loading");
       await delay(350);
     },
   },
@@ -203,7 +204,7 @@ export const scenes = [
       await ui.submit("#search-form");
       await ui.fill("#images", "alpine:latest\nfail/unknown:1");
       await ui.submit("#offline-form");
-      await ui.waitFor("#download .status-error");
+      await ui.waitFor("#download .ui-error-state");
     },
   },
 ];

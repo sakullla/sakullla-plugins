@@ -21,57 +21,6 @@ const store = {
   },
 };
 
-/* ---------- Theme ---------- */
-
-const systemDark = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-const themeToggle = $("#theme-toggle");
-
-const setTheme = (theme) => {
-  document.documentElement.setAttribute("data-theme", theme);
-  if (themeToggle) {
-    themeToggle.setAttribute("aria-label", theme === "dark" ? "切换为浅色模式" : "切换为深色模式");
-  }
-};
-
-// The page normally runs top-level; when a host shell embeds it, the host
-// theme family is mapped onto the two palettes this page ships.
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = store.get("theme");
-  if (!allowed[theme]) {
-    theme = systemDark && systemDark.matches ? "dark" : "light";
-    try {
-      if (window.parent && window.parent !== window) {
-        const raw = window.parent.document.documentElement.getAttribute("data-theme");
-        const mapped = aliases[raw] || raw;
-        if (allowed[mapped]) {
-          theme = mapped;
-        }
-      }
-    } catch (_error) {
-      // Cross-origin parent: keep the system preference.
-    }
-  }
-  setTheme(theme);
-};
-
-applyHostTheme();
-
-if (systemDark && systemDark.addEventListener) {
-  systemDark.addEventListener("change", () => {
-    if (!store.get("theme")) {
-      applyHostTheme();
-    }
-  });
-}
-
-themeToggle.addEventListener("click", () => {
-  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
-  store.set("theme", next);
-  setTheme(next);
-});
-
 /* ---------- Shared helpers ---------- */
 
 const origin = window.location.origin;
@@ -240,9 +189,35 @@ const setBusy = (button, busy, label) => {
   button.setAttribute("aria-busy", busy ? "true" : "false");
 };
 
-const renderStatus = (target, message, tone = "info") => {
-  const status = create("p", `status status-${tone}`, message);
-  target.replaceChildren(status);
+const stateIcon = (kind) => {
+  const icon = create("span", `${kind}__icon`);
+  icon.innerHTML = kind === "ui-error-state"
+    ? '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3.2 21 20H3L12 3.2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9v4.4M12 16.8v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  return icon;
+};
+
+const renderState = (target, kind, title, message) => {
+  const box = create("div", kind);
+  box.append(stateIcon(kind), create("p", `${kind}__title`, title), create("p", `${kind}__desc`, message));
+  target.replaceChildren(box);
+};
+
+const renderEmpty = (target, title, message) => renderState(target, "ui-empty", title, message);
+const renderError = (target, title, message) => renderState(target, "ui-error-state", title, message);
+
+const renderLoading = (target, message, count = 3, variant = "row") => {
+  const wrap = create("div", "accel-loading");
+  const line = create("div", "ui-loading");
+  line.append(create("span", "ui-spinner"), create("span", "", message));
+  wrap.append(line);
+  if (variant === "chip") {
+    wrap.classList.add("accel-loading--chips");
+  }
+  for (let index = 0; index < count; index += 1) {
+    wrap.append(create("div", variant === "chip" ? "ui-skeleton accel-skeleton-chip" : "ui-skeleton accel-skeleton-row"));
+  }
+  target.replaceChildren(wrap);
 };
 
 /* ---------- Views ---------- */
@@ -256,8 +231,10 @@ const showView = (name, push = false) => {
   $$("[data-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.panel !== name;
   });
-  $$(".primary button").forEach((item) => {
-    item.setAttribute("aria-pressed", item.dataset.view === name ? "true" : "false");
+  $$("[data-view]").forEach((item) => {
+    const active = item.dataset.view === name;
+    item.setAttribute("aria-selected", active ? "true" : "false");
+    item.setAttribute("tabindex", active ? "0" : "-1");
   });
   const hash = name === "usage" ? "" : `#${name}`;
   if (window.location.hash !== hash && !(hash === "" && window.location.hash === "#usage")) {
@@ -580,7 +557,9 @@ const syncTagPressed = () => {
 const renderQueue = () => {
   const lines = imageLines();
   packCount.textContent = `${lines.length} / ${maxImages}`;
-  packCount.dataset.state = lines.length > maxImages ? "over" : lines.length ? "filled" : "empty";
+  const over = lines.length > maxImages;
+  packCount.dataset.state = over ? "over" : lines.length ? "filled" : "empty";
+  packCount.className = "ui-badge ui-badge--plain" + (over ? " ui-badge--danger" : lines.length ? " ui-badge--info" : "");
   packClear.disabled = lines.length === 0;
   if (!packError.hidden && packError.dataset.source === "validate") {
     packError.hidden = true;
@@ -603,7 +582,7 @@ const revealPack = () => {
 };
 
 const packIsVisible = () => {
-  const box = $(".pane-offline").getBoundingClientRect();
+  const box = $(".accel-pane-offline").getBoundingClientRect();
   return box.top < window.innerHeight && box.bottom > 80;
 };
 
@@ -659,7 +638,6 @@ const compactNumber = (value) => {
 // Docker Hub's catalog rejects tags or digests, so strip them from free text.
 const repositoryName = (value) => value.trim().toLowerCase().replace(/^docker\.io\//, "").replace(/@.*$/, "").replace(/:[^/]*$/, "");
 
-const skeleton = (count, className) => Array.from({ length: count }, () => create("div", `skeleton ${className}`));
 
 const renderResultCard = (entry) => {
   const name = entry.repo_name || entry.name;
@@ -670,7 +648,7 @@ const renderResultCard = (entry) => {
   const title = create("span", "result-title");
   title.append(create("strong", "", name));
   if (entry.is_official) {
-    title.append(create("span", "badge badge-official", "官方"));
+    title.append(create("span", "ui-badge ui-badge--info ui-badge--plain", "官方"));
   }
   const detail = create("span", "result-desc", entry.short_description || "暂无简介");
   const meta = create("span", "result-meta");
@@ -681,7 +659,7 @@ const renderResultCard = (entry) => {
     $$("#results .result-card").forEach((item) => item.setAttribute("aria-pressed", item === card ? "true" : "false"));
     $("#tag-image").value = name;
     loadTags(false);
-    const tags = $(".pane-tags");
+    const tags = $(".accel-pane-tags");
     if (tags.getBoundingClientRect().top > window.innerHeight * 0.6) {
       tags.scrollIntoView({ behavior: "smooth", block: "start" });
     }
@@ -707,13 +685,13 @@ const runSearch = async (append) => {
     resultsMore.hidden = true;
     resultsMeta.textContent = "";
     results.setAttribute("aria-busy", "true");
-    results.replaceChildren(...skeleton(4, "skeleton-row"));
+    renderLoading(results, "正在搜索 Docker Hub…");
   }
   try {
     const payload = await api(`/api/search?q=${encodeURIComponent(query)}&page=${searchState.page}&page_size=10`, { signal: controller.signal });
     const entries = Array.isArray(payload.results) ? payload.results : [];
     if (!append && entries.length === 0) {
-      renderStatus(results, `没有找到与「${query}」匹配的镜像。`);
+      renderEmpty(results, "没有找到匹配的镜像", `没有与「${query}」匹配的仓库，换一个关键字再试。`);
       return;
     }
     const cards = entries.map(renderResultCard);
@@ -732,7 +710,7 @@ const runSearch = async (append) => {
       searchState.page -= 1;
       toast(error.message);
     } else {
-      renderStatus(results, error.message, "error");
+      renderError(results, "搜索失败", error.message);
     }
   } finally {
     if (searchState.controller === controller) {
@@ -790,11 +768,11 @@ const renderTags = () => {
   const term = tagFilter.value.trim().toLowerCase();
   const visible = term ? tagState.items.filter((entry) => entry.name.toLowerCase().includes(term)) : tagState.items;
   if (visible.length === 0) {
-    renderStatus(tagBoard, term ? `已加载的标签中没有包含「${term}」的。` : "该镜像没有可显示的标签。");
+    renderEmpty(tagBoard, term ? "没有匹配的标签" : "没有可显示的标签", term ? `已加载的标签中没有包含「${term}」的。` : "该镜像没有可显示的标签。");
     return;
   }
   tagBoard.replaceChildren(...visible.map((entry) => {
-    const chip = create("button", "tag-chip", entry.name);
+    const chip = create("button", "tag-chip ui-badge ui-badge--plain", entry.name);
     chip.type = "button";
     chip.dataset.tag = entry.name;
     chip.title = tagTooltip(entry);
@@ -846,7 +824,7 @@ const loadTags = async (append) => {
     tagsMore.hidden = true;
     tagMeta.textContent = "";
     tagBoard.setAttribute("aria-busy", "true");
-    tagBoard.replaceChildren(...skeleton(9, "skeleton-chip"));
+    renderLoading(tagBoard, "正在加载标签…", 6, "chip");
   }
   try {
     const payload = await api(`/api/tags?image=${encodeURIComponent(image)}&page=${tagState.page}&page_size=100`, { signal: controller.signal });
@@ -865,7 +843,7 @@ const loadTags = async (append) => {
       tagState.page -= 1;
       toast(error.message);
     } else {
-      renderStatus(tagBoard, error.message, "error");
+      renderError(tagBoard, "标签加载失败", error.message);
     }
   } finally {
     if (tagState.controller === controller) {
@@ -919,16 +897,15 @@ const validatePack = (lines) => {
 const summaryText = (lines, platform, compressed) => `${lines.length} 个镜像 · ${platform || "linux/amd64"} · ${compressed ? "压缩层" : "未压缩层"}`;
 
 const renderReady = (payload, lines, platform, compressed) => {
-  const card = create("div", "download-ready");
-  const head = create("div", "download-head");
-  head.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="m8 12.4 2.7 2.7L16.2 9.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const card = create("div", "ui-card ui-card--flat download-ready");
+  const head = create("div", "ui-card__head download-head");
   const text = create("div");
-  text.append(create("strong", "", "离线包已就绪"), create("span", "", summaryText(lines, platform, compressed)));
-  head.append(text);
-  const link = create("a", "download-link", "下载 images.tar");
+  text.append(create("p", "ui-card__title", "离线包已就绪"), create("p", "ui-card__desc", summaryText(lines, platform, compressed)));
+  head.append(text, create("span", "ui-badge ui-badge--success", "可下载"));
+  const link = create("a", "ui-btn ui-btn--lg download-link", "下载 images.tar");
   link.href = payload.download_url;
   link.setAttribute("download", "images.tar");
-  const expiry = create("p", "download-expiry");
+  const expiry = create("p", "ui-help-text download-expiry");
   const loadCommand = create("div", "snippet");
   const chrome = create("div", "snippet-chrome");
   chrome.append(create("p", "snippet-label", "下载后导入 Docker"), copyButton("docker load -i images.tar"));
@@ -999,7 +976,7 @@ offlineForm.addEventListener("submit", async (event) => {
   const platform = platformSelect.value;
   const compressedLayers = compressedToggle.checked;
   setBusy(packSubmit, true, "正在生成…");
-  renderStatus(download, `正在解析 ${lines.length} 个镜像的清单…`, "progress");
+  renderLoading(download, `正在解析 ${lines.length} 个镜像的清单…`);
   try {
     const payload = await api("/api/offline/prepare", {
       method: "POST",
@@ -1021,7 +998,7 @@ offlineForm.addEventListener("submit", async (event) => {
     }
     renderReady(payload, lines, platform, compressedLayers);
   } catch (error) {
-    renderStatus(download, error.message, "error");
+    renderError(download, "离线包生成失败", error.message);
   } finally {
     setBusy(packSubmit, false);
   }

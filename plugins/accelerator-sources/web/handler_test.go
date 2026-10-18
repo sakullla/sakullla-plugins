@@ -13,7 +13,7 @@ import (
 func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	handler := NewHandler()
 	bodies := map[string]string{}
-	for _, route := range []string{"/", "/app.js", "/style.css", "/theme.js"} {
+	for _, route := range []string{"/", "/app.js", "/style.css", "/ui-kit.js", "/ui-kit.css"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
@@ -25,128 +25,141 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 		}
 		bodies[route] = body
 	}
-	if policy := httptest.NewRecorder(); func() bool {
-		handler.ServeHTTP(policy, httptest.NewRequest(http.MethodGet, "/", nil))
-		return !strings.Contains(policy.Header().Get("Content-Security-Policy"), "default-src 'self'")
-	}() {
+	removed := httptest.NewRecorder()
+	handler.ServeHTTP(removed, httptest.NewRequest(http.MethodGet, "/theme.js", nil))
+	if removed.Code != http.StatusNotFound {
+		t.Fatalf("retired theme bootstrap is still embedded: status=%d", removed.Code)
+	}
+	policy := httptest.NewRecorder()
+	handler.ServeHTTP(policy, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(policy.Header().Get("Content-Security-Policy"), "default-src 'self'") {
 		t.Fatal("embedded page lacks self-contained content policy")
 	}
 
 	page := bodies["/"]
 	script := bodies["/app.js"]
 	style := bodies["/style.css"]
-	if !strings.Contains(page, `<script src="/theme.js"></script>`) || strings.Index(page, "/theme.js") > strings.Index(page, "/style.css") {
-		t.Fatal("theme bootstrap must load before the stylesheet to avoid a light flash")
+	kitScript := bodies["/ui-kit.js"]
+	kitStyle := bodies["/ui-kit.css"]
+
+	if !strings.Contains(kitScript, "data-theme-key") || !strings.Contains(kitScript, "standalone") {
+		t.Fatal("ui-kit.js does not expose the standalone theme authority")
 	}
-	if !strings.Contains(bodies["/theme.js"], "prefers-color-scheme: dark") || !strings.Contains(script, "#theme-toggle") {
-		t.Fatal("visitor page does not follow the system theme with a manual toggle")
+	if !strings.Contains(kitStyle, `[data-theme="fresh-green"]`) || !strings.Contains(kitStyle, "[data-theme-family=") {
+		t.Fatal("ui-kit.css does not ship the host themes and theme families")
 	}
-	for _, fragment := range []string{"isSecureContext", `execCommand("copy")`, `method: "HEAD"`, "registryHosts", "release-assets.githubusercontent.com"} {
-		if !strings.Contains(script, fragment) {
-			t.Fatalf("visitor script missing UX safeguard %q", fragment)
-		}
-	}
-	if strings.Contains(script, "github-releases.githubusercontent.com") {
-		t.Fatal("converter advertises a host that the service does not route")
-	}
-	for _, fragment := range []string{"资源加速", `data-panel="usage"`, `data-panel="mirrors"`} {
-		if !strings.Contains(page, fragment) {
-			t.Fatalf("visitor page missing %q", fragment)
-		}
-	}
-	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, `id="search-view"`) || strings.Contains(page, `id="offline-view"`) {
-		t.Fatal("visitor page still uses the old tool-shell markup")
-	}
+
+	assertStandaloneThemeAuthority(t, page, style)
 	assertTwoPageDocsNav(t, page)
-	for _, fragment := range []string{`data-example="docker-pull"`, `data-example="docker-mirror"`, `data-example="file-sample"`, `id="convert-input"`, `id="convert-result"`, `id="convert-copy"`, `id="search-form"`, `id="tags-form"`, `id="offline-form"`, `id="platform"`, `id="compressed-layers"`, `option value=""`, `type="checkbox" checked`, `<h2 id="search-heading">搜索</h2>`, `<h2 id="tags-heading">标签</h2>`, `<h2 id="offline-heading">离线包</h2>`} {
-		if !strings.Contains(page, fragment) {
-			t.Fatalf("visitor page missing capability markup %q", fragment)
-		}
-	}
+	assertPageCapabilityMarkup(t, page)
 	assertSnippetCopyChrome(t, page)
-	for _, fragment := range []string{"window.location.origin", "window.location.host", "#convert-input", "#convert-copy", "normalizeSourceUrl", "/api/search?q=", "/api/tags?image=", "/api/offline/prepare", "compressed_layers"} {
-		if !strings.Contains(script, fragment) {
-			t.Fatalf("visitor script missing %q", fragment)
-		}
-	}
-	if strings.Contains(script, `showView("tags")`) || strings.Contains(script, `showView("offline")`) || strings.Contains(script, `showView("search")`) {
-		t.Fatal("mirror page still switches top-level views for search, tags, or offline")
-	}
-	for _, fragment := range []string{"#17202a", "header { display: flex", "nav button[aria-pressed=\"true\"]", "--rust", "--paper"} {
-		if strings.Contains(style, fragment) {
-			t.Fatalf("visitor theme still contains a retired theme rule %q", fragment)
-		}
-	}
-	if !strings.Contains(style, "--accent") || !strings.Contains(style, ".masthead") || !strings.Contains(style, ".snippet") || !strings.Contains(style, ".doc-section") {
-		t.Fatal("visitor theme is not the two-page docs layout")
-	}
-	assertDocsSkin(t, page, script, style)
-	if strings.Contains(cssRule(style, ".primary"), "999px") || strings.Contains(cssRule(style, ".primary button"), "999px") {
-		t.Fatal("primary nav still uses a capsule selected state")
-	}
-	selected := cssRule(style, `.primary button[aria-pressed="true"]`)
-	if !strings.Contains(selected, "background: var(--accent)") {
-		t.Fatal("current nav item is not a solid selected state")
-	}
-	for _, fragment := range []string{
-		"@media (max-width: 640px)",
-		"grid-template-columns: 1fr",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"width: calc(100% - 2.5rem)",
-		"overflow-wrap: anywhere",
-	} {
-		if !strings.Contains(style, fragment) {
-			t.Fatalf("visitor stylesheet missing viewport rule %q", fragment)
-		}
-	}
-	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
-		t.Fatal("visitor stylesheet still caps main at 52rem, 64rem, or 880px")
-	}
-	if strings.Contains(style, "overflow: auto") {
-		t.Fatal("visitor stylesheet still uses overflow: auto on reading content")
-	}
-	panel := cssRule(style, ".panel")
-	if !strings.Contains(panel, "max-width: min(90rem, 100%)") {
-		t.Fatal(".panel does not follow the masthead content width")
-	}
-	if !strings.Contains(style, ".hero-row") || !strings.Contains(style, ".split-row") || !strings.Contains(style, ".mirrors-row") {
-		t.Fatal("visitor layout is missing dense two-pane rows")
-	}
-	if strings.Contains(style, ".usage-grid") || strings.Contains(style, ".converter-card") {
-		t.Fatal("visitor page still uses retired two-card class names")
-	}
+	assertScriptSafeguards(t, script)
+	assertStyleTokensAndViewports(t, style)
+	assertMirrorStates(t, page, script, style)
+}
+
+func assertStandaloneThemeAuthority(t *testing.T, page, style string) {
+	t.Helper()
 	for _, want := range []string{
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
+		`data-theme="light"`,
+		`data-theme-mode="standalone"`,
+		`data-theme-key="accelerator-sources.theme"`,
+		`<script src="/ui-kit.js"></script>`,
+		`<link rel="stylesheet" href="/ui-kit.css">`,
+		`<link rel="stylesheet" href="/style.css">`,
+		`id="theme-toggle"`,
+		`data-ui-theme-toggle`,
 	} {
-		if !strings.Contains(style, want) {
-			t.Fatalf("visitor stylesheet missing wide-viewport rule %q", want)
+		if !strings.Contains(page, want) {
+			t.Fatalf("visitor page missing %q", want)
+		}
+	}
+	if strings.Contains(page, "/theme.js") {
+		t.Fatal("visitor page still loads the retired theme.js bootstrap")
+	}
+	kitScript := strings.Index(page, `<script src="/ui-kit.js"></script>`)
+	kitStyle := strings.Index(page, `<link rel="stylesheet" href="/ui-kit.css">`)
+	pageStyle := strings.Index(page, `<link rel="stylesheet" href="/style.css">`)
+	if kitScript < 0 || kitStyle < 0 || pageStyle < 0 || !(kitScript < kitStyle && kitStyle < pageStyle) {
+		t.Fatal("page does not load ui-kit.js before ui-kit.css and style.css")
+	}
+	if strings.Contains(page, "<script>") || strings.Contains(page, " onclick=") {
+		t.Fatal("page must not depend on inline script or handlers under self-only CSP")
+	}
+	for _, class := range []string{"ui-page", "ui-page-head", "ui-tabs", "ui-tab", "ui-toolbar", "ui-card", "ui-empty", "ui-help"} {
+		if !strings.Contains(page, class) {
+			t.Fatalf("page is missing kit class %q", class)
+		}
+	}
+	for _, banned := range []string{`[data-theme="dark"]`, `[data-theme="sakura-day"]`, `[data-theme="light"]`} {
+		if strings.Contains(style, banned) {
+			t.Fatalf("page stylesheet still owns the theme palette %q", banned)
+		}
+	}
+	for _, token := range []string{"var(--ui-space-", "var(--ui-text-", "var(--ui-border", "var(--ui-primary)", "var(--ui-sunken)"} {
+		if !strings.Contains(style, token) {
+			t.Fatalf("page stylesheet is not using kit token %q", token)
 		}
 	}
 }
 
 func assertTwoPageDocsNav(t *testing.T, page string) {
 	t.Helper()
-	nav := htmlSection(page, `<nav class="primary"`, `</nav>`)
+	nav := htmlSection(page, `<nav class="primary ui-tabs accel-view-tabs"`, `</nav>`)
 	if nav == "" {
-		t.Fatal("visitor page missing primary navigation")
+		t.Fatal("visitor page missing the 用法 / 镜像 view switch")
 	}
 	if strings.Count(nav, "data-view=") != 2 {
-		t.Fatal("primary navigation is not exactly two items")
+		t.Fatal("view switch is not exactly two items")
 	}
 	if !strings.Contains(nav, ">用法<") || !strings.Contains(nav, ">镜像<") {
-		t.Fatal("primary navigation is not 用法 / 镜像")
+		t.Fatal("view switch is not 用法 / 镜像")
 	}
 	if strings.Contains(nav, "搜索") || strings.Contains(nav, "标签") || strings.Contains(nav, "离线包") {
-		t.Fatal("primary navigation still lists 搜索, 标签, or 离线包 as top-bar items")
+		t.Fatal("view switch still lists 搜索, 标签, or 离线包 as top-level items")
 	}
 	for _, fragment := range []string{`data-view="search"`, `data-view="tags"`, `data-view="offline"`, `data-panel="search"`, `data-panel="tags"`, `data-panel="offline"`} {
 		if strings.Contains(page, fragment) {
 			t.Fatalf("visitor page still treats %q as a top-level view", fragment)
 		}
+	}
+	if !strings.Contains(page, `data-panel="usage"`) || !strings.Contains(page, `data-panel="mirrors"`) {
+		t.Fatal("visitor page is missing the usage / mirrors panels")
+	}
+}
+
+func assertPageCapabilityMarkup(t *testing.T, page string) {
+	t.Helper()
+	for _, fragment := range []string{
+		`data-example="docker-pull"`,
+		`data-example="docker-mirror"`,
+		`data-example="file-sample"`,
+		`data-example="script-sample"`,
+		`data-example="clone-sample"`,
+		`data-example="offline-cli"`,
+		`id="convert-input"`,
+		`id="convert-result"`,
+		`id="convert-copy"`,
+		`id="search-form"`,
+		`id="tags-form"`,
+		`id="offline-form"`,
+		`id="tag-filter"`,
+		`id="platform"`,
+		`id="compressed-layers"`,
+		`option value=""`,
+		`type="checkbox" checked`,
+		`<h2 class="ui-card__title" id="search-heading">搜索</h2>`,
+		`<h2 class="ui-card__title" id="tags-heading">标签</h2>`,
+		`<h2 class="ui-card__title" id="offline-heading">离线包</h2>`,
+		`<summary>Docker：拉取镜像与镜像源</summary>`,
+		`<summary>GitHub 与 Hugging Face：下载、脚本与克隆</summary>`,
+	} {
+		if !strings.Contains(page, fragment) {
+			t.Fatalf("visitor page missing capability markup %q", fragment)
+		}
+	}
+	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, `id="search-view"`) || strings.Contains(page, `id="offline-view"`) {
+		t.Fatal("visitor page still uses the old tool-shell markup")
 	}
 }
 
@@ -174,46 +187,103 @@ func assertSnippetCopyChrome(t *testing.T, page string) {
 	}
 }
 
-func assertDocsSkin(t *testing.T, page, script, style string) {
+func assertScriptSafeguards(t *testing.T, script string) {
 	t.Helper()
-	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
-		t.Fatal("stylesheet still contains sakura theme colors")
+	for _, fragment := range []string{
+		"isSecureContext",
+		`execCommand("copy")`,
+		`method: "HEAD"`,
+		"registryHosts",
+		"release-assets.githubusercontent.com",
+		"window.location.origin",
+		"window.location.host",
+		"#convert-input",
+		"#convert-copy",
+		"normalizeSourceUrl",
+		"/api/search?q=",
+		"/api/tags?image=",
+		"/api/offline/prepare",
+		"compressed_layers",
+		`event.key === "Enter"`,
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("visitor script missing UX safeguard %q", fragment)
+		}
 	}
-	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
-		t.Fatal("page still uses sakura-day as the rendered theme")
+	if strings.Contains(script, "github-releases.githubusercontent.com") {
+		t.Fatal("converter advertises a host that the service does not route")
 	}
-	if !strings.Contains(page, `data-theme="light"`) {
-		t.Fatal("page default theme is not light")
+	for _, retired := range []string{"applyHostTheme", "window.parent", "aliases", `showView("tags")`, `showView("offline")`, `showView("search")`} {
+		if strings.Contains(script, retired) {
+			t.Fatalf("visitor script still contains retired behaviour %q", retired)
+		}
 	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
-		t.Fatal("stylesheet missing light/dark theme selectors")
+	if strings.Contains(script, `document.documentElement.setAttribute("data-theme"`) {
+		t.Fatal("page script still resolves themes itself instead of ui-kit.js")
 	}
-	if strings.Contains(style, "var(--color-terminal)") || strings.Contains(style, "--color-terminal:") || strings.Contains(style, ".shell") || strings.Contains(style, ".wash") {
-		t.Fatal("stylesheet still paints command blocks as light-theme terminals or keeps wash")
+}
+
+func assertStyleTokensAndViewports(t *testing.T, style string) {
+	t.Helper()
+	for _, want := range []string{
+		"@media (max-width: 768px)",
+		"@media (max-width: 480px)",
+		"@media (min-width: 720px)",
+		"@media (min-width: 1100px)",
+		"grid-template-columns: minmax(0, 1fr)",
+		"grid-template-columns: repeat(2, minmax(0, 1fr))",
+		"overflow-wrap: anywhere",
+		"min-width: 0",
+		".accel-converter",
+		".accel-mirror-grid",
+		".accel-help-grid",
+		".snippet *::selection",
+		"min-height: var(--ui-touch)",
+	} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("visitor stylesheet missing viewport/token rule %q", want)
+		}
+	}
+	if strings.Contains(style, "max-width: 52rem") || strings.Contains(style, "max-width: 64rem") || strings.Contains(style, "max-width: 880px") {
+		t.Fatal("visitor stylesheet still caps the main reading width")
+	}
+	if strings.Contains(style, "width: 100vw") || strings.Contains(style, "min-width: 60rem") {
+		t.Fatal("visitor stylesheet forces a wider-than-viewport layout")
+	}
+	if strings.Contains(style, "#17202a") || strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
+		t.Fatal("visitor stylesheet still contains a retired hard-coded palette")
 	}
 	snippet := cssRule(style, ".snippet")
-	if snippet == "" || strings.Contains(snippet, "--color-terminal") {
-		t.Fatal("light-theme command blocks are missing or still use --color-terminal")
+	if snippet == "" {
+		t.Fatal("command blocks are missing")
 	}
-	if !strings.Contains(snippet, "--color-code-bg") {
-		t.Fatal("command blocks are not light-gray document snippets")
+	if !strings.Contains(snippet, "var(--ui-sunken)") {
+		t.Fatal("command blocks are not using the kit sunken surface")
 	}
-	pageSel := cssRule(style, "::selection")
-	if strings.Contains(pageSel, "--color-text-primary") {
-		t.Fatal("page-wide ::selection still forces --color-text-primary onto snippets")
+	selection := cssRule(style, ".snippet *::selection")
+	if !strings.Contains(selection, "color:") || !strings.Contains(selection, "var(--ui-active)") {
+		t.Fatal("command blocks do not have their own token-based selection colours")
 	}
-	snippetSel := cssRule(style, ".snippet *::selection")
-	if snippetSel == "" || !strings.Contains(snippetSel, "color:") || strings.Contains(snippetSel, "--color-text-primary") {
-		t.Fatal("command blocks do not have their own 4.5:1 selection colors")
+}
+
+func assertMirrorStates(t *testing.T, page, script, style string) {
+	t.Helper()
+	if !strings.Contains(page, `id="results" class="result-list"`) || !strings.Contains(page, `id="tag-results" class="tag-board"`) {
+		t.Fatal("mirror view is missing the result and tag containers")
 	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	if strings.Count(page, `class="ui-empty"`) < 2 {
+		t.Fatal("mirror view is missing the initial empty states")
 	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
+	for _, fragment := range []string{"renderLoading", "renderEmpty", "renderError", "ui-loading", "ui-spinner", "ui-skeleton", "ui-error-state"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("mirror state rendering is missing %q", fragment)
+		}
 	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	if !strings.Contains(page, `id="tag-filter"`) || !strings.Contains(script, "tagFilter.addEventListener") {
+		t.Fatal("mirror view is missing the tag filter")
+	}
+	if !strings.Contains(style, ".result-card[aria-pressed=\"true\"]") || !strings.Contains(style, ".tag-chip[aria-pressed=\"true\"]") {
+		t.Fatal("mirror selection states are not styled")
 	}
 }
 
@@ -258,7 +328,32 @@ func TestVisitorPageCorpusListsSelfContainedAssets(t *testing.T) {
 	if strings.Contains(text, `"views": ["usage", "search", "tags", "offline"]`) {
 		t.Fatal("web corpus still lists four top-level views")
 	}
-	for _, fragment := range []string{`"/"`, `"/app.js"`, `"/style.css"`, `"/api/search"`, `"/api/tags"`, `"/api/offline/prepare"`, `"converter"`, `"#convert-input"`, `"#convert-copy"`, `"640px"`, `"1920px"`, `"2560px"`, `"3840px"`, `"usage"`, `"mirrors"`, `"search"`, `"tags"`, `"offline"`, `"用法"`, `"镜像"`, `".snippet *::selection"`} {
+	for _, fragment := range []string{
+		`"/"`,
+		`"/app.js"`,
+		`"/style.css"`,
+		`"/ui-kit.js"`,
+		`"/ui-kit.css"`,
+		`"/api/search"`,
+		`"/api/tags"`,
+		`"/api/offline/prepare"`,
+		`"converter"`,
+		`"#convert-input"`,
+		`"#convert-copy"`,
+		`"usage"`,
+		`"mirrors"`,
+		`"search"`,
+		`"tags"`,
+		`"offline"`,
+		`"用法"`,
+		`"镜像"`,
+		`"standalone"`,
+		`"accelerator-sources.theme"`,
+		`"ui-loading"`,
+		`"ui-empty"`,
+		`"ui-error-state"`,
+		`".snippet *::selection"`,
+	} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("web corpus missing %q", fragment)
 		}
