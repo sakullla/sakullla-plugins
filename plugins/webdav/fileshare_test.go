@@ -151,40 +151,56 @@ func TestPageServesManagerAndDavMountInstructions(t *testing.T) {
 	}
 }
 
-func TestManagerViewportLayout(t *testing.T) {
+func TestManagerLayoutConsumesKitTokens(t *testing.T) {
 	css, err := os.ReadFile(filepath.Join("static", "style.css"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(css)
 	for _, want := range []string{
-		"width: calc(100% - 2.5rem)",
+		"var(--ui-space-4)",
+		"var(--ui-radius-xl)",
+		"var(--ui-border-subtle)",
+		"var(--ui-text-secondary)",
 		"@media (max-width: 720px)",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
-		"max-width: min(46rem, 100%)",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("stylesheet missing viewport rule %q", want)
+			t.Fatalf("stylesheet missing kit token or rule %q", want)
 		}
 	}
-	if strings.Contains(text, "min(52rem") || strings.Contains(text, "min(64rem") || strings.Contains(text, "min(880px") {
-		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	for _, banned := range []string{"--color-", "[data-theme=", "#4f46e5", "#818cf8", "#f8fafc", "font-size: 17px"} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("page stylesheet must not own theme values: %q", banned)
+		}
 	}
-	filesHead := cssRule(text, ".files-head")
-	if strings.Contains(filesHead, "space-between") {
-		t.Fatal(".files-head still uses space-between to stretch the action cluster")
+	if strings.Contains(text, "width: calc(100% - 2.5rem)") {
+		t.Fatal("page stylesheet still overrides the kit page shell width")
 	}
-	if !strings.Contains(filesHead, "justify-content: flex-start") {
-		t.Fatal(".files-head is not grouped at flex-start")
+	for _, want := range []string{"var(--ui-text-tertiary)", "color-mix(in srgb, var(--ui-primary)"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("file glyphs do not consume kit tokens: %q", want)
+		}
 	}
-	actions := cssRule(text, ".actions")
-	if !strings.Contains(actions, "max-width: min(46rem, 100%)") {
-		t.Fatal(".actions still fills main without a capped operation group")
+
+	page, err := os.ReadFile(filepath.Join("static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, want := range []string{
+		`href="/static/ui-kit.css"`,
+		`src="/static/ui-kit.js"`,
+		`data-theme-mode="standalone"`,
+		`data-theme-key="webdav.theme"`,
+		"ui-page",
+		"ui-card",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("page missing kit contract %q", want)
+		}
+	}
+	if strings.Contains(html, "applyHostTheme") {
+		t.Fatal("page still maps host themes in its own markup")
 	}
 }
 
@@ -226,7 +242,7 @@ func TestManagerFileGlyphs(t *testing.T) {
 		t.Fatalf("file glyph missing folded corner: %s", fold)
 	}
 	lines := cssRule(text, ".row-file .file-glyph::after")
-	if !strings.Contains(lines, "linear-gradient(var(--color-text-tertiary), var(--color-text-tertiary))") {
+	if !strings.Contains(lines, "linear-gradient(var(--ui-text-tertiary), var(--ui-text-tertiary))") {
 		t.Fatalf("file glyph missing document lines: %s", lines)
 	}
 
@@ -259,24 +275,38 @@ func TestManagerFileGlyphs(t *testing.T) {
 	}
 }
 
-func TestLoginHeadingSize(t *testing.T) {
+func TestLoginUsesCenteredKitCard(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, want := range []string{
+		`class="ui-card ui-card--raised login-stage"`,
+		`class="ui-title" id="login-title"`,
+		`id="login-form"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("login page missing %q", want)
+		}
+	}
 	css, err := os.ReadFile(filepath.Join("static", "style.css"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	heading := cssRule(string(css), "h1")
-	if heading == "" {
-		t.Fatal("missing h1 rule")
+	text := string(css)
+	if cssRule(text, "h1") != "" {
+		t.Fatal("page stylesheet overrides the kit heading scale")
 	}
-	if strings.Contains(heading, "clamp(") || strings.Contains(heading, "2.45rem") || strings.Contains(heading, "1.75rem") {
-		t.Fatalf("login heading still uses oversized fluid type: %s", heading)
+	if !strings.Contains(text, "place-items: center") {
+		t.Fatal("login page is not centered on a full-height stage")
 	}
-	if !strings.Contains(heading, "1.35rem") {
-		t.Fatalf("login heading is not compact: %s", heading)
+	if !strings.Contains(cssRule(text, ".login-stage"), "width: min(26rem, 100%)") {
+		t.Fatalf("login card has no centered reading width: %s", cssRule(text, ".login-stage"))
 	}
 }
 
-func TestMobileManagerToolbar(t *testing.T) {
+func TestMobileListingBecomesCards(t *testing.T) {
 	css, err := os.ReadFile(filepath.Join("static", "style.css"))
 	if err != nil {
 		t.Fatal(err)
@@ -289,24 +319,34 @@ func TestMobileManagerToolbar(t *testing.T) {
 	if mobile == "" {
 		t.Fatal("missing 720px manager stylesheet")
 	}
-	pathCluster := cssRule(mobile, ".files-head > div:not(.actions)")
-	if !strings.Contains(pathCluster, "flex: 0 0 auto") {
-		t.Fatalf("path cluster still grows on mobile: %s", pathCluster)
-	}
-	actions := cssRule(mobile, ".actions")
-	if !strings.Contains(actions, "grid-template-columns: 1fr 1fr") {
-		t.Fatalf("mobile actions are not a two-up row: %s", actions)
-	}
-	if strings.Contains(mobile, ".listing, .listing tbody, .listing tr, .listing td { display: block") {
-		t.Fatal("listing cells still stack as full-width blocks on mobile")
-	}
 	row := cssRule(mobile, ".listing tbody tr")
-	if !strings.Contains(row, "display: flex") {
-		t.Fatalf("listing rows are not a compact flex row: %s", row)
+	for _, want := range []string{
+		"display: grid",
+		`grid-template-areas:`,
+		"border: 1px solid var(--ui-border-subtle)",
+		"border-radius: var(--ui-radius-xl)",
+	} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("mobile listing row is not a card (%q): %s", want, row)
+		}
 	}
-	typeCell := cssRule(mobile, ".listing td:nth-child(2)")
-	if !strings.Contains(typeCell, "display: none") {
-		t.Fatalf("type pills still occupy a mobile row: %s", typeCell)
+	if !strings.Contains(row, `"name actions"`) {
+		t.Fatalf("mobile card does not pair the name with its actions: %s", row)
+	}
+	if !strings.Contains(cssRule(mobile, ".listing thead"), "display: none") {
+		t.Fatalf("mobile listing still shows table headers: %s", cssRule(mobile, ".listing thead"))
+	}
+	if !strings.Contains(cssRule(mobile, ".listing td:nth-child(2)"), "grid-area: type") {
+		t.Fatal("mobile card does not put the type badge on the meta line")
+	}
+	if !strings.Contains(cssRule(mobile, ".listing td:nth-child(4)"), "grid-area: actions") {
+		t.Fatal("mobile card does not keep row actions in the actions area")
+	}
+	if !strings.Contains(cssRule(mobile, ".file-table-wrap"), "overflow: visible") {
+		t.Fatal("mobile table still scrolls horizontally instead of becoming cards")
+	}
+	if !strings.Contains(cssRule(mobile, ".file-toolbar"), "grid-template-columns: 1fr 1fr") {
+		t.Fatal("mobile upload/mkdir toolbar is not a two-up row")
 	}
 }
 
@@ -319,7 +359,9 @@ func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 	assertNoBasicChallenge(t, page)
 	body := page.Body.String()
 	for _, fragment := range []string{
-		`<dialog id="mkdir-dialog"`,
+		`id="mkdir-dialog"`,
+		`class="ui-dialog"`,
+		`data-ui-dialog`,
 		`id="mkdir-title"`,
 		`for="mkdir-name"`,
 		`id="mkdir-error"`,
@@ -338,27 +380,24 @@ func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 	}
 	assertNoBasicChallenge(t, script)
 	text := script.Body.String()
-	if strings.Contains(text, `window.prompt("目录名称")`) {
-		t.Fatal("mkdir still uses the native prompt")
-	}
-	if !strings.Contains(text, `window.prompt("新名称"`) {
-		t.Fatal("rename no longer uses the native prompt")
-	}
-	if !strings.Contains(text, `window.confirm("删除 "`) {
-		t.Fatal("delete no longer uses the native confirm")
+	if strings.Contains(text, "window.prompt") {
+		t.Fatal("mkdir or rename still uses the native prompt")
 	}
 	for _, fragment := range []string{
-		"mkdirDialog.showModal()",
+		"openDialog(mkdirDialog)",
 		"mkdirName.focus()",
 		"mkdirName.value.trim()",
 		`sendJSON("/api/mkdir"`,
-		"mkdirDialog.close()",
+		"closeDialog(mkdirDialog)",
 		"已新建目录。",
 		"event.preventDefault()",
-		"setMkdirError(error.message)",
+		"setMkdirError(failure.message)",
+		"openRename",
+		"confirmAction",
+		`tone: "danger"`,
 	} {
 		if !strings.Contains(text, fragment) {
-			t.Fatalf("script missing mkdir dialog behavior %q", fragment)
+			t.Fatalf("script missing dialog behavior %q", fragment)
 		}
 	}
 	if !strings.Contains(text, "if (!name)") {
@@ -370,57 +409,156 @@ func TestManagerMkdirUsesInPageDialog(t *testing.T) {
 		t.Fatal(err)
 	}
 	style := string(css)
-	dialog := cssRule(style, "#mkdir-dialog")
-	for _, want := range []string{"var(--color-bg-surface)", "var(--color-text-primary)", "var(--shadow-md)"} {
-		if !strings.Contains(dialog, want) {
-			t.Fatalf("mkdir dialog missing theme token %q in %q", want, dialog)
-		}
+	if strings.Contains(style, "#mkdir-dialog") || strings.Contains(style, "#rename-dialog") {
+		t.Fatal("page stylesheet re-styles the kit dialog instead of using .ui-dialog")
 	}
-	if cssRule(style, "#mkdir-dialog::backdrop") == "" {
-		t.Fatal("mkdir dialog has no backdrop")
-	}
-	nameField := cssRule(style, "#mkdir-name")
-	if !strings.Contains(nameField, "var(--color-bg-sunken)") || !strings.Contains(nameField, "var(--color-text-primary)") {
-		t.Fatalf("mkdir name field does not follow theme tokens: %q", nameField)
-	}
-	if !strings.Contains(style, `[data-theme="dark"] #mkdir-dialog::backdrop`) {
-		t.Fatal("mkdir dialog backdrop does not adapt to dark theme")
+	if !strings.Contains(style, ".ui-dialog form") {
+		t.Fatal("page stylesheet does not reset the dialog form layout")
 	}
 	pageHTML, err := os.ReadFile(filepath.Join("static", "index.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertConsoleSkin(t, string(pageHTML), text, style)
+	assertStandaloneKitPage(t, string(pageHTML), text, style)
 }
 
-func assertConsoleSkin(t *testing.T, page, script, style string) {
+func TestDeleteConfirmationMatchesEntryType(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("static", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, want := range []string{
+		"const deleteConfirmation = (entry) => {",
+		"if (entry.dir) {",
+		`title: "删除目录",`,
+		`"“" + entry.name + "” 及其中的全部内容一并删除且不可恢复？"`,
+		`title: "删除文件",`,
+		`"“" + entry.name + "”？删除后不可恢复。"`,
+		"confirmAction(deleteConfirmation(entry))",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("delete confirmation missing %q", want)
+		}
+	}
+	if strings.Contains(text, `"删除 " + entry.name + "？删除后不可恢复。"`) {
+		t.Fatal("delete confirmation still uses file wording for directories")
+	}
+}
+
+func TestListLoadingStateIsAnnounced(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, want := range []string{
+		`id="listing-region"`,
+		`role="region"`,
+		`aria-label="目录内容"`,
+		`id="listing-loading"`,
+		`class="file-loading"`,
+		`id="status-retry"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("listing region missing %q", want)
+		}
+	}
+
+	script, err := os.ReadFile(filepath.Join("static", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, want := range []string{
+		`listingRegion.setAttribute("aria-busy", "true")`,
+		`listingLoading.hidden = !busy`,
+		`showStatus("正在加载 " + pathLabel(target) + "…", "")`,
+		`if (isCurrent || listBusy) {`,
+		`if (listBusy) {`,
+		`setListBusy(false);`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("listing loading state missing %q", want)
+		}
+	}
+}
+
+func TestPhoneTouchTargetsUseKitTouchToken(t *testing.T) {
+	css, err := os.ReadFile(filepath.Join("static", "style.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	small := cssMedia(string(css), "(max-width: 480px)")
+	if small == "" {
+		t.Fatal("missing 480px touch stylesheet")
+	}
+	for _, selector := range []string{".crumbs button", ".file-name-button", ".mount-help > summary"} {
+		rule := cssRule(small, selector)
+		if !strings.Contains(rule, "min-height: var(--ui-touch)") {
+			t.Fatalf("%s does not reach the 44px touch target: %q", selector, rule)
+		}
+	}
+}
+
+func TestFailuresUseChineseUserMessages(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("static", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, want := range []string{
+		`if (error.status === 401) {`,
+		`clearCredentials();`,
+		`showLogin();`,
+		`unauthorized: "共享口令不正确，请重新输入。",`,
+		`"path is not found": "找不到这个路径，可能已被移动或删除。",`,
+		`"delete failed": "删除没有完成，请稍后重试。",`,
+		`return "网络不可用，请检查连接后重试。";`,
+		`console.error("[webdav] 原始错误"`,
+		`console.error("[webdav] API 返回错误"`,
+		`const handleFailure = (error, prefix) => {`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("failure handling missing %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"error.message",
+		`showStatus("删除失败：" + error.message`,
+		`showStatus("上传失败：" + error.message`,
+		`setMkdirError(error.message)`,
+		`setRenameError(error.message)`,
+	} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("raw error text still reaches the page: %q", banned)
+		}
+	}
+}
+
+func assertStandaloneKitPage(t *testing.T, page, script, style string) {
 	t.Helper()
-	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
-		t.Fatal("stylesheet still contains sakura theme colors")
+	if !strings.Contains(page, `data-theme-mode="standalone"`) {
+		t.Fatal("page does not run the kit in standalone theme mode")
 	}
-	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
-		t.Fatal("page still uses sakura-day as the rendered theme")
+	if !strings.Contains(page, `data-theme-key="webdav.theme"`) {
+		t.Fatal("page does not declare its standalone theme key")
 	}
-	if !strings.Contains(page, `data-theme="light"`) {
-		t.Fatal("page default theme is not light")
+	if !strings.Contains(page, `href="/static/ui-kit.css"`) || !strings.Contains(page, `src="/static/ui-kit.js"`) {
+		t.Fatal("page does not load the shared ui-kit assets")
 	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
-		t.Fatal("stylesheet missing light/dark theme selectors")
+	for _, banned := range []string{"applyHostTheme", "sakura-day", "sakura-night", "neko-dark", "business:"} {
+		if strings.Contains(script, banned) {
+			t.Fatalf("page script still resolves themes itself: %q", banned)
+		}
 	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
+	if !strings.Contains(script, "NREUI") {
+		t.Fatal("page script does not use the shared kit helpers")
 	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
-	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
-	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
-	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	for _, banned := range []string{"[data-theme=", "--color-", "#4f46e5", "#818cf8", "#f8fafc"} {
+		if strings.Contains(style, banned) {
+			t.Fatalf("page stylesheet still owns theme values: %q", banned)
+		}
 	}
 }
 

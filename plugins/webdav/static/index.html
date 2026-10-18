@@ -60,32 +60,43 @@
           </div>
         </div>
 
-        <p id="status" class="file-status" role="status" aria-live="polite" hidden></p>
-
-        <div class="ui-table-wrap file-table-wrap" id="table-wrap" hidden>
-          <table class="ui-table listing">
-            <caption class="ui-sr-only">当前目录的文件和子目录</caption>
-            <thead>
-              <tr>
-                <th scope="col">名称</th>
-                <th scope="col">类型</th>
-                <th scope="col">大小</th>
-                <th scope="col" class="listing__actions">操作</th>
-              </tr>
-            </thead>
-            <tbody id="listing"></tbody>
-          </table>
+        <div class="file-status-row">
+          <p id="status" class="file-status" role="status" aria-live="polite" hidden></p>
+          <button type="button" id="status-retry" class="ui-btn ui-btn--secondary ui-btn--sm" hidden>重试</button>
         </div>
 
-        <div id="empty" class="ui-empty" hidden>
-          <span class="ui-empty__icon" aria-hidden="true">
-            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true" focusable="false"><path d="M2.5 5.3h5l1.6 1.9h8.4v7.9a1.6 1.6 0 0 1-1.6 1.6H4.1a1.6 1.6 0 0 1-1.6-1.6V5.3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          </span>
-          <h2 class="ui-empty__title">这个目录还是空的</h2>
-          <p class="ui-empty__desc">先上传一个文件，或在这里新建子目录，再继续整理。</p>
-          <div class="ui-empty__actions">
-            <button type="button" class="ui-btn" id="empty-upload">上传文件</button>
-            <button type="button" class="ui-btn ui-btn--secondary" id="empty-mkdir">新建目录</button>
+        <div class="file-listing" id="listing-region" role="region" aria-label="目录内容">
+          <div id="listing-loading" class="file-loading" hidden aria-hidden="true">
+            <span class="file-loading__bar"></span>
+            <span class="file-loading__bar"></span>
+            <span class="file-loading__bar"></span>
+          </div>
+
+          <div class="ui-table-wrap file-table-wrap" id="table-wrap" hidden>
+            <table class="ui-table listing">
+              <caption class="ui-sr-only">当前目录的文件和子目录</caption>
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">类型</th>
+                  <th scope="col">大小</th>
+                  <th scope="col" class="listing__actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="listing"></tbody>
+            </table>
+          </div>
+
+          <div id="empty" class="ui-empty" hidden>
+            <span class="ui-empty__icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true" focusable="false"><path d="M2.5 5.3h5l1.6 1.9h8.4v7.9a1.6 1.6 0 0 1-1.6 1.6H4.1a1.6 1.6 0 0 1-1.6-1.6V5.3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            </span>
+            <h2 class="ui-empty__title">这个目录还是空的</h2>
+            <p class="ui-empty__desc">先上传一个文件，或在这里新建子目录，再继续整理。</p>
+            <div class="ui-empty__actions">
+              <button type="button" class="ui-btn" id="empty-upload">上传文件</button>
+              <button type="button" class="ui-btn ui-btn--secondary" id="empty-mkdir">新建目录</button>
+            </div>
           </div>
         </div>
       </section>

@@ -43,9 +43,14 @@ const renameName = document.querySelector("#rename-name");
 const renameCancel = document.querySelector("#rename-cancel");
 const renameSubmit = document.querySelector("#rename-submit");
 const renameError = document.querySelector("#rename-error");
+const statusRow = document.querySelector(".file-status-row");
+const statusRetry = document.querySelector("#status-retry");
+const listingRegion = document.querySelector("#listing-region");
+const listingLoading = document.querySelector("#listing-loading");
 
 let currentPath = "/";
 let renameTarget = null;
+let listBusy = false;
 
 const encodeBasic = (username, password) => {
   const bytes = new TextEncoder().encode(username + ":" + password);
@@ -128,6 +133,12 @@ const showStatus = (message, tone) => {
   } else {
     delete statusNode.dataset.tone;
   }
+  if (statusRow) {
+    statusRow.hidden = !message;
+  }
+  if (statusRetry) {
+    statusRetry.hidden = !(message && tone === "error");
+  }
 };
 
 const setBusy = (node, busy) => {
@@ -173,6 +184,164 @@ const closeDialog = (dialog) => {
   }
 };
 
+const resetManagerState = () => {
+  currentPath = "/";
+  renameTarget = null;
+  closeDialog(mkdirDialog);
+  closeDialog(renameDialog);
+  if (listing) {
+    listing.replaceChildren();
+  }
+  if (tableWrap) {
+    tableWrap.hidden = true;
+  }
+  if (empty) {
+    empty.hidden = true;
+  }
+  if (listingLoading) {
+    listingLoading.hidden = true;
+  }
+  if (listingRegion) {
+    listingRegion.removeAttribute("aria-busy");
+  }
+  [uploadButton, mkdirButton].forEach((button) => {
+    if (button) {
+      button.disabled = false;
+    }
+  });
+  listBusy = false;
+  showStatus("", "");
+};
+
+const setListBusy = (busy) => {
+  listBusy = busy;
+  if (listingRegion) {
+    if (busy) {
+      listingRegion.setAttribute("aria-busy", "true");
+    } else {
+      listingRegion.removeAttribute("aria-busy");
+    }
+  }
+  if (listingLoading) {
+    listingLoading.hidden = !busy;
+  }
+  if (busy) {
+    if (tableWrap) {
+      tableWrap.hidden = true;
+    }
+    if (empty) {
+      empty.hidden = true;
+    }
+  }
+  if (crumbs) {
+    crumbs.querySelectorAll("button").forEach((button) => {
+      button.disabled = busy;
+    });
+  }
+  if (listing) {
+    listing.querySelectorAll(".file-name-button").forEach((button) => {
+      button.disabled = busy;
+    });
+  }
+  [uploadButton, mkdirButton].forEach((button) => {
+    if (button) {
+      button.disabled = busy;
+    }
+  });
+};
+
+class ApiFailure extends Error {
+  constructor(code, details) {
+    super(code || "api_failure");
+    this.name = "ApiFailure";
+    this.code = code || "";
+    this.status = details && details.status ? details.status : 0;
+    this.kind = (details && details.kind) || "api";
+    this.cause = details && details.cause;
+  }
+}
+
+const apiErrorMessages = {
+  unauthorized: "共享口令不正确，请重新输入。",
+  "path is not found": "找不到这个路径，可能已被移动或删除。",
+  "path is not a directory": "这个路径不是目录，请返回上一级重试。",
+  "directory cannot be listed": "目录暂时无法列出，请稍后重试。",
+  "path is a directory": "这是一个目录，不能作为文件下载。",
+  "upload is invalid": "上传内容无效，请选择文件后重试。",
+  "upload name is invalid": "文件名称无效，请改名后重试。",
+  "path is invalid": "路径无效，请检查名称后重试。",
+  "directory cannot be created": "目录创建失败，可能已存在同名项。",
+  "rename is invalid": "重命名参数无效，请检查名称后重试。",
+  "rename failed": "重命名没有完成，请稍后重试。",
+  "delete failed": "删除没有完成，请稍后重试。",
+  "file cannot be written": "文件写入失败，请检查磁盘空间后重试。",
+  "path is outside the share root": "路径超出共享目录范围，请返回共享根后重试。",
+  "request is invalid": "请求无效，请刷新页面后重试。",
+};
+
+const failureMessage = (error) => {
+  if (!error) {
+    return "操作没有完成，请稍后重试。";
+  }
+  if (error.kind === "network") {
+    return "网络不可用，请检查连接后重试。";
+  }
+  if (error.status === 401) {
+    return apiErrorMessages.unauthorized;
+  }
+  if (error.status === 403) {
+    return "没有权限执行这个操作，请重新输入共享口令。";
+  }
+  return apiErrorMessages[error.code] || "操作没有完成，请稍后重试。";
+};
+
+const logFailure = (error) => {
+  console.error("[webdav] 原始错误", error && error.cause ? error.cause : error);
+};
+
+const apiFetch = async (path, options) => {
+  try {
+    return await fetch(path, options);
+  } catch (cause) {
+    throw new ApiFailure("network", { kind: "network", cause });
+  }
+};
+
+const apiFailure = async (response) => {
+  const payload = await response.json().catch(() => ({}));
+  const code = payload && typeof payload.error === "string" ? payload.error : "";
+  console.error("[webdav] API 返回错误", response.status, code);
+  return new ApiFailure(code, { status: response.status, code });
+};
+
+const requestJSON = async (path, options) => {
+  const response = await apiFetch(path, options);
+  if (response.status === 204) {
+    return {};
+  }
+  if (!response.ok) {
+    throw await apiFailure(response);
+  }
+  return response.json().catch(() => ({}));
+};
+
+const handleFailure = (error, prefix) => {
+  logFailure(error);
+  const message = failureMessage(error);
+  if (error && error.status === 401) {
+    clearCredentials();
+    resetManagerState();
+    setLoginError(message);
+    if (loginPassword) {
+      loginPassword.value = "";
+    }
+    showLogin();
+    return { message, unauthorized: true };
+  }
+  showStatus((prefix ? prefix + "：" : "") + message, "error");
+  return { message, unauthorized: false };
+};
+
 const confirmAction = (options) => {
   if (window.NREUI && typeof window.NREUI.confirm === "function") {
     return window.NREUI.confirm(options);
@@ -188,8 +357,10 @@ const joinPath = (dir, name) => {
 };
 
 
+const pathLabel = (dir) => (dir && dir !== "/" ? dir : "共享根");
+
 const sendJSON = async (path, body) => {
-  const response = await fetch(path, {
+  const response = await apiFetch(path, {
     method: "POST",
     headers: withAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -197,40 +368,57 @@ const sendJSON = async (path, body) => {
   if (response.status === 204) {
     return {};
   }
-  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || "操作失败");
+    throw await apiFailure(response);
   }
-  return payload;
+  return response.json().catch(() => ({}));
 };
 
 const loadList = async (dir) => {
-  currentPath = dir || "/";
-  const response = await fetch("/api/list?path=" + encodeURIComponent(currentPath), {
-    headers: withAuthHeaders(),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || "无法列出目录");
-  }
-  const entries = payload.entries || [];
-  renderCrumbs(payload.path || currentPath);
-  renderListing(entries);
-  if (tableWrap) {
-    tableWrap.hidden = entries.length === 0;
-  }
-  if (empty) {
-    empty.hidden = entries.length > 0;
+  const target = dir || "/";
+  const previousPath = currentPath;
+  const previousTableHidden = tableWrap ? tableWrap.hidden : true;
+  const previousEmptyHidden = empty ? empty.hidden : true;
+  currentPath = target;
+  renderCrumbs(target);
+  setListBusy(true);
+  showStatus("正在加载 " + pathLabel(target) + "…", "");
+  try {
+    const payload = await requestJSON("/api/list?path=" + encodeURIComponent(target), {
+      headers: withAuthHeaders(),
+    });
+    const entries = payload.entries || [];
+    currentPath = payload.path || target;
+    renderCrumbs(currentPath);
+    renderListing(entries);
+    if (tableWrap) {
+      tableWrap.hidden = entries.length === 0;
+    }
+    if (empty) {
+      empty.hidden = entries.length > 0;
+    }
+    showStatus("", "");
+  } catch (error) {
+    currentPath = previousPath;
+    renderCrumbs(previousPath);
+    if (tableWrap) {
+      tableWrap.hidden = previousTableHidden;
+    }
+    if (empty) {
+      empty.hidden = previousEmptyHidden;
+    }
+    throw error;
+  } finally {
+    setListBusy(false);
   }
 };
 
 const downloadFile = async (name) => {
-  const response = await fetch("/api/download?path=" + encodeURIComponent(joinPath(currentPath, name)), {
+  const response = await apiFetch("/api/download?path=" + encodeURIComponent(joinPath(currentPath, name)), {
     headers: withAuthHeaders(),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || "下载失败");
+    throw await apiFailure(response);
   }
   const blob = await response.blob();
   const objectURL = URL.createObjectURL(blob);
@@ -258,11 +446,11 @@ const renderCrumbs = (dir) => {
       button.setAttribute("aria-current", "page");
     }
     button.addEventListener("click", () => {
-      if (isCurrent) {
+      if (isCurrent || listBusy) {
         return;
       }
       showStatus("", "");
-      loadList(target).catch((error) => showStatus(error.message, "error"));
+      loadList(target).catch((error) => handleFailure(error));
     });
     crumbs.append(button);
   };
@@ -299,6 +487,23 @@ const setRenameError = (message) => {
   }
   renameError.hidden = !message;
   renameError.textContent = message || "";
+};
+
+const deleteConfirmation = (entry) => {
+  if (entry.dir) {
+    return {
+      title: "删除目录",
+      message: "“" + entry.name + "” 及其中的全部内容一并删除且不可恢复？",
+      confirmLabel: "删除目录",
+      tone: "danger",
+    };
+  }
+  return {
+    title: "删除文件",
+    message: "“" + entry.name + "”？删除后不可恢复。",
+    confirmLabel: "删除文件",
+    tone: "danger",
+  };
 };
 
 const renderListing = (entries) => {
@@ -341,13 +546,19 @@ const renderListing = (entries) => {
     open.append(glyph, label);
     if (entry.dir) {
       open.addEventListener("click", () => {
+        if (listBusy) {
+          return;
+        }
         showStatus("", "");
-        loadList(joinPath(currentPath, entry.name)).catch((error) => showStatus(error.message, "error"));
+        loadList(joinPath(currentPath, entry.name)).catch((error) => handleFailure(error));
       });
     } else {
       open.addEventListener("click", () => {
+        if (listBusy) {
+          return;
+        }
         showStatus("", "");
-        downloadFile(entry.name).catch((error) => showStatus(error.message, "error"));
+        downloadFile(entry.name).catch((error) => handleFailure(error));
       });
     }
     nameCell.append(open);
@@ -361,24 +572,22 @@ const renderListing = (entries) => {
     remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
     remove.textContent = "删除";
     remove.addEventListener("click", async () => {
-      const confirmed = await confirmAction({
-        title: "删除文件",
-        message: "删除 " + entry.name + "？删除后不可恢复。",
-        confirmLabel: "删除",
-        tone: "danger",
-      });
+      const confirmed = await confirmAction(deleteConfirmation(entry));
       if (!confirmed) {
         showStatus("已取消删除，内容未变。", "");
         return;
       }
+      const kindLabel = entry.dir ? "目录" : "文件";
+      let deleted = false;
       setBusy(remove, true);
-      showStatus("正在删除 " + entry.name + "…", "");
+      showStatus("正在删除" + kindLabel + " " + entry.name + "…", "");
       try {
         await sendJSON("/api/delete", { path: joinPath(currentPath, entry.name) });
+        deleted = true;
         await loadList(currentPath);
-        showStatus("已删除 " + entry.name + "。", "success");
+        showStatus("已删除" + kindLabel + " " + entry.name + "。", "success");
       } catch (error) {
-        showStatus("删除失败：" + error.message, "error");
+        handleFailure(error, deleted ? "刷新目录失败" : "删除失败");
       } finally {
         setBusy(remove, false);
       }
@@ -390,24 +599,25 @@ const renderListing = (entries) => {
 };
 
 const uploadFile = async (file) => {
-  if (!file) {
+  if (!file || listBusy) {
     return;
   }
   setBusy(uploadButton, true);
   showStatus("正在上传 " + file.name + "…", "");
+  let uploaded = false;
   try {
     const body = new FormData();
     body.set("path", currentPath);
     body.set("file", file, file.name);
-    const response = await fetch("/api/upload", { method: "POST", headers: withAuthHeaders(), body });
-    const payload = await response.json().catch(() => ({}));
+    const response = await apiFetch("/api/upload", { method: "POST", headers: withAuthHeaders(), body });
     if (!response.ok) {
-      throw new Error(payload.error || "上传失败");
+      throw await apiFailure(response);
     }
+    uploaded = true;
     await loadList(currentPath);
     showStatus("已上传 " + file.name + "。", "success");
   } catch (error) {
-    showStatus("上传失败：" + error.message, "error");
+    handleFailure(error, uploaded ? "刷新目录失败" : "上传失败");
   } finally {
     setBusy(uploadButton, false);
   }
@@ -466,14 +676,18 @@ if (mkdirDialog && mkdirForm && mkdirName) {
       return;
     }
     setBusy(mkdirSubmit, true);
+    let created = false;
     try {
       await sendJSON("/api/mkdir", { path: joinPath(currentPath, name) });
+      created = true;
       closeDialog(mkdirDialog);
       await loadList(currentPath);
       showStatus("已新建目录。", "success");
     } catch (error) {
-      setMkdirError(error.message);
-      showStatus(error.message, "error");
+      const failure = handleFailure(error, created ? "刷新目录失败" : "新建目录失败");
+      if (!failure.unauthorized && !created) {
+        setMkdirError(failure.message);
+      }
     } finally {
       setBusy(mkdirSubmit, false);
     }
@@ -504,17 +718,21 @@ if (renameDialog && renameForm && renameName) {
       return;
     }
     setBusy(renameSubmit, true);
+    let renamed = false;
     try {
       await sendJSON("/api/rename", {
         from: joinPath(currentPath, renameTarget.name),
         to: joinPath(currentPath, next),
       });
+      renamed = true;
       closeDialog(renameDialog);
       await loadList(currentPath);
       showStatus("已重命名。", "success");
     } catch (error) {
-      setRenameError(error.message);
-      showStatus(error.message, "error");
+      const failure = handleFailure(error, renamed ? "刷新目录失败" : "重命名失败");
+      if (!failure.unauthorized && !renamed) {
+        setRenameError(failure.message);
+      }
     } finally {
       setBusy(renameSubmit, false);
     }
@@ -540,20 +758,26 @@ if (loginForm && loginUsername && loginPassword) {
     }
     try {
       setLoginError("");
-      const response = await fetch("/api/list?path=/", {
+      const payload = await requestJSON("/api/list?path=/", {
         headers: { Authorization: encodeBasic(username, password) },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "登录失败");
-      }
       saveCredentials(username, password);
       loginPassword.value = "";
       showManager(username);
       showStatus("", "");
-      await loadList("/");
+      const entries = payload.entries || [];
+      currentPath = payload.path || "/";
+      renderCrumbs(currentPath);
+      renderListing(entries);
+      if (tableWrap) {
+        tableWrap.hidden = entries.length === 0;
+      }
+      if (empty) {
+        empty.hidden = entries.length > 0;
+      }
     } catch (error) {
-      setLoginError(error.message);
+      logFailure(error);
+      setLoginError(failureMessage(error));
     }
   });
 }
@@ -561,25 +785,22 @@ if (loginForm && loginUsername && loginPassword) {
 if (logoutButton) {
   logoutButton.addEventListener("click", () => {
     clearCredentials();
-    currentPath = "/";
-    renameTarget = null;
-    closeDialog(mkdirDialog);
-    closeDialog(renameDialog);
-    if (listing) {
-      listing.replaceChildren();
-    }
-    if (empty) {
-      empty.hidden = true;
-    }
-    if (tableWrap) {
-      tableWrap.hidden = true;
-    }
-    showStatus("", "");
+    resetManagerState();
     setLoginError("");
     if (loginPassword) {
       loginPassword.value = "";
     }
     showLogin();
+  });
+}
+
+if (statusRetry) {
+  statusRetry.addEventListener("click", () => {
+    if (listBusy) {
+      return;
+    }
+    showStatus("", "");
+    loadList(currentPath).catch((error) => handleFailure(error));
   });
 }
 
@@ -591,10 +812,7 @@ const restoreSession = () => {
   }
   showManager(credentials.username);
   loadList("/").catch((error) => {
-    clearCredentials();
-    showStatus("", "");
-    setLoginError(error.message);
-    showLogin();
+    handleFailure(error);
   });
 };
 

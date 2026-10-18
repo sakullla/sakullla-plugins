@@ -134,8 +134,16 @@ body:has(#login-view:not([hidden])) .ui-page {
   margin-left: auto;
 }
 
+.file-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-3);
+}
+
 .file-status {
-  margin: var(--ui-space-3) 0 0;
+  margin: 0;
   padding: var(--ui-space-2) var(--ui-space-3);
   border-radius: var(--ui-radius-md);
   background: var(--ui-subtle);
@@ -151,6 +159,51 @@ body:has(#login-view:not([hidden])) .ui-page {
 .file-status[data-tone="error"] {
   background: var(--ui-danger-soft);
   color: var(--ui-danger-text, var(--ui-danger));
+}
+
+.file-listing {
+  position: relative;
+}
+
+.file-loading {
+  display: grid;
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-4);
+  padding: var(--ui-space-1) 0;
+}
+
+.file-loading[hidden] {
+  display: none;
+}
+
+.file-loading__bar {
+  position: relative;
+  display: block;
+  height: 2.6rem;
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-subtle);
+  overflow: hidden;
+}
+
+.file-loading__bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--ui-hover), transparent);
+  transform: translateX(-100%);
+  animation: file-loading-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes file-loading-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-loading__bar::after {
+    animation: none;
+  }
 }
 
 .file-table-wrap {
@@ -387,5 +440,19 @@ body:has(#login-view:not([hidden])) .ui-page {
 
   .file-toolbar {
     gap: var(--ui-space-2);
+  }
+
+  .crumbs button {
+    min-height: var(--ui-touch);
+  }
+
+  .file-name-button {
+    min-height: var(--ui-touch);
+    padding-block: var(--ui-space-1);
+  }
+
+  .mount-help > summary {
+    min-height: var(--ui-touch);
+    padding-block: var(--ui-space-2);
   }
 }
