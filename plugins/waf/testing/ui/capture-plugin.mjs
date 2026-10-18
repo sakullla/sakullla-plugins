@@ -89,7 +89,7 @@ export const scenes = [
     run: async (ui) => {
       await ui.waitFor("#tab-scope");
       await ui.click("#tab-scope");
-      await ui.waitFor("#entry-list li");
+      await ui.waitFor("#entry-list tr");
     },
   },
 ];

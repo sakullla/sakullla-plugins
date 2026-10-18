@@ -46,8 +46,16 @@ func TestPluginYAMLDeclaresDedicatedManagementPage(t *testing.T) {
 	if !strings.Contains(text, "http.request") {
 		t.Fatal("plugin.yaml must declare http.request")
 	}
-	if !strings.Contains(text, "assets/ui/index.html") || !strings.Contains(text, "assets/ui/app.js") {
-		t.Fatal("plugin.yaml must declare frontend files below assets/")
+	for _, asset := range []string{
+		"assets/ui/index.html",
+		"assets/ui/app.js",
+		"assets/ui/style.css",
+		"assets/ui/ui-kit.css",
+		"assets/ui/ui-kit.js",
+	} {
+		if !strings.Contains(text, asset) {
+			t.Fatalf("plugin.yaml must declare frontend asset %s below assets/", asset)
+		}
 	}
 	var manifest pluginsdk.Manifest
 	if err := yaml.Unmarshal(raw, &manifest); err != nil {
@@ -108,6 +116,95 @@ func TestManagementPageServesChineseCopy(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("page missing %q", want)
 		}
+	}
+}
+
+func TestManagementPageUsesSharedKitAndKeepsTaskAnchors(t *testing.T) {
+	t.Parallel()
+
+	rawPage, err := os.ReadFile("assets/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(rawPage)
+	for _, want := range []string{
+		`src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`data-theme-mode="host"`,
+		`id="event-dialog"`,
+		`class="ui-dialog ui-dialog--drawer"`,
+		`id="event-detail"`,
+		`id="event-list"`,
+		`id="entry-list"`,
+		`<tbody id="entry-list">`,
+		`class="ui-table waf-entry-table"`,
+		`id="rule-dialog"`,
+		`id="confirm-dialog"`,
+		`id="stat-deny"`,
+		`id="stat-observe"`,
+		`id="stat-skip"`,
+		`data-event-mode="deny"`,
+		`命中与跳过事件`,
+		`还没有 HTTP 入口`,
+		`检查未完成`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("management page missing %q", want)
+		}
+	}
+
+	overviewStart := strings.Index(page, `id="view-overview"`)
+	eventsStart := strings.Index(page, `id="view-events"`)
+	if overviewStart < 0 || eventsStart <= overviewStart {
+		t.Fatal("overview view section missing")
+	}
+	overview := page[overviewStart:eventsStart]
+	if count := strings.Count(overview, "<h2"); count > 4 {
+		t.Fatalf("overview must keep at most four h2 headings, got %d", count)
+	}
+	order := []string{
+		`id="protection-banner"`,
+		`class="ui-metric-grid waf-metrics"`,
+		`id="attention-list"`,
+		`id="capability-list"`,
+		`id="recent-events"`,
+	}
+	last := -1
+	for _, marker := range order {
+		index := strings.Index(overview, marker)
+		if index < 0 {
+			t.Fatalf("overview missing %q", marker)
+		}
+		if index < last {
+			t.Fatalf("overview order drifted at %q", marker)
+		}
+		last = index
+	}
+
+	rawScript, err := os.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(rawScript)
+	if strings.Contains(script, "applyHostTheme") || strings.Contains(script, `document.documentElement.setAttribute("data-theme"`) {
+		t.Fatal("page must defer theme resolution to ui-kit.js host mode")
+	}
+	for _, want := range []string{"未挂载防护", "防护配置异常", "检查未完成", "检测并拦截", "仅检测", "askConfirm("} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("app.js missing status or confirmation behaviour %q", want)
+		}
+	}
+
+	rawStyle, err := os.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	style := string(rawStyle)
+	if strings.Contains(style, "--color-") {
+		t.Fatal("style.css must use --ui-* kit tokens instead of legacy --color-* tokens")
+	}
+	if !strings.Contains(style, "var(--ui-") {
+		t.Fatal("style.css must consume kit tokens")
 	}
 }
 

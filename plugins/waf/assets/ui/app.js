@@ -1,31 +1,3 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = {
-    "sakura-day": "light",
-    business: "light",
-    "fresh-green": "light",
-    sakura: "light",
-    cyberpunk: "light",
-    "sakura-night": "dark",
-    "neko-dark": "dark",
-    midnight: "dark",
-  };
-  let theme = "light";
-  try {
-    const raw =
-      window.parent && window.parent !== window
-        ? window.parent.document.documentElement.getAttribute("data-theme")
-        : document.documentElement.getAttribute("data-theme");
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) theme = mapped;
-  } catch (_error) {
-    theme = "light";
-  }
-  document.documentElement.setAttribute("data-theme", theme);
-};
-
-applyHostTheme();
-
 const loadingNode = document.querySelector("#app-loading");
 const unavailableNode = document.querySelector("#app-unavailable");
 const deniedNode = document.querySelector("#app-denied");
@@ -529,6 +501,12 @@ const loadAgents = async () => {
 const $ = (selector) => document.querySelector(selector);
 const ruleDialog = $("#rule-dialog");
 const eventDialog = $("#event-dialog");
+const confirmDialog = $("#confirm-dialog");
+const eventEmptyDesc = $("#event-empty-desc");
+const appEmptyDesc = $("#app-empty-desc");
+const eventTableWrap = $("#event-table-wrap");
+const entryTableWrap = $("#entry-table-wrap");
+
 const targetLabel = (target) =>
   ({ path: "请求路径", query: "查询参数", headers: "请求头", body: "请求体" })[
     target
@@ -573,10 +551,30 @@ const eventMode = (event) =>
       : "observe";
 const eventLabel = (event) =>
   ({ deny: "已拦截", observe: "仅检测", skip: "检查未完成" })[eventMode(event)];
-const formatTime = (value) =>
-  value && Number.isFinite(Date.parse(value))
-    ? new Date(value).toLocaleString("zh-CN", { hour12: false })
-    : "—";
+
+// Status is always conveyed by text and an icon mark, never by colour alone.
+const statusIcon = (tone, glyph) =>
+  `<span class="waf-status-icon" data-tone="${tone}" aria-hidden="true">${glyph}</span>`;
+const badgeMarkup = (tone, glyph, label) =>
+  `<span class="ui-badge${tone ? " ui-badge--" + tone : ""} ui-badge--plain">${statusIcon(tone || "muted", glyph)}${escapeText(label)}</span>`;
+const eventBadge = (event) => {
+  const mode = eventMode(event);
+  if (mode === "deny") return badgeMarkup("danger", "!", "已拦截");
+  if (mode === "observe") return badgeMarkup("info", "◉", "仅检测");
+  return badgeMarkup("warning", "?", "检查未完成");
+};
+const entryStatus = (entry) => {
+  if (!entry.enabled)
+    return { mode: "disabled", label: "入口已停用", tone: "", glyph: "—" };
+  if (entry.overlay_invalid)
+    return { mode: "invalid", label: "防护配置异常", tone: "danger", glyph: "!" };
+  if (!entry.attached)
+    return { mode: "skip", label: "未挂载防护", tone: "warning", glyph: "⊘" };
+  if (entry.mode === "deny")
+    return { mode: "deny", label: "检测并拦截", tone: "success", glyph: "✓" };
+  return { mode: "observe", label: "仅检测", tone: "info", glyph: "◉" };
+};
+
 const listState = {
   entry: { page: 1, query: "", mode: "" },
   event: { page: 1, query: "", mode: "" },
@@ -593,11 +591,14 @@ const switchTab = (tab) => {
   activeTab = tab;
   ["overview", "events", "rules", "scope"].forEach((name) => {
     const trigger = $("#tab-" + name);
+    const view = $("#view-" + name);
+    if (!trigger || !view) return;
     trigger.setAttribute("aria-selected", String(name === tab));
     trigger.tabIndex = name === tab ? 0 : -1;
-    $("#view-" + name).hidden = name !== tab;
+    view.hidden = name !== tab;
   });
 };
+
 const bindTabs = (selector, values, current, change) => {
   document.querySelectorAll(selector).forEach((button, index) => {
     button.addEventListener("click", () => change(values[index]));
@@ -615,12 +616,12 @@ const bindTabs = (selector, values, current, change) => {
                 values.length) %
               values.length;
       change(values[next]);
-      document.querySelectorAll(selector)[next].focus();
+      document.querySelectorAll(selector)[next]?.focus();
     });
   });
 };
 bindTabs(
-  ".main-tabs [data-tab]",
+  ".waf-tabbar [data-tab]",
   ["overview", "events", "rules", "scope"],
   () => activeTab,
   switchTab,
@@ -633,6 +634,7 @@ document
 
 const renderPagination = (kind, info) => {
   const root = $("#" + kind + "-pagination");
+  if (!root) return;
   root.replaceChildren();
   root.hidden = !info || !info.total;
   if (!info) return;
@@ -647,7 +649,7 @@ const renderPagination = (kind, info) => {
   const button = (text, delta, disabled) => {
     const node = document.createElement("button");
     node.type = "button";
-    node.className = "btn-secondary";
+    node.className = "ui-btn ui-btn--secondary ui-btn--sm";
     node.textContent = text;
     node.disabled = disabled;
     node.addEventListener("click", () => {
@@ -662,14 +664,14 @@ const renderPagination = (kind, info) => {
     button("下一页", 1, info.page >= pages),
   );
   root.append(summary, actions);
-  $("#" + kind + "-count").textContent = info.total;
+  const count = $("#" + kind + "-count");
+  if (count) count.textContent = info.total;
 };
 
 const showEvents = (mode = "", query = "") => {
   listState.event = { page: 1, query, mode };
   $("#event-query").value = query;
   $("#event-mode").value = mode;
-
   switchTab("events");
   refreshWorkspace();
 };
@@ -681,67 +683,116 @@ document
     ),
   );
 
+const changeEntryMode = async (entry, mode, controls, label) => {
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    await panelJSON("api/entries/mode", {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: selectedAgentID,
+        rule_ref: entry.rule_ref,
+        mode,
+      }),
+    });
+    await refreshWorkspace();
+    showStatus(
+      `${entry.frontend_url || entry.rule_ref} 已切为${label}。`,
+      false,
+    );
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled =
+        !entry.enabled || !entry.attached || entry.overlay_invalid;
+    });
+  }
+};
+
 const renderEntries = (entries = []) => {
-  entryList.replaceChildren();
-  emptyNode.hidden = entries.length > 0;
-  emptyNode.textContent =
-    listState.entry.query || listState.entry.mode
+  if (entryList) entryList.replaceChildren();
+  const filtered = Boolean(listState.entry.query || listState.entry.mode);
+  if (emptyNode) emptyNode.hidden = entries.length > 0;
+  if (appEmptyDesc)
+    appEmptyDesc.textContent = filtered
       ? "没有符合条件的入口，请调整查询条件。"
-      : "还没有 HTTP 入口。";
+      : "先在节点上添加 HTTP 入口，再回到本页设置防护模式。";
+  if (entryTableWrap) entryTableWrap.hidden = entries.length === 0;
   entries.forEach((entry) => {
-    const item = document.createElement("li");
-    item.className = "entry-card";
-    const mode = entry.overlay_invalid || !entry.attached ? "skip" : entry.mode;
-    const label = !entry.enabled
-      ? "入口已停用"
-      : entry.overlay_invalid
-        ? "防护配置异常"
-        : !entry.attached
-          ? "未挂载防护"
-          : mode === "deny"
-            ? "检测并拦截"
-            : "仅检测";
-    item.innerHTML = `<div><header><strong>${escapeText(entry.frontend_url || entry.rule_ref)}</strong><span class="badge" data-mode="${mode}">${label}</span></header><p class="meta">后端 · ${escapeText(entry.backend || "未配置")}</p>${entry.notice ? `<p class="notice">${escapeText(entry.notice)}</p>` : ""}</div><div class="workspace-head-actions"><div class="mode-switch" role="group" aria-label="入口防护模式"><button data-mode="observe" type="button" aria-pressed="${mode === "observe"}">仅检测</button><button data-mode="deny" type="button" aria-pressed="${mode === "deny"}">检测并拦截</button></div><button class="btn-link" data-events type="button">查看事件</button></div>`;
-    const controls = item.querySelectorAll("[data-mode][type=button]");
-    controls.forEach((button) => {
+    const status = entryStatus(entry);
+    const row = document.createElement("tr");
+
+    const targetCell = document.createElement("td");
+    targetCell.className = "waf-entry-target";
+    const title = document.createElement("strong");
+    title.textContent = entry.frontend_url || entry.rule_ref || "未命名入口";
+    const meta = document.createElement("span");
+    meta.className = "waf-entry-meta";
+    meta.textContent = `后端 · ${entry.backend || "未配置"}`;
+    targetCell.append(title, meta);
+    if (entry.notice) {
+      const notice = document.createElement("span");
+      notice.className = "waf-entry-notice";
+      notice.textContent = entry.notice;
+      targetCell.append(notice);
+    }
+
+    const statusCell = document.createElement("td");
+    statusCell.innerHTML = badgeMarkup(status.tone, status.glyph, status.label);
+    const badge = statusCell.firstElementChild;
+    if (badge) badge.dataset.mode = status.mode;
+
+    const modeCell = document.createElement("td");
+    modeCell.className = "waf-entry-mode";
+    const switchGroup = document.createElement("div");
+    switchGroup.className = "mode-switch";
+    switchGroup.setAttribute("role", "group");
+    switchGroup.setAttribute("aria-label", "入口防护模式");
+    const controls = [];
+    [
+      ["observe", "仅检测"],
+      ["deny", "检测并拦截"],
+    ].forEach(([mode, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode-switch__option";
+      button.dataset.mode = mode;
+      button.setAttribute("aria-pressed", String(status.mode === mode));
+      button.textContent = label;
       button.disabled =
         !entry.enabled || !entry.attached || entry.overlay_invalid;
       button.title =
-        button.dataset.mode === "deny"
+        mode === "deny"
           ? "仅拒绝命中 WAF 规则的请求"
           : "记录命中，不阻断请求";
-      button.addEventListener("click", async () => {
-        controls.forEach((control) => {
-          control.disabled = true;
-        });
-        try {
-          await panelJSON("api/entries/mode", {
-            method: "POST",
-            body: JSON.stringify({
-              agent_id: selectedAgentID,
-              rule_ref: entry.rule_ref,
-              mode: button.dataset.mode,
-            }),
-          });
-          await refreshWorkspace();
-        } catch (error) {
-          showStatus(error.message, true);
-        } finally {
-          controls.forEach((control) => {
-            control.disabled =
-              !entry.enabled || !entry.attached || entry.overlay_invalid;
-          });
-        }
-      });
+      button.addEventListener("click", () =>
+        changeEntryMode(entry, mode, controls, label),
+      );
+      controls.push(button);
+      switchGroup.append(button);
     });
-    item.querySelector("[data-events]").addEventListener("click", () => {
+    modeCell.append(switchGroup);
+
+    const actionCell = document.createElement("td");
+    actionCell.className = "waf-table-actions";
+    const eventsButton = document.createElement("button");
+    eventsButton.type = "button";
+    eventsButton.className = "ui-btn ui-btn--ghost ui-btn--sm";
+    eventsButton.dataset.events = "true";
+    eventsButton.textContent = "查看事件";
+    eventsButton.addEventListener("click", () => {
       let site = entry.frontend_url || "";
       try {
         site = new URL(site).host;
       } catch {}
       showEvents("", site);
     });
-    entryList.append(item);
+    actionCell.append(eventsButton);
+
+    row.append(targetCell, statusCell, modeCell, actionCell);
+    if (entryList) entryList.append(row);
   });
 };
 
@@ -756,36 +807,77 @@ const eventDetail = (event) => {
     ["来源指纹", event.digest || "未提供"],
   ];
   $("#event-detail").innerHTML =
-    `<span class="badge" data-mode="${eventMode(event)}">${eventLabel(event)}</span><dl class="event-fields">${fields.map(([key, value]) => `<div><dt>${key}</dt><dd>${escapeText(value)}</dd></div>`).join("")}</dl><p class="event-explanation">${eventMode(event) === "deny" ? "该请求命中检测规则，WAF 已拒绝请求。请结合业务判断是否为误报。" : eventMode(event) === "observe" ? "该请求命中检测规则，但入口处于仅检测模式，请求仍然放行。" : "本次检查未完整完成，不能据此判断请求安全。请先查看检查说明。"}</p>`;
+    `<div class="waf-event-status">${eventBadge(event)}</div>` +
+    `<dl class="waf-event-fields">${fields
+      .map(
+        ([key, value]) =>
+          `<div><dt>${key}</dt><dd>${escapeText(value)}</dd></div>`,
+      )
+      .join("")}</dl>` +
+    `<p class="waf-event-explanation">${
+      eventMode(event) === "deny"
+        ? "该请求命中检测规则，WAF 已拒绝请求。请结合业务判断是否为误报。"
+        : eventMode(event) === "observe"
+          ? "该请求命中检测规则，但入口处于仅检测模式，请求仍然放行。"
+          : "本次检查未完整完成，不能据此判断请求安全。请先查看检查说明。"
+    }</p>` +
+    `<p class="ui-help-text">确认属于正常业务请求后，再填写范围尽可能小的路径排除。</p>`;
   const actionable = !!event.rule_id && event.reason === "rule_matched";
-  $("#event-create-exclusion").disabled = !actionable;
-  $("#event-create-exclusion").title = actionable
-    ? ""
-    : "只有命中具体规则的记录才能创建排除";
-  eventDialog.showModal();
+  const createButton = $("#event-create-exclusion");
+  if (createButton) {
+    createButton.disabled = !actionable;
+    createButton.title = actionable
+      ? ""
+      : "只有命中具体规则的记录才能创建排除";
+  }
+  eventDialog?.showModal();
 };
+
 const eventRow = (event) => {
   const row = document.createElement("tr");
-  row.innerHTML = `<td><strong>${escapeText(event.site || "未标记站点")}</strong></td><td><span>${escapeText(event.rule_id || "检查异常")}</span><small>${escapeText(reasonLabel(event.reason))}</small></td><td><span class="badge" data-mode="${eventMode(event)}">${eventLabel(event)}</span></td><td><button type="button" class="btn-link">详情 →</button></td>`;
-  row
-    .querySelector("button")
-    .addEventListener("click", () => eventDetail(event));
+  const siteCell = document.createElement("td");
+  const site = document.createElement("strong");
+  site.textContent = event.site || "未标记站点";
+  siteCell.append(site);
+
+  const ruleCell = document.createElement("td");
+  const rule = document.createElement("span");
+  rule.textContent = event.rule_id || "检查异常";
+  const reason = document.createElement("small");
+  reason.textContent = reasonLabel(event.reason);
+  ruleCell.append(rule, reason);
+
+  const statusCell = document.createElement("td");
+  statusCell.innerHTML = eventBadge(event);
+
+  const actionCell = document.createElement("td");
+  actionCell.className = "waf-table-actions";
+  const detailButton = document.createElement("button");
+  detailButton.type = "button";
+  detailButton.className = "ui-btn ui-btn--ghost ui-btn--sm";
+  detailButton.textContent = "详情";
+  detailButton.setAttribute("aria-label", `查看 ${event.site || "事件"} 详情`);
+  detailButton.addEventListener("click", () => eventDetail(event));
+  actionCell.append(detailButton);
+
+  row.append(siteCell, ruleCell, statusCell, actionCell);
   return row;
 };
+
 const renderEvents = () => {
-  eventList.replaceChildren();
+  if (eventList) eventList.replaceChildren();
   const events = latestEvents?.events || [];
-  events.forEach((event) => eventList.append(eventRow(event)));
-  eventEmpty.hidden = events.length > 0 && !eventFailure;
-  eventEmpty.textContent =
-    eventFailure || "宿主当前未返回相关记录，不能据此判断未发生攻击。";
-  if (
-    !eventFailure &&
-    (listState.event.query || listState.event.mode) &&
-    events.length === 0
-  )
-    eventEmpty.textContent = "当前记录中没有符合条件的事件，请调整筛选条件。";
-  $("#event-panel .events-table").hidden = eventEmpty.hidden === false;
+  const filtered = Boolean(listState.event.query || listState.event.mode);
+  events.forEach((event) => eventList?.append(eventRow(event)));
+  const empty = Boolean(eventFailure) || events.length === 0;
+  if (eventEmpty) eventEmpty.hidden = !empty;
+  if (eventEmptyDesc)
+    eventEmptyDesc.textContent =
+      eventFailure ||
+      (filtered
+        ? "当前记录中没有符合条件的事件，请调整筛选条件。"
+        : "宿主当前未返回相关记录，不能据此判断未发生攻击。");
+  if (eventTableWrap) eventTableWrap.hidden = empty;
   $("#event-count").textContent = eventFailure ? "—" : latestEvents?.total || 0;
   renderPagination("event", eventFailure ? null : latestEvents);
   $("#event-retention").textContent =
@@ -799,29 +891,41 @@ const ruleGroups = (rules = []) => {
   );
   return result;
 };
+
 const switchRuleTab = (tab) => {
   activeRuleTab = tab;
   ["managed", "custom", "exclusion"].forEach((name) => {
-    $("#" + name + "-tab").setAttribute("aria-selected", String(name === tab));
-    $("#" + name + "-tab").tabIndex = name === tab ? 0 : -1;
-    $("#" + name + "-rule-panel").hidden = name !== tab;
+    const trigger = $("#" + name + "-tab");
+    const panel = $("#" + name + "-rule-panel");
+    if (!trigger || !panel) return;
+    trigger.setAttribute("aria-selected", String(name === tab));
+    trigger.tabIndex = name === tab ? 0 : -1;
+    panel.hidden = name !== tab;
   });
-  $("#add-rule").textContent =
-    tab === "exclusion" ? "＋ 添加排除规则" : "＋ 添加自定义规则";
+  const addRule = $("#add-rule");
+  if (addRule)
+    addRule.textContent =
+      tab === "exclusion" ? "添加排除规则" : "添加自定义规则";
 };
 bindTabs(
-  ".rule-tabs [role=tab]",
+  ".waf-rule-tabs [role=tab]",
   ["managed", "custom", "exclusion"],
   () => activeRuleTab,
   switchRuleTab,
 );
+
 const openRuleDialog = (kind, event = null) => {
-  customForm.hidden = kind !== "custom";
-  exclusionForm.hidden = kind !== "exclusion";
+  if (!ruleDialog) return;
+  if (customForm) customForm.hidden = kind !== "custom";
+  if (exclusionForm) exclusionForm.hidden = kind !== "exclusion";
   $("#rule-dialog-title").textContent =
     kind === "custom" ? "添加自定义规则" : "添加排除";
+  $("#rule-dialog-desc").textContent =
+    kind === "custom"
+      ? "只支持字面量匹配，不支持正则、CRS 或 PCRE 规则。"
+      : "仅排除指定规则在匹配路径下的检查。";
   $("#rule-dialog-error").hidden = true;
-  if (event) {
+  if (event && exclusionForm) {
     exclusionForm.reset();
     exclusionForm.elements.rule_id.value = event.rule_id;
     exclusionForm.elements.path_prefix.value = "";
@@ -833,18 +937,89 @@ $("#add-rule")?.addEventListener("click", () =>
 );
 $("#event-create-exclusion")?.addEventListener("click", () => {
   const event = detailEvent;
-  eventDialog.close();
+  eventDialog?.close();
   switchTab("rules");
   switchRuleTab("exclusion");
   openRuleDialog("exclusion", event);
 });
+
+let pendingConfirm = null;
+const settleConfirm = (value) => {
+  if (!pendingConfirm || pendingConfirm.done) return;
+  const pending = pendingConfirm;
+  pending.done = true;
+  pendingConfirm = null;
+  if (confirmDialog?.open) confirmDialog.close();
+  pending.resolve(value);
+};
+const askConfirm = ({ title, desc, label, danger = true }) =>
+  new Promise((resolve) => {
+    if (!confirmDialog) {
+      resolve(false);
+      return;
+    }
+    if (pendingConfirm) settleConfirm(false);
+    $("#confirm-title").textContent = title;
+    $("#confirm-desc").textContent = desc;
+    const accept = $("#confirm-accept");
+    accept.textContent = label;
+    accept.className = danger ? "ui-btn ui-btn--danger" : "ui-btn";
+    pendingConfirm = { resolve, done: false };
+    confirmDialog.showModal();
+  });
+$("#confirm-accept")?.addEventListener("click", () => settleConfirm(true));
+document
+  .querySelectorAll("[data-confirm-cancel]")
+  .forEach((button) =>
+    button.addEventListener("click", () => settleConfirm(false)),
+  );
+confirmDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  settleConfirm(false);
+});
+
+const deleteRecord = async (kind, rule, button) => {
+  const name = rule.id || rule.rule_id || "";
+  const confirmed = await askConfirm({
+    title: kind === "custom" ? "删除自定义规则" : "删除排除规则",
+    desc:
+      kind === "custom"
+        ? `将删除规则 ${name} 及其关联的排除项，删除后无法恢复，相关请求会重新接受该规则的检查。`
+        : `将删除规则 ${name} 在路径 ${rule.path_prefix || ""} 下的排除，该路径会恢复检查。`,
+    label: "确认删除",
+  });
+  if (!confirmed) return;
+  button.disabled = true;
+  try {
+    await panelJSON(kind === "custom" ? "api/custom-rules" : "api/exclusions", {
+      method: "DELETE",
+      body: JSON.stringify({ ...rule, agent_id: selectedAgentID }),
+    });
+    await refreshWorkspace();
+    showStatus(
+      kind === "custom"
+        ? "已删除规则及其关联排除。"
+        : "已删除排除，恢复路径检查。",
+      false,
+    );
+  } catch (error) {
+    showStatus(error.message, true);
+    button.disabled = false;
+  }
+};
+
 const renderRules = () => {
   const managed = latestState?.managed_rules || [];
   $("#managed-count").textContent = managed.length;
   $("#managed-list").innerHTML = ruleGroups(managed)
     .map(
       (group) =>
-        `<details class="managed-group"><summary><span><strong>${group.name}</strong><small>${group.copy}</small></span><span class="count">${group.rules.length} 项检测</span></summary><div class="managed-rows">${group.rules.map((rule) => `<div><span><strong>${escapeText(rule.id)}</strong><small>${targetLabel(rule.target)}</small></span><code>${escapeText(rule.needle)}</code></div>`).join("")}</div></details>`,
+        `<details class="managed-group"><summary><span><strong>${group.name}</strong><small>${group.copy}</small></span><span class="ui-badge ui-badge--plain">${group.rules.length} 项检测</span></summary><div class="managed-rows">${group.rules
+          .map(
+            (rule) =>
+              `<div><span><strong>${escapeText(rule.id)}</strong><small>${targetLabel(rule.target)}</small></span><code>${escapeText(rule.needle)}</code></div>`,
+          )
+          .join("")}</div></details>`,
     )
     .join("");
   ["custom", "exclusion"].forEach((kind) => {
@@ -858,33 +1033,34 @@ const renderRules = () => {
     root.replaceChildren();
     rules.forEach((rule) => {
       const item = document.createElement("li");
-      item.className = "rule-card";
-      item.innerHTML = `<div><strong>${escapeText(rule.id || rule.rule_id)}</strong><p class="meta">${kind === "custom" ? targetLabel(rule.target) : "排除路径前缀"}</p></div><code>${escapeText(rule.needle || rule.path_prefix)}</code><button class="btn-link" type="button">删除</button>`;
-      const button = item.querySelector("button");
+      item.className = "ui-record";
+      const main = document.createElement("div");
+      main.className = "ui-record__main";
+      const title = document.createElement("p");
+      title.className = "ui-record__title";
+      title.textContent = rule.id || rule.rule_id || "";
+      const meta = document.createElement("div");
+      meta.className = "ui-record__meta";
+      const metaText = document.createElement("span");
+      metaText.className = "ui-tertiary";
+      metaText.textContent =
+        kind === "custom" ? targetLabel(rule.target) : "排除路径前缀";
+      meta.append(metaText);
+      main.append(title, meta);
+      const actions = document.createElement("div");
+      actions.className = "ui-record__actions";
+      const code = document.createElement("code");
+      code.className = "ui-mono";
+      code.textContent = rule.needle || rule.path_prefix || "";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
+      button.textContent = "删除";
       button.title =
         kind === "custom" ? "删除规则及其关联排除" : "删除后恢复对此路径的检查";
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          await panelJSON(
-            kind === "custom" ? "api/custom-rules" : "api/exclusions",
-            {
-              method: "DELETE",
-              body: JSON.stringify({ ...rule, agent_id: selectedAgentID }),
-            },
-          );
-          await refreshWorkspace();
-          showStatus(
-            kind === "custom"
-              ? "已删除规则及其关联排除。"
-              : "已删除排除，恢复路径检查。",
-            false,
-          );
-        } catch (error) {
-          showStatus(error.message, true);
-          button.disabled = false;
-        }
-      });
+      button.addEventListener("click", () => deleteRecord(kind, rule, button));
+      actions.append(code, button);
+      item.append(main, actions);
       root.append(item);
     });
   });
@@ -892,20 +1068,29 @@ const renderRules = () => {
 
 const renderOverview = () => {
   const coverage = latestState?.coverage || {};
-  const unprotected = coverage.unprotected || 0,
-    observed = coverage.observe || 0,
-    blocking = coverage.deny || 0;
-  $("#protection-title").textContent = unprotected
-    ? "存在尚未受保护的入口"
+  const unprotected = coverage.unprotected || 0;
+  const observed = coverage.observe || 0;
+  const blocking = coverage.deny || 0;
+  const disabled = coverage.disabled || 0;
+  const gap = unprotected + disabled;
+  $("#protection-title").textContent = gap
+    ? `${gap} 个入口需要处理防护缺口`
     : observed
-      ? "部分入口仍在仅检测"
+      ? "防护已启用，仍有入口处于仅检测"
       : blocking
-        ? "已配置请求拦截"
-        : "尚无启用的防护入口";
-  $("#protection-banner").dataset.state =
-    unprotected || observed ? "warning" : blocking ? "ready" : "empty";
+        ? "当前节点已配置请求拦截"
+        : "当前节点还没有可用的防护入口";
+  const banner = $("#protection-banner");
+  banner.dataset.state = gap
+    ? "warning"
+    : observed
+      ? "info"
+      : blocking
+        ? "ready"
+        : "empty";
   $("#protection-copy").textContent =
-    `${blocking} 个入口检测并拦截 · ${observed} 个入口仅检测 · ${unprotected} 个入口需处理。模式以节点实际应用的配置为准。`;
+    `${blocking} 个入口检测并拦截 · ${observed} 个入口仅检测 · ` +
+    `${unprotected} 个入口未挂载 · ${disabled} 个入口已停用。模式以节点实际应用的配置为准。`;
   const available = !eventFailure && latestState?.events_available === true;
   ["deny", "observe", "skip"].forEach((mode) => {
     $("#stat-" + mode).textContent = available
@@ -913,7 +1098,7 @@ const renderOverview = () => {
       : "—";
   });
   const status = $("#event-source-status");
-  status.dataset.state = "warning";
+  status.dataset.state = eventFailure ? "warning" : "info";
   status.textContent =
     eventFailure ||
     "统计仅基于宿主返回的近期记录，可能不完整；现有接口不提供采集健康状态。";
@@ -921,9 +1106,16 @@ const renderOverview = () => {
   if (unprotected)
     attention.push({
       title: `${unprotected} 个入口存在防护缺口`,
-      copy: "检查未挂载的防护或无效配置。",
+      copy: "这些入口的请求没有经过 Web 防火墙检查。先到防护范围确认挂载。",
       tab: "scope",
       label: "检查入口",
+    });
+  if (disabled)
+    attention.push({
+      title: `${disabled} 个入口已停用`,
+      copy: "停用的入口不再接受检查；确认后重新启用或删除入口。",
+      tab: "scope",
+      label: "检查范围",
     });
   if (observed)
     attention.push({
@@ -950,28 +1142,55 @@ const renderOverview = () => {
   root.replaceChildren();
   if (!attention.length) {
     const item = document.createElement("li");
-    item.innerHTML =
-      '<span class="attention-mark">✓</span><div><strong>当前没有待处理的配置问题</strong><p>请持续查看安全事件，留意误报和检查失败。</p></div>';
+    item.className = "waf-attention__empty";
+    const mark = document.createElement("span");
+    mark.className = "waf-status-icon";
+    mark.dataset.tone = "success";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "✓";
+    const copy = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = "当前没有待处理的配置问题";
+    const detail = document.createElement("p");
+    detail.textContent = "请持续查看安全事件，留意误报和检查失败。";
+    copy.append(strong, detail);
+    item.append(mark, copy);
     root.append(item);
   }
   attention.forEach((task) => {
     const item = document.createElement("li");
-    item.innerHTML = `<span class="attention-mark">!</span><div><strong>${task.title}</strong><p>${escapeText(task.copy)}</p></div><button class="btn-link" type="button">${task.label} →</button>`;
-    item
-      .querySelector("button")
-      .addEventListener("click", () =>
-        task.mode ? showEvents(task.mode) : switchTab(task.tab),
-      );
+    item.className = "waf-attention__item";
+    const mark = document.createElement("span");
+    mark.className = "waf-status-icon";
+    mark.dataset.tone = "warning";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "!";
+    const copy = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = task.title;
+    const detail = document.createElement("p");
+    detail.textContent = task.copy;
+    copy.append(strong, detail);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ui-btn ui-btn--ghost ui-btn--sm";
+    button.textContent = `${task.label} →`;
+    button.addEventListener("click", () =>
+      task.mode ? showEvents(task.mode) : switchTab(task.tab),
+    );
+    item.append(mark, copy, button);
     root.append(item);
   });
   $("#capability-list").innerHTML = ruleGroups(latestState?.managed_rules)
     .map(
       (group) =>
-        `<div><span class="capability-mark">✓</span><span><strong>${group.name}</strong><small>${group.copy}</small></span><span class="count">${group.rules.length}</span></div>`,
+        `<div class="waf-capability"><span class="waf-status-icon" data-tone="success" aria-hidden="true">✓</span><span class="waf-capability__copy"><strong>${group.name}</strong><small>${group.copy}</small></span><span class="ui-badge ui-badge--plain">${group.rules.length}</span></div>`,
     )
     .join("");
   $("#policy-summary").textContent =
-    `${latestState?.managed_rules?.length || 0} 项内置检测 · ${latestState?.custom_rules?.length || 0} 条自定义规则 · ${latestState?.exclusions?.length || 0} 项排除`;
+    `${latestState?.managed_rules?.length || 0} 项内置检测 · ` +
+    `${latestState?.custom_rules?.length || 0} 条自定义规则 · ` +
+    `${latestState?.exclusions?.length || 0} 项排除`;
   const recent = $("#recent-events");
   recent.replaceChildren();
   const events = (latestEvents?.recent || latestEvents?.events || []).slice(
@@ -980,20 +1199,21 @@ const renderOverview = () => {
   );
   if (eventFailure || !events.length) {
     const empty = document.createElement("p");
-    empty.className = "empty-state";
+    empty.className = "ui-empty waf-inline-empty";
     empty.textContent =
       eventFailure || "宿主当前没有返回相关记录，不能据此判断未发生攻击。";
     recent.append(empty);
   } else {
+    const wrap = document.createElement("div");
+    wrap.className = "ui-table-wrap";
     const table = document.createElement("table");
-    table.className = "events-table";
+    table.className = "ui-table waf-events-table";
+    table.setAttribute("aria-label", "最近安全事件");
     const body = document.createElement("tbody");
     events.forEach((event) => body.append(eventRow(event)));
     table.append(body);
-    const scroll = document.createElement("div");
-    scroll.className = "table-scroll";
-    scroll.append(table);
-    recent.append(scroll);
+    wrap.append(table);
+    recent.append(wrap);
   }
 };
 
@@ -1007,17 +1227,17 @@ const renderWorkspace = async () => {
     showContext("node-empty");
     return;
   }
-  const entryQuery = new URLSearchParams({
+  const query = new URLSearchParams({
     agent_id: selectedAgentID,
     page_size: "10",
     entry_page: listState.entry.page,
     entry_query: listState.entry.query,
     entry_mode: listState.entry.mode,
   });
-  entryQuery.set("event_page", listState.event.page);
-  entryQuery.set("event_query", listState.event.query);
-  entryQuery.set("event_mode", listState.event.mode);
-  const payload = await panelJSON(`api/state?${entryQuery}`);
+  query.set("event_page", listState.event.page);
+  query.set("event_query", listState.event.query);
+  query.set("event_mode", listState.event.mode);
+  const payload = await panelJSON(`api/state?${query}`);
   if (sequence !== requestSequence) return;
   latestState = payload;
   latestEvents = {
@@ -1039,8 +1259,10 @@ const renderWorkspace = async () => {
   renderOverview();
   if (latestState.error) showStatus(latestState.error, true);
 };
+
 const refreshWorkspace = async () => {
-  $("#refresh-state").disabled = true;
+  const refreshButton = $("#refresh-state");
+  if (refreshButton) refreshButton.disabled = true;
   try {
     await renderWorkspace();
   } catch (error) {
@@ -1049,7 +1271,7 @@ const refreshWorkspace = async () => {
       workspaceNode.hidden = true;
     } else showStatus(error.message, true);
   } finally {
-    $("#refresh-state").disabled = false;
+    if (refreshButton) refreshButton.disabled = false;
   }
 };
 $("#refresh-state")?.addEventListener("click", refreshWorkspace);
@@ -1065,36 +1287,42 @@ $("#refresh-state")?.addEventListener("click", refreshWorkspace);
   $("#" + kind + "-search-form")?.addEventListener("submit", search);
   $("#" + kind + "-mode")?.addEventListener("change", search);
 });
+
 agentPicker.onChange = async (value) => {
   selectedAgentID = String(value || "");
   ruleDialog?.close();
   eventDialog?.close();
+  settleConfirm(false);
   workspaceNode.hidden = true;
   latestState = null;
   latestEvents = null;
   ["entry", "event"].forEach((kind) => {
-    listState[kind] = {
-      page: 1,
-      query: "",
-      mode: "",
-    };
+    listState[kind] = { page: 1, query: "", mode: "" };
     $("#" + kind + "-query").value = "";
     $("#" + kind + "-mode").value = "";
   });
-
   const url = new URL(window.location.href);
   if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
   else url.searchParams.delete("agent_id");
   window.history.replaceState({}, "", url);
   await refreshWorkspace();
 };
+
 [
   ["#global-observe", "observe"],
   ["#global-deny", "deny"],
 ].forEach(([selector, mode]) => {
   $(selector)?.addEventListener("click", async () => {
-    globalObserve.disabled = true;
-    globalDeny.disabled = true;
+    if (mode === "deny") {
+      const confirmed = await askConfirm({
+        title: "切换为检测并拦截",
+        desc: "将把当前节点的已挂载入口切为检测并拦截：命中规则的请求会立即被拒绝，可随时切回仅检测。",
+        label: "确认切换",
+      });
+      if (!confirmed) return;
+    }
+    if (globalObserve) globalObserve.disabled = true;
+    if (globalDeny) globalDeny.disabled = true;
     try {
       await panelJSON("api/entries/mode-all", {
         method: "POST",
@@ -1106,16 +1334,17 @@ agentPicker.onChange = async (value) => {
       await refreshWorkspace();
       showStatus(`${error.message} 部分入口可能已更新，请检查当前状态。`, true);
     } finally {
-      globalObserve.disabled = false;
-      globalDeny.disabled = false;
+      if (globalObserve) globalObserve.disabled = false;
+      if (globalDeny) globalDeny.disabled = false;
     }
   });
 });
+
 const bindDialog = (dialog, selector) => {
   document
     .querySelectorAll(selector)
     .forEach((button) =>
-      button.addEventListener("click", () => dialog.close()),
+      button.addEventListener("click", () => dialog?.close()),
     );
   dialog?.addEventListener("click", (event) => {
     if (event.target !== dialog) return;
@@ -1131,6 +1360,7 @@ const bindDialog = (dialog, selector) => {
 };
 bindDialog(ruleDialog, "#close-rule-dialog,[data-close-dialog]");
 bindDialog(eventDialog, "[data-close-event]");
+
 [
   [customForm, "api/custom-rules"],
   [exclusionForm, "api/exclusions"],
@@ -1146,7 +1376,7 @@ bindDialog(eventDialog, "[data-close-event]");
       body.agent_id = selectedAgentID;
       await panelJSON(path, { method: "POST", body: JSON.stringify(body) });
       form.reset();
-      ruleDialog.close();
+      ruleDialog?.close();
       await refreshWorkspace();
       showStatus("规则已添加。", false);
     } catch (error) {
@@ -1157,6 +1387,7 @@ bindDialog(eventDialog, "[data-close-event]");
     }
   });
 });
+
 const start = async () => {
   try {
     await loadAgents();
