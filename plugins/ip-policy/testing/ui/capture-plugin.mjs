@@ -121,15 +121,17 @@ const stateFor = (url) => {
 };
 
 export const id = "ip-policy";
+export const themeMode = "host";
 
 export const scenes = [
   {
     name: "global",
     title: "全局策略",
     run: async (ui) => {
-      await ui.waitFor("#rules li");
+      await ui.waitFor("#rules tr");
       await ui.waitFor("#provinces label");
       await ui.waitFor("#desired-mode");
+      await ui.waitFor(".ip-status-strip");
     },
   },
   {
@@ -157,7 +159,7 @@ export const scenes = [
         }
         throw new Error("入口未选中");
       })()`);
-      await ui.waitFor("#entry-rules li");
+      await ui.waitFor("#entry-rules tr");
     },
   },
   {

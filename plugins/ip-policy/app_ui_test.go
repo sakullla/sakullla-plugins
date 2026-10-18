@@ -82,6 +82,61 @@ func TestDedicatedManagementPageAndVisibleRuntimeStates(t *testing.T) {
 			t.Fatalf("page missing %q: %s", text, page.Body.String())
 		}
 	}
+	html := page.Body.String()
+	for _, text := range []string{
+		`data-theme-mode="host"`,
+		`script src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`class="ip-status-strip"`,
+		`id="dirty-badge"`,
+		`id="readonly-badge"`,
+		`id="save-bar"`,
+		`class="ui-save-bar ip-save-bar"`,
+		`<tbody id="rules">`,
+		`<tbody id="entry-rules">`,
+		`id="province-search"`,
+		`id="entry-empty"`,
+		`id="entry-empty-title"`,
+		`id="denied-state"`,
+		`id="load-error"`,
+		`id="province-empty"`,
+		`id="events-empty"`,
+		`href="#global-behavior"`,
+		`href="#global-rules"`,
+		`href="#province-whitelist"`,
+		`role="tablist"`,
+		`aria-controls="tab-global"`,
+		`aria-controls="tab-entry"`,
+		`aria-controls="tab-data"`,
+		`aria-controls="tab-events"`,
+	} {
+		if !strings.Contains(html, text) {
+			t.Fatalf("page missing %q", text)
+		}
+	}
+	order := []string{"ui-kit.js", "ui-kit.css", "style.css", "app.js"}
+	for index := 1; index < len(order); index++ {
+		if strings.Index(html, order[index-1]) >= strings.Index(html, order[index]) {
+			t.Fatalf("asset load order must be ui-kit.js -> ui-kit.css -> style.css -> app.js")
+		}
+	}
+	for _, asset := range []string{"/ui-kit.css", "/ui-kit.js"} {
+		response := httptest.NewRecorder()
+		controller.ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset, nil))
+		if response.Code != http.StatusOK || response.Body.Len() == 0 {
+			t.Fatalf("asset %s status=%d body=%s", asset, response.Code, response.Body.String())
+		}
+	}
+	css, err := uiAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), `[data-theme-family="dark"]`) {
+		t.Fatal("style.css must style dark details through data-theme-family")
+	}
+	if strings.Contains(string(css), `[data-theme="dark"]`) {
+		t.Fatal("style.css must not declare its own data-theme dark palette")
+	}
 
 	denied := httptest.NewRecorder()
 	controller.ServeHTTP(denied, httptest.NewRequest(http.MethodGet, "/api/state", nil))

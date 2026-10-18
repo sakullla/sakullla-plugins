@@ -52,6 +52,8 @@ assets:
   - assets/ui/index.html
   - assets/ui/app.js
   - assets/ui/style.css
+  - assets/ui/ui-kit.css
+  - assets/ui/ui-kit.js
 permissions:
   - name: ui.dynamic
   - name: storage.read

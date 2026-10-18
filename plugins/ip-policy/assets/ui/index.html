@@ -1,414 +1,738 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-theme-mode="host">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>IP 策略</title>
+    <script src="ui-kit.js"></script>
+    <link rel="stylesheet" href="ui-kit.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <main>
-      <header class="hero">
-        <div>
-          <p class="eyebrow">安全 · 入口防护</p>
-          <h1>IP 策略</h1>
-          <p>管理访问来源，查看节点和入口的防护状态。</p>
+    <main class="ui-page ui-page--wide ip-page">
+      <header class="ui-page-head ip-page-head">
+        <div class="ui-page-head__copy">
+          <p class="ui-eyebrow">安全 · 入口防护</p>
+          <h1 class="ui-title">IP 策略</h1>
+          <p class="ui-lede">
+            先确认当前节点和应用状态，再配置全局或入口规则、准备地理数据并查看诊断事件。
+          </p>
         </div>
-        <div class="node-toolbar">
-          <span class="field-label">查看节点</span>
-          <div class="node-controls">
-            <div id="node-picker" class="node-picker">
-              <button
-                id="node-trigger"
-                type="button"
-                class="select-trigger"
-                aria-expanded="false"
-                aria-controls="node-menu"
-              >
-                <span id="node-label">选择节点</span
-                ><span aria-hidden="true">⌄</span>
-              </button>
-              <div id="node-menu" class="picker-menu" hidden>
-                <input
-                  id="node-search"
-                  type="search"
-                  aria-label="搜索节点"
-                  placeholder="搜索节点名称或地址"
-                />
-                <div id="node-filters" class="chips">
-                  <button data-online="" aria-pressed="true">全部</button
-                  ><button data-online="online">在线</button
-                  ><button data-online="offline">离线</button>
-                </div>
-                <div
-                  id="node-options"
-                  class="picker-options"
-                  role="listbox"
-                  aria-label="当前插件的节点"
-                ></div>
-                <label class="sort-field"
-                  >排序<select id="node-sort">
-                    <option value="seen">最近活跃</option>
-                    <option value="name">名称</option>
-                  </select></label
+        <div class="ui-page-actions ip-node-toolbar">
+          <div class="ui-field ip-node-field">
+            <span id="node-heading" class="ui-label">查看节点</span>
+            <div class="node-controls">
+              <div id="node-picker" class="node-picker">
+                <button
+                  id="node-trigger"
+                  type="button"
+                  class="ui-select select-trigger"
+                  aria-expanded="false"
+                  aria-controls="node-menu"
+                  aria-labelledby="node-heading node-label"
                 >
+                  <span id="node-label">选择节点</span
+                  ><span aria-hidden="true">⌄</span>
+                </button>
+                <div id="node-menu" class="picker-menu" hidden>
+                  <input
+                    id="node-search"
+                    class="ui-input"
+                    type="search"
+                    aria-label="搜索节点"
+                    placeholder="搜索节点名称或地址"
+                  />
+                  <div id="node-filters" class="chips" role="group" aria-label="节点状态筛选">
+                    <button type="button" data-online="" aria-pressed="true">全部</button
+                    ><button type="button" data-online="online" aria-pressed="false">在线</button
+                    ><button type="button" data-online="offline" aria-pressed="false">离线</button>
+                  </div>
+                  <div
+                    id="node-options"
+                    class="picker-options"
+                    role="listbox"
+                    aria-label="当前插件的节点"
+                  ></div>
+                  <label class="sort-field"
+                    >排序<select id="node-sort" class="ui-select">
+                      <option value="seen">最近活跃</option>
+                      <option value="name">名称</option>
+                    </select></label
+                  >
+                </div>
               </div>
+              <button id="load" class="ui-btn ui-btn--secondary" type="button">刷新</button>
             </div>
-            <button id="load" class="secondary" type="button">刷新</button>
+            <p id="node-hint" class="ui-help-text"></p>
           </div>
-          <p id="node-hint" class="hint"></p>
         </div>
       </header>
-      <p id="status" role="status" aria-live="polite">正在连接管理服务…</p>
-      <section id="workspace" hidden>
-        <section class="panel summary">
-          <div><span>全局模式</span><strong id="desired-mode">—</strong></div>
-          <div>
-            <span>所选入口模式</span
-            ><strong id="applied-mode">请先选择入口</strong>
-          </div>
-          <div><span>应用状态</span><strong id="phase">—</strong></div>
-          <div><span>配置版本</span><strong id="generation">—</strong></div>
-        </section>
-        <div class="workspace-tabs" role="tablist" aria-label="策略设置">
-          <button role="tab" aria-selected="true" data-tab="global">
-            全局规则</button
-          ><button role="tab" aria-selected="false" data-tab="entry">
-            入口专属规则</button
-          ><button role="tab" aria-selected="false" data-tab="data">
-            地理数据</button
-          ><button role="tab" aria-selected="false" data-tab="events">
-            诊断事件
-          </button>
+
+      <p id="status" class="ip-status" role="status" aria-live="polite" data-failed="false">
+        正在连接管理服务…
+      </p>
+
+      <section id="denied-state" class="ui-denied ip-message" role="alert" hidden>
+        <h2 class="ui-error-state__title">没有访问策略的权限</h2>
+        <p id="denied-desc" class="ui-denied__desc">
+          当前账号只能查看部分信息，无法读取或保存 IP 策略。请联系管理员授予策略管理权限。
+        </p>
+      </section>
+
+      <section id="load-error" class="ui-error-state ip-message" role="alert" hidden>
+        <h2 class="ui-error-state__title">暂时无法读取策略状态</h2>
+        <p id="load-error-desc" class="ui-error-state__desc">
+          管理服务没有返回可用状态，请检查节点连接后重试。
+        </p>
+        <div class="ui-error-state__actions">
+          <button id="retry-load" class="ui-btn ui-btn--secondary" type="button">重新加载</button>
         </div>
-        <section id="tab-global" role="tabpanel">
-          <section class="panel">
-            <div class="panel-head">
+      </section>
+
+      <section id="workspace" hidden>
+        <section class="ip-status-strip" aria-label="当前策略状态">
+          <div class="ip-status-strip__metric">
+            <span class="ip-status-strip__label">全局模式</span>
+            <strong id="desired-mode" class="ip-status-strip__value">—</strong>
+          </div>
+          <div class="ip-status-strip__metric">
+            <span class="ip-status-strip__label">所选入口模式</span>
+            <strong id="applied-mode" class="ip-status-strip__value">请先选择入口</strong>
+          </div>
+          <div class="ip-status-strip__metric">
+            <span class="ip-status-strip__label">应用状态</span>
+            <strong id="phase" class="ip-status-strip__value">—</strong>
+          </div>
+          <div class="ip-status-strip__metric">
+            <span class="ip-status-strip__label">配置版本</span>
+            <strong id="generation" class="ip-status-strip__value">—</strong>
+          </div>
+          <div class="ip-status-badges">
+            <span id="readonly-badge" class="ui-badge ui-badge--warning" hidden>
+              只读 · 没有保存权限
+            </span>
+            <span id="dirty-badge" class="ui-badge ui-badge--warning ip-dirty" hidden>
+              有未保存修改
+            </span>
+          </div>
+        </section>
+
+        <div class="ip-tabbar">
+          <div class="ui-tabs" role="tablist" aria-label="策略设置" data-ui-tabs>
+            <button
+              id="tab-global-tab"
+              class="ui-tab"
+              data-tab="global"
+              role="tab"
+              aria-selected="true"
+              aria-controls="tab-global"
+              type="button"
+            >
+              全局规则
+            </button>
+            <button
+              id="tab-entry-tab"
+              class="ui-tab"
+              data-tab="entry"
+              role="tab"
+              aria-selected="false"
+              aria-controls="tab-entry"
+              tabindex="-1"
+              type="button"
+            >
+              入口专属规则
+            </button>
+            <button
+              id="tab-data-tab"
+              class="ui-tab"
+              data-tab="data"
+              role="tab"
+              aria-selected="false"
+              aria-controls="tab-data"
+              tabindex="-1"
+              type="button"
+            >
+              地理数据
+            </button>
+            <button
+              id="tab-events-tab"
+              class="ui-tab"
+              data-tab="events"
+              role="tab"
+              aria-selected="false"
+              aria-controls="tab-events"
+              tabindex="-1"
+              type="button"
+            >
+              诊断事件
+            </button>
+          </div>
+        </div>
+
+        <section
+          id="tab-global"
+          class="ip-view"
+          role="tabpanel"
+          aria-labelledby="tab-global-tab"
+        >
+          <nav class="ip-section-nav" aria-label="全局配置区块">
+            <a class="ui-btn ui-btn--ghost ui-btn--sm" href="#global-behavior">全局行为</a>
+            <a class="ui-btn ui-btn--ghost ui-btn--sm" href="#global-rules">全局规则</a>
+            <a class="ui-btn ui-btn--ghost ui-btn--sm" href="#province-whitelist">
+              省份白名单
+            </a>
+          </nav>
+
+          <section id="global-behavior" class="ui-card">
+            <div class="ui-card__head">
               <div>
-                <h2>全局行为</h2>
-                <p>
+                <h2 class="ui-card__title">全局行为</h2>
+                <p class="ui-card__desc">
                   应用于所有使用本策略的入口。观察模式只记录命中，拦截模式执行拒绝规则。
                 </p>
               </div>
-              <div class="segmented">
-                <button data-mode="observe">观察</button
-                ><button data-mode="enforce">拦截</button>
+              <div class="ip-segmented" role="group" aria-label="全局模式">
+                <button
+                  class="ui-btn ui-btn--secondary ui-btn--sm"
+                  data-mode="observe"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  观察
+                </button>
+                <button
+                  class="ui-btn ui-btn--secondary ui-btn--sm"
+                  data-mode="enforce"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  拦截
+                </button>
               </div>
             </div>
-            <label class="compact-field"
-              >未命中任何规则时<select id="default-action">
-                <option value="allow">允许访问</option>
-                <option value="deny">拒绝访问</option>
-              </select></label
-            >
+            <div class="ui-form-grid ip-form-grid">
+              <div class="ui-field">
+                <label class="ui-label" for="default-action">未命中任何规则时</label>
+                <select id="default-action" class="ui-select">
+                  <option value="allow">允许访问</option>
+                  <option value="deny">拒绝访问</option>
+                </select>
+                <span class="ui-help-text">只影响没有命中任何允许或拒绝规则的访问。</span>
+              </div>
+              <div class="ui-field">
+                <span class="ui-label">修改方式</span>
+                <span class="ui-help-text"
+                  >修改全局规则或模式后，底部保存条会提示未保存；保存后对所有入口生效。</span
+                >
+              </div>
+            </div>
           </section>
-          <section class="panel">
-            <div class="panel-head">
+
+          <section id="global-rules" class="ui-card">
+            <div class="ui-card__head">
               <div>
-                <h2>全局规则</h2>
-                <p>
+                <h2 class="ui-card__title">
+                  全局规则
+                  <span id="rule-count" class="ui-badge ui-badge--plain">0 条</span>
+                </h2>
+                <p class="ui-card__desc">
                   在所有入口生效。全局和入口专属规则中，拒绝规则优先于允许规则。
                 </p>
               </div>
-              <span id="rule-count" class="badge">0 条</span>
             </div>
-            <form id="rule-form" class="rule-form">
-              <label
-                >处理方式<select name="action">
+            <form id="rule-form" class="ip-rule-form" aria-label="新增全局规则">
+              <div class="ui-field">
+                <label class="ui-label" for="rule-action">处理方式</label>
+                <select id="rule-action" class="ui-select" name="action">
                   <option value="deny">拒绝访问</option>
                   <option value="allow">允许访问</option>
-                </select></label
-              ><label
-                >匹配来源<select name="type">
+                </select>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label" for="rule-type">匹配来源</label>
+                <select id="rule-type" class="ui-select" name="type">
                   <option value="ip">单个 IP</option>
                   <option value="cidr">IP 网段</option>
                   <option value="classification">国家或地区</option>
-                </select></label
-              ><label data-value-field
-                >IP 地址<input
+                </select>
+              </div>
+              <div class="ui-field" data-value-field>
+                <label class="ui-label" for="rule-value">IP 地址</label>
+                <input
+                  id="rule-value"
+                  class="ui-input"
                   name="value"
                   placeholder="例如 192.0.2.1"
-                  required /></label
-              ><label data-class-field hidden
-                >国家或地区<select
-                  name="classification"
-                  id="rule-classification"
-                ></select></label
-              ><button>添加规则</button>
+                  required
+                />
+              </div>
+              <div class="ui-field" data-class-field hidden>
+                <label class="ui-label" for="rule-classification">国家或地区</label>
+                <select id="rule-classification" class="ui-select" name="classification"></select>
+              </div>
+              <button class="ui-btn ip-rule-submit" type="submit">添加规则</button>
             </form>
-            <p class="hint classification-hint" hidden>
+            <p class="ip-inline-hint classification-hint" hidden>
               先在“地理数据”中选择数据源和分类。
             </p>
-            <ul id="rules" class="list"></ul>
+            <div class="ui-table-wrap">
+              <table class="ui-table ip-rule-table" aria-label="全局规则">
+                <thead>
+                  <tr>
+                    <th scope="col">匹配来源</th>
+                    <th scope="col">类型</th>
+                    <th scope="col">处理方式</th>
+                    <th scope="col" class="ip-actions-col"><span class="ui-sr-only">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody id="rules"></tbody>
+              </table>
+            </div>
           </section>
-          <section class="panel">
-            <div class="panel-head">
+
+          <section id="province-whitelist" class="ui-card">
+            <div class="ui-card__head">
               <div>
-                <h2>中国大陆省份白名单</h2>
-                <p>
+                <h2 class="ui-card__title">中国大陆省份白名单</h2>
+                <p class="ui-card__desc">
                   应用于所有使用本策略的入口。启用后，只有所选省份继续匹配规则；其它省份、境外和无法确认归属的地址会被拒绝。
                 </p>
               </div>
-              <span id="province-coverage" class="badge">尚未配置</span>
+              <span id="province-coverage" class="ui-badge ui-badge--plain">尚未配置</span>
             </div>
-            <div id="province-empty" class="empty-state">
-              <strong>先准备省份数据</strong>
-              <p>选择包含中国省份分类的数据源，使用版本后即可勾选省份。</p>
-              <button id="setup-provinces" class="secondary">
-                配置省份数据
-              </button>
+            <div id="province-empty" class="ui-empty ip-province-empty">
+              <h3 class="ui-empty__title">先准备省份数据</h3>
+              <p class="ui-empty__desc">选择包含中国省份分类的数据源，使用版本后即可勾选省份。</p>
+              <div class="ui-empty__actions">
+                <button id="setup-provinces" class="ui-btn ui-btn--secondary" type="button">
+                  配置省份数据
+                </button>
+              </div>
             </div>
             <div id="province-settings" hidden>
-              <label class="compact-field"
-                >省份数据来源<select id="province-dataset"></select
-              ></label>
-              <div class="panel-head province-toolbar">
-                <span id="province-count">未启用白名单</span>
-                <div class="actions">
-                  <button id="province-all" class="text-button">全选</button
-                  ><button id="province-clear" class="text-button">
-                    清空并停用
+              <div class="ui-field ip-province-source">
+                <label class="ui-label" for="province-dataset">省份数据来源</label>
+                <select id="province-dataset" class="ui-select"></select>
+              </div>
+              <p id="province-count" class="ip-province-count"></p>
+              <div class="ui-toolbar ip-province-toolbar">
+                <div class="ui-field ui-toolbar__grow">
+                  <label class="ui-sr-only" for="province-search">搜索省份</label>
+                  <input
+                    id="province-search"
+                    class="ui-input"
+                    type="search"
+                    placeholder="搜索省份名称"
+                    autocomplete="off"
+                  />
+                </div>
+                <button id="province-all" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">
+                  全选可见
+                </button>
+                <button id="province-clear" class="ui-btn ui-btn--ghost ui-btn--sm" type="button">
+                  清空并停用
+                </button>
+              </div>
+              <div id="provinces" class="ip-province-grid"></div>
+              <p id="province-selected" class="ip-province-selected"></p>
+              <p id="province-hint" class="ui-help-text"></p>
+            </div>
+          </section>
+
+          <div id="save-bar" class="ui-save-bar ip-save-bar">
+            <span id="draft-status" class="ui-save-bar__status">配置已保存</span>
+            <button id="save" class="ui-btn" type="button">保存配置</button>
+          </div>
+        </section>
+
+        <section
+          id="tab-entry"
+          class="ip-view"
+          role="tabpanel"
+          aria-labelledby="tab-entry-tab"
+          hidden
+        >
+          <section class="ui-card">
+            <div class="ui-card__head">
+              <div>
+                <h2 class="ui-card__title">入口专属规则</h2>
+                <p class="ui-card__desc">
+                  只对选中的域名或监听端口生效，在全局规则之外补充限制。入口允许规则不能抵消全局拒绝规则。
+                </p>
+              </div>
+            </div>
+            <div class="ip-entry-picker">
+              <div class="ui-field">
+                <label class="ui-label" for="entry-select">选择入口</label>
+                <select id="entry-select" class="ui-select">
+                  <option value="">请先选择节点</option>
+                </select>
+              </div>
+            </div>
+            <p id="entry-hint" class="ui-help-text"></p>
+            <div id="entry-empty" class="ui-empty ip-entry-empty">
+              <h3 id="entry-empty-title" class="ui-empty__title">尚未选择入口</h3>
+              <p id="entry-empty-desc" class="ui-empty__desc">
+                选择节点上的域名或监听端口后，可查看并设置它自己的规则和模式。
+              </p>
+            </div>
+            <fieldset id="entry-controls" class="ip-entry-controls" disabled hidden>
+              <legend class="ui-sr-only">所选入口的设置</legend>
+              <div class="ui-card__head ip-entry-mode-head">
+                <div>
+                  <h3 class="ui-card__title">此入口的模式</h3>
+                  <p id="entry-mode-hint" class="ui-card__desc">默认继承全局设置。</p>
+                </div>
+                <div class="ip-segmented" role="group" aria-label="入口模式">
+                  <button
+                    id="entry-reset"
+                    class="ui-btn ui-btn--secondary ui-btn--sm"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    继承全局
+                  </button>
+                  <button
+                    id="entry-observe"
+                    class="ui-btn ui-btn--secondary ui-btn--sm"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    观察
+                  </button>
+                  <button
+                    id="entry-enforce"
+                    class="ui-btn ui-btn--secondary ui-btn--sm"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    拦截
                   </button>
                 </div>
               </div>
-              <div id="provinces" class="province-grid"></div>
-              <p id="province-hint" class="hint"></p>
-            </div>
-          </section>
-          <div class="save-bar">
-            <span id="draft-status">配置已保存</span
-            ><button id="save">保存全局配置</button>
-          </div>
-        </section>
-        <section id="tab-entry" role="tabpanel" hidden>
-          <section class="panel">
-            <h2>入口专属规则</h2>
-            <p>
-              只对选中的域名或监听端口生效，在全局规则之外补充限制。入口允许规则不能抵消全局拒绝规则。
-            </p>
-            <label
-              >选择入口<select id="entry-select">
-                <option value="">请先选择节点</option>
-              </select></label
-            >
-            <p id="entry-hint" class="hint"></p>
-            <fieldset id="entry-controls" disabled>
-              <legend class="sr-only">所选入口的设置</legend>
-              <div class="panel-head">
-                <div>
-                  <h3>此入口的模式</h3>
-                  <p id="entry-mode-hint">默认继承全局设置。</p>
-                </div>
-                <div class="segmented">
-                  <button id="entry-reset" type="button">继承全局</button
-                  ><button id="entry-observe" type="button">观察</button
-                  ><button id="entry-enforce" type="button">拦截</button>
-                </div>
-              </div>
-              <form id="entry-rule-form" class="rule-form">
-                <label
-                  >处理方式<select name="action">
+              <form id="entry-rule-form" class="ip-rule-form" aria-label="新增入口专属规则">
+                <div class="ui-field">
+                  <label class="ui-label" for="entry-rule-action">处理方式</label>
+                  <select id="entry-rule-action" class="ui-select" name="action">
                     <option value="deny">拒绝访问</option>
                     <option value="allow">允许访问</option>
-                  </select></label
-                ><label
-                  >匹配来源<select name="type">
+                  </select>
+                </div>
+                <div class="ui-field">
+                  <label class="ui-label" for="entry-rule-type">匹配来源</label>
+                  <select id="entry-rule-type" class="ui-select" name="type">
                     <option value="ip">单个 IP</option>
                     <option value="cidr">IP 网段</option>
                     <option value="classification">国家或地区</option>
-                  </select></label
-                ><label data-value-field
-                  >IP 地址<input
+                  </select>
+                </div>
+                <div class="ui-field" data-value-field>
+                  <label class="ui-label" for="entry-rule-value">IP 地址</label>
+                  <input
+                    id="entry-rule-value"
+                    class="ui-input"
                     name="value"
                     placeholder="例如 192.0.2.1"
-                    required /></label
-                ><label data-class-field hidden
-                  >国家或地区<select
+                    required
+                  />
+                </div>
+                <div class="ui-field" data-class-field hidden>
+                  <label class="ui-label" for="entry-classification">国家或地区</label>
+                  <select
                     id="entry-classification"
+                    class="ui-select"
                     name="classification"
-                  ></select></label
-                ><button>添加并保存</button>
+                  ></select>
+                </div>
+                <button class="ui-btn ip-rule-submit" type="submit">添加并保存</button>
               </form>
-              <p class="hint classification-hint" hidden>
+              <p class="ip-inline-hint classification-hint" hidden>
                 请先在“地理数据”中添加分类。
               </p>
-              <ul id="entry-rules" class="list"></ul>
+              <div class="ui-table-wrap">
+                <table class="ui-table ip-rule-table" aria-label="入口专属规则">
+                  <thead>
+                    <tr>
+                      <th scope="col">匹配来源</th>
+                      <th scope="col">类型</th>
+                      <th scope="col">处理方式</th>
+                      <th scope="col" class="ip-actions-col"><span class="ui-sr-only">操作</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="entry-rules"></tbody>
+                </table>
+              </div>
             </fieldset>
           </section>
+
+          <details class="ui-help">
+            <summary>入口规则如何与全局规则配合？</summary>
+            <div class="ui-help__body">
+              <p>入口规则只在选中的域名或监听端口上生效，不能放宽全局拒绝规则。</p>
+              <p>
+                入口模式可以继承全局、单独观察或单独拦截。恢复继承会同时删除该入口的专属规则。
+              </p>
+            </div>
+          </details>
         </section>
-        <section id="tab-data" role="tabpanel" hidden>
-          <section class="panel">
-            <div class="panel-head">
+
+        <section
+          id="tab-data"
+          class="ip-view"
+          role="tabpanel"
+          aria-labelledby="tab-data-tab"
+          hidden
+        >
+          <section class="ui-card">
+            <div class="ui-card__head">
               <div>
-                <h2>数据源与版本</h2>
-                <p>
+                <h2 class="ui-card__title">数据源与版本</h2>
+                <p class="ui-card__desc">
                   先选择数据源和版本，再选择需要的国家或省份。系统会校验版本并完成绑定。
                 </p>
               </div>
-              <button id="add-source" class="secondary">添加数据源</button>
+              <button id="add-source" class="ui-btn ui-btn--secondary" type="button">
+                添加数据源
+              </button>
             </div>
-            <p id="catalog-status" class="hint"></p>
-            <form id="binding-form">
-              <div class="form-grid">
-                <label
-                  >1. 数据源<select id="source-select" required>
+            <p id="catalog-status" class="ui-help-text"></p>
+            <form id="binding-form" class="ip-binding-form">
+              <div class="ui-form-grid">
+                <div class="ui-field">
+                  <label class="ui-label" for="source-select">1. 数据源</label>
+                  <select id="source-select" class="ui-select" required>
                     <option value="">选择数据源</option>
-                  </select></label
-                ><label
-                  >2. 使用版本<select id="version-select" required>
+                  </select>
+                </div>
+                <div class="ui-field">
+                  <label class="ui-label" for="version-select">2. 使用版本</label>
+                  <select id="version-select" class="ui-select" required>
                     <option value="">先选择数据源</option>
-                  </select></label
-                >
+                  </select>
+                </div>
               </div>
               <div id="version-info" class="version-info"></div>
-              <div class="panel-head">
-                <h3>3. 选择分类</h3>
-                <div class="actions">
+              <div class="ui-card__head ip-classes-head">
+                <h3 class="ui-card__title">3. 选择分类</h3>
+                <div class="ip-class-actions">
                   <button
                     id="select-province-classes"
                     type="button"
-                    class="text-button"
+                    class="ui-btn ui-btn--ghost ui-btn--sm"
                   >
-                    选中大陆省份</button
-                  ><button id="clear-classes" type="button" class="text-button">
+                    选中大陆省份
+                  </button>
+                  <button id="clear-classes" type="button" class="ui-btn ui-btn--ghost ui-btn--sm">
                     清空
                   </button>
                 </div>
               </div>
-              <input
-                id="classification-search"
-                type="search"
-                aria-label="搜索数据分类"
-                placeholder="搜索国家、省份或分类名称"
-              />
+              <div class="ui-field">
+                <label class="ui-sr-only" for="classification-search">搜索数据分类</label>
+                <input
+                  id="classification-search"
+                  class="ui-input"
+                  type="search"
+                  placeholder="搜索国家、省份或分类名称"
+                  autocomplete="off"
+                />
+              </div>
               <div id="catalog-classes" class="classification-grid"></div>
-              <button id="more-classes" type="button" class="secondary" hidden>
+              <button id="more-classes" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" hidden>
                 加载更多分类
               </button>
-              <p id="binding-hint" class="hint"></p>
-              <button id="bind" disabled>使用所选数据</button>
+              <p id="binding-hint" class="ui-help-text"></p>
+              <div class="ip-form-actions">
+                <button id="bind" class="ui-btn" type="submit" disabled>使用所选数据</button>
+              </div>
             </form>
           </section>
-          <section class="panel">
-            <h2>已使用的数据</h2>
-            <p>这里的数据供全局地理规则、入口地理规则和省份白名单引用。</p>
+          <section class="ui-card">
+            <div class="ui-card__head">
+              <div>
+                <h2 class="ui-card__title">已使用的数据</h2>
+                <p class="ui-card__desc">
+                  这里的数据供全局地理规则、入口地理规则和省份白名单引用。
+                </p>
+              </div>
+            </div>
             <div id="datasets" class="cards"></div>
           </section>
-        </section>
-        <section id="tab-events" role="tabpanel" hidden>
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>诊断事件</h2>
-                <p id="event-retention">选择节点后查看本插件的事件。</p>
-              </div>
-              <button id="events-refresh" class="secondary">刷新事件</button>
+          <details class="ui-help">
+            <summary>数据版本、分类和删除行为</summary>
+            <div class="ui-help__body">
+              <p>
+                数据按版本绑定；更换版本会重新校验。已有配置中的分类会保留，删除版本前会检查使用和回退引用。
+              </p>
+              <p>数据存入共享目录；卸载插件只清理本插件的配置和引用。</p>
             </div>
-            <div class="form-grid">
-              <label
-                >结果<select id="event-mode">
+          </details>
+        </section>
+
+        <section
+          id="tab-events"
+          class="ip-view"
+          role="tabpanel"
+          aria-labelledby="tab-events-tab"
+          hidden
+        >
+          <section class="ui-card">
+            <div class="ui-card__head">
+              <div>
+                <h2 class="ui-card__title">诊断事件</h2>
+                <p id="event-retention" class="ui-card__desc">选择节点后查看本插件的事件。</p>
+              </div>
+              <button id="events-refresh" class="ui-btn ui-btn--secondary" type="button">
+                刷新事件
+              </button>
+            </div>
+            <div class="ui-form-grid ip-event-filters">
+              <div class="ui-field">
+                <label class="ui-label" for="event-mode">结果</label>
+                <select id="event-mode" class="ui-select">
                   <option value="">全部结果</option>
                   <option value="deny">已拦截</option>
                   <option value="observe">仅观察</option>
                   <option value="skip">跳过检查</option>
-                </select></label
-              ><label
-                >搜索<input
+                </select>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label" for="event-search">搜索</label>
+                <input
                   id="event-search"
+                  class="ui-input"
                   type="search"
                   placeholder="来源 IP、入口或规则"
-              /></label>
+                  autocomplete="off"
+                />
+              </div>
             </div>
-            <div class="table-scroll">
-              <table>
+            <div class="ui-table-wrap">
+              <table class="ui-table" aria-label="诊断事件">
                 <thead>
                   <tr>
-                    <th>时间</th>
-                    <th>来源 IP</th>
-                    <th>入口 / 规则</th>
-                    <th>结果</th>
-                    <th>原因</th>
+                    <th scope="col">时间</th>
+                    <th scope="col">来源 IP</th>
+                    <th scope="col">入口 / 规则</th>
+                    <th scope="col">结果</th>
+                    <th scope="col">原因</th>
                   </tr>
                 </thead>
                 <tbody id="events"></tbody>
               </table>
             </div>
-            <p id="events-empty" class="empty-state"></p>
+            <p id="events-empty" class="ui-empty ip-events-empty" hidden></p>
             <div class="pagination">
-              <button id="events-prev" class="secondary" disabled>上一页</button
-              ><span id="events-page">第 1 页</span
-              ><button id="events-next" class="secondary" disabled>
+              <button id="events-prev" class="ui-btn ui-btn--secondary ui-btn--sm" type="button" disabled>
+                上一页
+              </button>
+              <span id="events-page" class="ui-help-text">第 1 页</span>
+              <button id="events-next" class="ui-btn ui-btn--secondary ui-btn--sm" type="button" disabled>
                 下一页
               </button>
             </div>
           </section>
+          <details class="ui-help">
+            <summary>为什么这里不是完整拦截历史？</summary>
+            <div class="ui-help__body">
+              <p>
+                页面只读取现有接口返回的最近记录，翻页只对本次结果分组，不代表完整历史，也不能据此判断没有发生拦截。
+              </p>
+              <p>记录保存和清理由控制面板统一管理。</p>
+            </div>
+          </details>
         </section>
       </section>
-      <dialog id="source-dialog">
-        <form id="source-form">
-          <div class="panel-head">
-            <div>
-              <h2>导入地理数据</h2>
-              <p>
-                选择数据文件，系统自动完成上传和校验。省份白名单使用包含省份信息的
-                MMDB 数据。
-              </p>
-            </div>
-            <button
-              id="source-close"
-              type="button"
-              class="text-button"
-              aria-label="关闭"
-            >
-              ✕
-            </button>
+    </main>
+
+    <dialog id="source-dialog" class="ui-dialog" aria-labelledby="source-title">
+      <form id="source-form" class="ui-stack">
+        <div class="ui-dialog__head">
+          <div>
+            <p class="ui-eyebrow">地理数据</p>
+            <h2 class="ui-dialog__title" id="source-title">导入地理数据</h2>
+            <p class="ui-dialog__desc">
+              选择数据文件，系统自动完成上传和校验。省份白名单使用包含省份信息的 MMDB 数据。
+            </p>
           </div>
-          <label
-            >数据文件<input
+          <button
+            id="source-close"
+            type="button"
+            class="ui-btn ui-btn--icon ui-btn--ghost"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <div class="ui-dialog__body">
+          <div class="ui-field">
+            <label class="ui-label" for="source-file">数据文件</label>
+            <input
+              id="source-file"
+              class="ui-input"
               name="file"
               type="file"
               accept=".mmdb,.dat,.txt"
               required
-          /></label>
-          <label
-            >数据类型<select name="format">
+            />
+          </div>
+          <div class="ui-field">
+            <label class="ui-label" for="source-format">数据类型</label>
+            <select id="source-format" class="ui-select" name="format">
               <option value="geo-mmdb">省份数据库（MMDB）</option>
               <option value="geoip">国家数据库（GeoIP）</option>
               <option value="cidr">IP 网段列表（文本）</option>
-            </select></label
-          >
-          <label
-            >显示名称<input
+            </select>
+          </div>
+          <div class="ui-field">
+            <label class="ui-label" for="source-name">显示名称</label>
+            <input
+              id="source-name"
+              class="ui-input"
               name="name"
               maxlength="128"
               placeholder="默认使用文件名"
-          /></label>
-          <details>
+            />
+          </div>
+          <details class="ui-help">
             <summary>来源说明（可选）</summary>
-            <label
-              >数据许可页面<input
-                name="license_url"
-                type="url"
-                placeholder="https://…"
-            /></label>
+            <div class="ui-help__body">
+              <div class="ui-field">
+                <label class="ui-label" for="source-license">数据许可页面</label>
+                <input
+                  id="source-license"
+                  class="ui-input"
+                  name="license_url"
+                  type="url"
+                  placeholder="https://…"
+                />
+              </div>
+            </div>
           </details>
-          <p class="hint">
-            单个文件最多 128
-            MiB。只导入一次，不自动下载或在插件中另存副本。数据存入共享目录；卸载插件会清理本插件的配置和引用，共享数据可在没有使用者后删除。
+          <p class="ui-help-text">
+            单个文件最多 128 MiB。只导入一次，不自动下载或在插件中另存副本。数据存入共享目录；卸载插件会清理本插件的配置和引用，共享数据可在没有使用者后删除。
           </p>
-          <p id="source-error" role="alert"></p>
-          <button>导入并校验</button>
-        </form>
-      </dialog>
-      <dialog id="confirm-dialog">
-        <h2 id="confirm-title">确认修改</h2>
-        <p id="confirm-message"></p>
-        <div class="actions">
-          <button id="confirm-cancel" class="secondary">取消</button
-          ><button id="confirm-ok">确定</button>
+          <p id="source-error" class="ui-error-text" role="alert"></p>
         </div>
-      </dialog>
-    </main>
+        <div class="ui-dialog__footer">
+          <button type="submit" class="ui-btn">导入并校验</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="ui-dialog" aria-labelledby="confirm-title">
+      <div class="ui-dialog__head">
+        <div>
+          <h2 class="ui-dialog__title" id="confirm-title">确认修改</h2>
+          <p class="ui-dialog__desc" id="confirm-message"></p>
+        </div>
+      </div>
+      <div class="ui-dialog__footer">
+        <button id="confirm-cancel" class="ui-btn ui-btn--secondary" type="button">取消</button>
+        <button id="confirm-ok" class="ui-btn ui-btn--danger" type="button">确定</button>
+      </div>
+    </dialog>
+
     <script src="app.js"></script>
   </body>
 </html>

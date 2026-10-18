@@ -134,6 +134,26 @@ const ruleLabel = (rule) =>
 const markDirty = () => {
   state.dirty = true;
   $("#draft-status").textContent = "有未保存的全局修改";
+  $("#dirty-badge").hidden = false;
+};
+const clearDirty = () => {
+  state.dirty = false;
+  $("#draft-status").textContent = "配置已保存";
+  $("#dirty-badge").hidden = true;
+};
+const clearLoadStates = () => {
+  $("#denied-state").hidden = true;
+  $("#load-error").hidden = true;
+};
+const showDenied = (message) => {
+  $("#denied-state").hidden = false;
+  $("#load-error").hidden = true;
+  if (message) $("#denied-desc").textContent = message;
+};
+const showLoadError = (message) => {
+  $("#load-error").hidden = false;
+  $("#denied-state").hidden = true;
+  if (message) $("#load-error-desc").textContent = message;
 };
 const confirmAction = (title, message) =>
   new Promise((resolve) => {
@@ -182,16 +202,18 @@ const updateWriteAccess = () => {
   document
     .querySelectorAll("[data-mode]")
     .forEach((b) => (b.disabled = blocked));
+  for (const id of ["province-all", "province-clear"])
+    $("#" + id).disabled = blocked;
   $("#entry-controls").disabled =
     blocked || !selectedEntry() || !online(agent(state.node));
 };
 const switchTab = (tab) => {
   state.tab = tab;
-  document
-    .querySelectorAll("[data-tab]")
-    .forEach((b) =>
-      b.setAttribute("aria-selected", String(b.dataset.tab === tab)),
-    );
+  document.querySelectorAll("[data-tab]").forEach((b) => {
+    const active = b.dataset.tab === tab;
+    b.setAttribute("aria-selected", String(active));
+    b.tabIndex = active ? 0 : -1;
+  });
   for (const name of ["global", "entry", "data", "events"])
     $("#tab-" + name).hidden = name !== tab;
   if (tab === "data")
@@ -257,7 +279,7 @@ const renderPicker = () => {
             "</small></button>",
         )
         .join("")
-    : '<p class="hint">没有匹配的节点</p>';
+    : '<p class="ui-help-text">没有匹配的节点</p>';
   $("#node-options")
     .querySelectorAll("[data-node]")
     .forEach(
@@ -431,6 +453,8 @@ const renderSummary = () => {
     ["entry-enforce", "enforce"],
   ])
     $("#" + id).setAttribute("aria-pressed", String(mode === value));
+  $("#dirty-badge").hidden = !state.dirty;
+  $("#readonly-badge").hidden = state.payload?.access?.can_write !== false;
 };
 const renderEntries = () => {
   const entries = state.node
@@ -441,42 +465,57 @@ const renderEntries = () => {
     option("", state.node ? "请选择域名或监听端口" : "请先选择节点") +
     entries.map((x) => option(x.entry.token, entryName(x.entry))).join("");
   $("#entry-select").value = state.token;
+  const selected = selectedEntry();
   $("#entry-hint").textContent = !state.node
     ? "先选择当前插件的节点，再设置该节点的入口。"
     : !entries.length
       ? "该节点没有可管理的入口。"
-      : state.token
-        ? "以下设置仅作用于 " + entryName(selectedEntry()) + "。"
+      : selected
+        ? "以下设置仅作用于 " + entryName(selected) + "。"
         : "仅列出所选节点上本插件可管理的入口。";
+  $("#entry-empty").hidden = !!selected;
+  $("#entry-empty-title").textContent = !state.node
+    ? "尚未选择节点"
+    : !entries.length
+      ? "该节点没有可管理的入口"
+      : "尚未选择入口";
+  $("#entry-empty-desc").textContent = !state.node
+    ? "先选择当前插件的节点，再设置该节点的入口。"
+    : !entries.length
+      ? "请先在节点上添加 HTTP、TCP 或 UDP 入口，再回到这里设置专属规则。"
+      : "从上方选择域名或监听端口，查看并设置它自己的规则和模式。";
+  $("#entry-controls").hidden = !selected;
   const rules = state.payload?.entry_overlay?.rules || [];
   renderRuleList($("#entry-rules"), rules, true);
   updateWriteAccess();
 };
+const ruleTypeLabel = (type) =>
+  type === "ip" ? "单个 IP" : type === "cidr" ? "IP 网段" : "地理分类";
+const ruleActionBadge = (action) =>
+  action === "deny"
+    ? '<span class="ui-badge ui-badge--danger">拒绝访问</span>'
+    : '<span class="ui-badge ui-badge--success">允许访问</span>';
 const renderRuleList = (root, rules, entry = false) => {
   root.innerHTML = rules.length
     ? rules
         .map(
           (r, i) =>
-            "<li><div><strong>" +
+            "<tr><td><strong>" +
             esc(ruleLabel(r)) +
-            "</strong><small>" +
-            (r.action === "deny" ? "拒绝访问" : "允许访问") +
-            " · " +
-            (r.selector.type === "ip"
-              ? "单个 IP"
-              : r.selector.type === "cidr"
-                ? "IP 网段"
-                : "地理分类") +
-            '</small></div><button class="text-button" data-remove="' +
+            "</strong></td><td>" +
+            ruleTypeLabel(r.selector.type) +
+            "</td><td>" +
+            ruleActionBadge(r.action) +
+            '</td><td class="ip-actions-col"><button type="button" class="ui-btn ui-btn--danger-soft ui-btn--sm" data-remove="' +
             i +
-            '">删除</button></li>',
+            '">删除</button></td></tr>',
         )
         .join("")
-    : '<li class="empty">' +
+    : '<tr><td colspan="4" class="ip-rule-empty">' +
       (entry
         ? "没有入口专属规则，将继续使用全局规则。"
         : "尚未添加全局规则。") +
-      "</li>";
+      "</td></tr>";
   root.querySelectorAll("[data-remove]").forEach(
     (b) =>
       (b.onclick = () => {
@@ -603,7 +642,7 @@ const renderProvinces = () => {
         ),
         key = c ? dataset.id + "/" + c.id : "";
       return (
-        '<label title="' +
+        '<label class="ip-province-option" title="' +
         (key ? "" : "所选数据源未提供该省份") +
         '"><input type="checkbox" data-province="' +
         esc(key) +
@@ -646,8 +685,23 @@ const renderProvinces = () => {
     ? "按所选版本覆盖检查"
     : "尚未配置";
   $("#province-hint").textContent =
-    "勾选后点击“保存全局配置”。未覆盖的 IPv4 / IPv6 地址无法确认省份，会被白名单拒绝；清空全部省份可停用白名单。";
+    "勾选后点击底部“保存配置”。未覆盖的 IPv4 / IPv6 地址无法确认省份，会被白名单拒绝；清空全部省份可停用白名单。";
   renderProvinceCount();
+  filterProvinces();
+};
+const filterProvinces = () => {
+  const query = ($("#province-search").value || "").trim().toLowerCase();
+  let shown = 0;
+  $("#provinces")
+    .querySelectorAll("label")
+    .forEach((label) => {
+      const match = !query || label.textContent.toLowerCase().includes(query);
+      label.hidden = !match;
+      if (match) shown += 1;
+    });
+  if (query && !shown)
+    $("#province-selected").textContent = "没有匹配的省份";
+  else renderProvinceCount();
 };
 const renderProvinceCount = () => {
   const names = new Set(
@@ -664,11 +718,16 @@ const renderProvinceCount = () => {
   $("#province-count").textContent = n
     ? "已选择 " + n + " 个省份" + (state.dirty ? " · 尚未保存" : " · 已保存")
     : "未启用白名单 · 不限制省份";
+  const labels = [...names].map((name) => provinceName(name) || name);
+  $("#province-selected").textContent = n
+    ? "多选结果：" + labels.join("、")
+    : "多选结果：未选择省份";
 };
 $("#province-dataset").onchange = renderProvinces;
+$("#province-search").oninput = filterProvinces;
 $("#province-all").onclick = () => {
   $("#provinces")
-    .querySelectorAll("input:not(:disabled)")
+    .querySelectorAll("label:not([hidden]) input:not(:disabled)")
     .forEach((i) => {
       i.checked = true;
     });
@@ -698,10 +757,10 @@ const save = async (mode) => {
   )
     return;
   await post("api/config", { mode: nextMode, config: state.config });
-  state.dirty = false;
-  $("#draft-status").textContent = "配置已保存";
+  clearDirty();
   await load();
   status("全局配置已保存");
+  NREUI.toast?.("全局配置已保存", "success");
 };
 $("#save").onclick = () => mutate(() => save());
 document
@@ -760,6 +819,7 @@ const load = async (initial) => {
     state.entries = Array.isArray(payload.entries) ? payload.entries : [];
     if (!state.dirty) state.config = structuredClone(payload.config);
     $("#workspace").hidden = false;
+    clearLoadStates();
     $("#default-action").value = state.config.default_action;
     renderSummary();
     renderEntries();
@@ -776,7 +836,9 @@ const load = async (initial) => {
     );
   } catch (error) {
     if (seq !== state.seq) return;
-    $("#workspace").hidden = false;
+    if (!state.payload) $("#workspace").hidden = true;
+    if (error.status === 403) showDenied(error.message);
+    else showLoadError(error.message);
     $("#phase").textContent = "状态读取失败";
     status(error.message, true);
   }
@@ -887,9 +949,9 @@ const renderVersionInfo = () => {
         esc(license) +
         '" target="_blank" rel="noopener noreferrer">查看许可</a>'
       : "") +
-    '</p><div class="actions"><button type="button" id="refresh-source" class="secondary">获取最新版本</button><button type="button" id="reload-versions" class="text-button">刷新版本列表</button><button type="button" id="delete-version" class="text-button">删除未使用版本</button><button type="button" id="delete-source" class="text-button">删除未使用来源</button></div><p class="hint">手动获取版本，不在插件中另存副本。删除会检查使用和回退引用；仍被引用的数据不会删除。</p>' +
+    '</p><div class="ui-row"><button type="button" id="refresh-source" class="ui-btn ui-btn--secondary ui-btn--sm">获取最新版本</button><button type="button" id="reload-versions" class="ui-btn ui-btn--ghost ui-btn--sm">刷新版本列表</button><button type="button" id="delete-version" class="ui-btn ui-btn--ghost ui-btn--sm">删除未使用版本</button><button type="button" id="delete-source" class="ui-btn ui-btn--ghost ui-btn--sm">删除未使用来源</button></div><p class="ui-help-text">手动获取版本，不在插件中另存副本。删除会检查使用和回退引用；仍被引用的数据不会删除。</p>' +
     (source.failure
-      ? '<p class="error">上次获取未完成：' +
+      ? '<p class="ui-error-text">上次获取未完成：' +
         esc(source.failure) +
         "。请检查下载地址和格式后重试。</p>"
       : "");
@@ -1095,7 +1157,7 @@ const renderClasses = () => {
           );
         })
         .join("")
-    : '<p class="hint">' +
+    : '<p class="ui-help-text">' +
       (state.classes.length
         ? "没有匹配的分类。"
         : "所选版本尚无可用分类。请先获取数据版本。") +
@@ -1205,10 +1267,10 @@ $("#binding-form").onsubmit = (e) => {
         config,
       },
     });
-    state.dirty = false;
-    $("#draft-status").textContent = "配置已保存";
+    clearDirty();
     await load();
     status("数据已绑定，分类现可用于规则和省份白名单。");
+    NREUI.toast?.("数据已绑定", "success");
   });
 };
 const renderDatasets = () => {
@@ -1228,7 +1290,7 @@ const renderDatasets = () => {
           return (
             '<article class="dataset-card"><header><strong>' +
             esc(sourceName(d.source_id)) +
-            '</strong><span class="badge">' +
+            '</strong><span class="ui-badge ui-badge--plain">' +
             esc(state.node ? phaseLabel(current?.phase) : "未选择节点") +
             "</span></header><p>" +
             d.classifications.length +
@@ -1256,9 +1318,9 @@ const renderDatasets = () => {
               : "") +
             "</dd></dl>" +
             (view?.error
-              ? '<p class="error">' + esc(view.error) + "</p>"
+              ? '<p class="ui-error-text">' + esc(view.error) + "</p>"
               : "") +
-            '<button class="text-button" data-source-edit="' +
+            '<button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-source-edit="' +
             esc(d.source_id) +
             '">查看分类 / 更换版本</button><details><summary>版本校验信息</summary><code>' +
             esc(binding?.desired?.spec?.version_digest || "尚无版本") +
@@ -1266,7 +1328,7 @@ const renderDatasets = () => {
           );
         })
         .join("")
-    : '<p class="empty-state">还没有使用地理数据。单 IP 和网段规则可直接配置；国家或省份规则需要先选择上方数据。</p>';
+    : '<p class="ui-empty ip-dataset-empty">还没有使用地理数据。单 IP 和网段规则可直接配置；国家或省份规则需要先选择上方数据。</p>';
   $("#datasets")
     .querySelectorAll("[data-source-edit]")
     .forEach(
@@ -1530,6 +1592,9 @@ $("#event-search").oninput = () => {
   state.page = 1;
   renderEventPage();
 };
+$("#retry-load").onclick = () => {
+  if (!state.busy) loadAgents().catch((error) => status(error.message, true));
+};
 window.addEventListener("beforeunload", (e) => {
   if (state.dirty) {
     e.preventDefault();
@@ -1545,4 +1610,8 @@ loadAgents()
           : error.message;
     }),
   )
-  .catch((error) => status(error.message, true));
+  .catch((error) => {
+    status(error.message, true);
+    if (error.status === 403) showDenied(error.message);
+    else showLoadError(error.message);
+  });

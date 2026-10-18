@@ -259,11 +259,10 @@ const server = createServer(async (req, res) => {
       if (body.dataset.source) sources.push({ source: body.dataset.source });
       return json({ stored: true });
     }
-    const file = path.endsWith("/app.js")
-      ? "app.js"
-      : path.endsWith("/style.css")
-        ? "style.css"
-        : "index.html";
+    const requested = path.split("/").pop() || "index.html";
+    const file = ["app.js", "style.css", "ui-kit.js", "ui-kit.css", "index.html"].includes(requested)
+      ? requested
+      : "index.html";
     res.writeHead(200, {
       "Content-Type": file.endsWith(".js")
         ? "text/javascript"
@@ -405,6 +404,44 @@ try {
   await send("Page.enable");
   await until(async () => await visible("#workspace"), "workspace");
   await check(
+    "host themes follow localStorage and dark details use data-theme-family",
+    async () => {
+      await evaluate('localStorage.setItem("theme", "neko-dark")');
+      await send("Page.reload", { ignoreCache: true });
+      await until(
+        async () =>
+          (await evaluate('document.documentElement.getAttribute("data-theme")')) ===
+          "neko-dark",
+        "dark host theme",
+      );
+      assert.equal(
+        await evaluate('document.documentElement.getAttribute("data-theme-family")'),
+        "dark",
+      );
+      assert.match(
+        await evaluate(
+          'getComputedStyle(document.querySelector(".ip-status-strip")).backgroundImage',
+        ),
+        /gradient/,
+      );
+      await evaluate('localStorage.setItem("theme", "light")');
+      await send("Page.reload", { ignoreCache: true });
+      await until(
+        async () =>
+          (await evaluate('document.documentElement.getAttribute("data-theme-family")')) ===
+          "light",
+        "light host theme",
+      );
+      assert.equal(
+        await evaluate(
+          'getComputedStyle(document.querySelector(".ip-status-strip")).backgroundImage',
+        ),
+        "none",
+      );
+      await until(async () => await visible("#workspace"), "workspace after theme reload");
+    },
+  );
+  await check(
     "node picker restricts membership and supports name/status filters",
     async () => {
       await click("#node-trigger");
@@ -440,6 +477,12 @@ try {
     assert.match(options, /25565/);
     assert.equal(options.includes("node-a"), false);
     assert.equal(options.includes("DNS 服务"), false);
+    assert.equal(await visible("#entry-empty"), true);
+    assert.match(
+      await evaluate('document.querySelector("#entry-empty-title").textContent'),
+      /尚未选择入口/,
+    );
+    assert.equal(await visible("#entry-controls"), false);
     await fill("#entry-select", "entry-token-000000000001");
     await until(
       async () =>
@@ -523,6 +566,20 @@ try {
       assert.equal(
         await evaluate(
           'document.querySelectorAll("#provinces input:not(:disabled)").length',
+        ),
+        3,
+      );
+      await fill("#province-search", "北京");
+      assert.equal(
+        await evaluate(
+          '[...document.querySelectorAll("#provinces label")].filter((label) => !label.hidden).length',
+        ),
+        1,
+      );
+      await fill("#province-search", "");
+      assert.equal(
+        await evaluate(
+          '[...document.querySelectorAll("#provinces label")].filter((label) => !label.hidden).length',
         ),
         3,
       );
@@ -618,7 +675,7 @@ try {
         '#source-form [name="license_url"]',
         "https://example.test/license",
       );
-      await click('#source-form button[type="submit"],#source-form > button');
+      await click('#source-form button[type="submit"]');
       await until(
         async () =>
           !(await evaluate('document.querySelector("#source-dialog").open')),
@@ -664,7 +721,7 @@ try {
         "referenced version protected",
       );
       assert.equal(config.datasets.length, 1);
-      assert.equal(await evaluate("localStorage.length"), 0);
+      assert.deepEqual(await evaluate('Object.keys(localStorage).filter((k) => k !== "theme")'), []);
       await until(
         async () =>
           !(await evaluate(
@@ -682,7 +739,7 @@ try {
       await evaluate(
         '(()=>{const transfer=new DataTransfer();transfer.items.add(new File([new Uint8Array(128*1024*1024+1)],"too-large.mmdb"));const input=document.querySelector("#source-form [name=file]");input.files=transfer.files;input.dispatchEvent(new Event("change"));})()',
       );
-      await click("#source-form > button");
+      await click('#source-form button[type="submit"]');
       assert.match(
         await evaluate('document.querySelector("#source-error").textContent'),
         /128 MiB/,
@@ -709,7 +766,7 @@ try {
         nodeId: input.nodeId,
         files: [file],
       });
-      await click("#source-form > button");
+      await click('#source-form button[type="submit"]');
       await until(
         async () => (await body()).includes("文件格式无法识别"),
         "import rejected",
@@ -739,6 +796,41 @@ try {
       "状态已更新",
     "clean final preview state",
   );
+  await check("sticky save bar and unsaved indicator stay observable", async () => {
+    await click('[data-tab="global"]');
+    assert.equal(
+      await evaluate('getComputedStyle(document.querySelector("#save-bar")).position'),
+      "sticky",
+    );
+    await fill('#rule-form [name="type"]', "ip");
+    await fill('#rule-form [name="value"]', "203.0.113.9");
+    await click("#rule-form button");
+    assert.equal(
+      await evaluate('document.querySelector("#dirty-badge").hidden'),
+      false,
+    );
+    assert.match(
+      await evaluate('document.querySelector("#draft-status").textContent'),
+      /未保存/,
+    );
+    await click("#save");
+    await until(
+      () => config.rules.some((rule) => rule.selector.value === "203.0.113.9"),
+      "draft rule saved",
+    );
+    await until(
+      async () => await evaluate('!!document.querySelector(".ui-toast")'),
+      "save toast",
+    );
+    await until(
+      async () => await evaluate('document.querySelector("#dirty-badge").hidden'),
+      "dirty cleared",
+    );
+    await until(
+      async () => !(await evaluate('document.querySelector("#save").disabled')),
+      "save settled",
+    );
+  });
   for (const width of [1440, 768, 390]) {
     await send("Emulation.setDeviceMetricsOverride", {
       width,
