@@ -1,24 +1,9 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = "light";
-  try {
-    const raw = window.parent && window.parent !== window
-      ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) theme = mapped;
-  } catch (_error) {
-    theme = "light";
-  }
-  document.documentElement.setAttribute("data-theme", theme);
-};
-
-applyHostTheme();
+// 主题由 ui-kit.js 的 host 模式根据 localStorage.theme 解析，并写入 data-theme / data-theme-family。
 
 const statusNode = document.querySelector("#app-status");
 const loadingNode = document.querySelector("#app-loading");
 const unavailableNode = document.querySelector("#app-unavailable");
+const unavailableDescNode = document.querySelector("#app-unavailable-desc");
 const deniedNode = document.querySelector("#app-denied");
 const contextNode = document.querySelector("#app-context");
 const workspaceNode = document.querySelector("#app-workspace");
@@ -32,12 +17,9 @@ const routingPanel = document.querySelector("#routing-panel");
 const tabBtnListens = document.querySelector("#tab-btn-listens");
 const tabBtnRouting = document.querySelector("#tab-btn-routing");
 const routingCountNode = document.querySelector("#routing-count");
-const routingQuickRule = document.querySelector("#routing-quick-rule");
-const routingQuickUpstream = document.querySelector("#routing-quick-upstream");
 const listNode = document.querySelector("#listen-list");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#listen-count");
-const workspaceHead = document.querySelector(".workspace-bar");
 const createDialog = document.querySelector("#create-dialog");
 const createForm = document.querySelector("#create-form");
 const createSubmit = document.querySelector("#create-submit");
@@ -105,6 +87,15 @@ const appendForm = document.querySelector("#append-form");
 const appendName = document.querySelector("#append-name");
 const appendMeta = document.querySelector("#append-meta");
 const appendCancel = document.querySelector("#append-cancel");
+const listenLoading = document.querySelector("#listen-loading");
+const listenError = document.querySelector("#listen-error");
+const listenErrorDesc = document.querySelector("#listen-error-desc");
+const listenRetry = document.querySelector("#listen-retry");
+const routingError = document.querySelector("#routing-error");
+const routingErrorDesc = document.querySelector("#routing-error-desc");
+const routingRetry = document.querySelector("#routing-retry");
+const rulesTable = document.querySelector("#route-rules-table");
+const upstreamsTable = document.querySelector("#route-upstreams-table");
 
 const METHOD_LABELS = {
   "2022-blake3-aes-128-gcm": "SS2022 · AES-128",
@@ -314,8 +305,14 @@ const sendPluginJSON = async (path, body) => {
 const switchWorkspaceTab = (tab) => {
   activeTab = tab === "routing" ? "routing" : "listens";
   const isRouting = activeTab === "routing";
-  if (tabBtnListens) tabBtnListens.setAttribute("aria-selected", isRouting ? "false" : "true");
-  if (tabBtnRouting) tabBtnRouting.setAttribute("aria-selected", isRouting ? "true" : "false");
+  if (tabBtnListens) {
+    tabBtnListens.setAttribute("aria-selected", isRouting ? "false" : "true");
+    tabBtnListens.setAttribute("tabindex", isRouting ? "-1" : "0");
+  }
+  if (tabBtnRouting) {
+    tabBtnRouting.setAttribute("aria-selected", isRouting ? "true" : "false");
+    tabBtnRouting.setAttribute("tabindex", isRouting ? "0" : "-1");
+  }
   if (listPanel) listPanel.hidden = isRouting;
   if (routingPanel) routingPanel.hidden = !isRouting;
   syncListPanel();
@@ -758,6 +755,15 @@ const selectedAgent = () => agentsCache.find((agent) => agent.id === selectedAge
 
 const isSS2022 = (method) => String(method || "").startsWith("2022-");
 
+const notify = (message, tone = "success") => {
+  if (!message) return;
+  if (window.NREUI && typeof window.NREUI.toast === "function") {
+    window.NREUI.toast(message, tone);
+    return;
+  }
+  showStatus(message, tone === "danger");
+};
+
 const copyText = async (text) => {
   const value = String(text || "");
   if (!value) throw new Error("没有可复制的内容");
@@ -786,6 +792,7 @@ const markCopied = (button) => {
   const original = button.dataset.copyLabel || button.textContent;
   button.dataset.copyLabel = original;
   button.textContent = "已复制";
+  notify("已复制。", "success");
   window.setTimeout(() => {
     if (button.textContent === "已复制") button.textContent = original;
   }, 1600);
@@ -798,6 +805,37 @@ const showContext = (kind) => {
   if (undeployedNode) undeployedNode.hidden = kind !== "undeployed";
   if (offlineNode) offlineNode.hidden = kind !== "offline";
   if (executionUnavailableNode) executionUnavailableNode.hidden = kind !== "execution-unavailable";
+};
+
+const setListenLoading = (loading) => {
+  if (listenLoading) listenLoading.hidden = !loading;
+  if (loading && listenError) listenError.hidden = true;
+  syncListPanel();
+};
+
+const showListenError = (message) => {
+  if (!listenError) return;
+  if (listenErrorDesc) listenErrorDesc.textContent = message || "暂时无法读取监听列表。刷新页面，或稍后重试。";
+  listenError.hidden = false;
+  syncListPanel();
+};
+
+const hideListenError = () => {
+  if (listenError) listenError.hidden = true;
+};
+
+const showRoutingError = (message) => {
+  if (!routingError) return;
+  if (routingErrorDesc) routingErrorDesc.textContent = message || "暂时无法读取规则与上游。刷新页面，或稍后重试。";
+  if (rulesTable) rulesTable.hidden = true;
+  if (upstreamsTable) upstreamsTable.hidden = true;
+  if (routeEmpty) routeEmpty.hidden = true;
+  if (upstreamEmpty) upstreamEmpty.hidden = true;
+  routingError.hidden = false;
+};
+
+const hideRoutingError = () => {
+  if (routingError) routingError.hidden = true;
 };
 
 const methodLabel = (method) => METHOD_LABELS[String(method || "")] || String(method || "");
@@ -874,11 +912,10 @@ const syncListPanel = () => {
   const hasListens = listNode && listNode.children.length > 0;
   const isRouting = activeTab === "routing";
   const canOperate = Boolean(selectedAgentID && agentOnline);
-  if (emptyNode) emptyNode.hidden = isRouting || !canOperate || hasListens;
-  if (workspaceHead) workspaceHead.hidden = false;
+  const loading = Boolean(listenLoading && !listenLoading.hidden);
+  const failed = Boolean(listenError && !listenError.hidden);
+  if (emptyNode) emptyNode.hidden = isRouting || !canOperate || hasListens || loading || failed;
   if (createToggle) createToggle.hidden = isRouting || !canOperate;
-  if (routingQuickRule) routingQuickRule.hidden = !isRouting || !canOperate;
-  if (routingQuickUpstream) routingQuickUpstream.hidden = !isRouting || !canOperate;
 };
 
 const closeCreate = () => {
@@ -916,8 +953,11 @@ const openCreate = async () => {
     return;
   }
   if (createDialog) {
+    createDialog._returnFocus = document.activeElement;
     if (createDialog.open) createDialog.close();
     createDialog.showModal();
+    const nameInput = createForm ? createForm.querySelector('input[name="name"]') : null;
+    if (nameInput) nameInput.focus();
   }
 };
 
@@ -957,7 +997,7 @@ const bindQRImage = (img, user) => {
 const qrButton = (user) => {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "btn btn--ghost";
+  button.className = "ui-btn ui-btn--secondary ui-btn--sm";
   button.textContent = "二维码";
   button.addEventListener("click", () => openQR(user));
   return button;
@@ -979,10 +1019,10 @@ const openQR = (user) => {
   qrDialog.showModal();
 };
 
-const renderStatusPill = (text, on) => {
+const renderStatusPill = (text, on, tone = "") => {
   const status = document.createElement("span");
-  status.className = "pill";
-  status.dataset.on = on ? "true" : "false";
+  const variant = tone || (on ? "success" : "warning");
+  status.className = `ui-badge ui-badge--${variant}`;
   status.textContent = text;
   return status;
 };
@@ -990,7 +1030,7 @@ const renderStatusPill = (text, on) => {
 const copyURIButton = (user) => {
   const copy = document.createElement("button");
   copy.type = "button";
-  copy.className = "btn btn--primary";
+  copy.className = "ui-btn ui-btn--sm";
   copy.textContent = "复制 ss://";
   copy.addEventListener("click", async () => {
     try {
@@ -1005,7 +1045,7 @@ const copyURIButton = (user) => {
 
 const shareHint = (user) => {
   const hint = document.createElement("p");
-  hint.className = "hint";
+  hint.className = "ui-help-text listen-share-hint";
   hint.textContent = user.enabled
     ? (user.reason || "暂时无法分享")
     : "停用后无法导入。再启用即可复制链接。";
@@ -1028,18 +1068,18 @@ const userManageButtons = (user) => {
   actions.className = "account-actions";
   const toggle = document.createElement("button");
   toggle.type = "button";
-  toggle.className = "btn btn--ghost btn--sm";
+  toggle.className = "ui-btn ui-btn--ghost ui-btn--sm";
   toggle.dataset.mutate = "true";
   toggle.textContent = user.enabled ? "停用" : "再启用";
   toggle.addEventListener("click", () => mutateUser(user, user.enabled ? "disable" : "enable"));
   const rotate = document.createElement("button");
   rotate.type = "button";
-  rotate.className = "btn btn--ghost btn--sm";
+  rotate.className = "ui-btn ui-btn--ghost ui-btn--sm";
   rotate.textContent = "轮换密钥";
   rotate.addEventListener("click", () => mutateUser(user, "rotate", true));
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn btn--text btn--danger btn--sm";
+  remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
   remove.dataset.mutate = "true";
   remove.textContent = "删除用户";
   remove.addEventListener("click", () => mutateUser(user, "delete", true));
@@ -1076,25 +1116,25 @@ const primaryUser = (listen) => {
 
 const listenFooterActions = (listen) => {
   const actions = document.createElement("div");
-  actions.className = "dialog-actions";
+  actions.className = "dialog-actions listen-detail-actions";
   if (isSS2022(listen.method)) {
     const append = document.createElement("button");
     append.type = "button";
-    append.className = "btn btn--ghost";
+    append.className = "ui-btn ui-btn--secondary ui-btn--sm";
     append.dataset.mutate = "true";
     append.textContent = "追加用户";
     append.addEventListener("click", () => appendUser(listen));
     actions.append(append);
     const rotateServer = document.createElement("button");
     rotateServer.type = "button";
-    rotateServer.className = "btn btn--ghost";
+    rotateServer.className = "ui-btn ui-btn--ghost ui-btn--sm";
     rotateServer.textContent = "轮换 Server PSK";
     rotateServer.addEventListener("click", () => rotateServerPSK(listen));
     actions.append(rotateServer);
   }
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "btn btn--text btn--danger";
+  remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
   remove.dataset.mutate = "true";
   remove.textContent = "删除监听";
   remove.addEventListener("click", () => deleteListen(listen));
@@ -1104,7 +1144,7 @@ const listenFooterActions = (listen) => {
 
 const renderListen = (listen) => {
   const card = document.createElement("article");
-  card.className = "listen-card";
+  card.className = "ui-card listen-card";
   card.dataset.id = listen.id;
   card.dataset.bound = listen.bound ? "true" : "false";
   const selected = Boolean(openListenID) && listen.id === openListenID;
@@ -1112,32 +1152,40 @@ const renderListen = (listen) => {
   if (selected) card.setAttribute("aria-current", "true");
 
   const head = document.createElement("div");
-  head.className = "listen-card-head";
-  const identity = document.createElement("div");
-  identity.className = "listen-card-identity";
+  head.className = "listen-card__head";
   const titleRow = document.createElement("div");
-  titleRow.className = "listen-card-title-row";
+  titleRow.className = "listen-card__title-row";
   const title = document.createElement("h3");
+  title.className = "listen-card__title";
   title.textContent = listenTitle(listen);
   titleRow.append(title, renderStatusPill(listen.bound ? "运行中" : "未生效", listen.bound));
   const meta = document.createElement("p");
-  meta.className = "listen-card-meta";
+  meta.className = "listen-card__meta";
   const users = listen.users || [];
   meta.textContent = [methodLabel(listen.method), `${users.length} 个用户`].filter(Boolean).join(" · ");
-  const endpointBox = document.createElement("div");
-  endpointBox.className = "listen-endpoint-box";
-  const endpointText = document.createElement("span");
-  endpointText.textContent = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
-  const protoTag = document.createElement("span");
-  protoTag.className = "listen-endpoint-protocol";
-  protoTag.textContent = "TCP + UDP";
-  endpointBox.append(endpointText, protoTag);
-  identity.append(titleRow, meta, endpointBox);
-  head.append(identity);
+  head.append(titleRow, meta);
   card.append(head);
 
+  const endpoint = document.createElement("div");
+  endpoint.className = "listen-endpoint";
+  const address = document.createElement("span");
+  address.className = "listen-endpoint__address";
+  address.textContent = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
+  const protocol = document.createElement("span");
+  protocol.className = "ui-badge ui-badge--plain listen-endpoint__protocol";
+  protocol.textContent = "TCP + UDP";
+  endpoint.append(address, protocol);
+  card.append(endpoint);
+
+  if (!listen.bound) {
+    const note = document.createElement("p");
+    note.className = "listen-binding-note";
+    note.textContent = "未生效：端口尚未绑定，等节点应用后再分享。";
+    card.append(note);
+  }
+
   const actions = document.createElement("div");
-  actions.className = "listen-actions";
+  actions.className = "listen-card__actions";
   const first = primaryUser(listen);
   if (first && first.share_available && first.uri) {
     const copy = copyURIButton(first);
@@ -1145,10 +1193,12 @@ const renderListen = (listen) => {
     const qr = qrButton(first);
     qr.addEventListener("click", (event) => event.stopPropagation());
     actions.append(copy, qr);
+  } else if (first) {
+    actions.append(shareHint(first));
   }
   const open = document.createElement("button");
   open.type = "button";
-  open.className = "btn btn--ghost";
+  open.className = "ui-btn ui-btn--ghost ui-btn--sm";
   open.textContent = "详情";
   open.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1156,7 +1206,10 @@ const renderListen = (listen) => {
   });
   actions.append(open);
   card.append(actions);
-  card.addEventListener("click", () => openDetail(listen));
+  card.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    openDetail(listen);
+  });
   return card;
 };
 
@@ -1366,6 +1419,9 @@ const clearWorkspace = (kind) => {
   workspaceNode.hidden = true;
   emptyNode.hidden = true;
   if (workspaceMetrics) workspaceMetrics.hidden = true;
+  setListenLoading(false);
+  hideListenError();
+  hideRoutingError();
   renderListens([]);
   renderExecutionBadge(null);
   showContext(kind);
@@ -1457,6 +1513,14 @@ const closeRouteModal = () => {
   if (routeDialog && routeDialog.open) routeDialog.close();
 };
 
+const tableCell = (text, className = "", label = "") => {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  if (label) cell.dataset.label = label;
+  cell.textContent = text;
+  return cell;
+};
+
 const renderRouting = (routing, routeStatus = []) => {
   routingCache = routing || { upstreams: [], rules: [], default_action: "direct" };
   routingCache.upstreams ||= [];
@@ -1473,45 +1537,60 @@ const renderRouting = (routing, routeStatus = []) => {
   if (upstreamBadge) upstreamBadge.textContent = `${upstreamsCount} 个`;
   if (routeEmpty) routeEmpty.hidden = rulesCount > 0;
   if (upstreamEmpty) upstreamEmpty.hidden = upstreamsCount > 0;
+  if (rulesTable) rulesTable.hidden = rulesCount === 0;
+  if (upstreamsTable) upstreamsTable.hidden = upstreamsCount === 0;
 
   if (upstreamList) {
-    upstreamList.innerHTML = "";
+    upstreamList.replaceChildren();
     routingCache.upstreams.forEach((upstream) => {
-      const row = document.createElement("article");
-      row.className = "route-item-card";
+      const row = document.createElement("tr");
+      row.className = "route-row";
+      row.dataset.id = upstream.id;
 
-      const top = document.createElement("div");
-      top.className = "route-item-top";
-      const main = document.createElement("div");
-      main.className = "route-item-main";
-      const label = document.createElement("strong");
-      label.className = "route-item-title";
-      label.textContent = `${upstream.id} · ${upstream.host}:${upstream.port}`;
-      main.append(label, renderStatusPill(upstream.enabled ? "启用" : "停用", upstream.enabled));
+      const identity = document.createElement("td");
+      identity.className = "route-upstream-identity";
+      identity.dataset.label = "标识";
+      const idText = document.createElement("strong");
+      idText.className = "route-id";
+      idText.textContent = upstream.id;
+      const secret = document.createElement("span");
+      secret.className = "ui-help-text route-secret";
+      secret.textContent = `${upstream.secret_ref}@${upstream.secret_version}`;
+      identity.append(idText, secret);
 
-      const controls = document.createElement("div");
-      controls.className = "route-item-controls";
+      const address = tableCell(`${upstream.host}:${upstream.port}`, "ui-table__mono route-address", "地址");
+
+      const capability = document.createElement("td");
+      capability.className = "route-capability";
+      capability.dataset.label = "能力";
+      const methodText = document.createElement("span");
+      methodText.className = "route-method";
+      methodText.textContent = methodLabel(upstream.method);
+      const protocolText = document.createElement("span");
+      protocolText.className = "ui-help-text";
+      protocolText.textContent = [upstream.tcp ? "TCP" : "", upstream.udp ? "UDP" : ""].filter(Boolean).join(" + ") || "—";
+      capability.append(methodText, protocolText);
+
+      const status = document.createElement("td");
+      status.dataset.label = "状态";
+      status.append(renderStatusPill(upstream.enabled ? "启用" : "停用", upstream.enabled));
+
+      const actions = document.createElement("td");
+      actions.className = "ui-table__actions";
+      actions.dataset.label = "操作";
       const toggle = document.createElement("button");
       toggle.type = "button";
-      toggle.className = "btn btn--ghost btn--sm";
+      toggle.className = "ui-btn ui-btn--ghost ui-btn--sm";
       toggle.textContent = upstream.enabled ? "停用" : "启用";
       toggle.onclick = () => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable");
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.className = "btn btn--text btn--danger btn--sm";
+      remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
       remove.textContent = "删除";
       remove.onclick = () => mutateUpstream(upstream.id, "delete");
-      controls.append(toggle, remove);
-      top.append(main, controls);
+      actions.append(toggle, remove);
 
-      const bottom = document.createElement("div");
-      bottom.className = "route-item-bottom";
-      const detail = document.createElement("p");
-      detail.className = "hint";
-      detail.textContent = `${methodLabel(upstream.method)} · ${upstream.tcp ? "TCP" : ""}${upstream.tcp && upstream.udp ? "/" : ""}${upstream.udp ? "UDP" : ""} · ${upstream.secret_ref}@${upstream.secret_version}`;
-      bottom.append(detail);
-
-      row.append(top, bottom);
+      row.append(identity, address, capability, status, actions);
       upstreamList.append(row);
     });
   }
@@ -1525,59 +1604,72 @@ const renderRouting = (routing, routeStatus = []) => {
   syncRouteModalActionVisibility();
 
   if (routeList) {
-    routeList.innerHTML = "";
+    routeList.replaceChildren();
     routingCache.rules.forEach((rule, index) => {
-      const row = document.createElement("article");
-      row.className = "route-item-card";
+      const row = document.createElement("tr");
+      row.className = "route-row";
+      row.dataset.id = rule.id;
 
-      const top = document.createElement("div");
-      top.className = "route-item-top";
-      const main = document.createElement("div");
-      main.className = "route-item-main";
-      const orderBadge = document.createElement("span");
-      orderBadge.className = "route-order-badge";
-      orderBadge.textContent = `#${index + 1}`;
-      const label = document.createElement("strong");
-      label.className = "route-item-title";
-      label.textContent = `${rule.id}`;
-      const actionBadge = document.createElement("span");
-      actionBadge.className = "route-action-badge";
-      actionBadge.dataset.action = rule.action;
-      const actionText = ACTION_LABELS[rule.action] || rule.action;
-      actionBadge.textContent = rule.upstream_id ? `${actionText} → ${rule.upstream_id}` : actionText;
-      main.append(orderBadge, label, actionBadge);
+      const order = tableCell(`#${index + 1}`, "route-order", "顺序");
+      const identity = document.createElement("td");
+      identity.dataset.label = "规则";
+      const idText = document.createElement("strong");
+      idText.className = "route-id";
+      idText.textContent = rule.id;
+      identity.append(idText);
 
-      const controls = document.createElement("div");
-      controls.className = "route-item-controls";
-      [
-        ["上移", () => moveRoute(index, -1), index === 0],
-        ["下移", () => moveRoute(index, 1), index === routingCache.rules.length - 1],
-        ["删除", () => removeRoute(index), false],
-      ].forEach(([text, action, isDisabled]) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = text === "删除" ? "btn btn--text btn--danger btn--sm" : "btn btn--ghost btn--sm";
-        button.textContent = text;
-        button.disabled = isDisabled;
-        button.onclick = action;
-        controls.append(button);
-      });
-      top.append(main, controls);
-
-      const bottom = document.createElement("div");
-      bottom.className = "route-item-bottom";
-      const detail = document.createElement("p");
-      detail.className = "hint";
       const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
+      const kindName = KIND_LABELS[rule.classification.kind] || rule.classification.kind;
+      const match = tableCell(
+        `数据源 ${rule.source_id} · ${kindName}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}`,
+        "route-match",
+        "匹配"
+      );
+
+      const actionCell = document.createElement("td");
+      actionCell.dataset.label = "动作";
+      const actionText = ACTION_LABELS[rule.action] || rule.action;
+      const actionBadge = document.createElement("span");
+      const actionTone = rule.action === "reject" ? "danger" : rule.action === "upstream" ? "info" : "success";
+      actionBadge.className = `ui-badge ui-badge--${actionTone} route-action`;
+      actionBadge.textContent = rule.upstream_id ? `${actionText} → ${rule.upstream_id}` : actionText;
+      actionCell.append(actionBadge);
+
       const applied = (routeStatus.length ? routeStatus : routeStatusCache).find((item) => item.rule_id === rule.id) || {};
       const rawIssue = applied.failure || routingIssue(rule);
       const issueLabel = FAILURE_LABELS[rawIssue] || rawIssue;
-      const kindName = KIND_LABELS[rule.classification.kind] || rule.classification.kind;
-      detail.textContent = `数据源 ${rule.source_id} · ${kindName}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}${applied.exit ? ` · 出口 ${applied.exit}` : ""}${issueLabel ? ` · 异常: ${issueLabel}` : ""}`;
-      const healthPill = renderStatusPill(issueLabel ? issueLabel : "规则就绪", !issueLabel);
-      bottom.append(detail, healthPill);
+      const status = document.createElement("td");
+      status.dataset.label = "状态";
+      const statusWrap = document.createElement("div");
+      statusWrap.className = "route-status";
+      statusWrap.append(renderStatusPill(issueLabel || "规则就绪", !issueLabel, issueLabel ? "danger" : "success"));
+      if (applied.exit) {
+        const exit = document.createElement("span");
+        exit.className = "ui-help-text";
+        exit.textContent = `出口 ${applied.exit}`;
+        statusWrap.append(exit);
+      }
+      status.append(statusWrap);
 
-      row.append(top, bottom);
+      const actions = document.createElement("td");
+      actions.className = "ui-table__actions";
+      actions.dataset.label = "操作";
+      const buttons = [
+        ["上移", () => moveRoute(index, -1), index === 0],
+        ["下移", () => moveRoute(index, 1), index === routingCache.rules.length - 1],
+        ["删除", () => removeRoute(index), false],
+      ];
+      buttons.forEach(([text, action, disabled]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = text === "删除" ? "ui-btn ui-btn--danger-soft ui-btn--sm" : "ui-btn ui-btn--ghost ui-btn--sm";
+        button.textContent = text;
+        button.disabled = disabled;
+        button.onclick = action;
+        actions.append(button);
+      });
+
+      row.append(order, identity, match, actionCell, status, actions);
       routeList.append(row);
     });
   }
@@ -1586,9 +1678,15 @@ const renderRouting = (routing, routeStatus = []) => {
 };
 
 const loadRouting = async () => {
-  const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
-  routeStatusCache = payload.route_status || [];
-  renderRouting(payload.routing, routeStatusCache);
+  hideRoutingError();
+  try {
+    const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
+    routeStatusCache = payload.route_status || [];
+    renderRouting(payload.routing, routeStatusCache);
+  } catch (error) {
+    if (error && error.denied) throw error;
+    showRoutingError(error.message);
+  }
 };
 
 const saveRoutingRules = async () => {
@@ -1646,7 +1744,6 @@ const mutateUpstream = async (id, action) => {
 };
 
 if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", openUpstreamModal);
-if (routingQuickUpstream) routingQuickUpstream.addEventListener("click", openUpstreamModal);
 if (upstreamCancel) upstreamCancel.addEventListener("click", closeUpstreamModal);
 if (upstreamDialog) {
   upstreamDialog.addEventListener("click", (event) => {
@@ -1655,7 +1752,6 @@ if (upstreamDialog) {
 }
 
 if (openRouteDialogBtn) openRouteDialogBtn.addEventListener("click", () => openRouteModal(""));
-if (routingQuickRule) routingQuickRule.addEventListener("click", () => openRouteModal(""));
 if (routeCancel) routeCancel.addEventListener("click", closeRouteModal);
 if (routeDialog) {
   routeDialog.addEventListener("click", (event) => {
@@ -1753,8 +1849,23 @@ const renderWorkspace = async () => {
   executionReady = execution?.ready === true;
   renderExecutionBadge(execution);
   workspaceNode.hidden = false;
-  const payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  setListenLoading(true);
+  hideListenError();
+  renderListens([]);
+  let payload = null;
+  try {
+    payload = await panelJSON(`api/listens?agent_id=${encodeURIComponent(selectedAgentID)}`);
+  } catch (error) {
+    if (seq !== workspaceSeq) return;
+    setListenLoading(false);
+    if (error && error.denied) throw error;
+    showListenError(error.message);
+    fillShareHost(execution, []);
+    syncShareHostBar(true);
+    return;
+  }
   if (seq !== workspaceSeq) return;
+  setListenLoading(false);
   renderListens(payload.listens);
   await loadRouting();
   fillShareHost(execution, payload.listens);
@@ -1817,6 +1928,20 @@ if (createDialog) {
   createDialog.addEventListener("click", (event) => {
     if (event.target === createDialog) closeCreate();
   });
+  createDialog.addEventListener("close", () => {
+    const trigger = createDialog._returnFocus;
+    if (!trigger || typeof trigger.focus !== "function") return;
+    let attempts = 0;
+    const restore = () => {
+      if (trigger.disabled && attempts < 20) {
+        attempts += 1;
+        window.setTimeout(restore, 50);
+        return;
+      }
+      trigger.focus();
+    };
+    window.setTimeout(restore, 0);
+  });
 }
 if (detailClose) detailClose.addEventListener("click", closeDetail);
 if (detailPanel) {
@@ -1841,6 +1966,16 @@ if (qrCopy) {
     }
   });
 }
+if (listenRetry) listenRetry.addEventListener("click", async () => {
+  if (!selectedAgentID) return;
+  try {
+    await renderWorkspace();
+  } catch (error) {
+    showStatus(error.message, true);
+  }
+});
+if (routingRetry) routingRetry.addEventListener("click", () => loadRouting());
+
 const saveShareHost = async (host, message) => {
   if (!canMutate()) return;
   setBusy(true);
@@ -1935,10 +2070,8 @@ const boot = async () => {
       if (deniedNode) deniedNode.hidden = false;
       return;
     }
-    if (unavailableNode) {
-      unavailableNode.hidden = false;
-      unavailableNode.textContent = error.message || "暂时无法管理 Shadowsocks 服务。";
-    }
+    if (unavailableNode) unavailableNode.hidden = false;
+    if (unavailableDescNode) unavailableDescNode.textContent = error.message || "暂时无法管理 Shadowsocks 服务。";
   } finally {
     if (loadingNode) loadingNode.hidden = true;
   }

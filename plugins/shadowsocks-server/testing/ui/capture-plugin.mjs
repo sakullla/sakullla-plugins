@@ -111,6 +111,7 @@ const routeStatus = [
 ];
 
 export const id = "shadowsocks-server";
+export const themeMode = "host";
 
 export const scenes = [
   {
@@ -119,6 +120,7 @@ export const scenes = [
     run: async (ui) => {
       await ui.waitFor("#listen-list .listen-card");
       await ui.waitFor("#share-host");
+      await ui.waitFor("#tab-btn-routing");
     },
   },
   {
@@ -127,8 +129,9 @@ export const scenes = [
     run: async (ui) => {
       await ui.waitFor("#tab-btn-routing");
       await ui.click("#tab-btn-routing");
-      await ui.waitFor("#routing-panel .route-item-card");
+      await ui.waitFor("#route-rules .route-row");
       await ui.waitFor("#route-default-action");
+      await ui.waitFor("#route-rules-table");
     },
   },
 ];
@@ -149,6 +152,7 @@ export async function startPreview({ root = moduleRoot } = {}) {
       if (url.pathname === "/panel-api/agents") return json(200, { agents });
       if (url.pathname === "/panel-api/plugins/shadowsocks-server") return json(200, { instances: [{ targets: ["edge"] }] });
       if (url.pathname === "/api/execution") return json(200, { ready: true, execution, access: { can_read: true, can_write: true } });
+      if (url.pathname === "/api/defaults") return json(200, { defaults: { method: "2022-blake3-aes-128-gcm", port: 8388 } });
       if (url.pathname === "/api/listens") return json(200, { ready: true, listens, access: { can_read: true, can_write: true } });
       if (url.pathname === "/api/routing") return json(200, { ready: true, routing, route_status: routeStatus, access: { can_read: true, can_write: true } });
       const relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));

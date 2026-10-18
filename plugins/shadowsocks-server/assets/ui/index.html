@@ -1,58 +1,46 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-theme-mode="host">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Shadowsocks 服务</title>
+  <script src="ui-kit.js"></script>
+  <link rel="stylesheet" href="ui-kit.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="masthead">
-      <div class="masthead-copy">
-        <p class="eyebrow">
-          <span class="eyebrow-dot" aria-hidden="true"></span>
-          NETWORK · SHADOWSOCKS
-        </p>
-        <h1>Shadowsocks 服务</h1>
-        <p class="lede">在节点上开端口、加人，把链接或二维码发给客户端；支持按数据集配置出站分流。</p>
-        <div id="workspace-metrics" class="metrics-strip" hidden>
-          <div class="metric-chip">
-            <span class="metric-label">监听端口</span>
-            <strong id="metric-listens">0</strong>
-          </div>
-          <div class="metric-chip">
-            <span class="metric-label">可用账号</span>
-            <strong id="metric-users">0</strong>
-          </div>
-          <button type="button" id="metric-routing-btn" class="metric-chip metric-chip--action" title="点击管理数据集分流">
-            <span class="metric-label">出站策略</span>
-            <strong id="metric-routing">默认直连</strong>
-            <span class="metric-arrow" aria-hidden="true">→</span>
+  <div id="app-toasts" class="ui-toast-region" role="status" aria-live="polite"></div>
+  <main class="ui-page ui-page--wide">
+    <header class="ui-page-head">
+      <div class="ui-page-head__copy">
+        <p class="ui-eyebrow">网络 / Shadowsocks</p>
+        <h1 class="ui-title">Shadowsocks 服务</h1>
+        <p class="ui-lede">在节点上开端口、加人，把 ss:// 链接或二维码发给客户端；支持按数据集配置出站分流。</p>
+        <div id="workspace-metrics" class="workspace-metrics" hidden>
+          <span class="ui-badge ui-badge--plain">监听 <strong id="metric-listens">0</strong></span>
+          <span class="ui-badge ui-badge--plain">可用账号 <strong id="metric-users">0</strong></span>
+          <button id="metric-routing-btn" class="ui-badge ui-badge--info metric-link" type="button" title="点击管理数据集分流">
+            出站策略 <strong id="metric-routing">默认直连</strong><span aria-hidden="true">→</span>
           </button>
         </div>
       </div>
-      <section class="node-console" aria-label="节点与连接地址">
-        <div class="node-console-row">
-          <div class="field">
-            <div class="field-head">
-              <span class="field-label" id="agent-picker-label">节点</span>
-              <p id="execution-status" class="exec-flag" hidden></p>
-            </div>
+      <section class="page-console" aria-label="节点与连接地址">
+        <div class="page-console__row">
+          <div class="ui-field page-console__node">
+            <span class="ui-label" id="agent-picker-label">节点</span>
             <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
             <div class="agent-search-select" data-agent-picker="workspace" aria-labelledby="agent-picker-label"></div>
+            <p id="execution-status" class="ui-badge ui-badge--warning" hidden></p>
           </div>
+          <button id="create-toggle" class="ui-btn" type="button">新增监听</button>
         </div>
         <div class="share-host-bar" hidden>
-          <div class="field">
-            <div class="field-head">
-              <span class="field-label">连接地址</span>
-              <span id="share-host-source" class="host-source-badge" hidden></span>
-            </div>
+          <div class="ui-field">
+            <span class="ui-label">连接地址 <span id="share-host-source" class="ui-help-text" hidden></span></span>
             <div class="share-host-controls">
-              <input id="share-host" name="share_host" autocomplete="off" spellcheck="false" placeholder="填写客户端连接的域名或公网 IP" title="只改 ss:// 里的主机名，不改节点绑定端口。">
-              <button id="share-host-save" class="btn btn--ghost btn--sm" type="button">保存</button>
-              <button id="share-host-auto" class="btn btn--text btn--sm" type="button" hidden>恢复自动</button>
+              <input id="share-host" class="ui-input" name="share_host" autocomplete="off" spellcheck="false" placeholder="填写客户端连接的域名或公网 IP" title="只改 ss:// 里的主机名，不改节点绑定端口。">
+              <button id="share-host-save" class="ui-btn ui-btn--secondary" type="button">保存</button>
+              <button id="share-host-auto" class="ui-btn ui-btn--ghost" type="button" hidden>恢复自动</button>
             </div>
           </div>
         </div>
@@ -60,167 +48,223 @@
     </header>
 
     <div class="notices">
-      <p id="app-loading" class="notice" role="status">正在加载监听…</p>
-      <p id="app-unavailable" class="notice" role="status" hidden>暂时无法管理 Shadowsocks 服务。</p>
-      <p id="app-denied" class="notice" role="alert" hidden>无权管理 Shadowsocks 服务。</p>
+      <div id="app-loading" class="ui-loading app-loading" role="status">
+        <span class="ui-spinner" aria-hidden="true"></span><span>正在加载 Shadowsocks 服务…</span>
+      </div>
+      <section id="app-unavailable" class="ui-error-state app-message" role="alert" hidden>
+        <span class="ui-error-state__icon" aria-hidden="true">!</span>
+        <h2 class="ui-error-state__title">暂时无法管理 Shadowsocks 服务</h2>
+        <p id="app-unavailable-desc" class="ui-error-state__desc">页面已打开，但还不能读取节点或监听。刷新页面，或确认宿主与 shadowsocks-server 插件状态。</p>
+      </section>
+      <section id="app-denied" class="ui-denied app-message" role="alert" hidden>
+        <h2 class="ui-empty__title">无权管理 Shadowsocks 服务</h2>
+        <p class="ui-denied__desc">当前操作人没有读取或改动 Shadowsocks 监听与路由的权限。请联系管理员授予对应权限。</p>
+      </section>
       <p id="app-status" class="status-line" role="status" hidden></p>
     </div>
 
-    <section id="app-context" class="state-region" hidden>
-      <section class="state-panel" id="app-undeployed" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
-          <div class="setup-copy">
-            <h2>还没有可操作的节点</h2>
-            <p>请先到插件详情页部署执行面，再回到本页新增或改动监听。</p>
-          </div>
-        </div>
+    <section id="app-context" class="app-context" hidden>
+      <section id="app-undeployed" class="ui-empty app-context-card" hidden>
+        <span class="ui-empty__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 7.6-8 9-4.5-1.4-8-4-8-9V7z"/><path d="M9 12h6"/></svg>
+        </span>
+        <h2 class="ui-empty__title">还没有可操作的节点</h2>
+        <p class="ui-empty__desc">请先到插件详情页部署执行面，再回到本页新增或改动监听。</p>
       </section>
-      <section class="state-panel" id="app-node-empty" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
-          <div class="setup-copy">
-            <h2>未选择节点</h2>
-            <p>请先选择一台在线节点，再新增监听。</p>
-          </div>
-        </div>
+      <section id="app-node-empty" class="ui-empty app-context-card" hidden>
+        <span class="ui-empty__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+        </span>
+        <h2 class="ui-empty__title">未选择节点</h2>
+        <p class="ui-empty__desc">请先选择一台在线节点，再新增监听。</p>
       </section>
-      <section class="state-panel" id="app-offline" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="offline" aria-hidden="true"></span>
-          <div class="setup-copy">
-            <h2>节点离线</h2>
-            <p>该节点离线，不能新增或改动监听。</p>
-          </div>
-        </div>
+      <section id="app-offline" class="ui-empty app-context-card" hidden>
+        <span class="ui-empty__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M8 8a8 8 0 0111 11"/><path d="M5 12a8 8 0 012-4"/><circle cx="12" cy="19" r="1"/></svg>
+        </span>
+        <h2 class="ui-empty__title">节点离线</h2>
+        <p class="ui-empty__desc">该节点离线，不能新增或改动监听。</p>
       </section>
-      <section class="state-panel" id="app-execution-unavailable" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
-          <div class="setup-copy">
-            <h2>该节点暂时无法执行监听</h2>
-            <p>该节点在线，但还不能执行 Shadowsocks。刷新本页，或检查该节点上的 shadowsocks-server 插件状态。</p>
-          </div>
-        </div>
+      <section id="app-execution-unavailable" class="ui-empty app-context-card" hidden>
+        <span class="ui-empty__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 9v4"/><circle cx="12" cy="16.5" r=".6" fill="currentColor"/></svg>
+        </span>
+        <h2 class="ui-empty__title">该节点暂时无法执行监听</h2>
+        <p class="ui-empty__desc">该节点在线，但还不能执行 Shadowsocks。刷新本页，或检查该节点上的 shadowsocks-server 插件状态。</p>
       </section>
     </section>
 
     <section id="app-workspace" class="workspace" hidden>
-      <header class="workspace-bar">
-        <div class="workspace-tabs" role="tablist" aria-label="功能分区">
-          <button type="button" role="tab" id="tab-btn-listens" class="workspace-tab" data-tab="listens" aria-selected="true" aria-controls="app-list-panel">
-            <span>监听与账号</span>
-            <span id="listen-count" class="tab-badge" hidden></span>
+      <div class="workspace-bar">
+        <div class="ui-tabs" role="tablist" data-ui-tabs aria-label="功能分区">
+          <button type="button" role="tab" id="tab-btn-listens" class="ui-tab" data-tab="listens" aria-selected="true" aria-controls="app-list-panel">
+            监听与账号
+            <span id="listen-count" class="ui-badge ui-badge--plain tab-badge" hidden></span>
           </button>
-          <button type="button" role="tab" id="tab-btn-routing" class="workspace-tab" data-tab="routing" aria-selected="false" aria-controls="routing-panel">
-            <span>数据集分流</span>
-            <span id="routing-count" class="tab-badge" hidden></span>
+          <button type="button" role="tab" id="tab-btn-routing" class="ui-tab" data-tab="routing" aria-selected="false" aria-controls="routing-panel">
+            数据集分流
+            <span id="routing-count" class="ui-badge ui-badge--plain tab-badge" hidden></span>
           </button>
         </div>
-        <div class="workspace-actions">
-          <div class="workspace-bar-copy sr-only">
-            <h2 id="listen-list-title">监听</h2>
-          </div>
-          <button id="create-toggle" class="btn btn--primary" type="button">+ 新增监听</button>
-          <button id="routing-quick-rule" class="btn btn--primary" type="button" hidden>+ 添加规则</button>
-          <button id="routing-quick-upstream" class="btn btn--ghost" type="button" hidden>+ 添加上游</button>
-        </div>
-      </header>
+        <p class="workspace-bar__hint">监听是客户端入口；数据集分流决定流量出站。</p>
+      </div>
 
       <div class="workspace-body">
-        <section class="panel" id="app-list-panel" role="tabpanel" aria-labelledby="tab-btn-listens">
-          <div id="app-empty" class="empty-state" hidden>
-            <div class="empty-state-icon" aria-hidden="true">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+        <section id="app-list-panel" class="panel" role="tabpanel" aria-labelledby="tab-btn-listens">
+          <div class="listen-toolbar">
+            <div>
+              <h2 class="ui-section-title">监听</h2>
+              <p class="ui-section-desc">每个监听拥有独立端口、加密方式与账号；未生效的监听等待节点应用。</p>
             </div>
-            <div class="empty-state-copy">
-              <h2>这台节点还没有监听</h2>
-              <p class="hint">一键创建加密端口与账号，保存后即可复制 ss:// 链接或展示二维码发给客户端。</p>
-            </div>
-            <button id="empty-create" class="btn btn--primary" type="button">+ 新增监听</button>
           </div>
+
+          <div id="listen-loading" class="listen-loading" role="status" hidden>
+            <p class="ui-loading"><span class="ui-spinner" aria-hidden="true"></span><span>正在加载监听…</span></p>
+            <div class="listen-grid" aria-hidden="true">
+              <div class="ui-skeleton listen-skeleton"></div>
+              <div class="ui-skeleton listen-skeleton"></div>
+            </div>
+          </div>
+
+          <section id="listen-error" class="ui-error-state app-message" role="alert" hidden>
+            <span class="ui-error-state__icon" aria-hidden="true">!</span>
+            <h2 class="ui-error-state__title">监听加载失败</h2>
+            <p id="listen-error-desc" class="ui-error-state__desc">暂时无法读取监听列表。刷新页面，或稍后重试。</p>
+            <div class="ui-error-state__actions">
+              <button id="listen-retry" class="ui-btn ui-btn--secondary" type="button">重试</button>
+            </div>
+          </section>
+
+          <div id="app-empty" class="ui-empty" hidden>
+            <span class="ui-empty__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-3.6 7-9V5l-7-2-7 2v7c0 5.4 7 9 7 9z"/><path d="M12 8v7"/><path d="M8.5 11.5h7"/></svg>
+            </span>
+            <h2 class="ui-empty__title">这台节点还没有监听</h2>
+            <p class="ui-empty__desc">新增一个监听，保存后即可复制 ss:// 链接或展示二维码发给客户端。</p>
+            <div class="ui-empty__actions">
+              <button id="empty-create" class="ui-btn" type="button">新增监听</button>
+            </div>
+          </div>
+
           <div id="listen-list" class="listen-grid"></div>
         </section>
 
-        <section class="panel" id="routing-panel" role="tabpanel" aria-labelledby="tab-btn-routing" hidden>
-          <div class="routing-overview-card">
-            <div class="routing-overview-copy">
-              <div class="routing-overview-head">
-                <h2>数据集分流与默认出口</h2>
-                <span class="pill" data-on="true">全节点同步生效</span>
+        <section id="routing-panel" class="panel" role="tabpanel" aria-labelledby="tab-btn-routing" hidden>
+          <section class="ui-card routing-default">
+            <div class="ui-card__head">
+              <div>
+                <h2 class="ui-card__title">默认出口与数据集分流</h2>
+                <p class="ui-card__desc">按规则顺序匹配域名或 IP，命中即执行对应动作；未命中的流量走默认动作。上游失败不会回退直连。</p>
               </div>
-              <p class="hint">按规则顺序匹配域名或 IP，命中即执行对应动作；未命中的流量走右侧「默认动作」。上游失败不会回退直连。</p>
-              <details class="routing-tech-note">
-                <summary>查看协议与域名嗅探说明</summary>
-                <p class="hint">仅 IP 目标的 TCP 可在拨号前用最多 16 KiB / 250 ms 识别 HTTP Host 或明文 TLS SNI；UDP、ECH、HTTP/2 和无法识别的流量按 IP/默认规则处理，原目标与字节不变。</p>
-              </details>
+              <span class="ui-badge ui-badge--success">全节点同步生效</span>
             </div>
-            <div class="default-route-box">
-              <span class="default-route-title">未命中规则时（兜底出口）</span>
-              <div class="default-route-controls">
-                <label class="field">
-                  <span class="field-label">默认动作</span>
-                  <select id="route-default-action">
-                    <option value="direct">直连 (Direct)</option>
-                    <option value="reject">拒绝 (Reject)</option>
-                    <option value="upstream">转发至指定上游</option>
-                  </select>
-                </label>
-                <label class="field" id="route-default-upstream-field" hidden>
-                  <span class="field-label">默认上游</span>
-                  <select id="route-default-upstream"></select>
-                </label>
-                <button id="route-save-default" class="btn btn--primary" type="button">保存默认路由</button>
+            <div class="routing-default__controls">
+              <label class="ui-field">
+                <span class="ui-label">默认动作</span>
+                <select id="route-default-action" class="ui-select">
+                  <option value="direct">直连 (Direct)</option>
+                  <option value="reject">拒绝 (Reject)</option>
+                  <option value="upstream">转发至指定上游</option>
+                </select>
+              </label>
+              <label class="ui-field" id="route-default-upstream-field" hidden>
+                <span class="ui-label">默认上游</span>
+                <select id="route-default-upstream" class="ui-select"></select>
+              </label>
+              <button id="route-save-default" class="ui-btn ui-btn--secondary" type="button">保存默认路由</button>
+            </div>
+            <details class="ui-help routing-help">
+              <summary>协议与域名嗅探说明</summary>
+              <div class="ui-help__body">
+                <p>仅 IP 目标的 TCP 可在拨号前用最多 16 KiB / 250 ms 识别 HTTP Host 或明文 TLS SNI；UDP、ECH、HTTP/2 和无法识别的流量按 IP/默认规则处理，原目标与字节不变。</p>
               </div>
-            </div>
-          </div>
+            </details>
+          </section>
 
-          <div class="routing-columns">
-            <section class="routing-card" aria-labelledby="rules-section-title">
-              <header class="routing-card-head">
+          <section id="routing-error" class="ui-error-state app-message" role="alert" hidden>
+            <span class="ui-error-state__icon" aria-hidden="true">!</span>
+            <h2 class="ui-error-state__title">数据集分流加载失败</h2>
+            <p id="routing-error-desc" class="ui-error-state__desc">暂时无法读取规则与上游。刷新页面，或稍后重试。</p>
+            <div class="ui-error-state__actions">
+              <button id="routing-retry" class="ui-btn ui-btn--secondary" type="button">重试</button>
+            </div>
+          </section>
+
+          <div class="routing-grid">
+            <section class="routing-section" aria-labelledby="rules-section-title">
+              <div class="ui-section-head">
                 <div>
-                  <div class="routing-card-title-row">
-                    <h3 id="rules-section-title">分流规则</h3>
-                    <span id="route-rules-badge" class="pill">0 条</span>
+                  <div class="routing-title-row">
+                    <h2 id="rules-section-title" class="ui-section-title">分流规则</h2>
+                    <span id="route-rules-badge" class="ui-badge ui-badge--plain">0 条</span>
                   </div>
-                  <p class="hint">从上到下按优先级依次匹配，第一条命中的规则生效。</p>
+                  <p class="ui-section-desc">从上到下按优先级依次匹配，第一条命中的规则生效。</p>
                 </div>
-                <button id="open-route-dialog" class="btn btn--primary btn--sm" type="button">+ 添加规则</button>
-              </header>
-
-              <div class="preset-bar" aria-label="快捷规则模板">
-                <span class="preset-bar-label">快捷模板：</span>
-                <button type="button" class="preset-chip" data-preset="ai-upstream">AI 服务走上游</button>
-                <button type="button" class="preset-chip" data-preset="cn-direct">国内域名直连</button>
-                <button type="button" class="preset-chip" data-preset="cn-ip-direct">国内 IP 直连</button>
-                <button type="button" class="preset-chip" data-preset="ads-reject">广告域名拒绝</button>
-                <button type="button" class="preset-chip" data-preset="private-reject">私有网段拒绝</button>
+                <button id="open-route-dialog" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">添加规则</button>
               </div>
 
-              <div id="route-rules-empty" class="sub-empty-state">
-                <p>暂未配置分流规则，所有流量均按默认出口处理。</p>
-                <p class="hint">点击上方「快捷模板」或「+ 添加规则」即可按 GeoSite / GeoIP 数据集分流。</p>
+              <div class="routing-presets" aria-label="快捷规则模板">
+                <span class="ui-help-text">快捷模板</span>
+                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="ai-upstream">AI 服务走上游</button>
+                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="cn-direct">国内域名直连</button>
+                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="cn-ip-direct">国内 IP 直连</button>
+                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="ads-reject">广告域名拒绝</button>
+                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="private-reject">私有网段拒绝</button>
               </div>
-              <div id="route-rules" class="route-list"></div>
+
+              <div id="route-rules-empty" class="ui-empty routing-empty">
+                <h2 class="ui-empty__title">暂未配置分流规则</h2>
+                <p class="ui-empty__desc">所有流量均按默认出口处理。点击上方快捷模板或「添加规则」，即可按 GeoSite / GeoIP 数据集分流。</p>
+              </div>
+
+              <div id="route-rules-table" class="ui-table-wrap" hidden>
+                <table class="ui-table routing-table routing-table--rules">
+                  <thead>
+                    <tr>
+                      <th scope="col">顺序</th>
+                      <th scope="col">规则</th>
+                      <th scope="col">匹配</th>
+                      <th scope="col">动作</th>
+                      <th scope="col">状态</th>
+                      <th scope="col" class="ui-table__num">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="route-rules"></tbody>
+                </table>
+              </div>
             </section>
 
-            <section class="routing-card" aria-labelledby="upstreams-section-title">
-              <header class="routing-card-head">
+            <section class="routing-section" aria-labelledby="upstreams-section-title">
+              <div class="ui-section-head">
                 <div>
-                  <div class="routing-card-title-row">
-                    <h3 id="upstreams-section-title">上游节点</h3>
-                    <span id="route-upstreams-badge" class="pill">0 个</span>
+                  <div class="routing-title-row">
+                    <h2 id="upstreams-section-title" class="ui-section-title">上游节点</h2>
+                    <span id="route-upstreams-badge" class="ui-badge ui-badge--plain">0 个</span>
                   </div>
-                  <p class="hint">供分流规则或默认路由调用的远端 Shadowsocks 出口。</p>
+                  <p class="ui-section-desc">供分流规则或默认路由调用的远端 Shadowsocks 出口。</p>
                 </div>
-                <button id="open-upstream-dialog" class="btn btn--ghost btn--sm" type="button">+ 添加上游</button>
-              </header>
-
-              <div id="route-upstreams-empty" class="sub-empty-state">
-                <p>暂未添加上游节点。</p>
-                <p class="hint">若只需「直连」或「拒绝」分流，无需配置上游；如需链式转发请先添加上游。</p>
+                <button id="open-upstream-dialog" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">添加上游</button>
               </div>
-              <div id="route-upstreams" class="route-list"></div>
+
+              <div id="route-upstreams-empty" class="ui-empty routing-empty">
+                <h2 class="ui-empty__title">暂未添加上游节点</h2>
+                <p class="ui-empty__desc">只需「直连」或「拒绝」分流时无需配置上游；需要链式转发时先添加上游。</p>
+              </div>
+
+              <div id="route-upstreams-table" class="ui-table-wrap" hidden>
+                <table class="ui-table routing-table routing-table--upstreams">
+                  <thead>
+                    <tr>
+                      <th scope="col">标识</th>
+                      <th scope="col">地址</th>
+                      <th scope="col">能力</th>
+                      <th scope="col">状态</th>
+                      <th scope="col" class="ui-table__num">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="route-upstreams"></tbody>
+                </table>
+              </div>
             </section>
           </div>
         </section>
@@ -228,221 +272,241 @@
     </section>
   </main>
 
-  <dialog id="listen-detail" aria-labelledby="detail-title">
-    <header class="detail-head">
-      <div class="detail-head-copy">
-        <h3 id="detail-title">监听详情</h3>
-        <p id="detail-meta" class="hint" hidden></p>
+  <dialog id="listen-detail" class="ui-dialog" data-ui-dialog aria-labelledby="detail-title">
+    <header class="ui-dialog__head">
+      <div>
+        <h2 id="detail-title" class="ui-dialog__title">监听详情</h2>
+        <p id="detail-meta" class="ui-dialog__desc" hidden></p>
       </div>
-      <button id="detail-close" class="btn btn--text" type="button">关闭</button>
+      <button id="detail-close" class="ui-btn ui-btn--ghost ui-btn--sm" type="button">关闭</button>
     </header>
-    <div id="detail-users" class="account-stack"></div>
-    <footer id="detail-actions" class="dialog-actions"></footer>
+    <div class="ui-dialog__body">
+      <div id="detail-users" class="account-stack"></div>
+    </div>
+    <footer id="detail-actions" class="ui-dialog__footer"></footer>
   </dialog>
 
-  <dialog id="create-dialog" aria-labelledby="app-create-title">
+  <dialog id="create-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="app-create-title">
     <form id="create-form" method="post">
-      <header class="dialog-head">
-        <h2 id="app-create-title">新增监听</h2>
-        <p class="hint">创建一个新的加密端口与首个客户端账号。</p>
+      <header class="ui-dialog__head">
+        <div>
+          <h2 id="app-create-title" class="ui-dialog__title">新增监听</h2>
+          <p class="ui-dialog__desc">创建一个新的加密端口与首个客户端账号。</p>
+        </div>
       </header>
-      <label class="field">
-        <span class="field-label">显示名称</span>
-        <input name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 笔记本 / alice（留空自动生成）">
-      </label>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">加密方式</span>
-          <select name="method">
-            <option value="2022-blake3-aes-128-gcm" selected>SS2022 · AES-128（推荐 · 支持多用户）</option>
-            <option value="2022-blake3-aes-256-gcm">SS2022 · AES-256（支持多用户）</option>
-            <option value="aes-128-gcm">AES-128-GCM（传统单用户）</option>
-            <option value="aes-256-gcm">AES-256-GCM（传统单用户）</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">监听端口（TCP + UDP）</span>
-          <input name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="自动分配空闲端口">
-        </label>
+      <div class="ui-dialog__body">
+        <div class="ui-form-grid">
+          <label class="ui-field ui-field--full">
+            <span class="ui-label">显示名称</span>
+            <input class="ui-input" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 笔记本 / alice（留空自动生成）">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">加密方式</span>
+            <select class="ui-select" name="method">
+              <option value="2022-blake3-aes-128-gcm" selected>SS2022 · AES-128（推荐 · 支持多用户）</option>
+              <option value="2022-blake3-aes-256-gcm">SS2022 · AES-256（支持多用户）</option>
+              <option value="aes-128-gcm">AES-128-GCM（传统单用户）</option>
+              <option value="aes-256-gcm">AES-256-GCM（传统单用户）</option>
+            </select>
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">监听端口（TCP + UDP）</span>
+            <input class="ui-input" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="自动分配空闲端口">
+          </label>
+        </div>
+        <details class="ui-help advanced" id="advanced-keys">
+          <summary>自行填写密钥（可选）</summary>
+          <div class="ui-help__body">
+            <p>留空则保存时自动生成高强度随机密钥。</p>
+            <div class="ui-form-grid">
+              <label class="ui-field">
+                <span class="ui-label">用户密钥</span>
+                <input class="ui-input" name="password" autocomplete="off" spellcheck="false" placeholder="自动生成">
+              </label>
+              <label class="ui-field" id="server-psk-field">
+                <span class="ui-label">服务端密钥 (Server PSK)</span>
+                <input class="ui-input" name="server_psk" autocomplete="off" spellcheck="false" placeholder="新端口自动生成">
+              </label>
+            </div>
+          </div>
+        </details>
+        <p class="form-note">同一节点上端口不能重复。推荐使用 SS2022，支持在同端口下追加多个独立用户。</p>
       </div>
-      <details class="advanced" id="advanced-keys">
-        <summary>自行填写密钥（可选）</summary>
-        <p class="hint">留空则保存时自动生成高强度随机密钥。</p>
-        <label class="field">
-          <span class="field-label">用户密钥</span>
-          <input name="password" autocomplete="off" spellcheck="false" placeholder="自动生成">
-        </label>
-        <label class="field" id="server-psk-field">
-          <span class="field-label">服务端密钥 (Server PSK)</span>
-          <input name="server_psk" autocomplete="off" spellcheck="false" placeholder="新端口自动生成">
-        </label>
-      </details>
-      <p class="form-note">同一节点上端口不能重复。推荐使用 SS2022，支持在同端口下追加多个独立用户。</p>
-      <footer class="dialog-actions">
-        <button id="create-cancel" class="btn btn--ghost" type="button">取消</button>
-        <button id="create-submit" class="btn btn--primary" type="submit">保存并开启</button>
+      <footer class="ui-dialog__footer">
+        <button id="create-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
+        <button id="create-submit" class="ui-btn" type="submit">保存并开启</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="append-dialog" aria-labelledby="append-title">
+  <dialog id="append-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="append-title">
     <form id="append-form" method="post">
-      <header class="dialog-head">
-        <h3 id="append-title">追加用户</h3>
-        <p id="append-meta" class="hint"></p>
+      <header class="ui-dialog__head">
+        <div>
+          <h2 id="append-title" class="ui-dialog__title">追加用户</h2>
+          <p id="append-meta" class="ui-dialog__desc"></p>
+        </div>
       </header>
-      <label class="field">
-        <span class="field-label">显示名称</span>
-        <input id="append-name" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 平板">
-      </label>
-      <p class="form-note">每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。</p>
-      <footer class="dialog-actions">
-        <button id="append-cancel" class="btn btn--ghost" type="button">取消</button>
-        <button id="append-submit" class="btn btn--primary" type="submit">追加</button>
+      <div class="ui-dialog__body">
+        <label class="ui-field">
+          <span class="ui-label">显示名称</span>
+          <input id="append-name" class="ui-input" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 平板">
+        </label>
+        <p class="form-note">每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。</p>
+      </div>
+      <footer class="ui-dialog__footer">
+        <button id="append-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
+        <button id="append-submit" class="ui-btn" type="submit">追加</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="upstream-dialog" aria-labelledby="upstream-dialog-title">
+  <dialog id="upstream-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="upstream-dialog-title">
     <form id="upstream-form" method="post">
-      <header class="dialog-head">
-        <h3 id="upstream-dialog-title">添加上游节点</h3>
-        <p class="hint">配置远端 Shadowsocks 节点，供分流规则或默认路由转发使用。</p>
-      </header>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">上游标识 (ID)</span>
-          <input name="id" required autocomplete="off" spellcheck="false" placeholder="例如 hk-node 或 ai-upstream">
-        </label>
-        <label class="field">
-          <span class="field-label">加密方式</span>
-          <select name="method">
-            <option value="2022-blake3-aes-128-gcm">SS2022 · AES-128</option>
-            <option value="2022-blake3-aes-256-gcm">SS2022 · AES-256</option>
-            <option value="aes-128-gcm">AES-128-GCM</option>
-            <option value="aes-256-gcm">AES-256-GCM</option>
-          </select>
-        </label>
-      </div>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">服务器地址</span>
-          <input name="host" required autocomplete="off" spellcheck="false" placeholder="域名或 IP，例如 203.0.113.20">
-        </label>
-        <label class="field">
-          <span class="field-label">端口</span>
-          <input name="port" type="number" min="1" max="65535" required value="8388">
-        </label>
-      </div>
-      <label class="field">
-        <span class="field-label">连接密钥 / 客户端密码</span>
-        <input name="password" type="password" required autocomplete="new-password" placeholder="填写远端节点的连接密码或 SS2022 完整密钥">
-      </label>
-      <div class="protocol-checks">
-        <span class="field-label">支持转发协议</span>
-        <div class="protocol-checks-row">
-          <label class="check-card"><input name="tcp" type="checkbox" checked> <span>TCP 流量</span></label>
-          <label class="check-card"><input name="udp" type="checkbox" checked> <span>UDP 流量</span></label>
+      <header class="ui-dialog__head">
+        <div>
+          <h2 id="upstream-dialog-title" class="ui-dialog__title">添加上游节点</h2>
+          <p class="ui-dialog__desc">配置远端 Shadowsocks 节点，供分流规则或默认路由转发使用。</p>
         </div>
+      </header>
+      <div class="ui-dialog__body">
+        <div class="ui-form-grid">
+          <label class="ui-field">
+            <span class="ui-label">上游标识 (ID)</span>
+            <input class="ui-input" name="id" required autocomplete="off" spellcheck="false" placeholder="例如 hk-node 或 ai-upstream">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">加密方式</span>
+            <select class="ui-select" name="method">
+              <option value="2022-blake3-aes-128-gcm">SS2022 · AES-128</option>
+              <option value="2022-blake3-aes-256-gcm">SS2022 · AES-256</option>
+              <option value="aes-128-gcm">AES-128-GCM</option>
+              <option value="aes-256-gcm">AES-256-GCM</option>
+            </select>
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">服务器地址</span>
+            <input class="ui-input" name="host" required autocomplete="off" spellcheck="false" placeholder="域名或 IP，例如 203.0.113.20">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">端口</span>
+            <input class="ui-input" name="port" type="number" min="1" max="65535" required value="8388">
+          </label>
+          <label class="ui-field ui-field--full">
+            <span class="ui-label">连接密钥 / 客户端密码</span>
+            <input class="ui-input" name="password" type="password" required autocomplete="new-password" placeholder="填写远端节点的连接密码或 SS2022 完整密钥">
+          </label>
+        </div>
+        <fieldset class="ui-fieldset protocol-checks">
+          <legend class="ui-legend">支持转发协议</legend>
+          <div class="protocol-checks-row">
+            <label class="ui-check"><input name="tcp" type="checkbox" checked> <span>TCP 流量</span></label>
+            <label class="ui-check"><input name="udp" type="checkbox" checked> <span>UDP 流量</span></label>
+          </div>
+        </fieldset>
       </div>
-      <footer class="dialog-actions">
-        <button id="upstream-cancel" class="btn btn--ghost" type="button">取消</button>
-        <button class="btn btn--primary" type="submit">添加上游</button>
+      <footer class="ui-dialog__footer">
+        <button id="upstream-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
+        <button class="ui-btn" type="submit">添加上游</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="route-dialog" aria-labelledby="route-dialog-title">
+  <dialog id="route-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="route-dialog-title">
     <form id="route-form" method="post">
-      <header class="dialog-head">
-        <h3 id="route-dialog-title">添加分流规则</h3>
-        <p class="hint">选择数据集分类与命中后的处理动作，支持一键套用常见场景。</p>
+      <header class="ui-dialog__head">
+        <div>
+          <h2 id="route-dialog-title" class="ui-dialog__title">添加分流规则</h2>
+          <p class="ui-dialog__desc">选择数据集分类与命中后的处理动作，支持一键套用常见场景。</p>
+        </div>
       </header>
-      <div class="dialog-presets">
-        <span class="field-label">场景快速填充</span>
-        <div class="preset-chips-wrap">
-          <button type="button" class="preset-chip" data-fill-preset="ai-upstream">AI 服务（非中国）</button>
-          <button type="button" class="preset-chip" data-fill-preset="cn-direct">中国大陆域名</button>
-          <button type="button" class="preset-chip" data-fill-preset="cn-ip-direct">中国大陆 IP</button>
-          <button type="button" class="preset-chip" data-fill-preset="ads-reject">广告域名拦截</button>
-          <button type="button" class="preset-chip" data-fill-preset="private-reject">私有网段拦截</button>
+      <div class="ui-dialog__body">
+        <div class="dialog-presets">
+          <span class="ui-label">场景快速填充</span>
+          <div class="preset-chips-wrap">
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-fill-preset="ai-upstream">AI 服务（非中国）</button>
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-fill-preset="cn-direct">中国大陆域名</button>
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-fill-preset="cn-ip-direct">中国大陆 IP</button>
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-fill-preset="ads-reject">广告域名拦截</button>
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-fill-preset="private-reject">私有网段拦截</button>
+          </div>
+        </div>
+        <div class="ui-form-grid">
+          <label class="ui-field">
+            <span class="ui-label">匹配类型</span>
+            <select class="ui-select" name="kind" id="route-kind-select">
+              <option value="domain">域名集合 (GeoSite)</option>
+              <option value="country">国家代码 (GeoIP)</option>
+              <option value="cidr">CIDR 网段 (GeoIP)</option>
+              <option value="region">地区分类</option>
+            </select>
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">数据源 ID</span>
+            <input class="ui-input" name="source_id" id="route-source-input" required autocomplete="off" spellcheck="false" value="geosite" placeholder="例如 geosite 或 geoip">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">分类名称</span>
+            <input class="ui-input" name="classification" id="route-class-input" required autocomplete="off" spellcheck="false" value="category-ai" placeholder="例如 category-ai、cn、private">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">附加属性（可选）</span>
+            <input class="ui-input" name="attribute" id="route-attr-input" autocomplete="off" spellcheck="false" placeholder="例如 !cn（排除中国大陆）">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">命中动作</span>
+            <select class="ui-select" name="action" id="route-action-select">
+              <option value="upstream">转发至指定上游</option>
+              <option value="direct">直连 (Direct)</option>
+              <option value="reject">拒绝连接 (Reject)</option>
+            </select>
+          </label>
+          <label class="ui-field" id="route-upstream-field">
+            <span class="ui-label">目标上游</span>
+            <select class="ui-select" name="upstream_id" id="route-upstream-select"></select>
+          </label>
+          <label class="ui-field ui-field--full">
+            <span class="ui-label">规则标识 (ID)</span>
+            <input class="ui-input" name="id" id="route-id-input" required autocomplete="off" spellcheck="false" placeholder="例如 ai-not-cn">
+          </label>
         </div>
       </div>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">匹配类型</span>
-          <select name="kind" id="route-kind-select">
-            <option value="domain">域名集合 (GeoSite)</option>
-            <option value="country">国家代码 (GeoIP)</option>
-            <option value="cidr">CIDR 网段 (GeoIP)</option>
-            <option value="region">地区分类</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">数据源 ID</span>
-          <input name="source_id" id="route-source-input" required autocomplete="off" spellcheck="false" value="geosite" placeholder="例如 geosite 或 geoip">
-        </label>
-      </div>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">分类名称</span>
-          <input name="classification" id="route-class-input" required autocomplete="off" spellcheck="false" value="category-ai" placeholder="例如 category-ai、cn、private">
-        </label>
-        <label class="field">
-          <span class="field-label">附加属性（可选）</span>
-          <input name="attribute" id="route-attr-input" autocomplete="off" spellcheck="false" placeholder="例如 !cn（排除中国大陆）">
-        </label>
-      </div>
-      <div class="field-row">
-        <label class="field">
-          <span class="field-label">命中动作</span>
-          <select name="action" id="route-action-select">
-            <option value="upstream">转发至指定上游</option>
-            <option value="direct">直连 (Direct)</option>
-            <option value="reject">拒绝连接 (Reject)</option>
-          </select>
-        </label>
-        <label class="field" id="route-upstream-field">
-          <span class="field-label">目标上游</span>
-          <select name="upstream_id" id="route-upstream-select"></select>
-        </label>
-      </div>
-      <label class="field">
-        <span class="field-label">规则标识 (ID)</span>
-        <input name="id" id="route-id-input" required autocomplete="off" spellcheck="false" placeholder="例如 ai-not-cn">
-      </label>
-      <footer class="dialog-actions">
-        <button id="route-cancel" class="btn btn--ghost" type="button">取消</button>
-        <button class="btn btn--primary" type="submit">添加规则</button>
+      <footer class="ui-dialog__footer">
+        <button id="route-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
+        <button class="ui-btn" type="submit">添加规则</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <dialog id="confirm-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="confirm-title">
     <form method="dialog">
-      <header class="dialog-head">
-        <h3 id="confirm-title">确认</h3>
+      <header class="ui-dialog__head">
+        <h2 id="confirm-title" class="ui-dialog__title">确认</h2>
       </header>
-      <p id="confirm-body"></p>
-      <footer class="dialog-actions">
-        <button id="confirm-cancel" class="btn btn--ghost" value="cancel">取消</button>
-        <button id="confirm-ok" class="btn btn--primary" value="ok">确定</button>
+      <div class="ui-dialog__body">
+        <p id="confirm-body" class="ui-muted"></p>
+      </div>
+      <footer class="ui-dialog__footer">
+        <button id="confirm-cancel" class="ui-btn ui-btn--secondary" value="cancel">取消</button>
+        <button id="confirm-ok" class="ui-btn" value="ok">确定</button>
       </footer>
     </form>
   </dialog>
 
-  <dialog id="qr-dialog" aria-labelledby="qr-title">
+  <dialog id="qr-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="qr-title">
     <form method="dialog" id="qr-form">
-      <header class="dialog-head">
-        <h3 id="qr-title">二维码</h3>
+      <header class="ui-dialog__head">
+        <h2 id="qr-title" class="ui-dialog__title">二维码</h2>
       </header>
-      <figure class="qr-frame">
-        <img id="qr-image" class="qr-image" alt="ss:// 二维码">
-        <figcaption id="qr-caption" class="hint"></figcaption>
-      </figure>
-      <footer class="dialog-actions">
-        <button id="qr-close" class="btn btn--ghost" value="cancel" type="submit">关闭</button>
-        <button id="qr-copy" class="btn btn--primary" type="button">复制 ss://</button>
+      <div class="ui-dialog__body">
+        <figure class="qr-frame">
+          <img id="qr-image" class="qr-image" alt="ss:// 二维码">
+          <figcaption id="qr-caption" class="ui-help-text"></figcaption>
+        </figure>
+      </div>
+      <footer class="ui-dialog__footer">
+        <button id="qr-close" class="ui-btn ui-btn--secondary" value="cancel" type="submit">关闭</button>
+        <button id="qr-copy" class="ui-btn" type="button">复制 ss://</button>
       </footer>
     </form>
   </dialog>

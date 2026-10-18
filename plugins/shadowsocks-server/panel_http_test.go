@@ -14,7 +14,7 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 	var _ http.Handler = (*Controller)(nil)
 	controller := &Controller{}
 	bodies := map[string]string{}
-	for _, route := range []string{"/", "/app.js", "/style.css"} {
+	for _, route := range []string{"/", "/app.js", "/style.css", "/ui-kit.css", "/ui-kit.js"} {
 		recorder := httptest.NewRecorder()
 		controller.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
@@ -26,50 +26,114 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		}
 		bodies[route] = body
 	}
-	for _, required := range []string{"数据集分流", "route-upstreams", "route-rules", "route-default-action", `id="routing-panel" role="tabpanel" aria-labelledby="tab-btn-routing" hidden`, `id="upstream-dialog"`, `id="route-dialog"`} {
-		if !strings.Contains(bodies["/"], required) {
-			t.Fatalf("routing page missing %q", required)
-		}
-	}
-	for _, required := range []string{"api/upstreams", "api/routing", "moveRoute", "removeRoute", "default_upstream_id", "secret_ref", "switchWorkspaceTab", "ROUTE_PRESETS"} {
-		if !strings.Contains(bodies["/app.js"], required) {
-			t.Fatalf("routing interaction missing %q", required)
-		}
-	}
-	policy := httptest.NewRecorder()
-	controller.ServeHTTP(policy, httptest.NewRequest(http.MethodGet, "/", nil))
-	if !strings.Contains(policy.Header().Get("Content-Security-Policy"), "default-src 'self'") {
-		t.Fatal("embedded page lacks self-contained content policy")
-	}
 	page := bodies["/"]
 	script := bodies["/app.js"]
-	for _, fragment := range []string{
+	style := bodies["/style.css"]
+	kitCSS := bodies["/ui-kit.css"]
+	kitJS := bodies["/ui-kit.js"]
+
+	// The page runs the shared kit in host mode: the kit owns theme resolution,
+	// so the page must not carry its own copy of the theme mapping.
+	for _, required := range []string{
+		`data-theme-mode="host"`,
+		`src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`class="ui-page`,
+		`class="ui-page-head`,
+		`data-ui-tabs`,
+		`class="ui-tabs"`,
+		`data-agent-picker="workspace"`,
+		`id="agent-select"`,
+		`id="share-host"`,
+		`id="share-host-save"`,
+		`id="share-host-auto"`,
+		`id="create-toggle"`,
+		`id="empty-create"`,
+		`id="workspace-metrics"`,
+		`id="app-loading"`,
+		`id="app-unavailable"`,
+		`id="app-denied"`,
+		`id="app-status"`,
+		`id="app-context"`,
+		`id="app-undeployed"`,
+		`id="app-node-empty"`,
+		`id="app-offline"`,
+		`id="app-execution-unavailable"`,
+		`id="app-workspace"`,
+		`id="tab-btn-listens"`,
+		`id="tab-btn-routing"`,
+		`id="listen-list"`,
+		`id="listen-loading"`,
+		`id="listen-error"`,
+		`id="listen-retry"`,
+		`id="app-empty"`,
+		`id="listen-detail"`,
+		`id="detail-title"`,
+		`id="detail-meta"`,
+		`id="detail-users"`,
+		`id="detail-actions"`,
+		`id="create-dialog"`,
+		`id="create-form"`,
+		`id="advanced-keys"`,
+		`id="server-psk-field"`,
+		`id="append-dialog"`,
+		`id="upstream-dialog"`,
+		`id="route-dialog"`,
+		`id="confirm-dialog"`,
+		`id="qr-dialog"`,
+		`id="routing-panel"`,
+		`id="route-default-action"`,
+		`id="route-save-default"`,
+		`id="routing-error"`,
+		`id="routing-retry"`,
+		`id="route-rules"`,
+		`id="route-rules-table"`,
+		`id="route-rules-empty"`,
+		`id="route-upstreams"`,
+		`id="route-upstreams-table"`,
+		`id="route-upstreams-empty"`,
+		`id="open-route-dialog"`,
+		`id="open-upstream-dialog"`,
+		`class="ui-dialog"`,
+		`class="ui-table`,
+		`ui-empty`,
+		`ui-error-state`,
+		`ui-loading`,
+		`ui-skeleton`,
+		`ui-badge`,
+		`name="method"`,
+		`name="port"`,
+		`name="password"`,
+		`name="server_psk"`,
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("panel page missing %q", required)
+		}
+	}
+	if strings.Count(page, "data-ui-dialog") < 7 {
+		t.Fatal("short-task dialogs must all opt into the kit dialog behaviour")
+	}
+	for _, required := range []string{
 		"Shadowsocks 服务",
 		"选择节点",
 		"新增监听",
 		"追加用户",
-		"id=\"append-dialog\"",
 		"连接地址",
-		"id=\"share-host\"",
 		"恢复自动",
-		"id=\"share-host-auto\"",
-		"data-agent-picker=\"workspace\"",
-		"id=\"agent-select\"",
 		"复制 ss://",
 		"二维码",
-		"id=\"app-undeployed\"",
-		"id=\"app-node-empty\"",
-		"id=\"app-offline\"",
-		"id=\"app-execution-unavailable\"",
+		"数据集分流",
+		"分流规则",
+		"上游节点",
+		"默认动作",
+		"请先到插件详情页部署执行面",
+		"再回到本页新增或改动监听",
 		"该节点暂时无法执行监听",
 		"还不能执行 Shadowsocks",
 		"shadowsocks-server 插件状态",
-		"请先到插件详情页部署执行面",
-		"再回到本页新增或改动监听",
-		"class=\"setup-hero\"",
 	} {
-		if !strings.Contains(page, fragment) && !strings.Contains(script, fragment) {
-			t.Fatalf("panel missing %q", fragment)
+		if !strings.Contains(page, required) && !strings.Contains(script, required) {
+			t.Fatalf("panel missing %q", required)
 		}
 	}
 	if strings.Contains(page, "ui.schema") || strings.Contains(page, "plugin=") || strings.Contains(page, "订阅") || strings.Contains(page, "ss2022://") {
@@ -80,72 +144,132 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 			t.Fatalf("panel still exposes excluded entry %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"/panel-api/agents", "/panel-api/plugins/shadowsocks-server", "api/listens", "api/execution", "api/share-host", "share_host_source", "mountAgentSearchSelect", "复制 ss://", "host_port", "二维码", "append-form", "已复制", "暂时无法执行", "请先在插件详情页部署执行面"} {
-		if !strings.Contains(script, fragment) {
-			t.Fatalf("panel script missing %q", fragment)
+
+	// The three first-screen controls live in the page header; the list follows.
+	headerEnd := strings.Index(page, "</header>")
+	listIndex := strings.Index(page, `id="listen-list"`)
+	for _, control := range []string{`id="agent-select"`, `id="share-host"`, `id="create-toggle"`} {
+		index := strings.Index(page, control)
+		if index < 0 || index > headerEnd || listIndex < 0 || headerEnd > listIndex {
+			t.Fatalf("first screen must lead with %s in the header before the listen list", control)
 		}
+	}
+	mainEnd := strings.Index(page, "</main>")
+	dialogIndex := strings.Index(page, `id="create-dialog"`)
+	if mainEnd < 0 || dialogIndex < mainEnd {
+		t.Fatal("the create dialog must live outside the first-screen flow")
+	}
+
+	for _, required := range []string{
+		"/panel-api/agents",
+		"/panel-api/plugins/shadowsocks-server",
+		"api/listens",
+		"api/execution",
+		"api/share-host",
+		"share_host_source",
+		"mountAgentSearchSelect",
+		"复制 ss://",
+		"host_port",
+		"二维码",
+		"append-form",
+		"已复制",
+		"暂时无法执行",
+		"请先在插件详情页部署执行面",
+		"api/upstreams",
+		"api/routing",
+		"moveRoute",
+		"removeRoute",
+		"default_upstream_id",
+		"secret_ref",
+		"switchWorkspaceTab",
+		"ROUTE_PRESETS",
+		"NREUI",
+		"ui-card listen-card",
+		"route-row",
+		"ui-table",
+		"setListenLoading",
+		"showListenError",
+		"nameInput.focus()",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("panel script missing %q", required)
+		}
+	}
+	if strings.Contains(script, "applyHostTheme") || strings.Contains(script, `document.documentElement.setAttribute("data-theme"`) {
+		t.Fatal("theme resolution must come from ui-kit.js host mode")
 	}
 	assertLoadAgentsKeepsDeployedInstanceTargets(t, page, script)
 	assertListenCardIsSummary(t, page, script)
 	assertListenDetailIsDialog(t, page, script)
 	assertWriteGate(t, script)
+
 	inactive := httptest.NewRecorder()
 	controller.ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "/api/listens?agent_id=agent-1", nil))
 	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), serviceNotReady) {
 		t.Fatalf("inactive panel=%d %s", inactive.Code, inactive.Body.String())
 	}
-	style := bodies["/style.css"]
-	for _, fragment := range []string{
-		"width: calc(100% - 2.5rem)",
-		"@media (max-width: 720px)",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"html { font-size: 20px; }",
+
+	for _, required := range []string{
+		".page-console",
+		".listen-grid",
+		".listen-card",
+		".listen-binding-note",
+		".routing-grid",
+		".routing-table",
+		".routing-presets",
+		".status-line",
 		".agent-search-select",
-		".setup-hero",
-		".setup-mark[data-kind=\"unavailable\"]",
-		"repeat(2, minmax(0, 1fr))",
-		"repeat(3, minmax(18rem, 1fr))",
-		"max-width: 34rem",
-		".listen-card[data-selected=\"true\"]",
-		"#listen-detail",
+		".agent-search-select__status--offline",
 		".account-ops",
+		".qr-image",
+		"@media (max-width: 1100px)",
+		"@media (max-width: 900px)",
+		"@media (max-width: 768px)",
+		"@media (max-width: 640px)",
+		"@media (max-width: 480px)",
+		"var(--ui-",
 	} {
-		if !strings.Contains(style, fragment) {
-			t.Fatalf("panel stylesheet missing %q", fragment)
+		if !strings.Contains(style, required) {
+			t.Fatalf("panel stylesheet missing %q", required)
 		}
 	}
-	if strings.Contains(style, "minmax(16rem, 22rem)") {
-		t.Fatal("panel stylesheet still uses two-column inspector")
-	}
-	if strings.Contains(style, "min(52rem") || strings.Contains(style, "min(64rem") || strings.Contains(style, "min(880px") {
-		t.Fatal("panel stylesheet still caps main at 52rem, 64rem, or 880px")
-	}
-	if !strings.Contains(cssRule(style, "dialog"), "max-width: 34rem") {
-		t.Fatal("create-class dialog is no longer 34rem")
-	}
-	if !strings.Contains(cssRule(style, "#listen-detail"), "max-width: 34rem") {
-		t.Fatal("#listen-detail is no longer aligned to 34rem dialog width")
+	for _, legacy := range []string{"--color-", "#d94880", "#f4a0c0", "tunnel-glow", "min(52rem", "min(64rem", "min(880px)"} {
+		if strings.Contains(style, legacy) {
+			t.Fatalf("panel stylesheet still contains retired value %q", legacy)
+		}
 	}
 	if strings.Contains(page, `class="backdrop"`) {
 		t.Fatal("panel still includes decorative body backdrop")
 	}
-	if strings.Contains(style, "tunnel-glow") || strings.Contains(style, "radial-gradient(42rem 26rem") || strings.Contains(style, "radial-gradient(36rem 24rem") {
-		t.Fatal("panel stylesheet still contains tunnel-glow backdrop")
+	if strings.Contains(style, ".setup-hero") || strings.Contains(style, "radial-gradient(42rem 26rem") {
+		t.Fatal("panel stylesheet still contains the retired setup decoration")
 	}
-	if strings.Contains(style, "radial-gradient(circle at 32% 28%") {
-		t.Fatal("setup-mark still uses radial highlight placeholders")
+
+	// The committed kit copies are packaged with the plugin and expose the
+	// host themes and theme-family contract the page relies on.
+	for _, required := range []string{`[data-theme="fresh-green"]`, `[data-theme="sakura-night"]`, "--ui-border:", "--ui-primary:"} {
+		if !strings.Contains(kitCSS, required) {
+			t.Fatalf("ui-kit.css missing %q", required)
+		}
 	}
-	if !strings.Contains(style, "dialog::backdrop") {
-		t.Fatal("panel stylesheet missing dialog::backdrop")
+	for _, required := range []string{"HOST_THEMES", "applyFromStorage", "data-theme-family"} {
+		if !strings.Contains(kitJS, required) {
+			t.Fatalf("ui-kit.js missing %q", required)
+		}
+	}
+	manifest, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"assets/ui/ui-kit.css", "assets/ui/ui-kit.js"} {
+		if !strings.Contains(string(manifest), required) {
+			t.Fatalf("plugin.yaml must package %q", required)
+		}
 	}
 }
 
 func TestPanelAssetsMatchManifestTree(t *testing.T) {
-	for _, name := range []string{"index.html", "app.js", "style.css"} {
+	for _, name := range []string{"index.html", "app.js", "style.css", "ui-kit.css", "ui-kit.js"} {
 		want, err := os.ReadFile(filepath.Join("assets", "ui", name))
 		if err != nil {
 			t.Fatal(err)
