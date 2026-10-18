@@ -1086,3 +1086,22 @@ test("contrast audit requires every rendered kit pair and gates on failures", as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("component consistency and keyboard evidence match the current pages", { timeout: 600000 }, async () => {
+  for (const [script, report] of [
+    ["component-consistency.mjs", "component-consistency.md"],
+    ["keyboard-checks.mjs", "keyboard-checks.md"],
+  ]) {
+    const run = spawnSync(process.execPath, [`testing/ui/${script}`, "--check"], {
+      cwd: repo,
+      encoding: "utf8",
+      timeout: 540000,
+    });
+    assert.equal(run.status, 0, outputOf(run));
+    const body = await readFile(join(repo, "testing/ui", report), "utf8");
+    assert.match(body, /九页/);
+    for (const page of ["accelerator-sources", "cloudflare-dns", "docker-app", "doh", "ip-policy", "reverse-l4", "shadowsocks-server", "waf", "webdav"]) {
+      assert.match(body, new RegExp(page));
+    }
+  }
+});

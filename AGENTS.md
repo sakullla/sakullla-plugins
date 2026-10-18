@@ -64,6 +64,12 @@ Six host pages (`cloudflare-dns`, `docker-app`, `ip-policy`, `reverse-l4`, `shad
 
 Successful PNGs include content already displayed below the first screen. The layout viewport stays 900 pixels tall, and a taller document produces a taller image. Content that is only inside a nested scroll container is kept as that container shows it. If the document is taller than the viewport but the PNG is not, that capture fails.
 
+### UI component and keyboard evidence
+
+`node testing/ui/component-consistency.mjs` opens the nine R6 pages (accelerator-sources, cloudflare-dns, docker-app, doh, ip-policy, reverse-l4, shadowsocks-server, waf, webdav) with their capture fixtures and writes `testing/ui/component-consistency.md`: the primary button, input, table, badge, dialog and empty state per page, with whether each uses the kit class and `--ui-*` tokens and whether the component differences are eliminated. `node testing/ui/keyboard-checks.mjs` presses real Tab/Enter/Escape keys over the same pages and writes `testing/ui/keyboard-checks.md`: page, scene, element, operation, focus visibility, Enter result, and Escape close/focus return.
+
+Both scripts have `--check`, which re-runs the audit against the current pages and fails when the committed report is stale or a difference remains. `node --test testing/ui/capture.test.mjs` runs both `--check` commands, so regenerate the reports with the same scripts after a page change. These reports are delivery evidence for R6, not product acceptance.
+
 ## Commit & Pull Request Guidelines
 
 Recent history generally follows Conventional Commit-style subjects: `fix(release): correct provenance`, `feat(waf): add rule support`, or `ci: tighten checks`. Use an imperative, focused summary and include a scope when useful. Pull requests should explain behavior changes, list affected plugins, link relevant issues, and include test evidence. Include screenshots only for UI schema or rendered interface changes. Ensure the required CI workflow passes before requesting review.
