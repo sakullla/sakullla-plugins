@@ -42,7 +42,7 @@
 
 | 页面 | 场景 | 元素 | 操作 | 结果 |
 | --- | --- | --- | --- | --- |
-| accelerator-sources | usage | #convert-input | Tab | 通过：Tab ×3 → input#convert-input.ui-input（:focus-visible=真，box-shadow） |
+| accelerator-sources | usage | #convert-input | Tab | 通过：Tab ×4 → input#convert-input.ui-input（:focus-visible=真，box-shadow） |
 | accelerator-sources | usage | #convert-input | Enter | 通过：Enter 提交链接转换：结果区可见，复制提示「已复制」（data-state=copied） |
 | accelerator-sources | usage | #convert-input | Esc | 通过：页面无对话框；Esc 清空链接输入并隐藏转换结果，焦点仍在 input#convert-input.ui-input（:focus-visible=真，box-shadow） |
 | cloudflare-dns | mappings | #mapping-add | Tab | 通过：Tab ×2 → button#mapping-add.ui-btn（:focus-visible=真，outline 2px，box-shadow） |

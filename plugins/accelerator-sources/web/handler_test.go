@@ -92,6 +92,13 @@ func assertStandaloneThemeAuthority(t *testing.T, page, style string) {
 			t.Fatalf("page is missing kit class %q", class)
 		}
 	}
+	// The kit strip is a scroll container (overflow-x:auto makes overflow-y:auto)
+	// and the active-tab underline sits 1px below it, so a classic scrollbar
+	// would cover the last tab. This page must opt the two-item strip out.
+	tabs := cssRule(style, ".accel-view-tabs")
+	if !strings.Contains(tabs, "overflow: visible") {
+		t.Fatal("the view switch must not open a scroll container (it shows a phantom scrollbar over the last tab)")
+	}
 	for _, banned := range []string{`[data-theme="dark"]`, `[data-theme="sakura-day"]`, `[data-theme="light"]`} {
 		if strings.Contains(style, banned) {
 			t.Fatalf("page stylesheet still owns the theme palette %q", banned)
@@ -137,14 +144,22 @@ func assertPageCapabilityMarkup(t *testing.T, page string) {
 		`data-example="file-sample"`,
 		`data-example="script-sample"`,
 		`data-example="clone-sample"`,
+		`data-example="hf-download"`,
+		`data-example="hf-endpoint"`,
+		`data-example="hf-clone"`,
 		`data-example="offline-cli"`,
+		`id="current-host"`,
+		`id="copy-host"`,
 		`id="convert-input"`,
 		`id="convert-result"`,
 		`id="convert-copy"`,
+		`id="convert-idle"`,
+		`id="convert-paste"`,
 		`id="search-form"`,
 		`id="tags-form"`,
 		`id="offline-form"`,
 		`id="tag-filter"`,
+		`id="pack-list"`,
 		`id="platform"`,
 		`id="compressed-layers"`,
 		`option value=""`,
@@ -152,12 +167,19 @@ func assertPageCapabilityMarkup(t *testing.T, page string) {
 		`<h2 class="ui-card__title" id="search-heading">搜索</h2>`,
 		`<h2 class="ui-card__title" id="tags-heading">标签</h2>`,
 		`<h2 class="ui-card__title" id="offline-heading">离线包</h2>`,
-		`<summary>Docker：拉取镜像与镜像源</summary>`,
-		`<summary>GitHub 与 Hugging Face：下载、脚本与克隆</summary>`,
+		`id="cap-docker">Docker</h3>`,
+		`id="cap-github">GitHub</h3>`,
+		`id="cap-hf">Hugging Face</h3>`,
 	} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("visitor page missing capability markup %q", fragment)
 		}
+	}
+	// Docker pull / mirror source and GitHub download / script / clone are the
+	// documented entry points, so they stay on screen. Only the headless CLI
+	// download may collapse behind a disclosure.
+	if !strings.Contains(page, `<summary>在服务器上用命令行下载</summary>`) || strings.Count(page, "<summary>") != 1 {
+		t.Fatal("capability docs must stay visible; only the CLI download may collapse")
 	}
 	if strings.Contains(page, "Accelerator Sources") || strings.Contains(page, `id="search-view"`) || strings.Contains(page, `id="offline-view"`) {
 		t.Fatal("visitor page still uses the old tool-shell markup")
@@ -174,14 +196,14 @@ func assertSnippetCopyChrome(t *testing.T, page string) {
 			t.Fatalf("standalone copy label %q remains outside snippet chrome", fragment)
 		}
 	}
-	if !strings.Contains(page, `class="snippet-copy" id="convert-copy"`) {
-		t.Fatal("#convert-copy is not on the convert result chrome")
+	if !strings.Contains(page, `class="snippet-copy convert-copy" id="convert-copy"`) {
+		t.Fatal("#convert-copy is not the primary action on the convert result surface")
 	}
-	convert := htmlSection(page, `id="convert-snippet"`, `id="convert-result"`)
+	convert := htmlSection(page, `class="snippet convert-result"`, `</section>`)
 	if !strings.Contains(convert, `id="convert-copy"`) || !strings.Contains(convert, `class="snippet-chrome"`) {
 		t.Fatal("#convert-copy is not inside the convert snippet structure")
 	}
-	for _, name := range []string{"docker-pull", "docker-mirror", "file-sample"} {
+	for _, name := range []string{"docker-pull", "docker-mirror", "file-sample", "hf-download", "hf-endpoint"} {
 		if !strings.Contains(page, `class="snippet-copy" data-copy="`+name+`"`) {
 			t.Fatalf("command block missing in-chrome copy for %q", name)
 		}
@@ -235,9 +257,9 @@ func assertStyleTokensAndViewports(t *testing.T, style string) {
 		"grid-template-columns: repeat(2, minmax(0, 1fr))",
 		"overflow-wrap: anywhere",
 		"min-width: 0",
-		".accel-converter",
+		".accel-paste",
 		".accel-mirror-grid",
-		".accel-help-grid",
+		".accel-caps",
 		".snippet *::selection",
 		"min-height: var(--ui-touch)",
 	} {

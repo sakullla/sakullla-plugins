@@ -280,6 +280,9 @@ const examples = {
   "file-sample": `${origin}/github.com/owner/repo/releases/download/v1/file.zip`,
   "script-sample": `curl -fsSL ${origin}/raw.githubusercontent.com/owner/repo/main/install.sh | bash`,
   "clone-sample": `git clone ${origin}/github.com/owner/repo.git`,
+  "hf-download": `curl -fLO ${origin}/huggingface.co/bert-base-uncased/resolve/main/config.json`,
+  "hf-endpoint": `export HF_ENDPOINT=${origin}`,
+  "hf-clone": `git clone ${origin}/huggingface.co/bigscience/bloom-560m.git`,
   "offline-cli": "",
 };
 
@@ -294,6 +297,11 @@ Object.keys(examples).forEach(fill);
 const hostBadge = $("#current-host");
 if (hostBadge) {
   hostBadge.textContent = host;
+}
+
+const copyHost = $("#copy-host");
+if (copyHost && hostBadge) {
+  copyHost.addEventListener("click", () => copyFrom(copyHost, origin));
 }
 
 $$("[data-copy]").forEach((button) => {
@@ -339,6 +347,8 @@ const convertFormats = $("#convert-formats");
 const convertOpen = $("#convert-open");
 const convertAdd = $("#convert-add");
 const convertClear = $("#convert-clear");
+const convertIdle = $("#convert-idle");
+const convertPaste = $("#convert-paste");
 
 const normalizeSourceUrl = (value) => value.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/^\/+/, "");
 
@@ -451,6 +461,7 @@ const updateConversion = () => {
   }
   if (!currentConversion) {
     convertSnippet.hidden = true;
+    convertIdle.hidden = false;
     convertNote.hidden = true;
     convertCopy.disabled = true;
     convertResult.textContent = "";
@@ -468,6 +479,7 @@ const updateConversion = () => {
   convertNote.hidden = notes.length === 0;
   convertNote.textContent = notes.join(" ");
   convertSnippet.hidden = false;
+  convertIdle.hidden = true;
   convertCopy.disabled = false;
 };
 
@@ -493,6 +505,26 @@ convertClear.addEventListener("click", () => {
   updateConversion();
   convertInput.focus();
 });
+
+// Reading the clipboard needs a permission the browser may refuse; the input is
+// always usable by hand, so a refusal only reports itself.
+if (convertPaste) {
+  convertPaste.addEventListener("click", async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        toast("剪贴板是空的");
+        return;
+      }
+      convertInput.value = text.trim();
+      $$("[data-sample]").forEach((item) => item.setAttribute("aria-pressed", "false"));
+      updateConversion();
+      convertInput.focus();
+    } catch (_error) {
+      toast("浏览器拒绝了剪贴板读取，请手动粘贴");
+    }
+  });
+}
 
 const samples = {
   github: "github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_amd64.tar.gz",
@@ -525,6 +557,7 @@ const imageArea = $("#images");
 const packCount = $("#pack-count");
 const packError = $("#pack-error");
 const packClear = $("#pack-clear");
+const packList = $("#pack-list");
 const download = $("#download");
 const platformSelect = $("#platform");
 const compressedToggle = $("#compressed-layers");
@@ -554,6 +587,29 @@ const syncTagPressed = () => {
   });
 };
 
+// The textarea stays the source of truth, but a removable row list saves typing
+// an exact reference when the only intent is "drop the one that failed".
+const renderPackList = () => {
+  if (!packList) {
+    return;
+  }
+  const lines = imageLines();
+  if (!lines.length) {
+    packList.replaceChildren(create("p", "pack-list__hint", "还没有加入镜像：点选标签页里的标签，或在上方直接填写镜像引用。"));
+    return;
+  }
+  packList.replaceChildren(...lines.map((line) => {
+    const row = create("div", "pack-item");
+    const remove = create("button", "pack-item__remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `移出 ${line}`);
+    remove.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    remove.addEventListener("click", () => writeImageLines(lines.filter((item) => item !== line)));
+    row.append(create("span", "pack-item__ref", line), remove);
+    return row;
+  }));
+};
+
 const renderQueue = () => {
   const lines = imageLines();
   packCount.textContent = `${lines.length} / ${maxImages}`;
@@ -569,6 +625,7 @@ const renderQueue = () => {
   fill("offline-cli");
   store.set("pack", lines.join("\n"));
   syncTagPressed();
+  renderPackList();
 };
 
 const writeImageLines = (lines) => {

@@ -19,13 +19,19 @@ helper application is required.
 `web/static/` is embedded into the binary and served on `/`. It is fully
 self-contained (no external requests, production CSP `default-src 'self'`).
 
-- **用法** — one smart input converts GitHub / Hugging Face links (web `blob`
-  URLs become raw / resolve downloads, repositories become `git clone`) and
-  Docker image references (`docker pull <host>/<ref>`), with link / curl /
-  wget / pull formats, plus copy-ready Docker, `daemon.json`, script and clone
-  examples.
+- The header states the accelerator endpoint as a copyable monospace host, so the
+  value a visitor needs most never has to be retyped from the address bar.
+- **用法** — one smart input (`/` focuses it, a clipboard button fills it) turns
+  GitHub / Hugging Face links (web `blob` URLs become raw / resolve downloads,
+  repositories become `git clone`) and Docker image references
+  (`docker pull <host>/<ref>`) into an accelerated address. The result sits
+  beside the input with link / curl / wget / pull formats, an `Enter`-to-copy
+  action and a one-click open. Below it, always-visible Docker, GitHub and
+  Hugging Face cards carry the copy-ready commands, including `HF_ENDPOINT` and
+  Git LFS clone.
 - **镜像** — search Docker Hub, pick tags, and build an offline pack of up to
-  16 images. Before offering the download, the page `HEAD`s the prepared URL
+  16 images. Selected references are mirrored as a removable list beside the
+  textarea. Before offering the download, the page `HEAD`s the prepared URL
   (HEAD does not consume the one-time token) and names any image that cannot
   be resolved. A `curl` command for headless servers is generated live.
 - Light/dark follows the system unless the visitor toggles it; copy works on

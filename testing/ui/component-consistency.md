@@ -27,7 +27,7 @@
 | accelerator-sources | mirrors | 主按钮 | button.ui-btn | 是 | 是 | 已消除 |
 | accelerator-sources | usage | 输入 | input#convert-input.ui-input | 是 | 是 | 已消除（大尺寸变体（--ui-control-height-lg、--ui-text-base）） |
 | accelerator-sources | usage | 表格 | — | — | — | 不适用（页面主流程没有表格） |
-| accelerator-sources | usage | 徽章 | span.ui-badge.ui-badge--info.ui-badge--plain | 是 | 是 | 已消除 |
+| accelerator-sources | usage | 徽章 | span.ui-badge.ui-badge--plain（隐藏） | 是 | 是 | 已消除 |
 | accelerator-sources | usage | 对话框 | — | — | — | 不适用（页面没有对话框） |
 | accelerator-sources | mirrors | 空状态 | div.ui-empty | 是 | 是 | 已消除 |
 | cloudflare-dns | mappings | 主按钮 | button#mapping-add.ui-btn | 是 | 是 | 已消除 |

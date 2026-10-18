@@ -12,10 +12,14 @@
 <body>
   <main class="ui-page ui-page--wide accel-page">
     <header class="ui-page-head accel-head">
-      <div class="ui-page-head__copy">
-        <p class="ui-eyebrow">当前域名即加速入口 · <span id="current-host" class="ui-mono"></span></p>
-        <h1 class="ui-title">资源加速</h1>
-        <p class="ui-lede">粘贴 GitHub、Hugging Face 链接或 Docker 镜像名，立即得到经由当前域名的加速地址。</p>
+      <div class="ui-page-head__copy accel-brand">
+        <span class="accel-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M13.4 2.6 5.6 13.3h5.2l-.8 8.1 7.8-10.7h-5.2l.8-8.1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        </span>
+        <div class="accel-brand__copy">
+          <h1 class="ui-title accel-title">资源加速</h1>
+          <p class="ui-lede accel-lede">把 GitHub、Hugging Face 与 Docker 镜像，全部走你自己的域名。</p>
+        </div>
       </div>
       <div class="ui-page-actions accel-head-actions">
         <nav class="primary ui-tabs accel-view-tabs" role="tablist" aria-label="资源加速" data-ui-tabs>
@@ -29,118 +33,202 @@
       </div>
     </header>
 
+    <section class="accel-endpoint" aria-label="加速入口">
+      <div class="accel-endpoint__lead">
+        <span class="accel-endpoint__label">当前域名即加速入口</span>
+        <code class="accel-endpoint__host" id="current-host"></code>
+      </div>
+      <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm accel-endpoint__copy" id="copy-host">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>复制域名</span>
+      </button>
+    </section>
+
     <section class="accel-view" id="usage" data-panel="usage" role="tabpanel" aria-labelledby="view-usage">
-      <section class="ui-card ui-card--raised accel-converter" aria-labelledby="convert-heading">
-        <div class="ui-card__head">
-          <div>
-            <h2 class="ui-card__title" id="convert-heading">链接转换</h2>
-            <p class="ui-card__desc">GitHub、Hugging Face 或 Docker 镜像名，转换成当前域名的加速地址。</p>
+      <div class="accel-workbench">
+        <section class="ui-card accel-pane accel-paste" aria-labelledby="paste-heading">
+          <div class="ui-card__head accel-pane-head">
+            <div>
+              <h2 class="ui-card__title" id="paste-heading">粘贴链接或镜像名</h2>
+              <p class="ui-card__desc">GitHub、Hugging Face 地址，或 nginx:latest 这样的镜像名。</p>
+            </div>
+            <span class="accel-shortcut"><kbd>/</kbd>聚焦</span>
           </div>
-          <span class="ui-badge ui-badge--info ui-badge--plain">Enter 复制</span>
-        </div>
-        <label for="convert-input" class="ui-sr-only">原始链接或镜像名</label>
-        <div class="convert-field">
-          <svg class="convert-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <input id="convert-input" class="ui-input" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴链接或镜像名，如 github.com/owner/repo 或 nginx:latest">
-          <kbd class="convert-kbd" aria-hidden="true">/</kbd>
-          <button type="button" class="convert-clear" id="convert-clear" aria-label="清空输入" hidden>
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-        <div class="sample-row" role="group" aria-label="示例">
-          <span class="sample-label">试试</span>
-          <button type="button" class="sample-chip" data-sample="github">GitHub 发行包</button>
-          <button type="button" class="sample-chip" data-sample="repo">克隆仓库</button>
-          <button type="button" class="sample-chip" data-sample="huggingface">Hugging Face</button>
-          <button type="button" class="sample-chip" data-sample="docker">Docker 镜像</button>
-        </div>
-        <div class="snippet convert-result" id="convert-snippet" hidden>
-          <div class="snippet-chrome">
-            <p class="snippet-label"><span class="kind-badge" id="convert-kind" data-kind="file">GitHub 文件</span></p>
-            <div class="segmented" id="convert-formats" role="group" aria-label="输出格式"></div>
-            <div class="snippet-actions">
-              <a class="snippet-action" id="convert-open" href="#" target="_blank" rel="noreferrer noopener" hidden>
-                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                <span>打开</span>
-              </a>
-              <button type="button" class="snippet-action" id="convert-add" hidden>
-                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-                <span>加入离线包</span>
-              </button>
-              <button type="button" class="snippet-copy" id="convert-copy" disabled>
+          <label for="convert-input" class="ui-sr-only">原始链接或镜像名</label>
+          <div class="convert-field">
+            <svg class="convert-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <input id="convert-input" class="ui-input" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github.com/owner/repo 或 nginx:latest">
+            <button type="button" class="convert-paste" id="convert-paste" aria-label="从剪贴板粘贴" title="从剪贴板粘贴">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8" y="4" width="8" height="4" rx="1.4" stroke="currentColor" stroke-width="1.7"/><path d="M16 5.5h1.8A2.2 2.2 0 0 1 20 7.7v10.1a2.2 2.2 0 0 1-2.2 2.2H6.2A2.2 2.2 0 0 1 4 17.8V7.7a2.2 2.2 0 0 1 2.2-2.2H8" stroke="currentColor" stroke-width="1.7"/></svg>
+            </button>
+            <button type="button" class="convert-clear" id="convert-clear" aria-label="清空输入" hidden>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <div class="sample-row" role="group" aria-label="示例">
+            <span class="sample-label">试试</span>
+            <button type="button" class="sample-chip" data-sample="github">发行包</button>
+            <button type="button" class="sample-chip" data-sample="repo">克隆仓库</button>
+            <button type="button" class="sample-chip" data-sample="huggingface">Hugging Face</button>
+            <button type="button" class="sample-chip" data-sample="docker">Docker 镜像</button>
+          </div>
+          <p class="convert-hint" id="convert-hint" role="status" hidden></p>
+          <p class="convert-support">支持 GitHub 发行包、源码、raw 与 Gist，Hugging Face 模型与数据集，以及 Docker Hub、ghcr.io、gcr.io、quay.io、registry.k8s.io 镜像。按 <kbd>Enter</kbd> 直接复制结果。</p>
+        </section>
+
+        <section class="ui-card accel-pane accel-output" aria-labelledby="output-heading">
+          <div class="ui-card__head accel-pane-head">
+            <div>
+              <h2 class="ui-card__title" id="output-heading">加速结果</h2>
+              <p class="ui-card__desc">当前域名前缀后的完整地址或命令。</p>
+            </div>
+            <span class="accel-shortcut"><kbd>Enter</kbd>复制</span>
+          </div>
+
+          <div class="accel-output__idle" id="convert-idle">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h16M4 12l4-4M4 12l4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/><path d="M20 12l-4-4M20 12l-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/></svg>
+            <p class="accel-output__idle-title">粘贴后这里立刻给出结果</p>
+            <p class="accel-output__idle-desc">识别到 GitHub 仓库会变成克隆地址，识别到镜像名会变成拉取命令。</p>
+          </div>
+
+          <div class="snippet convert-result" id="convert-snippet" hidden>
+            <div class="snippet-chrome">
+              <p class="snippet-label"><span class="kind-badge" id="convert-kind" data-kind="file">GitHub 文件</span></p>
+              <div class="segmented" id="convert-formats" role="group" aria-label="输出格式"></div>
+              <div class="snippet-actions">
+                <a class="snippet-action" id="convert-open" href="#" target="_blank" rel="noreferrer noopener" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>打开</span>
+                </a>
+                <button type="button" class="snippet-action" id="convert-add" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                  <span>加入离线包</span>
+                </button>
+              </div>
+            </div>
+            <pre class="snippet-body" id="convert-result"></pre>
+            <div class="convert-foot">
+              <p class="convert-note" id="convert-note" hidden></p>
+              <button type="button" class="snippet-copy convert-copy" id="convert-copy" disabled>
                 <svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg>
                 <svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span>复制</span>
               </button>
             </div>
           </div>
-          <pre class="snippet-body" id="convert-result"></pre>
+        </section>
+      </div>
+
+      <div class="ui-section-head accel-caps-head">
+        <div>
+          <h2 class="ui-section-title">常用速查</h2>
+          <p class="ui-section-desc">照抄即可，全部已经带上当前域名。</p>
         </div>
-        <p class="convert-note" id="convert-note" hidden></p>
-        <p class="convert-hint" id="convert-hint" role="status" hidden></p>
-        <p class="convert-empty">支持 GitHub 发行包、源码、raw 与 Gist，Hugging Face 模型与数据集，以及 Docker Hub、ghcr.io、gcr.io、quay.io、registry.k8s.io 镜像。按 <kbd>Enter</kbd> 直接复制结果。</p>
-      </section>
+      </div>
 
-      <div class="accel-help-grid">
-        <details class="ui-help accel-help">
-          <summary>Docker：拉取镜像与镜像源</summary>
-          <div class="ui-help__body">
-            <p>在镜像名前加上当前域名即可拉取。其它仓库的域名前缀会原样保留。</p>
-            <div class="snippet">
-              <div class="snippet-chrome">
-                <p class="snippet-label">拉取镜像</p>
-                <button type="button" class="snippet-copy" data-copy="docker-pull"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
-              </div>
-              <pre class="snippet-body" data-example="docker-pull"></pre>
+      <div class="accel-caps">
+        <section class="ui-card accel-cap" aria-labelledby="cap-docker">
+          <div class="accel-cap__head">
+            <span class="accel-cap__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 8.5h16v8.8A2.2 2.2 0 0 1 17.8 19.5H6.2A2.2 2.2 0 0 1 4 17.3V8.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m4 8.5 2.4-3.6h13.2L20 8.5M9.2 12.2h5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <div>
+              <h3 class="accel-cap__title" id="cap-docker">Docker</h3>
+              <p class="accel-cap__desc">拉取镜像与镜像源</p>
             </div>
-            <p class="pane-note">ghcr.io、gcr.io、quay.io、registry.k8s.io 的镜像在前缀后保留原域名，例如 <code data-example="docker-ghcr"></code>。</p>
-
-            <h3 class="accel-subtitle">设为 Docker Hub 镜像源</h3>
-            <div class="segmented os-switch" role="group" aria-label="操作系统">
-              <button type="button" data-os="linux" aria-pressed="true">Linux</button>
-              <button type="button" data-os="windows" aria-pressed="false">Windows</button>
-              <button type="button" data-os="macos" aria-pressed="false">macOS</button>
-            </div>
-            <p class="pane-note os-path">写入 <code id="daemon-path">/etc/docker/daemon.json</code></p>
-            <div class="snippet">
-              <div class="snippet-chrome">
-                <p class="snippet-label">daemon.json</p>
-                <button type="button" class="snippet-copy" data-copy="docker-mirror"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
-              </div>
-              <pre class="snippet-body" data-example="docker-mirror"></pre>
-            </div>
-            <p class="pane-note" id="daemon-apply">保存后执行 <code>sudo systemctl restart docker</code> 生效。镜像源只作用于 Docker Hub，其它仓库请用上面的域名前缀。</p>
           </div>
-        </details>
-
-        <details class="ui-help accel-help">
-          <summary>GitHub 与 Hugging Face：下载、脚本与克隆</summary>
-          <div class="ui-help__body">
-            <p>去掉原始链接的协议头，接在当前域名之后。脚本、Dockerfile 中的直链会在下载时自动改写为加速地址。</p>
-            <div class="snippet">
-              <div class="snippet-chrome">
-                <p class="snippet-label">下载文件</p>
-                <button type="button" class="snippet-copy" data-copy="file-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
-              </div>
-              <pre class="snippet-body" data-example="file-sample"></pre>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">拉取镜像</p>
+              <button type="button" class="snippet-copy" data-copy="docker-pull"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
             </div>
-            <div class="snippet">
-              <div class="snippet-chrome">
-                <p class="snippet-label">运行安装脚本</p>
-                <button type="button" class="snippet-copy" data-copy="script-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
-              </div>
-              <pre class="snippet-body" data-example="script-sample"></pre>
-            </div>
-            <div class="snippet">
-              <div class="snippet-chrome">
-                <p class="snippet-label">克隆仓库</p>
-                <button type="button" class="snippet-copy" data-copy="clone-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
-              </div>
-              <pre class="snippet-body" data-example="clone-sample"></pre>
-            </div>
-            <p class="pane-note">脚本、Dockerfile 中的 GitHub 与 Hugging Face 直链会在下载时自动改写为加速地址，后续下载同样走加速。</p>
+            <pre class="snippet-body" data-example="docker-pull"></pre>
           </div>
-        </details>
+          <div class="segmented os-switch" role="group" aria-label="操作系统">
+            <button type="button" data-os="linux" aria-pressed="true">Linux</button>
+            <button type="button" data-os="windows" aria-pressed="false">Windows</button>
+            <button type="button" data-os="macos" aria-pressed="false">macOS</button>
+          </div>
+          <p class="pane-note os-path">写入 <code id="daemon-path">/etc/docker/daemon.json</code></p>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">daemon.json</p>
+              <button type="button" class="snippet-copy" data-copy="docker-mirror"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="docker-mirror"></pre>
+          </div>
+          <p class="pane-note" id="daemon-apply"></p>
+          <p class="pane-note">ghcr.io、gcr.io、quay.io、registry.k8s.io 的镜像在前缀后保留原域名，例如 <code data-example="docker-ghcr"></code>。</p>
+        </section>
+
+        <section class="ui-card accel-cap" aria-labelledby="cap-github">
+          <div class="accel-cap__head">
+            <span class="accel-cap__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="7" cy="6.2" r="2.4" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="17.8" r="2.4" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="9.4" r="2.4" stroke="currentColor" stroke-width="1.7"/><path d="M7 8.6v6.8M17 11.8c0 3.3-2.7 4.6-6.2 4.9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </span>
+            <div>
+              <h3 class="accel-cap__title" id="cap-github">GitHub</h3>
+              <p class="accel-cap__desc">下载、脚本与克隆</p>
+            </div>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">下载发行包或文件</p>
+              <button type="button" class="snippet-copy" data-copy="file-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="file-sample"></pre>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">运行安装脚本</p>
+              <button type="button" class="snippet-copy" data-copy="script-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="script-sample"></pre>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">克隆仓库</p>
+              <button type="button" class="snippet-copy" data-copy="clone-sample"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="clone-sample"></pre>
+          </div>
+          <p class="pane-note">脚本与 Dockerfile 中的 GitHub 直链会在下载时自动改写为加速地址。</p>
+        </section>
+
+        <section class="ui-card accel-cap" aria-labelledby="cap-hf">
+          <div class="accel-cap__head">
+            <span class="accel-cap__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M10.4 3.6 11.7 7l3.4 1.3-3.4 1.3-1.3 3.4-1.3-3.4L5.7 8.3 9.1 7l1.3-3.4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m17.2 13.6.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8.8-2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            </span>
+            <div>
+              <h3 class="accel-cap__title" id="cap-hf">Hugging Face</h3>
+              <p class="accel-cap__desc">模型与数据集</p>
+            </div>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">下载模型文件</p>
+              <button type="button" class="snippet-copy" data-copy="hf-download"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="hf-download"></pre>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">hf / huggingface-cli 走加速</p>
+              <button type="button" class="snippet-copy" data-copy="hf-endpoint"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="hf-endpoint"></pre>
+          </div>
+          <p class="pane-note">设置 <code>HF_ENDPOINT</code> 后，<code>hf download</code> 与 <code>huggingface-cli</code> 的模型、数据集请求都会走当前域名。</p>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">克隆模型仓库（Git LFS）</p>
+              <button type="button" class="snippet-copy" data-copy="hf-clone"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="hf-clone"></pre>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -155,7 +243,7 @@
 
       <div class="accel-mirror-grid">
         <section class="ui-card accel-pane accel-pane-search" aria-labelledby="search-heading">
-          <div class="ui-card__head">
+          <div class="ui-card__head accel-pane-head">
             <div>
               <h2 class="ui-card__title" id="search-heading">搜索</h2>
               <p class="ui-card__desc">按名称查找 Docker Hub 仓库。</p>
@@ -180,7 +268,7 @@
         </section>
 
         <section class="ui-card accel-pane accel-pane-tags" aria-labelledby="tags-heading">
-          <div class="ui-card__head">
+          <div class="ui-card__head accel-pane-head">
             <div>
               <h2 class="ui-card__title" id="tags-heading">标签</h2>
               <p class="ui-card__desc">点选标签加入离线包。</p>
@@ -210,7 +298,7 @@
         </section>
 
         <section class="ui-card accel-pane accel-pane-offline" aria-labelledby="offline-heading">
-          <div class="ui-card__head">
+          <div class="ui-card__head accel-pane-head">
             <div>
               <h2 class="ui-card__title" id="offline-heading">离线包</h2>
               <p class="ui-card__desc">生成可导入的 images.tar。</p>
@@ -223,6 +311,7 @@
               <textarea id="images" class="ui-textarea" required spellcheck="false" autocomplete="off" placeholder="alpine:latest&#10;library/nginx:stable&#10;ghcr.io/owner/app:1.0"></textarea>
             </div>
             <p class="ui-error-text" id="pack-error" role="alert" hidden></p>
+            <div class="pack-list" id="pack-list" aria-live="polite"></div>
             <div class="offline-options">
               <label class="ui-field" for="platform">
                 <span class="ui-label">架构</span>

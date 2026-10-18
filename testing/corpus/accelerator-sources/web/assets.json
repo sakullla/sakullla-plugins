@@ -13,6 +13,9 @@
     "input": "#convert-input",
     "output": "#convert-result",
     "copy": "#convert-copy",
+    "idle": "#convert-idle",
+    "clipboard": "#convert-paste",
+    "clear": "#convert-clear",
     "scheme_normalization": "strip any leading scheme, then prefix window.location.origin",
     "supported_hosts": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github.githubassets.com", "huggingface.co"],
     "image_registries": ["docker.io", "ghcr.io", "gcr.io", "quay.io", "registry.k8s.io"],
@@ -22,12 +25,23 @@
       "image": ["pull", "ref"]
     }
   },
+  "endpoint": {
+    "host": "#current-host",
+    "copy": "#copy-host",
+    "value": "window.location.origin"
+  },
+  "capability_cards": [
+    { "id": "cap-docker", "examples": ["docker-pull", "docker-mirror", "docker-ghcr"], "os_switch": ["linux", "windows", "macos"] },
+    { "id": "cap-github", "examples": ["file-sample", "script-sample", "clone-sample"] },
+    { "id": "cap-hf", "examples": ["hf-download", "hf-endpoint", "hf-clone"] }
+  ],
   "command_blocks": {
     "copy": [".snippet-copy", "#convert-copy", "[data-copy]"],
     "selection": ".snippet *::selection",
     "surface": "var(--ui-sunken)"
   },
   "offline_fields": ["images", "platform", "compressed_layers"],
+  "offline_list": "#pack-list",
   "offline_preflight": "HEAD the prepared download_url (not consumed by HEAD); on failure HEAD /api/offline?image= per image",
   "theme": {
     "bootstrap": "/ui-kit.js",
