@@ -24,7 +24,10 @@ let config = configDefault(),
   failImport = false,
   entryRules = [],
   received = [],
-  stateDelay = 0;
+  stateDelay = 0,
+  writeDelay = 0,
+  failState = false,
+  deniedState = false;
 const provinces = [
   { name: "北京市", classification: "cn-11" },
   { name: "广东省", classification: "cn-44" },
@@ -147,6 +150,11 @@ const server = createServer(async (req, res) => {
         rules: [{ id: 1, frontend_url: "https://media.example.test" }],
       });
     if (path.endsWith("/api/state")) {
+      if (failState) {
+        res.destroy();
+        return;
+      }
+      if (deniedState) return json({ error: "没有访问权限" }, 403);
       const token = url.searchParams.get("entry_token"),
         selected = entries.find((e) => e.entry.token === token);
       const policy = {
@@ -240,18 +248,22 @@ const server = createServer(async (req, res) => {
     }
     if (path.endsWith("/api/binding")) {
       if (failBinding) return json({ error: "版本校验失败，原配置保留" }, 409);
+      if (writeDelay) await delay(writeDelay);
       config = body.binding.config;
       return json({ stored: true });
     }
     if (path.endsWith("/api/config")) {
+      if (writeDelay) await delay(writeDelay);
       config = body.config;
       return json({ stored: true });
     }
     if (path.endsWith("/api/entry-rules")) {
+      if (writeDelay) await delay(writeDelay);
       entryRules = body.rules;
       return json({ stored: true });
     }
     if (path.endsWith("/api/entry-mode")) {
+      if (writeDelay) await delay(writeDelay);
       if (body.reset) entryRules = [];
       return json({ stored: true });
     }
@@ -468,6 +480,42 @@ try {
       );
     },
   );
+  await check(
+    "390 touch targets reach 44px in the node picker and sort field",
+    async () => {
+      await send("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 900,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await click("#node-trigger");
+      const sizes = await evaluate(`(() => {
+        const heights = (selector) =>
+          [...document.querySelectorAll(selector)].map((node) =>
+            Math.round(node.getBoundingClientRect().height),
+          );
+        return {
+          rows: heights("#node-options button"),
+          filters: heights("#node-filters button"),
+          sort: heights("#node-sort"),
+        };
+      })()`);
+      assert.ok(sizes.rows.length > 0, "node options rendered");
+      for (const [name, values] of Object.entries(sizes)) {
+        assert.ok(values.length > 0, name + " rendered");
+        for (const height of values)
+          assert.ok(height >= 44, name + " target is " + height + "px");
+      }
+      await click("#node-trigger");
+      await send("Emulation.setDeviceMetricsOverride", {
+        width: 1440,
+        height: 1000,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+    },
+  );
   await check("entry labels show domains and ports, not raw IDs", async () => {
     await click('[data-tab="entry"]');
     const options = await evaluate(
@@ -624,6 +672,49 @@ try {
       assert.equal(request.entry.token, "entry-token-000000000001");
       assert.match(request.rules[0].id, /^rule-[a-f0-9]+$/);
       assert.equal(config.rules.length, 1);
+    },
+  );
+  await check(
+    "entry rule deletion confirms impact, shows progress and reports the result",
+    async () => {
+      writeDelay = 400;
+      await click("#entry-rules [data-remove]");
+      assert.equal(await visible("#confirm-dialog"), true);
+      assert.match(
+        await evaluate('document.querySelector("#confirm-message").textContent'),
+        /无法撤销/,
+      );
+      assert.equal(entryRules.length, 1);
+      await click("#confirm-ok");
+      await until(
+        async () =>
+          (await evaluate(
+            'document.querySelector("#entry-rules [data-remove]")?.textContent',
+          )) === "正在删除…",
+        "delete in progress",
+      );
+      assert.equal(
+        await evaluate(
+          'document.querySelector("#entry-rules [data-remove]").getAttribute("aria-busy")',
+        ),
+        "true",
+      );
+      assert.match(
+        await evaluate('document.querySelector("#status").textContent'),
+        /正在删除入口规则/,
+      );
+      await until(() => entryRules.length === 0, "entry rule deleted");
+      await until(
+        async () =>
+          (await evaluate('document.querySelector("#status").textContent')) ===
+          "已删除入口规则",
+        "delete result",
+      );
+      assert.equal(
+        await evaluate('document.querySelector("#entry-rules [data-remove]")'),
+        null,
+      );
+      writeDelay = 0;
     },
   );
   await check(
@@ -813,7 +904,20 @@ try {
       await evaluate('document.querySelector("#draft-status").textContent'),
       /未保存/,
     );
+    writeDelay = 400;
     await click("#save");
+    assert.equal(
+      await evaluate('document.querySelector("#save").textContent'),
+      "正在保存…",
+    );
+    assert.equal(
+      await evaluate('document.querySelector("#save").getAttribute("aria-busy")'),
+      "true",
+    );
+    assert.match(
+      await evaluate('document.querySelector("#status").textContent'),
+      /正在保存全局配置/,
+    );
     await until(
       () => config.rules.some((rule) => rule.selector.value === "203.0.113.9"),
       "draft rule saved",
@@ -830,6 +934,105 @@ try {
       async () => !(await evaluate('document.querySelector("#save").disabled')),
       "save settled",
     );
+    assert.equal(
+      await evaluate('document.querySelector("#save").hasAttribute("aria-busy")'),
+      false,
+    );
+    assert.equal(
+      await evaluate('document.querySelector("#save").textContent'),
+      "保存配置",
+    );
+    writeDelay = 0;
+  });
+  await check(
+    "refresh and permission failures explain the next step without losing preset copy",
+    async () => {
+      const loadPreset = (
+        await evaluate('document.querySelector("#load-error-desc").textContent')
+      ).trim();
+      failState = true;
+      await click("#load");
+      await until(async () => await visible("#load-error"), "refresh error shown");
+      assert.match(
+        await evaluate('document.querySelector("#status").textContent'),
+        /网络连接失败/,
+      );
+      const detail = await evaluate(
+        'document.querySelector("#load-error-detail").textContent',
+      );
+      assert.match(detail, /网络连接失败/);
+      assert.match(detail, /上次读取的数据/);
+      assert.equal(
+        (
+          await evaluate(
+            'document.querySelector("#load-error-desc").textContent',
+          )
+        ).trim(),
+        loadPreset,
+      );
+      assert.equal(await visible("#rules"), true);
+      failState = false;
+      await click("#load");
+      await until(
+        async () => !(await visible("#load-error")),
+        "refresh recovered",
+      );
+
+      const deniedPreset = (
+        await evaluate('document.querySelector("#denied-desc").textContent')
+      ).trim();
+      deniedState = true;
+      await click("#load");
+      await until(async () => await visible("#denied-state"), "denied shown");
+      assert.equal(
+        (
+          await evaluate('document.querySelector("#denied-desc").textContent')
+        ).trim(),
+        deniedPreset,
+      );
+      assert.match(deniedPreset, /联系管理员/);
+      assert.match(
+        await evaluate('document.querySelector("#status").textContent'),
+        /权限/,
+      );
+      deniedState = false;
+      await click("#load");
+      await until(
+        async () => !(await visible("#denied-state")),
+        "denied recovered",
+      );
+    },
+  );
+  await check("390 rule table keeps match source readable", async () => {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 1000,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await click('[data-tab="global"]');
+    assert.equal(
+      await evaluate(
+        'getComputedStyle(document.querySelector("#global-rules th.ip-type-col")).display',
+      ),
+      "none",
+    );
+    assert.equal(
+      await evaluate(
+        'getComputedStyle(document.querySelector("#global-rules .ip-rule-type-inline")).display',
+      ),
+      "block",
+    );
+    const sourceWidth = await evaluate(
+      'Math.round(document.querySelector("#global-rules tbody tr td").getBoundingClientRect().width)',
+    );
+    assert.ok(sourceWidth >= 110, "match source column is " + sourceWidth + "px");
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 1440,
+      height: 1000,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
   });
   for (const width of [1440, 768, 390]) {
     await send("Emulation.setDeviceMetricsOverride", {

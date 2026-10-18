@@ -84,6 +84,7 @@
         <p id="load-error-desc" class="ui-error-state__desc">
           管理服务没有返回可用状态，请检查节点连接后重试。
         </p>
+        <p id="load-error-detail" class="ui-help-text ip-error-detail" hidden></p>
         <div class="ui-error-state__actions">
           <button id="retry-load" class="ui-btn ui-btn--secondary" type="button">重新加载</button>
         </div>
@@ -280,7 +281,7 @@
                 <thead>
                   <tr>
                     <th scope="col">匹配来源</th>
-                    <th scope="col">类型</th>
+                    <th scope="col" class="ip-type-col">类型</th>
                     <th scope="col">处理方式</th>
                     <th scope="col" class="ip-actions-col"><span class="ui-sr-only">操作</span></th>
                   </tr>
@@ -454,7 +455,7 @@
                   <thead>
                     <tr>
                       <th scope="col">匹配来源</th>
-                      <th scope="col">类型</th>
+                      <th scope="col" class="ip-type-col">类型</th>
                       <th scope="col">处理方式</th>
                       <th scope="col" class="ip-actions-col"><span class="ui-sr-only">操作</span></th>
                     </tr>

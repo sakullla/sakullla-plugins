@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -99,6 +100,7 @@ func TestDedicatedManagementPageAndVisibleRuntimeStates(t *testing.T) {
 		`id="entry-empty-title"`,
 		`id="denied-state"`,
 		`id="load-error"`,
+		`id="load-error-detail"`,
 		`id="province-empty"`,
 		`id="events-empty"`,
 		`href="#global-behavior"`,
@@ -203,3 +205,37 @@ func TestStateDistinguishesEmptyHostListAndPolicyDenial(t *testing.T) {
 }
 
 var _ = context.Background
+
+func TestUIKeepsTouchTargetsAndFailureFeedbackReadable(t *testing.T) {
+	css, err := uiAssets.ReadFile("assets/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, pattern := range map[string]string{
+		"node option rows":   `(?s)\.picker-options button \{[^}]*min-height: var\(--ui-touch\);`,
+		"node status chips":  `(?s)\.chips button \{[^}]*min-height: var\(--ui-touch\);`,
+		"narrow rule layout": `\.ip-rule-table \.ip-type-col`,
+	} {
+		if !regexp.MustCompile(pattern).Match(css) {
+			t.Fatalf("style.css is missing the %s contract", name)
+		}
+	}
+	if strings.Contains(string(css), "--ui-control-height-sm") {
+		t.Fatal("style.css must not override the kit control height for the node sort select")
+	}
+	app, err := uiAssets.ReadFile("assets/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{
+		`setAttribute("aria-busy"`,
+		`removeAttribute("aria-busy")`,
+		"网络连接失败",
+		"删除后立即对该入口生效，且无法撤销",
+		`$("#load-error-detail")`,
+	} {
+		if !strings.Contains(string(app), text) {
+			t.Fatalf("app.js is missing %q", text)
+		}
+	}
+}

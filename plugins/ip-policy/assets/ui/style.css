@@ -80,6 +80,7 @@ body {
   align-items: center;
   gap: var(--ui-space-2);
   width: 100%;
+  min-height: var(--ui-touch);
   padding: var(--ui-space-2) var(--ui-space-3);
   border: 0;
   border-radius: var(--ui-radius-md);
@@ -132,7 +133,7 @@ body {
 }
 
 .chips button {
-  min-height: 1.75rem;
+  min-height: var(--ui-touch);
   padding: 0.25rem 0.625rem;
   border: 1px solid transparent;
   border-radius: var(--ui-radius-full);
@@ -165,7 +166,6 @@ body {
 
 .sort-field select {
   width: auto;
-  min-height: var(--ui-control-height-sm);
   padding: 0 var(--ui-space-2);
   font-size: var(--ui-text-xs);
 }
@@ -183,6 +183,14 @@ body {
 
 .ip-message {
   margin: 0 0 var(--ui-space-4);
+}
+
+.ip-error-detail {
+  margin: var(--ui-space-2) 0 0;
+}
+
+.ip-error-detail[hidden] {
+  display: none;
 }
 
 .ip-status-strip {
@@ -354,6 +362,10 @@ body {
 .ip-rule-table strong {
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+
+.ip-rule-type-inline {
+  display: none;
 }
 
 .ip-actions-col {
@@ -736,6 +748,26 @@ body {
 }
 
 @media (max-width: 520px) {
+  .ip-rule-table .ip-type-col {
+    display: none;
+  }
+
+  .ip-rule-table .ip-rule-type-inline {
+    display: block;
+    margin-top: 2px;
+    color: var(--ui-text-tertiary);
+    font-size: var(--ui-text-xs);
+  }
+
+  .ip-rule-table th,
+  .ip-rule-table td {
+    padding: var(--ui-space-2) var(--ui-space-3);
+  }
+
+  .ip-rule-table .ip-actions-col {
+    width: auto;
+  }
+
   .node-controls {
     flex-wrap: wrap;
   }

@@ -65,6 +65,35 @@ const status = (message, failed = false) => {
   $("#status").textContent = message;
   $("#status").dataset.failed = String(failed);
 };
+const networkError = (error) =>
+  /failed to fetch|networkerror|network request failed|load failed|fetch failed|timed out|timeout|aborted/i.test(
+    String(error?.message || ""),
+  );
+const errorText = (error) => {
+  if (error?.status === 403)
+    return "没有访问策略的权限。请联系管理员授予策略管理权限。";
+  if (error?.status === 401)
+    return "登录状态已失效，请重新登录后再试。";
+  if (networkError(error))
+    return "网络连接失败：无法联系管理服务。请检查节点连接、管理服务状态和网络后重试。";
+  const raw = String(error?.message || "").trim();
+  if (/[\u4e00-\u9fff]/.test(raw)) return raw;
+  if (error?.status >= 500)
+    return "管理服务暂时不可用，请稍后重试；如持续失败，请检查节点状态。";
+  return "操作未完成，请稍后重试；如持续失败，请检查节点连接或管理服务状态。";
+};
+const setBusyButton = (button, label) => {
+  if (!button) return () => {};
+  const previousText = button.textContent,
+    previousBusy = button.getAttribute("aria-busy");
+  button.textContent = label;
+  button.setAttribute("aria-busy", "true");
+  return () => {
+    button.textContent = previousText;
+    if (previousBusy === null) button.removeAttribute("aria-busy");
+    else button.setAttribute("aria-busy", previousBusy);
+  };
+};
 const modeLabel = (mode) =>
   ({ observe: "观察", enforce: "拦截", deny: "拦截" })[mode] || "未设置";
 const phaseLabel = (phase) =>
@@ -144,16 +173,31 @@ const clearDirty = () => {
 const clearLoadStates = () => {
   $("#denied-state").hidden = true;
   $("#load-error").hidden = true;
+  $("#load-error-detail").hidden = true;
 };
-const showDenied = (message) => {
+const showDenied = () => {
   $("#denied-state").hidden = false;
   $("#load-error").hidden = true;
-  if (message) $("#denied-desc").textContent = message;
+  $("#load-error-detail").hidden = true;
 };
-const showLoadError = (message) => {
+const showLoadError = (detail, stale = false) => {
   $("#load-error").hidden = false;
   $("#denied-state").hidden = true;
-  if (message) $("#load-error-desc").textContent = message;
+  const text = [detail, stale ? "当前显示上次读取的数据，可重新加载确认。" : ""]
+    .filter(Boolean)
+    .join(" ");
+  $("#load-error-detail").textContent = text;
+  $("#load-error-detail").hidden = !text;
+};
+const reportLoadError = (error, stale = false) => {
+  if (error?.status === 403) {
+    showDenied();
+    status("没有访问策略的权限。请联系管理员授予策略管理权限。", true);
+    return;
+  }
+  const text = errorText(error);
+  showLoadError(text, stale);
+  status(text, true);
 };
 const confirmAction = (title, message) =>
   new Promise((resolve) => {
@@ -182,7 +226,7 @@ const mutate = async (action) => {
   try {
     await action();
   } catch (error) {
-    status(error.message, true);
+    status(errorText(error), true);
   } finally {
     controls.forEach(([node, disabled]) => (node.disabled = disabled));
     state.busy = false;
@@ -219,7 +263,7 @@ const switchTab = (tab) => {
   if (tab === "data")
     loadSources().catch((e) => {
       $("#catalog-status").textContent =
-        e.status === 403 ? "需要数据源管理权限才能选择或添加来源。" : e.message;
+        e.status === 403 ? "需要数据源管理权限才能选择或添加来源。" : errorText(e);
     });
   if (tab === "events") loadEvents();
 };
@@ -502,7 +546,9 @@ const renderRuleList = (root, rules, entry = false) => {
           (r, i) =>
             "<tr><td><strong>" +
             esc(ruleLabel(r)) +
-            "</strong></td><td>" +
+            '</strong><small class="ip-rule-type-inline">' +
+            ruleTypeLabel(r.selector.type) +
+            '</small></td><td class="ip-type-col">' +
             ruleTypeLabel(r.selector.type) +
             "</td><td>" +
             ruleActionBadge(r.action) +
@@ -518,23 +564,42 @@ const renderRuleList = (root, rules, entry = false) => {
       "</td></tr>";
   root.querySelectorAll("[data-remove]").forEach(
     (b) =>
-      (b.onclick = () => {
-        if (entry) {
-          mutate(async () => {
-            const next = structuredClone(rules);
-            next.splice(Number(b.dataset.remove), 1);
+      (b.onclick = async () => {
+        if (state.busy) return;
+        if (!entry) {
+          state.config.rules.splice(Number(b.dataset.remove), 1);
+          markDirty();
+          renderRules();
+          return;
+        }
+        const rule = rules[Number(b.dataset.remove)];
+        if (!rule) return;
+        if (
+          !(await confirmAction(
+            "删除入口规则",
+            "将删除“" +
+              ruleLabel(rule) +
+              "”这条入口专属规则。删除后立即对该入口生效，且无法撤销，实际访问结果可能改变。",
+          ))
+        )
+          return;
+        mutate(async () => {
+          const next = structuredClone(rules);
+          next.splice(Number(b.dataset.remove), 1);
+          const restore = setBusyButton(b, "正在删除…");
+          status("正在删除入口规则…");
+          try {
             await post("api/entry-rules", {
               entry: selectedEntry(),
               rules: next,
             });
-            await load();
-          });
-        } else {
-          if (state.busy) return;
-          state.config.rules.splice(Number(b.dataset.remove), 1);
-          markDirty();
-          renderRules();
-        }
+          } finally {
+            restore();
+          }
+          await load();
+          status("已删除入口规则");
+          NREUI.toast?.("入口规则已删除", "success");
+        });
       }),
   );
 };
@@ -600,8 +665,18 @@ for (const [id, isEntry] of [
         if (!selectedEntry()) throw new Error("请先选择入口");
         const rules = [...(state.payload.entry_overlay?.rules || []), rule];
         if (rules.length > 64) throw new Error("每个入口最多 64 条规则");
-        await post("api/entry-rules", { entry: selectedEntry(), rules });
+        const restore = setBusyButton(
+          form.querySelector('button[type="submit"]'),
+          "正在保存…",
+        );
+        status("正在保存入口规则…");
+        try {
+          await post("api/entry-rules", { entry: selectedEntry(), rules });
+        } finally {
+          restore();
+        }
         await load();
+        status("入口规则已保存");
       } else {
         if (state.config.rules.length >= 256)
           throw new Error("最多 256 条全局规则");
@@ -744,7 +819,7 @@ $("#default-action").onchange = () => {
     markDirty();
   }
 };
-const save = async (mode) => {
+const save = async (mode, trigger) => {
   if (!state.config) return;
   const nextMode = mode || currentMode();
   if (
@@ -756,16 +831,25 @@ const save = async (mode) => {
     ))
   )
     return;
-  await post("api/config", { mode: nextMode, config: state.config });
+  const restore = setBusyButton(
+    trigger || $("#save"),
+    trigger?.classList.contains("ui-btn--sm") ? "保存中…" : "正在保存…",
+  );
+  status("正在保存全局配置…");
+  try {
+    await post("api/config", { mode: nextMode, config: state.config });
+  } finally {
+    restore();
+  }
   clearDirty();
   await load();
   status("全局配置已保存");
   NREUI.toast?.("全局配置已保存", "success");
 };
-$("#save").onclick = () => mutate(() => save());
+$("#save").onclick = () => mutate(() => save(undefined, $("#save")));
 document
   .querySelectorAll("[data-mode]")
-  .forEach((b) => (b.onclick = () => mutate(() => save(b.dataset.mode))));
+  .forEach((b) => (b.onclick = () => mutate(() => save(b.dataset.mode, b))));
 $("#entry-select").onchange = () => {
   if (state.busy) {
     $("#entry-select").value = state.token;
@@ -800,8 +884,15 @@ for (const [id, mode, reset] of [
         ))
       )
         return;
-      await post("api/entry-mode", { entry, mode, reset });
+      const restore = setBusyButton($("#" + id), "保存中…");
+      status("正在保存入口模式…");
+      try {
+        await post("api/entry-mode", { entry, mode, reset });
+      } finally {
+        restore();
+      }
       await load();
+      status("入口模式已更新");
     });
 const load = async (initial) => {
   const seq = ++state.seq,
@@ -837,10 +928,8 @@ const load = async (initial) => {
   } catch (error) {
     if (seq !== state.seq) return;
     if (!state.payload) $("#workspace").hidden = true;
-    if (error.status === 403) showDenied(error.message);
-    else showLoadError(error.message);
+    reportLoadError(error, !!state.payload);
     $("#phase").textContent = "状态读取失败";
-    status(error.message, true);
   }
 };
 const loadAgents = async () => {
@@ -871,7 +960,7 @@ const loadAgents = async () => {
   await load(state.node ? undefined : payload);
 };
 $("#load").onclick = () => {
-  if (!state.busy) loadAgents().catch((e) => status(e.message, true));
+  if (!state.busy) loadAgents().catch((e) => reportLoadError(e, !!state.payload));
 };
 
 const coverageLabel = (c) =>
@@ -965,7 +1054,7 @@ const renderVersionInfo = () => {
     });
   $("#refresh-source").hidden = !source.source.url;
   $("#reload-versions").onclick = () =>
-    loadVersions().catch((e) => status(e.message, true));
+    loadVersions().catch((e) => status(errorText(e), true));
   $("#delete-version").disabled = !version;
   for (const [id, action] of [
     ["delete-version", "delete-version"],
@@ -1055,7 +1144,7 @@ const loadVersions = async () => {
     if (seq !== state.catalogSeq) return;
     $("#version-select").innerHTML = option("", "版本读取失败");
     $("#catalog-status").textContent =
-      e.status === 403 ? "没有查看数据版本的权限。" : e.message;
+      e.status === 403 ? "没有查看数据版本的权限。" : errorText(e);
     renderVersionInfo();
   }
 };
@@ -1113,8 +1202,8 @@ const loadClasses = async (append = false) => {
     renderClasses();
   } catch (e) {
     if (seq === state.catalogSeq) {
-      $("#catalog-classes").textContent = e.message;
-      status(e.message, true);
+      $("#catalog-classes").textContent = errorText(e);
+      status(errorText(e), true);
     }
   } finally {
     if (seq === state.catalogSeq) $("#more-classes").disabled = false;
@@ -1257,16 +1346,22 @@ $("#binding-form").onsubmit = (e) => {
     }
     if (definition.classifications.length > 64)
       throw new Error("每个数据源最多选择 64 个分类");
-    await post("api/binding", {
-      binding: {
-        source_id: source.source.id,
-        version_digest: version,
-        dataset_id: definition.id,
-        node_ids: [node],
-        mode: currentMode(),
-        config,
-      },
-    });
+    const restore = setBusyButton($("#bind"), "正在绑定…");
+    status("正在校验并绑定数据…");
+    try {
+      await post("api/binding", {
+        binding: {
+          source_id: source.source.id,
+          version_digest: version,
+          dataset_id: definition.id,
+          node_ids: [node],
+          mode: currentMode(),
+          config,
+        },
+      });
+    } finally {
+      restore();
+    }
     clearDirty();
     await load();
     status("数据已绑定，分类现可用于规则和省份白名单。");
@@ -1336,7 +1431,7 @@ const renderDatasets = () => {
         (b.onclick = () => {
           switchTab("data");
           loadSources(b.dataset.sourceEdit).catch((e) =>
-            status(e.message, true),
+            status(errorText(e), true),
           );
           $("#source-select").focus();
         }),
@@ -1430,7 +1525,7 @@ $("#source-form").onsubmit = (e) => {
           );
         }
       }
-      $("#source-error").textContent = error.message;
+      $("#source-error").textContent = errorText(error);
       throw error;
     }
   });
@@ -1570,7 +1665,7 @@ const loadEvents = async () => {
   } catch (error) {
     if (seq !== state.eventSeq) return;
     state.recentEvents = [];
-    $("#events-empty").textContent = error.message;
+    $("#events-empty").textContent = errorText(error) + " 请稍后点击“刷新事件”重试。";
     $("#event-retention").textContent =
       "读取未完成，不能据此判断是否发生拦截。";
   }
@@ -1593,7 +1688,8 @@ $("#event-search").oninput = () => {
   renderEventPage();
 };
 $("#retry-load").onclick = () => {
-  if (!state.busy) loadAgents().catch((error) => status(error.message, true));
+  if (!state.busy)
+    loadAgents().catch((error) => reportLoadError(error, !!state.payload));
 };
 window.addEventListener("beforeunload", (e) => {
   if (state.dirty) {
@@ -1607,11 +1703,7 @@ loadAgents()
       $("#catalog-status").textContent =
         error.status === 403
           ? "需要数据源管理权限才能选择或添加来源。"
-          : error.message;
+          : errorText(error);
     }),
   )
-  .catch((error) => {
-    status(error.message, true);
-    if (error.status === 403) showDenied(error.message);
-    else showLoadError(error.message);
-  });
+  .catch((error) => reportLoadError(error));
