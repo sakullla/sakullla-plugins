@@ -65,7 +65,7 @@
   gap: 2px;
   padding: 3px;
   border-bottom: 0;
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-xl);
   background: var(--ui-sunken);
   overflow: visible;
   scrollbar-width: none;
@@ -82,7 +82,7 @@
 .accel-view-tabs .ui-tab[aria-selected="true"] {
   background: var(--ui-surface);
   color: var(--ui-primary);
-  box-shadow: var(--ui-shadow-xs);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 .accel-theme-toggle svg {

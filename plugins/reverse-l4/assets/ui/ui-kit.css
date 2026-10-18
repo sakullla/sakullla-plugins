@@ -38,14 +38,18 @@
   --ui-touch: 2.75rem;
 
   --ui-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ui-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ui-duration: 180ms;
 
+  /* Layered elevation. Cards sit on --ui-shadow-sm, raised surfaces on --ui-md,
+     floating layers on --ui-lg. Two-part shadows read as ambient + key light
+     instead of the flat single drop of a v1 kit. */
   --ui-shadow-rgb: 15 23 42;
-  --ui-shadow-xs: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.05);
-  --ui-shadow-sm: 0 1px 3px rgb(var(--ui-shadow-rgb) / 0.06), 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.04);
-  --ui-shadow-md: 0 8px 20px -12px rgb(var(--ui-shadow-rgb) / 0.22);
-  --ui-shadow-lg: 0 18px 40px -20px rgb(var(--ui-shadow-rgb) / 0.28);
-  --ui-shadow-xl: 0 28px 60px -28px rgb(var(--ui-shadow-rgb) / 0.34);
+  --ui-shadow-xs: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.04);
+  --ui-shadow-sm: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.04), 0 2px 6px -2px rgb(var(--ui-shadow-rgb) / 0.06);
+  --ui-shadow-md: 0 2px 4px -2px rgb(var(--ui-shadow-rgb) / 0.06), 0 8px 20px -8px rgb(var(--ui-shadow-rgb) / 0.16);
+  --ui-shadow-lg: 0 4px 8px -4px rgb(var(--ui-shadow-rgb) / 0.08), 0 18px 40px -14px rgb(var(--ui-shadow-rgb) / 0.24);
+  --ui-shadow-xl: 0 8px 16px -8px rgb(var(--ui-shadow-rgb) / 0.1), 0 32px 64px -24px rgb(var(--ui-shadow-rgb) / 0.3);
 
   /* Default light palette (also the `light` and `business` themes). */
   --ui-primary: #4f46e5;
@@ -55,20 +59,22 @@
   --ui-on-primary: #ffffff;
   --ui-accent: #06b6d4;
 
-  --ui-bg: #f8fafc;
+  /* Hairline borders carry structure on light canvases; surfaces stay pure so
+     the primary gradient and status colors keep the visual emphasis. */
+  --ui-bg: #f6f7fb;
   --ui-surface: #ffffff;
   --ui-surface-raised: #ffffff;
   --ui-sunken: #f1f5f9;
   --ui-subtle: #f1f5f9;
-  --ui-hover: #e2e8f0;
-  --ui-active: #cbd5e1;
+  --ui-hover: #eef1f6;
+  --ui-active: #e2e8f0;
 
   --ui-text: #0f172a;
   --ui-text-secondary: #475569;
   --ui-text-tertiary: #5b6b80;
   --ui-text-muted: #64748b;
   --ui-border: #8794a5;
-  --ui-border-subtle: rgba(15, 23, 42, 0.06);
+  --ui-border-subtle: rgba(15, 23, 42, 0.08);
   --ui-border-strong: #64748b;
 
   --ui-success: #10b981;
@@ -476,11 +482,19 @@ svg {
 
 /* ---------- Tabs ---------- */
 
+/* Segmented-control tabs: the active pill carries the fill so the current
+   section reads at a glance without a hairline underline competing with the
+   container border. */
 .ui-tabs {
   display: flex;
   align-items: center;
   gap: var(--ui-space-1);
-  border-bottom: 1px solid var(--ui-border);
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--ui-space-1);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-xl);
+  background: color-mix(in srgb, var(--ui-sunken) 70%, transparent);
   overflow-x: auto;
   scrollbar-width: thin;
 }
@@ -491,42 +505,73 @@ svg {
   align-items: center;
   justify-content: center;
   gap: var(--ui-space-2);
-  min-height: var(--ui-control-height);
-  padding: 0 var(--ui-space-3);
+  min-height: calc(var(--ui-control-height) - 0.375rem);
+  padding: 0 var(--ui-space-4);
   border: 0;
-  border-radius: var(--ui-radius-md) var(--ui-radius-md) 0 0;
+  border-radius: var(--ui-radius-lg);
   background: transparent;
   color: var(--ui-text-secondary);
   font-size: var(--ui-text-sm);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
-  transition: color var(--ui-duration) var(--ui-ease), background var(--ui-duration) var(--ui-ease);
+  transition: color var(--ui-duration) var(--ui-ease), background var(--ui-duration) var(--ui-ease),
+    box-shadow var(--ui-duration) var(--ui-ease);
 }
 
 .ui-tab:hover {
   color: var(--ui-text);
-  background: var(--ui-hover);
+  background: color-mix(in srgb, var(--ui-surface) 70%, transparent);
 }
 
 .ui-tab[aria-selected="true"],
 .ui-tab.is-active {
   color: var(--ui-primary);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-sm);
+  font-weight: 650;
 }
 
-.ui-tab[aria-selected="true"]::after,
-.ui-tab.is-active::after {
+.ui-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Underline variant for pages that sit directly on the canvas. */
+.ui-tabs--underline {
+  padding: 0;
+  gap: var(--ui-space-4);
+  border: 0;
+  border-bottom: 1px solid var(--ui-border-subtle);
+  border-radius: 0;
+  background: transparent;
+}
+
+.ui-tabs--underline .ui-tab {
+  min-height: var(--ui-control-height);
+  padding: 0 var(--ui-space-1);
+  border-radius: 0;
+}
+
+.ui-tabs--underline .ui-tab:hover {
+  background: transparent;
+}
+
+.ui-tabs--underline .ui-tab[aria-selected="true"],
+.ui-tabs--underline .ui-tab.is-active {
+  color: var(--ui-primary);
+  background: transparent;
+  box-shadow: none;
+}
+
+.ui-tabs--underline .ui-tab[aria-selected="true"]::after,
+.ui-tabs--underline .ui-tab.is-active::after {
   content: "";
   position: absolute;
   inset: auto 0 -1px;
   height: 2px;
   border-radius: var(--ui-radius-full) var(--ui-radius-full) 0 0;
   background: var(--ui-primary);
-}
-
-.ui-tab:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 /* ---------- Toolbar ---------- */
@@ -540,7 +585,7 @@ svg {
   border: 1px solid var(--ui-border-subtle);
   border-radius: var(--ui-radius-xl);
   background: var(--ui-surface);
-  box-shadow: var(--ui-shadow-xs);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 .ui-toolbar__grow {
@@ -557,6 +602,7 @@ svg {
 /* ---------- Buttons ---------- */
 
 .ui-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -574,6 +620,7 @@ svg {
   white-space: nowrap;
   cursor: pointer;
   text-decoration: none;
+  box-shadow: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.12), inset 0 1px 0 rgb(255 255 255 / 0.16);
   transition: background var(--ui-duration) var(--ui-ease), border-color var(--ui-duration) var(--ui-ease),
     box-shadow var(--ui-duration) var(--ui-ease), transform var(--ui-duration) var(--ui-ease), opacity var(--ui-duration) var(--ui-ease);
 }
@@ -581,13 +628,13 @@ svg {
 .ui-btn:hover:not(:disabled) {
   background: var(--ui-primary-hover);
   transform: translateY(-1px);
-  box-shadow: var(--ui-shadow-sm);
+  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--ui-primary) 42%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.16);
 }
 
 .ui-btn:active:not(:disabled) {
   background: var(--ui-primary-active);
   transform: translateY(0);
-  box-shadow: none;
+  box-shadow: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.14);
 }
 
 .ui-btn:focus-visible {
@@ -614,27 +661,33 @@ svg {
 .ui-btn--secondary:hover:not(:disabled) {
   background: var(--ui-hover);
   border-color: var(--ui-border-strong);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 .ui-btn--ghost {
   background: transparent;
   color: var(--ui-text-secondary);
   border-color: transparent;
+  box-shadow: none;
 }
 
 .ui-btn--ghost:hover:not(:disabled) {
   background: var(--ui-hover);
   color: var(--ui-text);
+  box-shadow: none;
 }
 
 .ui-btn--danger {
   background: var(--ui-danger-button, var(--ui-danger));
   color: var(--ui-on-danger, #ffffff);
+  box-shadow: 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.14), inset 0 1px 0 rgb(255 255 255 / 0.16);
 }
 
 .ui-btn--danger:hover:not(:disabled) {
   background: var(--ui-danger-button, var(--ui-danger));
-  filter: brightness(1.03);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--ui-danger) 45%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.16);
 }
 
 .ui-btn--danger-soft {
@@ -719,6 +772,7 @@ svg {
   color: var(--ui-text);
   font-size: var(--ui-text-sm);
   line-height: 1.4;
+  box-shadow: inset 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.03);
   transition: border-color var(--ui-duration) var(--ui-ease), box-shadow var(--ui-duration) var(--ui-ease),
     background var(--ui-duration) var(--ui-ease);
 }
@@ -749,7 +803,7 @@ svg {
 .ui-textarea:focus {
   outline: none;
   border-color: var(--ui-primary);
-  box-shadow: var(--ui-focus-ring);
+  box-shadow: 0 0 0 3px var(--ui-primary-soft), inset 0 1px 2px rgb(var(--ui-shadow-rgb) / 0.03);
 }
 
 .ui-input[aria-invalid="true"],
@@ -829,12 +883,15 @@ svg {
 /* ---------- Cards ---------- */
 
 .ui-card {
+  position: relative;
   border: 1px solid var(--ui-border-subtle);
   border-radius: var(--ui-radius-2xl);
   background: var(--ui-surface);
-  box-shadow: var(--ui-shadow-xs);
+  box-shadow: var(--ui-shadow-sm);
   padding: var(--ui-space-5);
   min-width: 0;
+  transition: box-shadow var(--ui-duration) var(--ui-ease), border-color var(--ui-duration) var(--ui-ease),
+    transform var(--ui-duration) var(--ui-ease);
 }
 
 .ui-card--flat {
@@ -843,6 +900,22 @@ svg {
 
 .ui-card--raised {
   box-shadow: var(--ui-shadow-md);
+}
+
+/* Interactive cards lift on hover; callouts and form panels opt out. */
+.ui-card--interactive {
+  cursor: pointer;
+}
+
+.ui-card--interactive:hover {
+  transform: translateY(-2px);
+  border-color: var(--ui-border-strong);
+  box-shadow: var(--ui-shadow-lg);
+}
+
+.ui-card--interactive:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 2px;
 }
 
 .ui-card__head {
@@ -857,12 +930,14 @@ svg {
   margin: 0;
   font-size: var(--ui-text-base);
   font-weight: 650;
+  letter-spacing: -0.005em;
   color: var(--ui-text);
 }
 
 .ui-card__desc {
   margin: var(--ui-space-1) 0 0;
   font-size: var(--ui-text-xs);
+  line-height: 1.6;
   color: var(--ui-text-secondary);
 }
 
@@ -871,6 +946,18 @@ svg {
   align-items: center;
   gap: var(--ui-space-2);
   flex-shrink: 0;
+}
+
+.ui-card__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  flex-wrap: wrap;
+  margin: var(--ui-space-4) calc(var(--ui-space-5) * -1) calc(var(--ui-space-5) * -1);
+  padding: var(--ui-space-3) var(--ui-space-5);
+  border-top: 1px solid var(--ui-border-subtle);
+  background: color-mix(in srgb, var(--ui-sunken) 60%, transparent);
+  border-radius: 0 0 var(--ui-radius-2xl) var(--ui-radius-2xl);
 }
 
 /* ---------- Metrics ---------- */
@@ -882,13 +969,35 @@ svg {
 }
 
 .ui-metric {
+  position: relative;
   border: 1px solid var(--ui-border-subtle);
   border-radius: var(--ui-radius-xl);
   background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-xs);
   padding: var(--ui-space-4);
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-1);
+  overflow: hidden;
+  transition: box-shadow var(--ui-duration) var(--ui-ease), transform var(--ui-duration) var(--ui-ease);
+}
+
+/* Tone variants tint the value and add a status rail without extra markup. */
+.ui-metric[data-tone="primary"] { --ui-metric-tone: var(--ui-primary); --ui-metric-tone-soft: var(--ui-primary-soft); }
+.ui-metric[data-tone="success"] { --ui-metric-tone: var(--ui-success-text, var(--ui-success)); --ui-metric-tone-soft: var(--ui-success-soft); }
+.ui-metric[data-tone="warning"] { --ui-metric-tone: var(--ui-warning-text, var(--ui-warning)); --ui-metric-tone-soft: var(--ui-warning-soft); }
+.ui-metric[data-tone="danger"] { --ui-metric-tone: var(--ui-danger-text, var(--ui-danger)); --ui-metric-tone-soft: var(--ui-danger-soft); }
+
+.ui-metric[data-tone]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ui-metric-tone);
+}
+
+.ui-metric[data-tone] {
+  background: linear-gradient(135deg, var(--ui-metric-tone-soft), transparent 62%), var(--ui-surface);
 }
 
 .ui-metric__label {
@@ -902,7 +1011,8 @@ svg {
   line-height: 1.1;
   font-weight: 700;
   letter-spacing: -0.03em;
-  color: var(--ui-text);
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-metric-tone, var(--ui-text));
 }
 
 .ui-metric__hint {
@@ -946,13 +1056,21 @@ svg {
 .ui-table th {
   font-size: var(--ui-text-xs);
   font-weight: 650;
+  letter-spacing: 0.02em;
   color: var(--ui-text-tertiary);
   background: var(--ui-sunken);
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .ui-table tbody tr:last-child td {
   border-bottom: 0;
+}
+
+.ui-table tbody tr {
+  transition: background var(--ui-duration) var(--ui-ease);
 }
 
 .ui-table tbody tr:hover {
@@ -991,6 +1109,14 @@ svg {
   border: 1px solid var(--ui-border-subtle);
   border-radius: var(--ui-radius-xl);
   background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-xs);
+  transition: box-shadow var(--ui-duration) var(--ui-ease), border-color var(--ui-duration) var(--ui-ease),
+    transform var(--ui-duration) var(--ui-ease);
+}
+
+.ui-record:hover {
+  border-color: var(--ui-border);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 .ui-record__main {
@@ -1037,6 +1163,7 @@ svg {
   color: var(--ui-text-secondary);
   font-size: var(--ui-text-xs);
   font-weight: 600;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -1083,7 +1210,7 @@ svg {
   align-items: center;
   justify-content: center;
   gap: var(--ui-space-2);
-  padding: var(--ui-space-10) var(--ui-space-5);
+  padding: var(--ui-space-12) var(--ui-space-5);
   text-align: center;
   border: 1px dashed var(--ui-border);
   border-radius: var(--ui-radius-2xl);
@@ -1095,12 +1222,12 @@ svg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 3rem;
-  height: 3rem;
+  width: 3.5rem;
+  height: 3.5rem;
   border-radius: var(--ui-radius-xl);
-  background: var(--ui-primary-soft);
+  background: linear-gradient(135deg, var(--ui-primary-soft), transparent 70%);
   color: var(--ui-primary);
-  margin-bottom: var(--ui-space-1);
+  margin-bottom: var(--ui-space-2);
 }
 
 .ui-empty__title,
@@ -1190,15 +1317,15 @@ svg {
 
 .ui-dialog::backdrop {
   background: var(--ui-overlay);
-  backdrop-filter: blur(3px);
+  backdrop-filter: blur(6px) saturate(120%);
 }
 
 .ui-dialog[open] {
-  animation: ui-pop var(--ui-duration) var(--ui-ease);
+  animation: ui-pop var(--ui-duration) var(--ui-ease-out);
 }
 
 @keyframes ui-pop {
-  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
@@ -1429,6 +1556,21 @@ svg {
 @media (max-width: 768px) {
   .ui-page {
     padding: var(--ui-space-6) var(--ui-space-4) var(--ui-space-12);
+  }
+
+  /* Segmented tabs stay a single scrollable row on narrow screens so the
+     current section never reflows into stacked pills. */
+  .ui-tabs {
+    max-width: 100%;
+    scrollbar-width: none;
+  }
+
+  .ui-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .ui-tab {
+    flex: 0 0 auto;
   }
 
   .ui-page-head {

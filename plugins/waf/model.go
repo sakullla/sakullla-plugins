@@ -17,7 +17,7 @@ var managedRulesSource string
 
 const (
 	PluginID      = "waf"
-	PluginVersion = "0.1.3"
+	PluginVersion = "0.1.4"
 	MaxRules      = 16
 	MaxExclusions = 16
 	ModeObserve   = "observe"

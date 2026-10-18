@@ -18,7 +18,7 @@ import (
 
 const (
 	PluginID         = "webdav"
-	PluginVersion    = "0.1.11"
+	PluginVersion    = "0.1.12"
 	ProviderID       = "default"
 	MaxConfigBytes   = 4096
 	MaxPasswordBytes = 256

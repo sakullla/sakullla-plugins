@@ -60,8 +60,9 @@ body {
 }
 
 .waf-tabbar .ui-tabs {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
 }
 
 .waf-view {
@@ -482,6 +483,7 @@ body {
 
 .waf-rule-tabs {
   margin-top: var(--ui-space-2);
+  max-width: 100%;
 }
 
 .waf-rule-panel {
