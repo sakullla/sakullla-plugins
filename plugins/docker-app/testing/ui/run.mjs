@@ -203,7 +203,7 @@ const server = createServer(async (request, response) => {
     if (request.method !== "GET") return json({ error: "Unexpected mutation in workspace suite" }, 500);
     if (url.pathname === "/theme-frame.html" || url.pathname === "/theme-writer.html") {
       response.writeHead(200,{"Content-Type":"text/html"});
-      response.end(url.pathname === "/theme-frame.html" ? '<!doctype html><html data-theme="sakura-night"><body style="margin:0"><iframe title="Theme fixture" src="/?agent_id=node-a" style="width:100%;height:100vh;border:0"></iframe></body></html>' : '<!doctype html><title>Host theme fixture</title>');
+      response.end(url.pathname === "/theme-frame.html" ? '<!doctype html><html data-theme="sakura-night"><body style="margin:0"><script>localStorage.setItem("theme","sakura-night")</script><iframe title="Theme fixture" src="/?agent_id=node-a" style="width:100%;height:100vh;border:0"></iframe></body></html>' : '<!doctype html><title>Host theme fixture</title>');
       return;
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
@@ -320,7 +320,7 @@ try {
             actions:[...card.querySelectorAll('.app-card-actions button')].filter(n=>n.getClientRects().length).map(n=>n.textContent)};
         })()`);
         assert.deepEqual(layout.images, ["example/gateway:v1.2.3", "example/worker:latest"]);
-        assert.ok(width > 850 ? layout.imageLeft >= layout.headRight : layout.imageTop >= layout.headBottom, "identity and service images occupy separate regions");
+        assert.ok(layout.imageTop >= layout.headBottom, "identity and service images occupy separate regions");
         assert.deepEqual(layout.actions, ["详情"]);
         await capture("multi-service-card", width);
       }
@@ -473,7 +473,7 @@ try {
         return {count: cards.length, rows, refreshWidth: refresh.width, pickerWidth: picker.width};
       })()`);
       assert.ok(grid.refreshWidth < grid.pickerWidth, `refresh is not a stretched primary at ${width}: ${JSON.stringify(grid)}`);
-      assert.equal(grid.rows, grid.count, `applications remain separate information rows at ${width}: ${JSON.stringify(grid)}`);
+      assert.ok(grid.rows >= Math.ceil(grid.count / 3), `applications stay in a compact card wall at ${width}: ${JSON.stringify(grid)}`);
       const bounds = await page.evaluate(`(() => {
         const client = document.documentElement.clientWidth;
         return {client, scroll: document.documentElement.scrollWidth, controls: Array.from(document.querySelectorAll('.agent-search-select__trigger, #deploy-toggle, #workspace-refresh, #app-list .app-card')).map(n => {

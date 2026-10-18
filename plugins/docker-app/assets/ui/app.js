@@ -1067,6 +1067,7 @@ const openCreate = async () => {
   updateDraftIndicators();
   document.querySelector("#create-context").textContent = `目标节点：${agentDisplayName(selectedAgent())}`;
   showFormFeedback(createForm, "");
+  clearFormFieldFeedback(createForm);
   createPanel.hidden = false;
   openDialog(createPanel, idInput);
   syncListPanel();
@@ -2483,6 +2484,7 @@ const fillCompose = (app, revision = composeDraft.revision) => {
     showFormFeedback(composeForm, "已刷新应用状态，保留当前未提交的编辑。", "info");
     return;
   }
+  clearFormFieldFeedback(composeForm);
   if (detailComposeInput) {
     detailComposeInput.value = app.compose || "";
     paintCodeEditor(detailComposeInput);
@@ -3701,16 +3703,57 @@ const showFormFeedback = (form, message, state = "failed") => {
   node.dataset.state = state;
   node.setAttribute("role", state === "failed" ? "alert" : "status");
 };
+// Field-level validation feedback: the kit error text renders next to the
+// control that failed, and the control points at it through aria-describedby.
+// Unknown submission failures keep the form-level alert.
+const fieldErrorMessage = (field) => field.name === "id"
+  ? "填写有效的应用 ID：小写字母、数字及连字符。"
+  : "请填写 Compose YAML。";
+const fieldErrorID = (form, field) => `field-error-${form.id || "form"}-${field.name}`;
+const clearFieldFeedback = (field) => {
+  const form = field.form;
+  if (!form) return;
+  const id = fieldErrorID(form, field);
+  document.getElementById(id)?.remove();
+  field.removeAttribute("aria-invalid");
+  if (field.getAttribute("aria-describedby") === id) field.removeAttribute("aria-describedby");
+};
+const clearFormFieldFeedback = (form) => {
+  if (!form) return;
+  form.querySelectorAll(".ui-error-text").forEach((node) => node.remove());
+  form.querySelectorAll('[aria-invalid="true"]').forEach((field) => field.removeAttribute("aria-invalid"));
+  form.querySelectorAll("[aria-describedby]").forEach((field) => {
+    if ((field.getAttribute("aria-describedby") || "").startsWith("field-error-")) field.removeAttribute("aria-describedby");
+  });
+};
+const showFieldFeedback = (field, message) => {
+  const form = field.form;
+  if (!form) return;
+  const id = fieldErrorID(form, field);
+  let error = document.getElementById(id);
+  if (!error) {
+    error = document.createElement("p");
+    error.id = id;
+    error.className = "ui-error-text";
+    error.setAttribute("role", "alert");
+    const container = field.closest(".ui-field, .code-field");
+    if (container) container.insertAdjacentElement("afterend", error);
+    else field.insertAdjacentElement("afterend", error);
+  }
+  error.textContent = message;
+  field.setAttribute("aria-invalid", "true");
+  field.setAttribute("aria-describedby", id);
+};
 const submitCompose = async (form, updating) => {
   if (busy || (updating && !detailApp)) return;
-  const invalid = Array.from(form.elements).find((field) => field.willValidate && (!field.checkValidity() || (field.required && !field.value.trim())));
-  if (invalid) {
-    showFormFeedback(form, invalid.name === "id" ? "填写有效的应用 ID：小写字母、数字及连字符。" : "请填写 Compose YAML。");
-    invalid.setAttribute("aria-invalid", "true");
-    invalid.focus();
+  clearFormFieldFeedback(form);
+  const invalidFields = Array.from(form.elements).filter((field) => field.willValidate && (!field.checkValidity() || (field.required && !field.value.trim())));
+  if (invalidFields.length) {
+    invalidFields.forEach((field) => showFieldFeedback(field, fieldErrorMessage(field)));
+    showFormFeedback(form, invalidFields.length === 1 ? fieldErrorMessage(invalidFields[0]) : "请补全标出的必填字段后再提交。");
+    invalidFields[0].focus();
     return;
   }
-  form.querySelectorAll('[aria-invalid]').forEach((field) => field.removeAttribute("aria-invalid"));
   if (!selectedAgentID || !agentOnline || !engineReady) {
     showFormFeedback(form, "当前节点无法部署，请检查节点状态。");
     return;
@@ -3759,6 +3802,10 @@ const submitCompose = async (form, updating) => {
 [ [composeForm, true], [createForm, false] ].forEach(([form, updating]) => {
   form.noValidate = true;
   form.addEventListener("submit", (event) => { event.preventDefault(); submitCompose(form, updating); });
+  form.addEventListener("input", (event) => {
+    const field = event.target;
+    if (field.form === form && field.getAttribute("aria-invalid") === "true") clearFieldFeedback(field);
+  });
 });
 document.addEventListener("keydown", (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing) return;

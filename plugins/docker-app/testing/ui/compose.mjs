@@ -29,6 +29,14 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
   const formState = async (form, expected) => eventually(
     () => page.evaluate(`document.querySelector(${JSON.stringify(form + " [data-form-feedback]")}).dataset.state === ${JSON.stringify(expected)}`),
     `${form} reports ${expected}`);
+  const fieldState = (form, name) => page.evaluate(`(() => {
+    const field = document.querySelector(${JSON.stringify(form)} + ' [name="' + ${JSON.stringify(name)} + '"]');
+    const id = field.getAttribute("aria-describedby") || "";
+    const error = id ? document.getElementById(id) : null;
+    const box = field.closest(".ui-field, .code-field");
+    return { invalid: field.getAttribute("aria-invalid"), described: Boolean(error && id),
+      message: error ? error.textContent : "", adjacent: Boolean(error && box && error.previousElementSibling === box) };
+  })()`);
 
   await test("complete deployment editor, template protection and node context", async () => {
     await reset(); await create();
@@ -52,7 +60,7 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     await reset(); await create();
     await fill('#create-form input[name="id"]', "navigation-draft");
     await fill('#create-form textarea[name="compose"]', draftYAML);
-    for (const trigger of [() => page.click("#create-cancel"), () => page.click("#workspace-refresh"), () => page.selectAgent("node-b")]) {
+    for (const trigger of [() => page.click("#create-cancel"), () => page.key("Escape")]) {
       await trigger(); await confirm(false);
       assert.ok(await page.visible("#create-form"));
       assert.equal(await value('#create-form textarea[name="compose"]'), draftYAML);
@@ -63,7 +71,9 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     assert.ok(page.javascriptDialogs.slice(previous).includes("beforeunload"), "dirty document requests native unload confirmation");
     await page.waitVisible('[data-id="alpha"]');
     await create(); await fill('#create-form textarea[name="compose"]', yaml);
-    await page.selectAgent("node-b"); await confirm(true); await page.waitVisible('[data-id="bravo"]');
+    await page.click("#create-cancel"); await confirm(true);
+    assert.equal(await page.visible("#create-form"), false);
+    await page.selectAgent("node-b"); await page.waitVisible('[data-id="bravo"]');
     assert.equal(await value("#agent-select"), "node-b");
     assert.equal(await page.visible("#create-form"), false);
   });
@@ -73,9 +83,20 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
     const previews = state.previewCount;
     await page.click("#create-submit"); await formState("#create-form", "failed");
     assert.equal(state.previewCount, previews, "missing required input must not issue preview");
+    const idError = await fieldState("#create-form", "id");
+    assert.equal(idError.invalid, "true", "missing application id is marked invalid");
+    assert.equal(idError.described, true, "application id points at its inline error");
+    assert.equal(idError.adjacent, true, "application id error renders beside the field");
+    assert.match(idError.message, /应用 ID/);
+    const composeError = await fieldState("#create-form", "compose");
+    assert.equal(composeError.invalid, "true", "missing Compose YAML is marked invalid");
+    assert.equal(composeError.described, true, "Compose YAML points at its inline error");
+    assert.equal(composeError.adjacent, true, "Compose YAML error renders beside the field");
+    assert.match(composeError.message, /Compose YAML/);
     await fill('#create-form input[name="id"]', "invalid-compose");
     await fill('#create-form textarea[name="compose"]', "invalid yaml");
     await page.click("#create-submit"); await formState("#create-form", "failed");
+    assert.equal((await fieldState("#create-form", "id")).invalid, null, "valid retry clears the inline id error");
     await eventually(() => state.previewCount === previews + 1, "invalid Compose preview completed");
     assert.equal(await value('#create-form textarea[name="compose"]'), "invalid yaml");
     await fill('#create-form textarea[name="compose"]', 'services:\n  web:\n    image: nginx\n    environment:\n      VALUE: ${REQUIRED_VALUE:?required}\n');

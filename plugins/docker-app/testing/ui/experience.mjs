@@ -10,6 +10,10 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
   await test("packaged companion loads without preview routes and keeps frames offline",async () => {
     await page.send("Emulation.setDeviceMetricsOverride",{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await navigate("?agent_id=node-a");
+    const before=await page.evaluate(`({frames:document.querySelector('#companion-assistant')?.dataset.expressionFrames || "0",webp:performance.getEntriesByType('resource').filter(entry=>entry.name.endsWith('.webp')).length,min:document.querySelector('#companion-assistant')?.dataset.minimized})`);
+    assert.equal(before.min,"true","companion starts collapsed");
+    assert.equal(before.webp,0,"first screen downloads no artwork");
+    await page.click("#companion-toggle");
     await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.expressionFrames==='3'`),"packaged expression frames loaded");
     const resources=await page.evaluate(`performance.getEntriesByType('resource').map(entry=>new URL(entry.name).pathname)`);
     for (const name of ["companion.js","companion-idle.webp","companion-blink.webp","companion-wink.webp"]) assert.ok(resources.includes('/'+name),`packaged asset ${name} loaded`);
@@ -46,9 +50,9 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
     await page.send("Page.navigate",{url:origin+"/theme-frame.html"});
     await eventually(() => page.evaluate(`document.querySelector('iframe')?.contentDocument?.querySelector('#app-loading')?.hidden === true`),"embedded fixture loaded");
     const theme = () => page.evaluate(`document.querySelector('iframe').contentDocument.documentElement.dataset.theme`);
-    assert.equal(await theme(),"dark");
-    for (const [host,expected] of [["business","light"],["neko-dark","dark"],["unknown-host-theme","light"],["sakura-night","dark"]]) {
-      await page.evaluate(`document.documentElement.dataset.theme=${JSON.stringify(host)}`);
+    assert.equal(await theme(),"sakura-night");
+    for (const [host,expected] of [["business","business"],["neko-dark","neko-dark"],["unknown-host-theme","light"],["sakura-night","sakura-night"]]) {
+      await page.evaluate(`localStorage.setItem('theme',${JSON.stringify(host)}); document.documentElement.dataset.theme=${JSON.stringify(host)}`);
       await eventually(async () => await theme() === expected,`dynamic ${host} theme`);
     }
   });
@@ -58,7 +62,7 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
     const tab = await page.send("Target.createTarget",{url:origin+"/theme-writer.html"});
     const {sessionId} = await page.send("Target.attachToTarget",{targetId:tab.targetId,flatten:true});
     try {
-      for (const [stored,expected] of [["sakura-night","dark"],["business","light"]]) {
+      for (const [stored,expected] of [["sakura-night","sakura-night"],["business","business"]]) {
         const result = await page.send("Runtime.evaluate",{expression:`localStorage.setItem('theme',${JSON.stringify(stored)})`},sessionId);
         assert.equal(result.exceptionDetails,undefined);
         await eventually(() => page.evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(expected)}`),"cross-tab host theme synchronization");

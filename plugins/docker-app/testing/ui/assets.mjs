@@ -1,5 +1,5 @@
 export const UI_ASSETS = [
-  "index.html", "app.js", "style.css", "companion.js",
+  "index.html", "app.js", "style.css", "ui-kit.css", "ui-kit.js", "companion.js",
   "companion-idle.webp", "companion-blink.webp", "companion-wink.webp",
 ];
 

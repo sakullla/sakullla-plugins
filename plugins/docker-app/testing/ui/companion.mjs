@@ -22,6 +22,9 @@ export async function runCompanion({Page,eventually,findBrowser,repo}) {
     await page.send("Emulation.setDeviceMetricsOverride",{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
     await page.send("Page.navigate",{url:"http://127.0.0.1:4173/?agent_id=node-a&companion=live2d"});
     await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer === 'live2d'`),"Live2D model renders",60000);
+    assert.equal(await page.evaluate(`document.querySelector('#companion-assistant').dataset.minimized`),"true");
+    await page.click("#companion-toggle");
+    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant').dataset.minimized === 'false'`),"expanded Live2D helper");
     await delay(600);
     const capture=async name=>{const shot=await page.send("Page.captureScreenshot",{format:"png"});await writeFile(join(output,`${name}.png`),Buffer.from(shot.data,"base64"));return shot.data;};
     const first=await capture("desktop-idle-1");await delay(900);const second=await capture("desktop-idle-2");
@@ -55,7 +58,11 @@ export async function runCompanion({Page,eventually,findBrowser,repo}) {
     console.log("PASS mobile placement, no overlap, minimize and restore");
     await page.send("Emulation.setDeviceMetricsOverride",{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
     await page.send("Page.navigate",{url:"http://127.0.0.1:4173/?agent_id=node-a"});
-    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer==='portrait'`),"reference portrait loaded");
+    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer==='idle'`),"reference portrait deferred");
+    assert.equal(await page.evaluate(`!!document.querySelector('.companion-portrait')`),false,"first screen does not load the large portrait");
+    assert.equal(await page.evaluate(`performance.getEntriesByType('resource').filter(entry=>entry.name.endsWith('.webp')).length`),0,"first screen downloads no artwork");
+    await page.click("#companion-toggle");
+    await eventually(()=>page.evaluate(`document.querySelector('#companion-assistant')?.dataset.renderer==='portrait'`),"reference portrait loaded on expand");
     assert.ok(await page.evaluate(`document.querySelector('.companion-portrait').naturalWidth >= 900`),"portrait retains high resolution source pixels");
     await eventually(()=>page.evaluate(`Number(document.querySelector('#companion-assistant').dataset.expressionFrames)>=3`),"matching expression frames preloaded");
     await eventually(()=>page.evaluate(`Number(document.querySelector('#companion-assistant').dataset.blinkCount)>0`),"automatic portrait blink",8000);
