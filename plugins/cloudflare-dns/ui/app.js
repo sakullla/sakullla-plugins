@@ -33,6 +33,8 @@ const tokenLabels = {
 
 const textFields = new Set(["access_key_id", "token_id", "secret_id"]);
 
+const MAX_SECRET_BYTES = 4096;
+
 const nodes = {
   loading: document.getElementById("mapping-loading"),
   error: document.getElementById("mapping-error"),
@@ -71,6 +73,8 @@ const state = {
   access: { can_write: false, can_rotate: false },
   filter: "",
 };
+
+const pendingDeletes = new Set();
 
 const providerID = (mapping) => String((mapping && mapping.provider) || "cloudflare");
 
@@ -150,6 +154,141 @@ const showFormError = (node, message) => {
   node.textContent = String(message || "保存失败，请稍后重试。");
   node.hidden = false;
 };
+
+const formSnapshot = (form) => JSON.stringify(Array.from(new FormData(form).entries()));
+
+const markFormClean = (form) => {
+  if (!form) return;
+  form.dataset.baseline = formSnapshot(form);
+};
+
+const isFormDirty = (form) => {
+  if (!form || typeof form.dataset.baseline !== "string") return false;
+  return formSnapshot(form) !== form.dataset.baseline;
+};
+
+const hasOpenDirtyForm = () => Array.from(document.querySelectorAll("dialog[data-ui-dialog]")).some((dialog) => {
+  const form = dialog.querySelector("form");
+  return dialog.open === true && isFormDirty(form);
+});
+
+const requestDialogClose = async (dialog) => {
+  if (!dialog || !dialog.open) return;
+  const form = dialog.querySelector("form");
+  if (form && form.dataset.busy === "true") {
+    closeDialog(dialog);
+    return;
+  }
+  if (isFormDirty(form)) {
+    if (dialog.dataset.discardPending === "true") return;
+    dialog.dataset.discardPending = "true";
+    let discard = false;
+    try {
+      discard = await confirmAction({
+        title: "改动尚未保存",
+        message: "表单里有未保存的输入。丢弃后这些内容会被清空，凭证需要重新填写。",
+        confirmLabel: "丢弃修改",
+        tone: "danger",
+      });
+    } finally {
+      delete dialog.dataset.discardPending;
+    }
+    if (!discard) return;
+  }
+  closeDialog(dialog);
+};
+
+const clearFieldError = (input) => {
+  if (!input) return;
+  if (window.NREUI && window.NREUI.clearFieldError) {
+    window.NREUI.clearFieldError(input);
+    return;
+  }
+  input.removeAttribute("aria-invalid");
+  input.removeAttribute("aria-describedby");
+  const field = input.closest(".ui-field");
+  const error = field ? field.querySelector(".ui-error-text") : null;
+  if (error) error.textContent = "";
+};
+
+const clearFieldErrors = (form) => {
+  if (!form) return;
+  form.querySelectorAll("[aria-invalid='true']").forEach((input) => clearFieldError(input));
+};
+
+const showFieldError = (input, message) => {
+  if (!input || !message) return false;
+  if (window.NREUI && window.NREUI.fieldError) {
+    window.NREUI.fieldError(input, message);
+  } else {
+    input.setAttribute("aria-invalid", "true");
+    const field = input.closest(".ui-field") || input.parentElement || input;
+    let error = field.querySelector(".ui-error-text");
+    if (!error) {
+      error = document.createElement("p");
+      error.className = "ui-error-text";
+      error.setAttribute("role", "alert");
+      field.appendChild(error);
+    }
+    if (!error.id) error.id = `field-error-${Math.random().toString(36).slice(2, 10)}`;
+    error.textContent = message;
+    input.setAttribute("aria-describedby", error.id);
+  }
+  if (input.focus) input.focus();
+  return true;
+};
+
+const credentialBytes = (value) => new TextEncoder().encode(String(value || "")).length;
+
+const suffixLooksInvalid = (value) => {
+  let text = String(value || "").trim();
+  if (!text || !/^[\x20-\x7e]+$/.test(text)) return true;
+  text = text.toLowerCase();
+  if (text.endsWith(".")) text = text.slice(0, -1);
+  if (!text || text.length > 253 || text.startsWith(".") || text.endsWith(".") || text.includes("..")) return true;
+  return text.split(".").some((label) => label.length === 0 || label.length > 63 || label.startsWith("-") || label.endsWith("-") || /[^a-z0-9-]/.test(label));
+};
+
+const serverFieldError = (form, error, credentialNames) => {
+  if (!form || !error) return null;
+  const message = String(error.message || "");
+  if (error.status === 409 || /already exists|conflict/i.test(message)) {
+    return { name: "suffix", message: "该域名后缀已有映射，请改用其他后缀，或先删除原映射。" };
+  }
+  if (error.status !== 400 && !/invalid|confirmation required/i.test(message)) return null;
+  const suffix = form.elements.namedItem("suffix");
+  if (suffix && suffix.value !== undefined && suffixLooksInvalid(suffix.value)) {
+    return { name: "suffix", message: "请输入合法的域名后缀，例如 example.com；只允许字母、数字、连字符和点。" };
+  }
+  for (const name of credentialNames || []) {
+    const input = form.elements.namedItem(name);
+    if (!input) continue;
+    if (!String(input.value || "")) return { name, message: `请填写${credentialLabels[name] || "凭证"}。` };
+    if (credentialBytes(input.value) > MAX_SECRET_BYTES) return { name, message: `${credentialLabels[name] || "凭证"}过长，请确认后重试。` };
+  }
+  return null;
+};
+
+const showSubmitError = (form, alert, error, credentialNames) => {
+  clearFieldErrors(form);
+  const field = serverFieldError(form, error, credentialNames);
+  if (field && showFieldError(form.elements.namedItem(field.name), field.message)) {
+    clearFormError(alert);
+    return;
+  }
+  showFormError(alert, error.message);
+};
+
+const bindFieldErrorClearing = (form) => {
+  const clear = (event) => {
+    const input = event.target;
+    if (input && input.getAttribute && input.getAttribute("aria-invalid") === "true") clearFieldError(input);
+  };
+  form.addEventListener("input", clear);
+  form.addEventListener("change", clear);
+};
+
+[nodes.createForm, nodes.renameForm, nodes.rotateForm].forEach(bindFieldErrorClearing);
 
 const isBusy = (form) => form.dataset.busy === "true";
 
@@ -370,6 +509,8 @@ const openCreate = () => {
   nodes.createForm.reset();
   syncCredentialFields(nodes.createForm);
   clearFormError(nodes.createError);
+  clearFieldErrors(nodes.createForm);
+  markFormClean(nodes.createForm);
   showStatus("");
   openDialog(nodes.createDialog);
 };
@@ -379,6 +520,8 @@ const openRename = (mapping) => {
   nodes.renameForm.dataset.suffix = mapping.suffix || "";
   nodes.renameCurrent.textContent = mapping.suffix || "";
   clearFormError(nodes.renameError);
+  clearFieldErrors(nodes.renameForm);
+  markFormClean(nodes.renameForm);
   showStatus("");
   openDialog(nodes.renameDialog);
 };
@@ -391,27 +534,50 @@ const openRotate = (mapping) => {
   nodes.rotateCurrent.textContent = mapping.suffix || "";
   nodes.rotateFields.replaceChildren(...fieldsFor(provider).map((name) => credentialField(name, provider)));
   clearFormError(nodes.rotateError);
+  clearFieldErrors(nodes.rotateForm);
+  markFormClean(nodes.rotateForm);
   showStatus("");
   openDialog(nodes.rotateDialog);
 };
 
-const removeMapping = async (mapping) => {
+const removeMapping = async (mapping, trigger) => {
   const current = mapping.suffix || "";
-  const confirmed = await confirmAction({
-    title: "删除映射",
-    message: `确认对 ${current} 执行删除？删除后该后缀的查询会失去映射，取消不会更改映射。`,
-    confirmLabel: "删除映射",
-    tone: "danger",
-  });
-  if (!confirmed) {
-    showStatus("已取消，映射未更改。", "neutral");
-    return;
-  }
+  if (pendingDeletes.has(current)) return;
+  pendingDeletes.add(current);
+  const row = trigger && trigger.closest ? trigger.closest("tr") : null;
+  const rowButtons = row ? Array.from(row.querySelectorAll("[data-row-action]")) : [];
   try {
-    await sendJSON(`api/mappings/${encodeURIComponent(current)}/delete`, { confirm: current });
-    await refreshAfterWrite("已删除映射。");
-  } catch (error) {
-    showStatus(error.message, "danger");
+    const confirmed = await confirmAction({
+      title: "删除映射",
+      message: `确认对 ${current} 执行删除？删除后该后缀及其子域名的查询会失去映射，映射和凭证会一并删除，删除后不可恢复。取消不会更改映射。`,
+      confirmLabel: "删除映射",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      showStatus("已取消，映射未更改。", "neutral");
+      return;
+    }
+    for (const button of rowButtons) button.disabled = true;
+    if (trigger) {
+      trigger.textContent = "正在删除…";
+      trigger.setAttribute("aria-busy", "true");
+    }
+    if (row) row.dataset.busy = "true";
+    showStatus(`正在删除 ${current}…`, "neutral");
+    try {
+      await sendJSON(`api/mappings/${encodeURIComponent(current)}/delete`, { confirm: current });
+      await refreshAfterWrite("已删除映射。");
+    } catch (error) {
+      showStatus(error.message, "danger");
+    }
+  } finally {
+    pendingDeletes.delete(current);
+    for (const button of rowButtons) button.disabled = false;
+    if (trigger) {
+      trigger.textContent = "删除";
+      trigger.removeAttribute("aria-busy");
+    }
+    if (row) delete row.dataset.busy;
   }
 };
 
@@ -427,7 +593,7 @@ nodes.list.addEventListener("click", (event) => {
   } else if (action === "rotate") {
     openRotate(mapping);
   } else if (action === "delete") {
-    void removeMapping(mapping);
+    void removeMapping(mapping, trigger);
   }
 });
 
@@ -439,7 +605,7 @@ document.addEventListener("click", (event) => {
 
 document.querySelectorAll("[data-ui-close]").forEach((button) => {
   button.addEventListener("click", () => {
-    closeDialog(button.closest("dialog"));
+    void requestDialogClose(button.closest("dialog"));
   });
 });
 
@@ -488,13 +654,14 @@ nodes.createForm.addEventListener("submit", async (event) => {
     body[name] = String(data.get(name) || "");
   }
   clearFormError(nodes.createError);
+  clearFieldErrors(nodes.createForm);
   setFormBusy(nodes.createForm, true);
   try {
     await sendJSON("api/mappings", body);
     closeDialog(nodes.createDialog);
     await refreshAfterWrite("已添加映射。");
   } catch (error) {
-    showFormError(nodes.createError, error.message);
+    showSubmitError(nodes.createForm, nodes.createError, error, fieldsFor(provider));
   } finally {
     setFormBusy(nodes.createForm, false);
   }
@@ -507,13 +674,14 @@ nodes.renameForm.addEventListener("submit", async (event) => {
   const next = String(new FormData(nodes.renameForm).get("suffix") || "").trim();
   if (!current || !next) return;
   clearFormError(nodes.renameError);
+  clearFieldErrors(nodes.renameForm);
   setFormBusy(nodes.renameForm, true);
   try {
     await sendJSON(`api/mappings/${encodeURIComponent(current)}/rename`, { suffix: next, confirm: current });
     closeDialog(nodes.renameDialog);
     await refreshAfterWrite("已修改域名后缀。");
   } catch (error) {
-    showFormError(nodes.renameError, error.message);
+    showSubmitError(nodes.renameForm, nodes.renameError, error, []);
   } finally {
     setFormBusy(nodes.renameForm, false);
   }
@@ -531,13 +699,14 @@ nodes.rotateForm.addEventListener("submit", async (event) => {
     body[name] = String(data.get(name) || "");
   }
   clearFormError(nodes.rotateError);
+  clearFieldErrors(nodes.rotateForm);
   setFormBusy(nodes.rotateForm, true);
   try {
     await sendJSON(`api/mappings/${encodeURIComponent(current)}/rotate`, body);
     closeDialog(nodes.rotateDialog);
     await refreshAfterWrite("凭证已轮换，页面不会回显。");
   } catch (error) {
-    showFormError(nodes.rotateError, error.message);
+    showSubmitError(nodes.rotateForm, nodes.rotateError, error, fieldsFor(provider));
   } finally {
     setFormBusy(nodes.rotateForm, false);
   }
@@ -564,6 +733,46 @@ nodes.rotateDialog.addEventListener("close", () => {
   nodes.rotateForm.dataset.busy = "false";
   delete nodes.rotateForm.dataset.suffix;
   delete nodes.rotateForm.dataset.provider;
+});
+
+const mappingDialogs = [nodes.createDialog, nodes.renameDialog, nodes.rotateDialog];
+
+for (const dialog of mappingDialogs) {
+  // <dialog> cancel events are not cancelable; intercept the Escape keydown so
+  // the discard confirmation can keep the dialog open until the choice is made.
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void requestDialogClose(dialog);
+  });
+  dialog.addEventListener("click", (event) => {
+    if (event.target !== dialog) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void requestDialogClose(dialog);
+  }, true);
+}
+
+// While the kit confirmation is on top, Chrome sends one Escape close request to
+// every open modal dialog. Cancel the confirmation instead of losing the form.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.isComposing) return;
+  const open = Array.from(document.querySelectorAll("dialog[open]"));
+  const top = open[open.length - 1];
+  if (!top || mappingDialogs.includes(top)) return;
+  if (!open.some((dialog) => mappingDialogs.includes(dialog))) return;
+  const cancel = top.querySelector("[data-ui-cancel]");
+  if (!cancel) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  cancel.click();
+}, true);
+
+window.addEventListener("beforeunload", (event) => {
+  if (!hasOpenDirtyForm()) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 void load();

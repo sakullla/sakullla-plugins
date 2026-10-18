@@ -424,6 +424,41 @@ func TestMappingUIViewportLayout(t *testing.T) {
 	}
 }
 
+func TestMappingUITouchTargetsAndUnsavedGuard(t *testing.T) {
+	t.Parallel()
+	css, err := mappingUIAssets.ReadFile("ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(css)
+	if !strings.Contains(text, "@media (max-width: 480px)") || !strings.Contains(text, ".mapping-help > summary") || !strings.Contains(text, "min-height: var(--ui-touch)") {
+		t.Fatal("mobile help summary is not a 44px touch target")
+	}
+	if strings.Contains(text, "#mapping-search") && strings.Contains(text, "min-height: var(--ui-control-height)") {
+		t.Fatal("page CSS still pins the search field to the desktop control height")
+	}
+	script, err := mappingUIAssets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(script)
+	for _, want := range []string{
+		"改动尚未保存",
+		"丢弃修改",
+		"beforeunload",
+		"requestDialogClose",
+		"正在删除",
+		"删除后不可恢复",
+		"NREUI.fieldError",
+		"NREUI.clearFieldError",
+		"aria-describedby",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("app script missing %q", want)
+		}
+	}
+}
+
 func assertDesignSystemPage(t *testing.T, page, script, style string) {
 	t.Helper()
 	if !strings.Contains(page, `data-theme-mode="host"`) {

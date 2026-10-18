@@ -30,10 +30,6 @@ body {
   min-width: 0;
 }
 
-#mapping-search {
-  min-height: var(--ui-control-height);
-}
-
 #mapping-workspace {
   min-width: 0;
 }
@@ -281,5 +277,11 @@ body {
   #mapping-list .ui-table-wrap {
     border: 0;
     background: transparent;
+  }
+}
+
+@media (max-width: 480px) {
+  .mapping-help > summary {
+    min-height: var(--ui-touch);
   }
 }
