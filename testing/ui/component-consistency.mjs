@@ -40,7 +40,14 @@ const CATEGORY_SCENES = {
   "webdav": { primary: "login", input: "login" },
 };
 
-const COMPONENT_EXPRESSION = `(() => {
+const EMPTY_TARGETS = {
+  "docker-app": "#app-empty",
+  "shadowsocks-server": "#app-empty",
+  "waf": "#event-empty",
+};
+
+const componentExpression = (emptyTarget) => `(() => {
+  const targetSelector = ${JSON.stringify(emptyTarget || null)};
   const isVisible = (node) => {
     if (!node || !node.getClientRects().length) return false;
     const style = getComputedStyle(node);
@@ -210,9 +217,7 @@ const COMPONENT_EXPRESSION = `(() => {
   }
 
   {
-    const { nodes, node } = pick(".ui-empty");
-    if (!node) result.empty = { present: false, reason: "页面没有空状态" };
-    else {
+    const measure = (node) => {
       const info = describe(node);
       info.kit = node.classList.contains("ui-empty");
       const title = node.querySelector(".ui-empty__title");
@@ -227,16 +232,47 @@ const COMPONENT_EXPRESSION = `(() => {
         check(node, "borderTopLeftRadius", "--ui-radius-2xl", "圆角"),
         ...(title ? [check(title, "color", "--ui-text", "标题文字")] : []),
       ];
-      info.count = nodes.length;
-      result.empty = info;
+      info.count = document.querySelectorAll(".ui-empty").length;
+      return info;
+    };
+
+    if (targetSelector) {
+      const node = document.querySelector(targetSelector);
+      if (!node) result.empty = { present: false, reason: "页面没有空数据容器 " + targetSelector };
+      else {
+        // The capture fixture hides the real empty-data container (and often a
+        // hidden workspace ancestor). Reveal it only for this measurement, then
+        // restore every attribute; this mirrors the hidden-dialog treatment.
+        const revealed = [];
+        for (let current = node; current && current !== document.documentElement; current = current.parentElement) {
+          if (current.hasAttribute("hidden")) {
+            current.removeAttribute("hidden");
+            revealed.push(current);
+          }
+        }
+        const info = measure(node);
+        info.revealed = revealed.length > 0;
+        info.revealedCount = revealed.length;
+        info.rendered = isVisible(node);
+        for (const current of revealed) current.setAttribute("hidden", "");
+        result.empty = info;
+      }
+    } else {
+      const { nodes, node } = pick(".ui-empty");
+      if (!node) result.empty = { present: false, reason: "页面没有空状态" };
+      else {
+        const info = measure(node);
+        info.count = nodes.length;
+        result.empty = info;
+      }
     }
   }
 
   return result;
 })()`;
 
-async function collect(page) {
-  const data = await page.evaluate(COMPONENT_EXPRESSION);
+async function collect(page, emptyTarget = null) {
+  const data = await page.evaluate(componentExpression(emptyTarget));
   await settle(page);
   return data;
 }
@@ -256,11 +292,14 @@ function row(pageId, scene, category, item) {
   const tokens = tokenState(item);
   const kit = item.kit ? "是" : "否";
   const token = tokens.ok ? "是" : `否（${tokens.failed.map((check) => check.name).join("、")}）`;
-  const element = `${item.label}${item.hidden ? "（隐藏）" : ""}`;
+  const element = `${item.label}${item.revealed
+    ? item.hidden ? "（测量时临时解除 hidden 后仍不可见）" : "（测量时临时解除 hidden）"
+    : item.hidden ? "（隐藏）" : ""}`;
   const layout = item.pageClasses.length ? `（布局类：${item.pageClasses.join("、")}）` : "";
   const variants = item.variants?.length ? `（${item.variants.join("；")}）` : "";
   let difference;
-  if (!item.kit) difference = "未消除：缺少 kit 类名";
+  if (item.revealed && item.rendered === false) difference = "未验证：临时解除 hidden 后仍不可见";
+  else if (!item.kit) difference = "未消除：缺少 kit 类名";
   else if (!tokens.ok) difference = `未消除：${tokens.failed.map((check) => check.name).join("、")} 与 token 不一致`;
   else difference = `已消除${variants}${layout}`;
   return `| ${pageId} | ${scene} | ${title} | ${element} | ${kit} | ${token} | ${difference} |`;
@@ -305,7 +344,7 @@ export async function buildComponentReport() {
       const main = await openScene(browser, plugin, sceneName);
       let mainData;
       try {
-        mainData = await collect(main.page);
+        mainData = await collect(main.page, EMPTY_TARGETS[plugin.id] || null);
       } finally {
         await main.close();
       }
@@ -316,7 +355,7 @@ export async function buildComponentReport() {
       if (emptyScene && emptyScene !== sceneName) {
         const emptyPage = await openScene(browser, plugin, emptyScene);
         try {
-          const data = await collect(emptyPage.page);
+          const data = await collect(emptyPage.page, EMPTY_TARGETS[plugin.id] || null);
           emptyData = data.empty;
         } finally {
           await emptyPage.close();
@@ -331,7 +370,7 @@ export async function buildComponentReport() {
         if (overrideScene) {
           const overridePage = await openScene(browser, plugin, overrideScene);
           try {
-            data = (await collect(overridePage.page))[category[0]];
+            data = (await collect(overridePage.page, EMPTY_TARGETS[plugin.id] || null))[category[0]];
           } finally {
             await overridePage.close();
           }
@@ -360,6 +399,7 @@ export async function buildComponentReport() {
     "> 检查对象为 R6 的九页：accelerator-sources、cloudflare-dns、docker-app、doh、ip-policy、reverse-l4、shadowsocks-server、waf、webdav。",
     "",
     `- 主题：light；视口：1440×900；场景：各页主流程及必要子视图（如 mirrors、login、routing、files）；空状态优先使用页面自带的空数据场景。`,
+    `- 夹具中隐藏的空数据容器（docker-app #app-empty、shadowsocks-server #app-empty、waf #event-empty）在测量时临时解除自身与祖先的 hidden，测量后立即恢复；元素列标注该测量方式。`,
     `- 结果：${presentTotal} 个存在的组件中 ${presentTotal - failures.length} 个通过，${failures.length} 个未消除。`,
     "",
     "## 检查口径",
@@ -371,9 +411,9 @@ export async function buildComponentReport() {
     "| 表格 | `.ui-table` | 字号 `--ui-text-sm`、表头背景 `--ui-sunken`、表头文字 `--ui-text-tertiary` |",
     "| 徽章 | `.ui-badge` | 圆角 `--ui-radius-full`、字号 `--ui-text-xs`，背景/文字必须命中一套 kit 徽章 token |",
     "| 对话框 | `dialog.ui-dialog` | 背景 `--ui-surface`、文字 `--ui-text`、边框 `--ui-border`、圆角 `--ui-radius-2xl` |",
-    "| 空状态 | `.ui-empty` | 背景 `--ui-surface`、边框 `--ui-border` 或状态面板的 `--ui-border-subtle`、圆角 `--ui-radius-2xl`、标题文字 `--ui-text` |",
+    "| 空状态 | `.ui-empty` | 背景 `--ui-surface`、边框 `--ui-border` 或状态面板的 `--ui-border-subtle`、圆角 `--ui-radius-2xl`、标题文字 `--ui-text`；夹具隐藏的空数据容器在测量时临时解除 hidden |",
     "",
-    "「已消除」表示组件使用 kit 类名、检查的 `--ui-*` token 全部命中；页面自身布局类（如栅格、宽度）不会改变组件 token，按布局类单独列出。",
+    "「已消除」表示组件使用 kit 类名、检查的 `--ui-*` token 全部命中；页面自身布局类（如栅格、宽度）不会改变组件 token，按布局类单独列出。临时解除 hidden 后仍不可见的空状态标为“未验证”，不计入已消除。",
     "",
     "## 逐项清单",
     "",
@@ -387,7 +427,7 @@ export async function buildComponentReport() {
     "",
   ];
   if (failures.length) lines.push("## 未消除项", "", ...failures.map((failure) => `- ${failure}`), "");
-  else lines.push("## 结论", "", "九页主流程实际出现的组件均使用共享 kit 类名与 `--ui-*` token；尺寸与状态面板差异均落在 kit token 变体内，差异已消除。", "");
+  else lines.push("## 结论", "", "九页主流程实际出现的组件均使用共享 kit 类名与 `--ui-*` token；夹具中隐藏的空数据状态按标注的临时解除 hidden 方式测量，尺寸与布局差异均落在 kit token 变体内，差异已消除。", "");
 
   return { markdown: lines.join("\n"), failures };
 }

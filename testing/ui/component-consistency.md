@@ -4,6 +4,7 @@
 > 检查对象为 R6 的九页：accelerator-sources、cloudflare-dns、docker-app、doh、ip-policy、reverse-l4、shadowsocks-server、waf、webdav。
 
 - 主题：light；视口：1440×900；场景：各页主流程及必要子视图（如 mirrors、login、routing、files）；空状态优先使用页面自带的空数据场景。
+- 夹具中隐藏的空数据容器（docker-app #app-empty、shadowsocks-server #app-empty、waf #event-empty）在测量时临时解除自身与祖先的 hidden，测量后立即恢复；元素列标注该测量方式。
 - 结果：46 个存在的组件中 46 个通过，0 个未消除。
 
 ## 检查口径
@@ -15,9 +16,9 @@
 | 表格 | `.ui-table` | 字号 `--ui-text-sm`、表头背景 `--ui-sunken`、表头文字 `--ui-text-tertiary` |
 | 徽章 | `.ui-badge` | 圆角 `--ui-radius-full`、字号 `--ui-text-xs`，背景/文字必须命中一套 kit 徽章 token |
 | 对话框 | `dialog.ui-dialog` | 背景 `--ui-surface`、文字 `--ui-text`、边框 `--ui-border`、圆角 `--ui-radius-2xl` |
-| 空状态 | `.ui-empty` | 背景 `--ui-surface`、边框 `--ui-border` 或状态面板的 `--ui-border-subtle`、圆角 `--ui-radius-2xl`、标题文字 `--ui-text` |
+| 空状态 | `.ui-empty` | 背景 `--ui-surface`、边框 `--ui-border` 或状态面板的 `--ui-border-subtle`、圆角 `--ui-radius-2xl`、标题文字 `--ui-text`；夹具隐藏的空数据容器在测量时临时解除 hidden |
 
-「已消除」表示组件使用 kit 类名、检查的 `--ui-*` token 全部命中；页面自身布局类（如栅格、宽度）不会改变组件 token，按布局类单独列出。
+「已消除」表示组件使用 kit 类名、检查的 `--ui-*` token 全部命中；页面自身布局类（如栅格、宽度）不会改变组件 token，按布局类单独列出。临时解除 hidden 后仍不可见的空状态标为“未验证”，不计入已消除。
 
 ## 逐项清单
 
@@ -40,7 +41,7 @@
 | docker-app | apps | 表格 | — | — | — | 不适用（页面主流程没有表格） |
 | docker-app | apps | 徽章 | p.app-card-status.ui-badge | 是 | 是 | 已消除（布局类：app-card-status） |
 | docker-app | files | 对话框 | dialog#files-mkdir-dialog.ui-dialog.files-dialog | 是 | 是 | 已消除（布局类：files-dialog） |
-| docker-app | apps | 空状态 | section#app-unavailable.ui-empty.state-panel（隐藏） | 是 | 是 | 已消除（状态面板变体（--ui-border-subtle，实线边框））（布局类：state-panel） |
+| docker-app | apps | 空状态 | div#app-empty.ui-empty（测量时临时解除 hidden） | 是 | 是 | 已消除 |
 | doh | endpoint | 主按钮 | button#copy-doh-url.ui-btn.ui-btn--lg.doh-copy | 是 | 是 | 已消除（布局类：doh-copy） |
 | doh | endpoint | 输入 | — | — | — | 不适用（页面主流程没有输入控件） |
 | doh | endpoint | 表格 | — | — | — | 不适用（页面主流程没有表格） |
@@ -64,13 +65,13 @@
 | shadowsocks-server | routing | 表格 | table.ui-table.routing-table.routing-table--rules | 是 | 是 | 已消除（布局类：routing-table、routing-table--rules） |
 | shadowsocks-server | listens | 徽章 | span.ui-badge.ui-badge--plain | 是 | 是 | 已消除 |
 | shadowsocks-server | listens | 对话框 | dialog#listen-detail.ui-dialog | 是 | 是 | 已消除 |
-| shadowsocks-server | listens | 空状态 | section#app-undeployed.ui-empty.app-context-card（隐藏） | 是 | 是 | 已消除（布局类：app-context-card） |
+| shadowsocks-server | listens | 空状态 | div#app-empty.ui-empty（测量时临时解除 hidden） | 是 | 是 | 已消除 |
 | waf | overview | 主按钮 | button.ui-btn | 是 | 是 | 已消除 |
 | waf | events | 输入 | input#event-query.ui-input | 是 | 是 | 已消除 |
 | waf | events | 表格 | table.ui-table.waf-events-table | 是 | 是 | 已消除（布局类：waf-events-table） |
 | waf | events | 徽章 | span#event-count.ui-badge.ui-badge--plain | 是 | 是 | 已消除 |
 | waf | events | 对话框 | dialog#rule-dialog.ui-dialog | 是 | 是 | 已消除 |
-| waf | events | 空状态 | div#app-node-empty.ui-empty（隐藏） | 是 | 是 | 已消除 |
+| waf | events | 空状态 | div#event-empty.ui-empty（测量时临时解除 hidden） | 是 | 是 | 已消除 |
 | webdav | login | 主按钮 | button.ui-btn.ui-btn--block | 是 | 是 | 已消除 |
 | webdav | login | 输入 | input#login-username.ui-input | 是 | 是 | 已消除 |
 | webdav | files | 表格 | table.ui-table.listing | 是 | 是 | 已消除（布局类：listing） |
@@ -85,8 +86,8 @@
 - 表格：5/9 页存在；类名与 token 检查全部通过；页面布局类：ip-rule-table、listing、routing-table、routing-table--rules、waf-events-table；不适用：accelerator-sources、docker-app、doh、reverse-l4。
 - 徽章：9/9 页存在；类名与 token 检查全部通过；kit 变体：ui-badge--info、ui-badge--plain、ui-badge--success；页面布局类：app-card-status。
 - 对话框：7/9 页存在；类名与 token 检查全部通过；页面布局类：files-dialog；不适用：accelerator-sources、doh。
-- 空状态：8/9 页存在；类名与 token 检查全部通过；token 变体：状态面板变体（--ui-border-subtle，实线边框）；页面布局类：app-context-card、ip-province-empty、state-panel；不适用：doh。
+- 空状态：8/9 页存在；类名与 token 检查全部通过；页面布局类：ip-province-empty；不适用：doh。
 
 ## 结论
 
-九页主流程实际出现的组件均使用共享 kit 类名与 `--ui-*` token；尺寸与状态面板差异均落在 kit token 变体内，差异已消除。
+九页主流程实际出现的组件均使用共享 kit 类名与 `--ui-*` token；夹具中隐藏的空数据状态按标注的临时解除 hidden 方式测量，尺寸与布局差异均落在 kit token 变体内，差异已消除。

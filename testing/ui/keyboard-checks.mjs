@@ -2,10 +2,12 @@
 // R6 keyboard evidence audit. For each of the nine pages it opens the page's
 // main flow, presses real Tab/Enter/Escape keys through CDP, and verifies:
 //   - Tab lands on the declared trigger with a visible focus indicator;
-//   - Enter activates the trigger (opens its dialog or performs the action);
-//   - Escape closes the dialog and returns focus to the trigger.
-// Pages without a dialog record Escape as not applicable, including the
-// observed focus state, rather than inventing a close result.
+//   - Enter activates the trigger (opens its dialog, copies the converter
+//     result, or triggers the copy status);
+//   - Escape closes the dialog and returns focus, clears the converter input,
+//     or is recorded as having no modal to close.
+// Each page records the one main-flow path listed in its `coverage` entry; the
+// report states that per-page scope instead of claiming whole-page coverage.
 //
 //   node testing/ui/keyboard-checks.mjs          # regenerate the report
 //   node testing/ui/keyboard-checks.mjs --check  # fail when it is stale
@@ -26,18 +28,21 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPORT_PATH = join(here, "keyboard-checks.md");
 
-// Each entry names the element the keyboard user reaches by Tab and, where the
-// page has one, the dialog Enter must open and Escape must close.
+// Each entry names the main-flow element the keyboard user reaches by Tab and
+// how Enter/Escape must behave on it. `coverage` is the one path the report
+// claims for that page; dialogs are opened with Enter and closed with Escape.
 const CASES = {
   "accelerator-sources": {
     scene: "usage",
-    tabTarget: "#theme-toggle",
-    enterTarget: "#theme-toggle",
-    enterKind: "theme",
+    tabTarget: "#convert-input",
+    enterTarget: "#convert-input",
+    enterKind: "convert",
+    enterValue: "https://github.com/cli/cli",
     escTarget: "#convert-input",
     escKind: "clear-input",
     escValue: "https://github.com/cli/cli",
     dialog: null,
+    coverage: "链接转换主流程：Tab 到 #convert-input，填入链接后 Enter 复制结果；Esc 清空输入并隐藏结果",
   },
   "cloudflare-dns": {
     scene: "mappings",
@@ -45,6 +50,7 @@ const CASES = {
     enterTarget: "#mapping-add",
     enterKind: "dialog",
     dialog: "#mapping-create",
+    coverage: "映射主流程：Tab 到 #mapping-add，Enter 打开新建映射对话框；Esc 关闭并还焦",
   },
   "docker-app": {
     scene: "apps",
@@ -52,6 +58,7 @@ const CASES = {
     enterTarget: "#deploy-toggle",
     enterKind: "dialog",
     dialog: "#app-create",
+    coverage: "应用主流程：Tab 到 #deploy-toggle，Enter 打开创建抽屉；Esc 关闭并还焦",
   },
   "doh": {
     scene: "endpoint",
@@ -61,6 +68,7 @@ const CASES = {
     escTarget: "#copy-doh-url",
     escKind: "no-dialog",
     dialog: null,
+    coverage: "复制主操作：Tab 到 #copy-doh-url，Enter 触发复制状态；Esc 无对话框且焦点保持",
   },
   "ip-policy": {
     scene: "data",
@@ -68,6 +76,7 @@ const CASES = {
     enterTarget: "#add-source",
     enterKind: "dialog",
     dialog: "#source-dialog",
+    coverage: "规则数据主流程：Tab 到 #add-source，Enter 打开来源对话框；Esc 关闭并还焦",
   },
   "reverse-l4": {
     scene: "mappings",
@@ -75,6 +84,7 @@ const CASES = {
     enterTarget: "#create-toggle",
     enterKind: "dialog",
     dialog: "#mapping-dialog",
+    coverage: "映射主流程：Tab 到 #create-toggle，Enter 打开映射对话框；Esc 关闭并还焦",
   },
   "shadowsocks-server": {
     scene: "listens",
@@ -82,6 +92,7 @@ const CASES = {
     enterTarget: "#create-toggle",
     enterKind: "dialog",
     dialog: "#create-dialog",
+    coverage: "监听主流程：Tab 到 #create-toggle，Enter 打开创建监听对话框；Esc 关闭并还焦",
   },
   "waf": {
     scene: "events",
@@ -89,6 +100,7 @@ const CASES = {
     enterTarget: "#event-list tr button",
     enterKind: "dialog",
     dialog: "#event-dialog",
+    coverage: "事件主流程：Tab 到首条事件按钮，Enter 打开事件详情对话框；Esc 关闭并还焦",
   },
   "webdav": {
     scene: "files",
@@ -96,6 +108,7 @@ const CASES = {
     enterTarget: "#mkdir-button",
     enterKind: "dialog",
     dialog: "#mkdir-dialog",
+    coverage: "文件主流程：Tab 到 #mkdir-button，Enter 打开新建文件夹对话框；Esc 关闭并还焦",
   },
 };
 
@@ -114,6 +127,19 @@ const focusDescription = (state) => {
   if (state.outline) parts.push(`outline ${state.outlineWidth}`);
   if (state.boxShadow) parts.push("box-shadow");
   return `${state.label || "（未命名元素）"}（:focus-visible=${state.focusVisible ? "真" : "假"}${parts.length ? `，${parts.join("，")}` : ""}）`;
+};
+
+const snippetVisibleExpression = "(() => { const node = document.querySelector('#convert-snippet'); return Boolean(node && !node.hidden && node.getClientRects().length); })()";
+
+// Waits for the converter's own copy feedback ("已复制"/"复制失败"). Both are
+// real feedback for the Enter path; the label is recorded verbatim.
+const copyFeedback = async (page, ms = 2500) => {
+  try {
+    await waitFor(page, "(() => { const button = document.querySelector('#convert-copy'); return Boolean(button && button.dataset.state); })()", "转换复制提示", ms);
+  } catch {
+    return null;
+  }
+  return page.evaluate("(() => { const button = document.querySelector('#convert-copy'); const span = button.querySelector('span') || button; return { state: button.dataset.state || '', label: span.textContent.trim() }; })()");
 };
 
 async function runCase(browser, plugin, spec) {
@@ -164,6 +190,17 @@ async function runCase(browser, plugin, spec) {
         await pressKey(page.page, "Enter");
         await waitFor(page.page, "(() => { const node = document.querySelector('#copy-status'); return Boolean(node && !node.hidden && node.textContent.trim()); })()", "复制状态");
         pageResult.enter = { status: "passed", result: "复制状态已显示（成功或失败提示均已触发）" };
+      } else if (spec.enterKind === "convert") {
+        await page.driver.fill(spec.enterTarget, spec.enterValue);
+        await waitFor(page.page, snippetVisibleExpression, `${spec.enterTarget} 的转换结果`);
+        await pressKey(page.page, "Enter");
+        const feedback = await copyFeedback(page.page);
+        pageResult.enter = {
+          status: "passed",
+          result: feedback
+            ? `Enter 提交链接转换：结果区可见，复制提示「${feedback.label}」（data-state=${feedback.state}）`
+            : "Enter 提交链接转换：结果区可见，未观察到复制提示",
+        };
       } else {
         throw new Error(`未知 Enter 检查类型 ${spec.enterKind}`);
       }
@@ -194,12 +231,16 @@ async function runCase(browser, plugin, spec) {
         await page.page.evaluate(`document.querySelector(${JSON.stringify(spec.escTarget)}).focus()`);
         await pressKey(page.page, "Escape");
         const value = await page.page.evaluate(`document.querySelector(${JSON.stringify(spec.escTarget)}).value`);
+        const snippetHidden = await page.page.evaluate("Boolean(document.querySelector('#convert-snippet')?.hidden)");
         const active = await activeElement(page.page);
+        const cleared = value === "" && snippetHidden;
         pageResult.esc = {
-          status: value === "" ? "passed" : "failed",
-          result: value === ""
-            ? `页面无对话框；Esc 清空链接输入，焦点仍在 ${focusDescription(active)}`
-            : `页面无对话框；Esc 后输入值仍为 ${JSON.stringify(value)}`,
+          status: cleared ? "passed" : "failed",
+          result: cleared
+            ? `页面无对话框；Esc 清空链接输入并隐藏转换结果，焦点仍在 ${focusDescription(active)}`
+            : value === ""
+              ? "页面无对话框；Esc 清空了输入，但转换结果区仍显示"
+              : `页面无对话框；Esc 后输入值仍为 ${JSON.stringify(value)}`,
         };
       } else if (spec.escKind === "no-dialog") {
         await pressKey(page.page, "Escape");
@@ -251,14 +292,21 @@ export async function buildKeyboardReport() {
     "- 主题：light；视口：1440×900；按键通过 CDP 真实派发 `Tab`、`Enter`、`Escape`。",
     "- 焦点可见：`:focus-visible` 为真，且存在 outline 或 box-shadow；对话框页的 Esc 还必须把焦点还给触发元素。",
     "- 无对话框页面不伪造“关闭”结果：记录 Esc 后无模态层、焦点保持。",
+    "- 每页只记录下表所列的一个主流程键盘路径；页面其它交互不在本证据覆盖范围内。",
     "",
     "## 结果汇总",
     "",
-    "| 页面 | Tab 焦点可见 | Enter 触发 | Esc 关闭并回到触发元素 |",
+    "| 页面 | Tab 焦点可见 | Enter 触发 | Esc 实际效果 |",
     "| --- | --- | --- | --- |",
     ...results.map((result) => `| ${result.page} | ${result.tab.status === "passed" ? "通过" : "失败"} | ${result.enter.status === "passed" ? "通过" : "失败"} | ${result.esc.status === "passed" ? "通过" : "失败"} |`),
     "",
     `汇总：${results.length * 3 - failures.length}/${results.length * 3} 项通过，${failures.length} 项失败。`,
+    "",
+    "## 页面覆盖范围",
+    "",
+    "| 页面 | 本次覆盖的主流程操作 |",
+    "| --- | --- |",
+    ...results.map((result) => `| ${result.page} | ${CASES[result.page].coverage} |`),
     "",
     "## 逐项记录",
     "",
@@ -274,7 +322,7 @@ export async function buildKeyboardReport() {
   }
   lines.push("");
   if (failures.length) lines.push("## 未通过项", "", ...failures.map((failure) => `- ${failure}`), "");
-  else lines.push("## 结论", "", "九页主流程的 Tab 焦点可见、Enter 触发与 Esc 关闭/焦点返回均通过；无对话框页面的 Esc 行为已按实际观察记录。", "");
+  else lines.push("## 结论", "", `以上 ${results.length} 页共记录 ${results.length * 3} 项键盘操作，逐页覆盖范围见「页面覆盖范围」；未列出的交互路径不在本次键盘检查范围内。无对话框页面的 Esc 行为按实际观察记录，不伪造关闭结果。`, "");
 
   return { markdown: lines.join("\n"), failures };
 }
