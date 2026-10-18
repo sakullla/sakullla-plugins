@@ -891,6 +891,20 @@ kbd {
     min-height: var(--ui-touch);
   }
 
+  .snippet-copy,
+  .snippet-action {
+    min-height: var(--ui-touch);
+  }
+
+  .convert-clear {
+    width: var(--ui-touch);
+    height: var(--ui-touch);
+  }
+
+  #convert-input {
+    padding-right: calc(var(--ui-touch) + var(--ui-space-3));
+  }
+
   .convert-result .snippet-chrome {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

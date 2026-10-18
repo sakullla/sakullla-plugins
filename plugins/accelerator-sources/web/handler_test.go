@@ -55,6 +55,7 @@ func TestWebEmbeddedPageAndAssets(t *testing.T) {
 	assertSnippetCopyChrome(t, page)
 	assertScriptSafeguards(t, script)
 	assertStyleTokensAndViewports(t, style)
+	assertMobileTouchTargets(t, style)
 	assertMirrorStates(t, page, script, style)
 }
 
@@ -264,6 +265,75 @@ func assertStyleTokensAndViewports(t *testing.T, style string) {
 	if !strings.Contains(selection, "color:") || !strings.Contains(selection, "var(--ui-active)") {
 		t.Fatal("command blocks do not have their own token-based selection colours")
 	}
+}
+
+func assertMobileTouchTargets(t *testing.T, style string) {
+	t.Helper()
+	mobile := cssBlock(style, "@media (max-width: 480px)")
+	if mobile == "" {
+		t.Fatal("visitor stylesheet is missing the mobile breakpoint")
+	}
+	rules := cssRules(mobile)
+	for _, selector := range []string{".snippet-copy", ".snippet-action"} {
+		if !strings.Contains(rules[selector], "min-height: var(--ui-touch)") {
+			t.Fatalf("%s falls below the 44px touch target at <=480px", selector)
+		}
+	}
+	clear := rules[".convert-clear"]
+	if !strings.Contains(clear, "width: var(--ui-touch)") || !strings.Contains(clear, "height: var(--ui-touch)") {
+		t.Fatal(".convert-clear falls below the 44px touch target at <=480px")
+	}
+}
+
+func cssBlock(css, opener string) string {
+	start := strings.Index(css, opener)
+	if start < 0 {
+		return ""
+	}
+	rest := css[start:]
+	openBrace := strings.Index(rest, "{")
+	if openBrace < 0 {
+		return ""
+	}
+	depth := 0
+	for i := openBrace; i < len(rest); i++ {
+		switch rest[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[openBrace+1 : i]
+			}
+		}
+	}
+	return rest[openBrace+1:]
+}
+
+func cssRules(css string) map[string]string {
+	rules := make(map[string]string)
+	depth := 0
+	open := -1
+	selectorStart := 0
+	for i := 0; i < len(css); i++ {
+		switch css[i] {
+		case '{':
+			if depth == 0 {
+				open = i
+			}
+			depth++
+		case '}':
+			depth--
+			if depth == 0 && open >= 0 {
+				body := strings.TrimSpace(css[open+1 : i])
+				for _, selector := range strings.Split(css[selectorStart:open], ",") {
+					rules[strings.TrimSpace(selector)] = body
+				}
+				selectorStart = i + 1
+			}
+		}
+	}
+	return rules
 }
 
 func assertMirrorStates(t *testing.T, page, script, style string) {
