@@ -87,8 +87,12 @@ export const scenes = [
     name: "mappings",
     title: "已保存映射",
     run: async (ui) => {
+      await ui.waitFor("#mapping-workspace");
       await ui.waitFor("#mapping-list table");
-      await ui.waitFor("#mapping-create");
+      await ui.waitFor("#mapping-add");
+      await ui.click("#mapping-add");
+      await ui.waitFor("#mapping-create[open]");
+      await ui.evaluate("document.getElementById('mapping-create').close()");
     },
   },
   {
@@ -98,7 +102,10 @@ export const scenes = [
       const origin = await ui.evaluate("location.origin");
       await reopen(ui, origin, "?fixture=empty");
       await ui.waitFor("#mapping-empty");
-      await ui.waitFor("#mapping-create");
+      await ui.waitFor("#mapping-empty-add");
+      await ui.click("#mapping-empty-add");
+      await ui.waitFor("#mapping-create[open]");
+      await ui.evaluate("document.getElementById('mapping-create').close()");
     },
   },
 ];

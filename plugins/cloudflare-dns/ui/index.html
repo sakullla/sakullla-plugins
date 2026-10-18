@@ -1,51 +1,135 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-theme-mode="host">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cloudflare 域名 Token 映射</title>
+  <script src="ui-kit.js"></script>
+  <link rel="stylesheet" href="ui-kit.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="wash" aria-hidden="true"></div>
-  <main>
-    <header class="page-head">
-      <p class="kicker">Cloudflare DNS</p>
-      <h1>域名 Token 映射</h1>
-      <p class="lede">按域名后缀绑定一家服务商。可选 Cloudflare、阿里云解析、DNSPod .cn、DNSPod .com 和腾讯云 DNS。查询时取最长匹配的后缀。列表、详情和编辑框都不会回显凭证。本页不管理 DNS 记录。</p>
-      <section class="token-guide" aria-labelledby="token-guide-title">
-        <h2 id="token-guide-title" class="sr-only">如何配置 Cloudflare API Token</h2>
-        <div class="token-guide-step">
-          <span class="token-guide-index">1</span>
-          <span><strong>打开 API Tokens</strong><small>Cloudflare 控制台 → 右上角头像 → My Profile → API Tokens → Create Token</small></span>
-        </div>
-        <div class="token-guide-step">
-          <span class="token-guide-index">2</span>
-          <span><strong>用自定义 Token</strong><small>选 Custom token。权限至少 Zone → DNS → Edit；建议再加 Zone → Zone → Read。区域资源选 Include → Specific zone，只包含本映射要用的域名</small></span>
-        </div>
-        <div class="token-guide-step">
-          <span class="token-guide-index">3</span>
-          <span><strong>创建后立刻复制</strong><small>Continue to summary → Create Token。密钥只显示一次，粘贴到下方后本页不会再回显</small></span>
-        </div>
-      </section>
-      <p class="token-guide-note"><strong>最长匹配：</strong>同时有 <code>example.com</code> 和 <code>shop.example.com</code> 时，<code>www.shop.example.com</code> 用更长的 <code>shop.example.com</code>。<a class="token-guide-link" href="https://sakullla.github.io/nginx-reverse-emby/guides/certificates#%E8%8E%B7%E5%8F%96-cloudflare-api-token" target="_blank" rel="noopener noreferrer">官方步骤与截图</a></p>
+  <main class="ui-page ui-page--wide">
+    <header class="ui-page-head">
+      <div class="ui-page-head__copy">
+        <p class="ui-eyebrow">Cloudflare DNS</p>
+        <h1 class="ui-title">域名 Token 映射</h1>
+        <p class="ui-lede">按域名后缀绑定一家 DNS 服务商，查询时取最长匹配。凭证只在提交时发送，保存后不会回显。</p>
+      </div>
+      <div class="ui-page-actions">
+        <button type="button" class="ui-btn" id="mapping-add" data-open-create hidden>新增映射</button>
+      </div>
     </header>
-    <p id="mapping-loading" role="status">正在加载映射...</p>
-    <p id="mapping-unavailable" role="status" hidden>插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
-    <p id="mapping-denied" role="alert" hidden>无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
+
+    <section class="ui-loading" id="mapping-loading" role="status" aria-live="polite">
+      <span class="ui-spinner" aria-hidden="true"></span>
+      <span>正在加载映射…</span>
+    </section>
+
+    <section class="ui-error-state" id="mapping-error" role="alert" hidden>
+      <span class="ui-error-state__icon" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true" focusable="false"><path d="M10 2.6 18 17H2L10 2.6Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 7.4v4.1M10 14.3v.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </span>
+      <h2 class="ui-error-state__title">加载映射失败</h2>
+      <p class="ui-error-state__desc" id="mapping-error-desc">请重试；如果持续失败，请检查宿主连接后刷新页面。</p>
+      <div class="ui-error-state__actions">
+        <button type="button" class="ui-btn ui-btn--secondary" id="mapping-retry">重试</button>
+      </div>
+    </section>
+
+    <section class="ui-error-state" id="mapping-unavailable" role="status" hidden>
+      <span class="ui-error-state__icon" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true" focusable="false"><path d="M10 2.6 18 17H2L10 2.6Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 7.4v4.1M10 14.3v.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </span>
+      <h2 class="ui-error-state__title">宿主资源能力不可用</h2>
+      <p class="ui-error-state__desc">插件页面已加载；宿主资源能力尚不可用，Token 与 DNS 操作保持关闭。</p>
+    </section>
+
+    <section class="ui-denied" id="mapping-denied" role="alert" hidden>
+      <h2 class="ui-empty__title">无权访问</h2>
+      <p class="ui-denied__desc">无权访问 Cloudflare 域名 Token 映射，请求已被明确拒绝。</p>
+    </section>
+
     <div id="mapping-workspace" hidden>
-      <section class="panel" id="mapping-create" aria-labelledby="mapping-create-title" hidden>
-        <div class="setup-hero">
-          <span class="setup-mark" aria-hidden="true"></span>
+      <div class="ui-toolbar mapping-toolbar">
+        <div class="ui-field ui-toolbar__grow">
+          <label class="ui-sr-only" for="mapping-search">筛选映射</label>
+          <input class="ui-input" id="mapping-search" type="search" placeholder="筛选域名后缀或服务商" autocomplete="off" spellcheck="false">
+        </div>
+        <span class="ui-toolbar__meta" id="mapping-count"></span>
+        <button type="button" class="ui-btn ui-btn--secondary" id="mapping-refresh">刷新</button>
+      </div>
+
+      <p id="mapping-status" role="status" aria-live="polite" hidden></p>
+
+      <section class="ui-section mapping-list-section" aria-labelledby="mapping-list-title">
+        <div class="ui-section-head">
           <div>
-            <h2 id="mapping-create-title">新增映射</h2>
-            <p class="hint">后缀按最长匹配生效。一条后缀只绑定一个服务商。凭证只在提交时发送，保存后不会回显。</p>
+            <h2 class="ui-section-title" id="mapping-list-title">已保存映射</h2>
+            <p class="ui-section-desc">按最长匹配生效；修改后缀或轮换凭证后立即生效。</p>
           </div>
         </div>
-        <form id="create-form" method="post" data-action="create">
-          <label>域名后缀 <input name="suffix" required autocomplete="off" placeholder="example.com" spellcheck="false"></label>
-          <label>服务商
-            <select name="provider">
+        <div id="mapping-list"></div>
+        <div class="ui-empty" id="mapping-empty" hidden>
+          <span class="ui-empty__icon" aria-hidden="true">
+            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true" focusable="false"><path d="M3 5.5h14v11H3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M3 9h14M7.5 3v5M12.5 3v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </span>
+          <h2 class="ui-empty__title">还没有映射</h2>
+          <p class="ui-empty__desc" id="mapping-empty-desc">添加第一条域名后缀映射后，DNS 查询会使用对应服务商的凭证。</p>
+          <div class="ui-empty__actions">
+            <button type="button" class="ui-btn" id="mapping-empty-add" data-open-create hidden>新增映射</button>
+          </div>
+        </div>
+        <div class="ui-empty" id="mapping-filter-empty" hidden>
+          <h2 class="ui-empty__title">没有匹配的映射</h2>
+          <p class="ui-empty__desc">换一个后缀或服务商关键字，或清除筛选查看全部映射。</p>
+          <div class="ui-empty__actions">
+            <button type="button" class="ui-btn ui-btn--secondary" id="mapping-clear-filter">清除筛选</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <details class="ui-help mapping-help">
+      <summary>Token 怎么获取？最长匹配如何生效？</summary>
+      <div class="ui-help__body">
+        <div class="token-guide">
+          <div class="token-guide-step">
+            <span class="token-guide-index" aria-hidden="true">1</span>
+            <span><strong>打开 API Tokens</strong><small>Cloudflare 控制台 → 右上角头像 → My Profile → API Tokens → Create Token</small></span>
+          </div>
+          <div class="token-guide-step">
+            <span class="token-guide-index" aria-hidden="true">2</span>
+            <span><strong>用自定义 Token</strong><small>选 Custom token。权限至少 Zone → DNS → Edit；建议再加 Zone → Zone → Read。区域资源选 Include → Specific zone，只包含本映射要用的域名</small></span>
+          </div>
+          <div class="token-guide-step">
+            <span class="token-guide-index" aria-hidden="true">3</span>
+            <span><strong>创建后立刻复制</strong><small>Continue to summary → Create Token。密钥只显示一次，粘贴到本页后不会再回显</small></span>
+          </div>
+        </div>
+        <p class="token-guide-note"><strong>最长匹配：</strong>同时有 <code>example.com</code> 和 <code>shop.example.com</code> 时，<code>www.shop.example.com</code> 用更长的 <code>shop.example.com</code>。<a class="token-guide-link" href="https://sakullla.github.io/nginx-reverse-emby/guides/certificates#%E8%8E%B7%E5%8F%96-cloudflare-api-token" target="_blank" rel="noopener noreferrer">官方步骤与截图</a></p>
+        <p>列表、详情和编辑框都不会回显凭证。本页只管理域名后缀到服务商凭证的映射，不管理 DNS 记录。</p>
+      </div>
+    </details>
+  </main>
+
+  <dialog class="ui-dialog" id="mapping-create" data-ui-dialog aria-labelledby="mapping-create-title">
+    <form id="create-form" method="post" data-action="create">
+      <div class="ui-dialog__head">
+        <div>
+          <h2 class="ui-dialog__title" id="mapping-create-title">新增映射</h2>
+          <p class="ui-dialog__desc">后缀按最长匹配生效；一条后缀只绑定一个服务商。凭证只在提交时发送，保存后不会回显。</p>
+        </div>
+      </div>
+      <div class="ui-dialog__body">
+        <div class="ui-form-grid">
+          <label class="ui-field">
+            <span class="ui-label">域名后缀</span>
+            <input class="ui-input" name="suffix" required autocomplete="off" placeholder="example.com" spellcheck="false">
+          </label>
+          <label class="ui-field">
+            <span class="ui-label">服务商</span>
+            <select class="ui-select" name="provider">
               <option value="cloudflare" selected>Cloudflare</option>
               <option value="aliyun">阿里云解析</option>
               <option value="dnspod-cn">DNSPod .cn</option>
@@ -53,26 +137,82 @@
               <option value="tencent-dns">腾讯云 DNS</option>
             </select>
           </label>
-          <label data-credential="access_key_id" hidden>AccessKey ID <input name="access_key_id" autocomplete="off" spellcheck="false"></label>
-          <label data-credential="access_key_secret" hidden>AccessKey Secret <input name="access_key_secret" type="password" autocomplete="new-password"></label>
-          <label data-credential="token_id" hidden>Token ID <input name="token_id" autocomplete="off" spellcheck="false"></label>
-          <label data-credential="token">Cloudflare DNS Token <input name="token" type="password" autocomplete="new-password" required></label>
-          <label data-credential="secret_id" hidden>SecretId <input name="secret_id" autocomplete="off" spellcheck="false"></label>
-          <label data-credential="secret_key" hidden>SecretKey <input name="secret_key" type="password" autocomplete="new-password"></label>
-          <button type="submit" class="btn-primary">添加映射</button>
-        </form>
-      </section>
-      <section class="panel" aria-labelledby="mapping-list-title">
-        <div class="section-head">
-          <h2 id="mapping-list-title">已保存映射</h2>
-          <p id="mapping-count" class="count" hidden></p>
+          <label class="ui-field" data-credential="access_key_id" hidden>
+            <span class="ui-label">AccessKey ID</span>
+            <input class="ui-input" name="access_key_id" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="ui-field" data-credential="access_key_secret" hidden>
+            <span class="ui-label">AccessKey Secret</span>
+            <input class="ui-input" name="access_key_secret" type="password" autocomplete="new-password">
+          </label>
+          <label class="ui-field" data-credential="token_id" hidden>
+            <span class="ui-label">Token ID</span>
+            <input class="ui-input" name="token_id" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="ui-field" data-credential="secret_id" hidden>
+            <span class="ui-label">SecretId</span>
+            <input class="ui-input" name="secret_id" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="ui-field" data-credential="secret_key" hidden>
+            <span class="ui-label">SecretKey</span>
+            <input class="ui-input" name="secret_key" type="password" autocomplete="new-password">
+          </label>
+          <label class="ui-field ui-field--full" data-credential="token">
+            <span class="ui-label">Cloudflare DNS Token</span>
+            <input class="ui-input" name="token" type="password" autocomplete="new-password" required>
+          </label>
         </div>
-        <div id="mapping-list"></div>
-        <p id="mapping-empty" hidden>还没有映射。</p>
-      </section>
-      <p id="mapping-status" role="status" hidden></p>
-    </div>
-  </main>
+        <p class="ui-error-text" id="create-error" role="alert" hidden></p>
+        <p class="ui-help-text">添加后可在列表里改后缀、轮换凭证或删除；凭证不会写入页面。</p>
+      </div>
+      <div class="ui-dialog__footer">
+        <button type="button" class="ui-btn ui-btn--secondary" data-ui-close>取消</button>
+        <button type="submit" class="ui-btn">添加映射</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="ui-dialog" id="mapping-rename" data-ui-dialog aria-labelledby="mapping-rename-title">
+    <form id="rename-form" method="post" data-action="rename">
+      <div class="ui-dialog__head">
+        <div>
+          <h2 class="ui-dialog__title" id="mapping-rename-title">修改域名后缀</h2>
+          <p class="ui-dialog__desc">当前后缀 <code class="ui-mono" id="rename-current"></code>；保存后按新后缀参与最长匹配，原后缀立即失效。</p>
+        </div>
+      </div>
+      <div class="ui-dialog__body">
+        <label class="ui-field">
+          <span class="ui-label">新域名后缀</span>
+          <input class="ui-input" name="suffix" required autocomplete="off" placeholder="example.com" spellcheck="false">
+        </label>
+        <p class="ui-error-text" id="rename-error" role="alert" hidden></p>
+      </div>
+      <div class="ui-dialog__footer">
+        <button type="button" class="ui-btn ui-btn--secondary" data-ui-close>取消</button>
+        <button type="submit" class="ui-btn">保存后缀</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="ui-dialog" id="mapping-rotate" data-ui-dialog aria-labelledby="mapping-rotate-title">
+    <form id="rotate-form" method="post" data-action="rotate">
+      <div class="ui-dialog__head">
+        <div>
+          <h2 class="ui-dialog__title" id="mapping-rotate-title">轮换凭证</h2>
+          <p class="ui-dialog__desc">为 <code class="ui-mono" id="rotate-current"></code> 重新录入凭证；保存后旧凭证立即失效，新凭证不会回显。</p>
+        </div>
+      </div>
+      <div class="ui-dialog__body">
+        <div class="ui-form-grid" id="rotate-fields"></div>
+        <p class="ui-error-text" id="rotate-error" role="alert" hidden></p>
+      </div>
+      <div class="ui-dialog__footer">
+        <button type="button" class="ui-btn ui-btn--secondary" data-ui-close>取消</button>
+        <button type="submit" class="ui-btn">保存凭证</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="app.js" defer></script>
 </body>
 </html>

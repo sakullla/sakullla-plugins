@@ -278,6 +278,10 @@ func TestMappingUIReadOnlyHidesWriteEntry(t *testing.T) {
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="mapping-create"`) || !strings.Contains(page.Body.String(), "hidden") {
 		t.Fatalf("readonly page status=%d body=%s", page.Code, page.Body.String())
 	}
+	script, err := mappingUIAssets.ReadFile("ui/app.js")
+	if err != nil || !bytes.Contains(script, []byte("addButton.hidden = !canWrite")) || !bytes.Contains(script, []byte("emptyAdd.hidden = !canWrite")) {
+		t.Fatalf("readonly page does not hide the write entry: %s", script)
+	}
 	listed := httptest.NewRecorder()
 	service.ServeHTTP(listed, uiRequest(http.MethodGet, "/api/mappings", "", "operation/ui-readonly-list"))
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), "example.com") || strings.Contains(listed.Body.String(), `"can_write":true`) || strings.Contains(listed.Body.String(), `"can_rotate":true`) {
@@ -316,7 +320,7 @@ func TestMappingUIConfirmCancelDoesNotChangeState(t *testing.T) {
 		t.Fatalf("list after cancel=%#v err=%v", listed, err)
 	}
 	script, err := mappingUIAssets.ReadFile("ui/app.js")
-	if err != nil || !bytes.Contains(script, []byte("取消不会更改映射")) || !bytes.Contains(script, []byte("window.confirm")) {
+	if err != nil || !bytes.Contains(script, []byte("取消不会更改映射")) || !bytes.Contains(script, []byte("NREUI.confirm")) || !bytes.Contains(script, []byte("window.confirm")) {
 		t.Fatalf("script missing cancel confirmation: %s", script)
 	}
 }
@@ -339,7 +343,7 @@ func TestMappingUIDuplicateSuffixRejected(t *testing.T) {
 func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	t.Parallel()
 	service, _ := newUIService(t, nil)
-	for _, route := range []string{"/app.js", "/style.css"} {
+	for _, route := range []string{"/app.js", "/style.css", "/ui-kit.js", "/ui-kit.css"} {
 		recorder := httptest.NewRecorder()
 		service.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
 		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
@@ -360,14 +364,20 @@ func TestMappingUIAssetsAndInactiveController(t *testing.T) {
 	if !bytes.Contains(page, []byte("Zone → DNS → Edit")) || !bytes.Contains(page, []byte("guides/certificates")) || !bytes.Contains(page, []byte("最长匹配")) {
 		t.Fatal("page missing Cloudflare token setup guide")
 	}
-	if !bytes.Contains(script, []byte(`actionForm("rotate"`)) || !bytes.Contains(script, []byte(`actionForm("delete"`)) {
-		t.Fatalf("native UI script is missing dynamic actions: %s", script)
+	if !bytes.Contains(script, []byte(`setAttribute("data-row-action", action)`)) || !bytes.Contains(script, []byte(`"rotate"`)) || !bytes.Contains(script, []byte(`"delete"`)) {
+		t.Fatalf("native UI script is missing dynamic row actions: %s", script)
+	}
+	if !bytes.Contains(script, []byte("NREUI.openDialog")) || !bytes.Contains(script, []byte("NREUI.confirm")) {
+		t.Fatalf("native UI script does not use the shared dialogs: %s", script)
+	}
+	if !bytes.Contains(page, []byte(`id="mapping-create" data-ui-dialog`)) || !bytes.Contains(page, []byte(`id="mapping-rename"`)) || !bytes.Contains(page, []byte(`id="mapping-rotate"`)) {
+		t.Fatalf("page is missing the create/rename/rotate dialogs: %s", page)
 	}
 	css, err := mappingUIAssets.ReadFile("ui/style.css")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertConsoleSkin(t, string(page), string(script), string(css))
+	assertDesignSystemPage(t, string(page), string(script), string(css))
 	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact"})
 	if err != nil {
 		t.Fatal(err)
@@ -392,82 +402,96 @@ func TestMappingUIViewportLayout(t *testing.T) {
 	}
 	text := string(css)
 	for _, want := range []string{
-		"@media (max-width: 720px)",
-		"grid-template-columns: 1fr",
-		"@media (min-width: 1920px)",
-		"@media (min-width: 2560px)",
-		"@media (min-width: 3840px)",
-		"width: calc(100% - 2.5rem)",
-		"flex-wrap: wrap",
+		"@media (max-width: 768px)",
+		"#mapping-list .ui-table thead",
+		"grid-template-columns: minmax(0, 1fr) auto",
 		"overflow-wrap: anywhere",
+		"min-width: 0",
+		"var(--ui-space-",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("stylesheet missing viewport rule %q", want)
 		}
 	}
-	if strings.Contains(text, "min(52rem") || strings.Contains(text, "min(64rem") || strings.Contains(text, "min(880px") {
-		t.Fatal("stylesheet still caps main at 52rem, 64rem, or 880px")
+	if strings.Contains(text, "max-width: 52rem") || strings.Contains(text, "max-width: 64rem") || strings.Contains(text, "max-width: 880px") {
+		t.Fatal("stylesheet still caps the page width")
 	}
-	if strings.Contains(text, "flex-wrap: nowrap") || strings.Contains(text, "white-space: nowrap") {
-		t.Fatal("action bar still forces nowrap overflow")
+	if strings.Contains(text, "width: 100vw") || strings.Contains(text, "min-width: 60rem") {
+		t.Fatal("stylesheet forces a wider-than-viewport layout")
 	}
-	createForm := cssRule(text, "#create-form")
-	if !strings.Contains(createForm, "max-width: min(46rem, 100%)") {
-		t.Fatal("#create-form is not a capped operation group")
-	}
-	if strings.Contains(createForm, "1fr") {
-		t.Fatal("#create-form still uses uncapped 1fr tracks")
-	}
-	for _, want := range []string{"html { font-size: 17px; }", "html { font-size: 18px; }", "html { font-size: 20px; }"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("stylesheet missing type scale %q", want)
-		}
+	if !strings.Contains(text, "grid-column: 1 / -1") {
+		t.Fatal("mobile mapping cards do not span the full row")
 	}
 }
 
-func assertConsoleSkin(t *testing.T, page, script, style string) {
+func assertDesignSystemPage(t *testing.T, page, script, style string) {
 	t.Helper()
-	if strings.Contains(style, "#d94880") || strings.Contains(style, "#f4a0c0") || strings.Contains(style, "#f5f4f2") {
-		t.Fatal("stylesheet still contains sakura theme colors")
-	}
-	if strings.Contains(page, `data-theme="sakura-day"`) || strings.Contains(style, `[data-theme="sakura-day"]`) {
-		t.Fatal("page still uses sakura-day as the rendered theme")
+	if !strings.Contains(page, `data-theme-mode="host"`) {
+		t.Fatal("page does not declare the host theme authority")
 	}
 	if !strings.Contains(page, `data-theme="light"`) {
 		t.Fatal("page default theme is not light")
 	}
-	if !strings.Contains(style, `[data-theme="light"]`) || !strings.Contains(style, `[data-theme="dark"]`) {
-		t.Fatal("stylesheet missing light/dark theme selectors")
+	kitScript := strings.Index(page, `<script src="ui-kit.js"></script>`)
+	kitStyle := strings.Index(page, `<link rel="stylesheet" href="ui-kit.css">`)
+	pageStyle := strings.Index(page, `<link rel="stylesheet" href="style.css">`)
+	if kitScript < 0 || kitStyle < 0 || pageStyle < 0 || !(kitScript < kitStyle && kitStyle < pageStyle) {
+		t.Fatal("page does not load ui-kit.js before ui-kit.css and style.css")
 	}
-	if !strings.Contains(style, "#4f46e5") || !strings.Contains(style, "#f8fafc") {
-		t.Fatal("stylesheet missing 晴空 light tokens")
+	for _, class := range []string{"ui-page", "ui-page-head", "ui-toolbar", "ui-dialog", "ui-empty", "ui-error-state", "ui-denied", "ui-help"} {
+		if !strings.Contains(page, class) {
+			t.Fatalf("page is missing kit class %q", class)
+		}
 	}
-	if !strings.Contains(style, "#818cf8") {
-		t.Fatal("stylesheet missing dark indigo accent")
+	for _, class := range []string{"ui-table", "ui-table-wrap", "ui-badge"} {
+		if !strings.Contains(script, class) {
+			t.Fatalf("rendered list is missing kit class %q", class)
+		}
 	}
-	if strings.Contains(script, `business: "sakura-day"`) || strings.Contains(script, `"fresh-green": "sakura-day"`) {
-		t.Fatal("applyHostTheme still maps business or fresh-green to sakura-day")
+	if strings.Contains(page, "<script>") || strings.Contains(page, " onclick=") {
+		t.Fatal("page must not depend on inline script or handlers under self-only CSP")
 	}
-	if !strings.Contains(script, `business: "light"`) || !strings.Contains(script, `"fresh-green": "light"`) || !strings.Contains(script, `"sakura-day": "light"`) {
-		t.Fatal("applyHostTheme does not map business, fresh-green, or sakura-day to light")
+	if strings.Contains(style, `[data-theme="dark"]`) || strings.Contains(style, `[data-theme="sakura-day"]`) || strings.Contains(style, "#818cf8") {
+		t.Fatal("page CSS must not define its own theme palettes")
 	}
-	if !strings.Contains(script, `"sakura-night": "dark"`) || !strings.Contains(script, `"neko-dark": "dark"`) {
-		t.Fatal("applyHostTheme does not map sakura-night or neko-dark to dark")
+	for _, token := range []string{"var(--ui-space-", "var(--ui-text-", "var(--ui-border", "var(--ui-primary)"} {
+		if !strings.Contains(style, token) {
+			t.Fatalf("page CSS is not using kit token %q", token)
+		}
+	}
+	if strings.Contains(script, "window.parent") || strings.Contains(script, "applyHostTheme") || strings.Contains(script, "aliases") {
+		t.Fatal("page script still resolves themes itself instead of ui-kit.js")
+	}
+	if !strings.Contains(script, "data-open-create") || !strings.Contains(script, "data-row-action") {
+		t.Fatal("page script is missing dialog and row action wiring")
 	}
 }
 
-func cssRule(css, selector string) string {
-	needle := selector + " {"
-	start := strings.Index(css, needle)
-	if start < 0 {
-		return ""
+func TestMappingUIStatesAreDistinct(t *testing.T) {
+	t.Parallel()
+	page, err := mappingUIAssets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
 	}
-	rest := css[start:]
-	end := strings.Index(rest, "}")
-	if end < 0 {
-		return rest
+	text := string(page)
+	for _, want := range []struct {
+		fragment string
+		state    string
+	}{
+		{fragment: `<section class="ui-loading" id="mapping-loading" role="status"`, state: "loading"},
+		{fragment: `id="mapping-error" role="alert" hidden`, state: "error"},
+		{fragment: `id="mapping-unavailable" role="status" hidden`, state: "unavailable"},
+		{fragment: `id="mapping-denied" role="alert" hidden`, state: "denied"},
+		{fragment: `id="mapping-empty" hidden`, state: "empty"},
+		{fragment: `id="mapping-filter-empty" hidden`, state: "filter-empty"},
+	} {
+		if !strings.Contains(text, want.fragment) {
+			t.Fatalf("page is missing the %s state", want.state)
+		}
 	}
-	return rest[:end]
+	if !strings.Contains(text, `id="mapping-workspace" hidden`) {
+		t.Fatal("workspace must stay hidden until the mapping list is loaded")
+	}
 }
 
 func TestPluginYAMLDeclaresUIRouteNotPanelPage(t *testing.T) {
