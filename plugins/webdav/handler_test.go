@@ -213,7 +213,7 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 	wrongBasic := httptest.NewRequest(http.MethodGet, "http://share.test/", nil)
 	wrongBasic.SetBasicAuth("mallory", "wrong")
 	badHeaders := []string{"", "Basic !!!", wrongBasic.Header.Get("Authorization"), "Bearer", "Bearer wrong", "Bearer " + testSharePassword + " extra", "Bearer\t" + testSharePassword, "Bearer  " + testSharePassword, "Bearer " + testSharePassword + " ", "Digest token"}
-	for _, path := range []string{"/", "/index.html", "/static/app.js", "/static/style.css"} {
+	for _, path := range []string{"/", "/index.html", "/static/app.js", "/static/style.css", "/static/ui-kit.css", "/static/ui-kit.js"} {
 		for _, method := range []string{http.MethodGet, http.MethodHead} {
 			for _, header := range badHeaders {
 				request := httptest.NewRequest(method, "http://share.test"+path, nil)
@@ -232,7 +232,7 @@ func TestBasicAndBearerAuthentication(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("public page status=%d body=%q", page.Code, page.Body.String())
 	}
-	for _, fragment := range []string{"用户名可自定", "隔离", "共享口令", `id="login-username"`, `id="login-password"`, `id="logout-button"`} {
+	for _, fragment := range []string{"用户名可自定", "隔离", "共享口令", `id="login-username"`, `id="login-password"`, `id="logout-button"`, `data-theme-mode="standalone"`, `data-theme-key="webdav.theme"`, `href="/static/ui-kit.css"`, `src="/static/ui-kit.js"`} {
 		if !strings.Contains(page.Body.String(), fragment) {
 			t.Fatalf("public page missing %q", fragment)
 		}
@@ -403,6 +403,55 @@ func TestBasicUserDirectoryIsolation(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(root, webdavComponent)); err != nil || !info.IsDir() {
 		t.Fatalf("webdav namespace missing: info=%v err=%v", info, err)
+	}
+}
+
+func TestPageServesKitAssetsWithSelfOnlyCSP(t *testing.T) {
+	handler, err := NewHandler(t.TempDir(), testSharePassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := []struct {
+		path      string
+		mediaType string
+		contains  string
+	}{
+		{path: "/static/ui-kit.css", mediaType: "text/css", contains: "--ui-primary:"},
+		{path: "/static/ui-kit.js", mediaType: "text/javascript", contains: "NREUI"},
+	}
+	for _, asset := range assets {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(method, "http://share.test"+asset.path, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("%s %s status=%d body=%q", method, asset.path, recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, asset.mediaType) {
+				t.Fatalf("%s content-type=%q, want prefix %q", asset.path, got, asset.mediaType)
+			}
+			assertSelfOnlyUIHeaders(t, recorder)
+			if method == http.MethodGet && !strings.Contains(recorder.Body.String(), asset.contains) {
+				t.Fatalf("%s missing %q", asset.path, asset.contains)
+			}
+		}
+	}
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "http://share.test/static/ui-kit-extra.css", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown static asset status=%d body=%q", unknown.Code, unknown.Body.String())
+	}
+}
+
+func assertSelfOnlyUIHeaders(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := recorder.Header().Get("Content-Security-Policy"); got != pluginsdk.PluginUIContentSecurityPolicy {
+		t.Fatalf("content-security-policy=%q", got)
+	}
+	if got := recorder.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("referrer-policy=%q", got)
+	}
+	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("x-content-type-options=%q", got)
 	}
 }
 

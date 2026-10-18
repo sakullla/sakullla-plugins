@@ -17,16 +17,18 @@ import (
 )
 
 const (
-	DavPrefix        = "/dav"
-	DavMountUsername = "webdav"
-	pageIndexName    = "static/index.html"
-	pageScriptName   = "static/app.js"
-	pageStyleName    = "static/style.css"
-	basicChallenge   = `Basic realm="webdav"`
-	bearerChallenge  = `Bearer realm="webdav"`
+	DavPrefix         = "/dav"
+	DavMountUsername  = "webdav"
+	pageIndexName     = "static/index.html"
+	pageScriptName    = "static/app.js"
+	pageStyleName     = "static/style.css"
+	pageKitStyleName  = "static/ui-kit.css"
+	pageKitScriptName = "static/ui-kit.js"
+	basicChallenge    = `Basic realm="webdav"`
+	bearerChallenge   = `Bearer realm="webdav"`
 )
 
-//go:embed static/index.html static/app.js static/style.css
+//go:embed static/index.html static/app.js static/style.css static/ui-kit.css static/ui-kit.js
 var pageAssets embed.FS
 
 type Handler struct {
@@ -228,6 +230,10 @@ func (handler *Handler) servePage(writer http.ResponseWriter, request *http.Requ
 		name = pageScriptName
 	case "/static/style.css":
 		name = pageStyleName
+	case "/static/ui-kit.css":
+		name = pageKitStyleName
+	case "/static/ui-kit.js":
+		name = pageKitScriptName
 	default:
 		http.NotFound(writer, request)
 		return

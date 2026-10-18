@@ -38,6 +38,8 @@ const authorized = (request) => {
 };
 
 export const id = "webdav";
+export const themeMode = "standalone";
+export const themeKey = "webdav.theme";
 
 export const scenes = [
   {

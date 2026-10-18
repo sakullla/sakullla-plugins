@@ -1,22 +1,6 @@
-const applyHostTheme = () => {
-  const allowed = { light: true, dark: true };
-  const aliases = { "sakura-day": "light", business: "light", "fresh-green": "light", sakura: "light", cyberpunk: "light", "sakura-night": "dark", "neko-dark": "dark", midnight: "dark" };
-  let theme = "light";
-  try {
-    const raw = window.parent && window.parent !== window
-      ? window.parent.document.documentElement.getAttribute("data-theme")
-      : document.documentElement.getAttribute("data-theme");
-    const mapped = aliases[raw] || raw;
-    if (allowed[mapped]) {
-      theme = mapped;
-    }
-  } catch (_error) {
-    theme = "light";
-  }
-  document.documentElement.setAttribute("data-theme", theme);
-};
-
-applyHostTheme();
+/* 文件共享页面：登录、目录浏览和文件操作。
+   主题（跟随系统浅色/深色）与对话框/按钮/输入框外观由 ui-kit 提供；
+   本文件只负责业务请求、列表渲染和操作反馈。 */
 
 const credentialUsernameKey = "webdav.username";
 const credentialPasswordKey = "webdav.password";
@@ -39,17 +23,29 @@ const currentUsername = document.querySelector("#current-username");
 const whoInitial = document.querySelector("#who-initial");
 const listing = document.querySelector("#listing");
 const empty = document.querySelector("#empty");
+const tableWrap = document.querySelector("#table-wrap");
+const emptyUpload = document.querySelector("#empty-upload");
+const emptyMkdir = document.querySelector("#empty-mkdir");
 const crumbs = document.querySelector("#crumbs");
 const statusNode = document.querySelector("#status");
+const uploadButton = document.querySelector("#upload-button");
 const uploadInput = document.querySelector("#upload-input");
 const mkdirButton = document.querySelector("#mkdir-button");
 const mkdirDialog = document.querySelector("#mkdir-dialog");
 const mkdirForm = document.querySelector("#mkdir-form");
 const mkdirName = document.querySelector("#mkdir-name");
 const mkdirCancel = document.querySelector("#mkdir-cancel");
+const mkdirSubmit = document.querySelector("#mkdir-submit");
 const mkdirError = document.querySelector("#mkdir-error");
+const renameDialog = document.querySelector("#rename-dialog");
+const renameForm = document.querySelector("#rename-form");
+const renameName = document.querySelector("#rename-name");
+const renameCancel = document.querySelector("#rename-cancel");
+const renameSubmit = document.querySelector("#rename-submit");
+const renameError = document.querySelector("#rename-error");
 
 let currentPath = "/";
+let renameTarget = null;
 
 const encodeBasic = (username, password) => {
   const bytes = new TextEncoder().encode(username + ":" + password);
@@ -121,13 +117,67 @@ const setLoginError = (message) => {
   loginError.textContent = message || "";
 };
 
-const showStatus = (message, isError) => {
+const showStatus = (message, tone) => {
   if (!statusNode) {
     return;
   }
   statusNode.hidden = !message;
   statusNode.textContent = message || "";
-  statusNode.dataset.error = isError ? "true" : "false";
+  if (message && tone) {
+    statusNode.dataset.tone = tone;
+  } else {
+    delete statusNode.dataset.tone;
+  }
+};
+
+const setBusy = (node, busy) => {
+  if (!node) {
+    return;
+  }
+  if (window.NREUI && typeof window.NREUI.setBusy === "function") {
+    window.NREUI.setBusy(node, busy);
+    return;
+  }
+  if (busy) {
+    node.setAttribute("aria-busy", "true");
+    node.disabled = true;
+  } else {
+    node.removeAttribute("aria-busy");
+    node.disabled = false;
+  }
+};
+
+const openDialog = (dialog) => {
+  if (!dialog) {
+    return;
+  }
+  if (window.NREUI && typeof window.NREUI.openDialog === "function") {
+    window.NREUI.openDialog(dialog);
+    return;
+  }
+  if (dialog.showModal) {
+    dialog.showModal();
+  }
+};
+
+const closeDialog = (dialog) => {
+  if (!dialog) {
+    return;
+  }
+  if (window.NREUI && typeof window.NREUI.closeDialog === "function") {
+    window.NREUI.closeDialog(dialog);
+    return;
+  }
+  if (dialog.open && dialog.close) {
+    dialog.close();
+  }
+};
+
+const confirmAction = (options) => {
+  if (window.NREUI && typeof window.NREUI.confirm === "function") {
+    return window.NREUI.confirm(options);
+  }
+  return Promise.resolve(window.confirm(options.message || "确认执行？"));
 };
 
 const joinPath = (dir, name) => {
@@ -137,17 +187,6 @@ const joinPath = (dir, name) => {
   return dir.replace(/\/$/, "") + "/" + name;
 };
 
-const parentPath = (dir) => {
-  if (!dir || dir === "/") {
-    return "/";
-  }
-  const trimmed = dir.replace(/\/$/, "");
-  const index = trimmed.lastIndexOf("/");
-  if (index <= 0) {
-    return "/";
-  }
-  return trimmed.slice(0, index);
-};
 
 const sendJSON = async (path, body) => {
   const response = await fetch(path, {
@@ -174,8 +213,15 @@ const loadList = async (dir) => {
   if (!response.ok) {
     throw new Error(payload.error || "无法列出目录");
   }
+  const entries = payload.entries || [];
   renderCrumbs(payload.path || currentPath);
-  renderListing(payload.entries || []);
+  renderListing(entries);
+  if (tableWrap) {
+    tableWrap.hidden = entries.length === 0;
+  }
+  if (empty) {
+    empty.hidden = entries.length > 0;
+  }
 };
 
 const downloadFile = async (name) => {
@@ -204,34 +250,62 @@ const renderCrumbs = (dir) => {
   }
   crumbs.replaceChildren();
   const parts = (dir || "/").split("/").filter(Boolean);
-  const add = (label, target) => {
+  const add = (label, target, isCurrent) => {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = label;
+    if (isCurrent) {
+      button.setAttribute("aria-current", "page");
+    }
     button.addEventListener("click", () => {
-      showStatus("", false);
-      loadList(target).catch((error) => showStatus(error.message, true));
+      if (isCurrent) {
+        return;
+      }
+      showStatus("", "");
+      loadList(target).catch((error) => showStatus(error.message, "error"));
     });
     crumbs.append(button);
   };
-  add("共享根", "/");
+  add("共享根", "/", parts.length === 0);
   let prefix = "";
-  parts.forEach((part) => {
+  parts.forEach((part, index) => {
     prefix += "/" + part;
     const sep = document.createElement("span");
     sep.className = "crumb-sep";
     sep.setAttribute("aria-hidden", "true");
     crumbs.append(sep);
-    add(part, prefix);
+    add(part, prefix, index === parts.length - 1);
   });
 };
 
+const openRename = (entry) => {
+  renameTarget = entry;
+  if (renameName) {
+    renameName.value = entry.name;
+  }
+  setRenameError("");
+  openDialog(renameDialog);
+  if (renameName) {
+    renameName.focus();
+    if (typeof renameName.select === "function") {
+      renameName.select();
+    }
+  }
+};
+
+const setRenameError = (message) => {
+  if (!renameError) {
+    return;
+  }
+  renameError.hidden = !message;
+  renameError.textContent = message || "";
+};
+
 const renderListing = (entries) => {
-  if (!listing || !empty) {
+  if (!listing) {
     return;
   }
   listing.replaceChildren();
-  empty.hidden = entries.length > 0;
   entries.forEach((entry) => {
     const row = document.createElement("tr");
     row.className = entry.dir ? "row-dir" : "row-file";
@@ -239,9 +313,9 @@ const renderListing = (entries) => {
     const typeCell = document.createElement("td");
     const sizeCell = document.createElement("td");
     const actionCell = document.createElement("td");
-    actionCell.className = "row-actions";
+    actionCell.className = "row-actions ui-table__actions";
     const typePill = document.createElement("span");
-    typePill.className = "type-pill";
+    typePill.className = "ui-badge ui-badge--plain";
     typePill.textContent = entry.dir ? "目录" : "文件";
     typeCell.append(typePill);
     if (entry.dir) {
@@ -257,6 +331,7 @@ const renderListing = (entries) => {
     }
     const open = document.createElement("button");
     open.type = "button";
+    open.className = "file-name-button";
     const glyph = document.createElement("span");
     glyph.className = "file-glyph";
     glyph.setAttribute("aria-hidden", "true");
@@ -266,53 +341,46 @@ const renderListing = (entries) => {
     open.append(glyph, label);
     if (entry.dir) {
       open.addEventListener("click", () => {
-        showStatus("", false);
-        loadList(joinPath(currentPath, entry.name)).catch((error) => showStatus(error.message, true));
+        showStatus("", "");
+        loadList(joinPath(currentPath, entry.name)).catch((error) => showStatus(error.message, "error"));
       });
     } else {
       open.addEventListener("click", () => {
-        showStatus("", false);
-        downloadFile(entry.name).catch((error) => showStatus(error.message, true));
+        showStatus("", "");
+        downloadFile(entry.name).catch((error) => showStatus(error.message, "error"));
       });
     }
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "name-wrap";
-    nameWrap.append(open);
-    nameCell.append(nameWrap);
+    nameCell.append(open);
     const rename = document.createElement("button");
     rename.type = "button";
-    rename.className = "ghost";
+    rename.className = "ui-btn ui-btn--ghost ui-btn--sm";
     rename.textContent = "重命名";
-    rename.addEventListener("click", async () => {
-      const next = window.prompt("新名称", entry.name);
-      if (!next || next === entry.name) {
-        return;
-      }
-      try {
-        await sendJSON("/api/rename", {
-          from: joinPath(currentPath, entry.name),
-          to: joinPath(currentPath, next),
-        });
-        await loadList(currentPath);
-        showStatus("已重命名。", false);
-      } catch (error) {
-        showStatus(error.message, true);
-      }
-    });
+    rename.addEventListener("click", () => openRename(entry));
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "ghost danger";
+    remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
     remove.textContent = "删除";
     remove.addEventListener("click", async () => {
-      if (!window.confirm("删除 " + entry.name + "？")) {
+      const confirmed = await confirmAction({
+        title: "删除文件",
+        message: "删除 " + entry.name + "？删除后不可恢复。",
+        confirmLabel: "删除",
+        tone: "danger",
+      });
+      if (!confirmed) {
+        showStatus("已取消删除，内容未变。", "");
         return;
       }
+      setBusy(remove, true);
+      showStatus("正在删除 " + entry.name + "…", "");
       try {
         await sendJSON("/api/delete", { path: joinPath(currentPath, entry.name) });
         await loadList(currentPath);
-        showStatus("已删除。", false);
+        showStatus("已删除 " + entry.name + "。", "success");
       } catch (error) {
-        showStatus(error.message, true);
+        showStatus("删除失败：" + error.message, "error");
+      } finally {
+        setBusy(remove, false);
       }
     });
     actionCell.append(rename, remove);
@@ -321,28 +389,41 @@ const renderListing = (entries) => {
   });
 };
 
-if (uploadInput) {
-  uploadInput.addEventListener("change", async () => {
-    const file = uploadInput.files && uploadInput.files[0];
-    uploadInput.value = "";
-    if (!file) {
-      return;
-    }
+const uploadFile = async (file) => {
+  if (!file) {
+    return;
+  }
+  setBusy(uploadButton, true);
+  showStatus("正在上传 " + file.name + "…", "");
+  try {
     const body = new FormData();
     body.set("path", currentPath);
     body.set("file", file, file.name);
-    try {
-      const response = await fetch("/api/upload", { method: "POST", headers: withAuthHeaders(), body });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "上传失败");
-      }
-      await loadList(currentPath);
-      showStatus("已上传。", false);
-    } catch (error) {
-      showStatus(error.message, true);
+    const response = await fetch("/api/upload", { method: "POST", headers: withAuthHeaders(), body });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || "上传失败");
     }
+    await loadList(currentPath);
+    showStatus("已上传 " + file.name + "。", "success");
+  } catch (error) {
+    showStatus("上传失败：" + error.message, "error");
+  } finally {
+    setBusy(uploadButton, false);
+  }
+};
+
+if (uploadButton && uploadInput) {
+  uploadButton.addEventListener("click", () => uploadInput.click());
+  uploadInput.addEventListener("change", () => {
+    const file = uploadInput.files && uploadInput.files[0];
+    uploadInput.value = "";
+    uploadFile(file);
   });
+}
+
+if (emptyUpload && uploadInput) {
+  emptyUpload.addEventListener("click", () => uploadInput.click());
 }
 
 const setMkdirError = (message) => {
@@ -353,35 +434,98 @@ const setMkdirError = (message) => {
   mkdirError.textContent = message || "";
 };
 
-if (mkdirButton && mkdirDialog && mkdirForm && mkdirName) {
-  mkdirButton.addEventListener("click", () => {
-    setMkdirError("");
+const openMkdir = () => {
+  setMkdirError("");
+  if (mkdirName) {
     mkdirName.value = "";
-    mkdirDialog.showModal();
+  }
+  openDialog(mkdirDialog);
+  if (mkdirName) {
     mkdirName.focus();
-  });
+  }
+};
+
+if (mkdirButton) {
+  mkdirButton.addEventListener("click", openMkdir);
+}
+
+if (emptyMkdir) {
+  emptyMkdir.addEventListener("click", openMkdir);
+}
+
+if (mkdirDialog && mkdirForm && mkdirName) {
   mkdirForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const name = mkdirName.value.trim();
-    if (!name) {
+    if (mkdirSubmit && mkdirSubmit.disabled) {
       return;
     }
+    const name = mkdirName.value.trim();
+    if (!name) {
+      setMkdirError("请填写目录名称。");
+      mkdirName.focus();
+      return;
+    }
+    setBusy(mkdirSubmit, true);
     try {
       await sendJSON("/api/mkdir", { path: joinPath(currentPath, name) });
-      mkdirDialog.close();
+      closeDialog(mkdirDialog);
       await loadList(currentPath);
-      showStatus("已新建目录。", false);
+      showStatus("已新建目录。", "success");
     } catch (error) {
       setMkdirError(error.message);
-      showStatus(error.message, true);
+      showStatus(error.message, "error");
+    } finally {
+      setBusy(mkdirSubmit, false);
     }
   });
   if (mkdirCancel) {
-    mkdirCancel.addEventListener("click", () => mkdirDialog.close());
+    mkdirCancel.addEventListener("click", () => closeDialog(mkdirDialog));
   }
   mkdirDialog.addEventListener("close", () => {
     mkdirName.value = "";
     setMkdirError("");
+  });
+}
+
+if (renameDialog && renameForm && renameName) {
+  renameForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (renameSubmit && renameSubmit.disabled) {
+      return;
+    }
+    const next = renameName.value.trim();
+    if (!next) {
+      setRenameError("请填写新名称。");
+      renameName.focus();
+      return;
+    }
+    if (!renameTarget || next === renameTarget.name) {
+      closeDialog(renameDialog);
+      return;
+    }
+    setBusy(renameSubmit, true);
+    try {
+      await sendJSON("/api/rename", {
+        from: joinPath(currentPath, renameTarget.name),
+        to: joinPath(currentPath, next),
+      });
+      closeDialog(renameDialog);
+      await loadList(currentPath);
+      showStatus("已重命名。", "success");
+    } catch (error) {
+      setRenameError(error.message);
+      showStatus(error.message, "error");
+    } finally {
+      setBusy(renameSubmit, false);
+    }
+  });
+  if (renameCancel) {
+    renameCancel.addEventListener("click", () => closeDialog(renameDialog));
+  }
+  renameDialog.addEventListener("close", () => {
+    renameTarget = null;
+    renameName.value = "";
+    setRenameError("");
   });
 }
 
@@ -406,7 +550,7 @@ if (loginForm && loginUsername && loginPassword) {
       saveCredentials(username, password);
       loginPassword.value = "";
       showManager(username);
-      showStatus("", false);
+      showStatus("", "");
       await loadList("/");
     } catch (error) {
       setLoginError(error.message);
@@ -418,13 +562,19 @@ if (logoutButton) {
   logoutButton.addEventListener("click", () => {
     clearCredentials();
     currentPath = "/";
+    renameTarget = null;
+    closeDialog(mkdirDialog);
+    closeDialog(renameDialog);
     if (listing) {
       listing.replaceChildren();
     }
     if (empty) {
       empty.hidden = true;
     }
-    showStatus("", false);
+    if (tableWrap) {
+      tableWrap.hidden = true;
+    }
+    showStatus("", "");
     setLoginError("");
     if (loginPassword) {
       loginPassword.value = "";
@@ -442,7 +592,7 @@ const restoreSession = () => {
   showManager(credentials.username);
   loadList("/").catch((error) => {
     clearCredentials();
-    showStatus("", false);
+    showStatus("", "");
     setLoginError(error.message);
     showLogin();
   });
