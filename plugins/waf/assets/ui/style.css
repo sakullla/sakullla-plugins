@@ -19,6 +19,33 @@ body {
   font-size: var(--ui-text-sm);
 }
 
+.ui-denied__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  margin-bottom: var(--ui-space-1);
+  border-radius: var(--ui-radius-xl);
+  background: var(--ui-subtle);
+  color: var(--ui-text-secondary);
+}
+
+.ui-denied__title {
+  margin: 0;
+  font-size: var(--ui-text-lg);
+  font-weight: 650;
+  color: var(--ui-text);
+}
+
+.ui-denied__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-2);
+}
+
 .waf-context {
   max-width: 48rem;
 }
@@ -1071,6 +1098,17 @@ body {
   .agent-search-select__trigger,
   .agent-search-select__option {
     min-height: var(--ui-touch);
+  }
+
+  .agent-search-select__search-input,
+  .agent-search-select__chip,
+  .waf-help > summary {
+    min-height: var(--ui-touch);
+  }
+
+  .agent-search-select__chip {
+    display: inline-flex;
+    align-items: center;
   }
 
   .managed-group summary {

@@ -47,22 +47,36 @@ const showStatus = (message, isError) => {
 };
 
 const panelJSON = async (path, options = {}) => {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (response.status === 403) {
-    throw Object.assign(new Error(payload.error || "无权管理 Web 防火墙。"), {
-      denied: true,
-      status: 403,
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+      headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
     });
+  } catch (cause) {
+    console.error("[waf] request failed", path, cause);
+    throw Object.assign(new Error("网络连接失败"), {
+      network: true,
+      status: 0,
+      cause,
+    });
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403) {
+    throw Object.assign(
+      new Error(payload.error || payload.message || "无权管理 Web 防火墙。"),
+      {
+        denied: true,
+        unauthorized: response.status === 401,
+        status: response.status,
+      },
+    );
   }
   if (!response.ok) {
     throw Object.assign(
       new Error(payload.error || payload.message || "请求失败"),
-      { status: response.status, unavailable: response.status === 503 },
+      { status: response.status, unavailable: response.status >= 500 },
     );
   }
   return payload;
@@ -506,6 +520,110 @@ const eventEmptyDesc = $("#event-empty-desc");
 const appEmptyDesc = $("#app-empty-desc");
 const eventTableWrap = $("#event-table-wrap");
 const entryTableWrap = $("#entry-table-wrap");
+const loadingText = $("#app-loading [data-loading-text]");
+const unavailableTitle = $("#app-unavailable-title");
+const unavailableDesc = $("#app-unavailable-desc");
+const deniedTitle = $("#app-denied-title");
+const deniedDesc = $("#app-denied-desc");
+
+const loadingTargets = () =>
+  [
+    workspaceNode,
+    contextNode,
+    entryTableWrap,
+    eventTableWrap,
+    $("#recent-events"),
+  ].filter(Boolean);
+
+const setLoading = (busy, message) => {
+  const active = Boolean(busy);
+  if (loadingNode) loadingNode.hidden = !active;
+  if (loadingText && message) loadingText.textContent = message;
+  loadingTargets().forEach((node) => {
+    if (active) node.setAttribute("aria-busy", "true");
+    else node.removeAttribute("aria-busy");
+  });
+  [$("#app-unavailable-retry"), $("#app-denied-retry")].forEach((button) => {
+    if (button) button.disabled = active;
+  });
+};
+
+const failureCopy = (error) => {
+  const status = Number(error && error.status) || 0;
+  const message = String((error && error.message) || "");
+  if (error && error.denied) {
+    return status === 401
+      ? {
+          kind: "denied",
+          title: "登录状态已失效",
+          desc: "当前登录状态已失效或尚未登录。请重新登录宿主，或刷新页面后重试。",
+          label: "重新检查权限",
+        }
+      : {
+          kind: "denied",
+          title: "无权管理 Web 防火墙",
+          desc: "当前账号没有该节点的防火墙管理权限。请确认节点归属，或联系管理员开通权限后重试。",
+          label: "重新检查权限",
+        };
+  }
+  if (
+    (error && (error.network || error.name === "TypeError")) ||
+    status === 0 ||
+    /Failed to fetch|NetworkError|Load failed|network error/i.test(message)
+  ) {
+    return {
+      kind: "unavailable",
+      title: "网络连接失败",
+      desc: "无法连接宿主或节点。请检查网络、宿主地址或代理后重试。",
+      label: "重新加载",
+    };
+  }
+  if (status >= 500) {
+    return {
+      kind: "unavailable",
+      title: "服务暂时不可用",
+      desc: /[\u4e00-\u9fff]/.test(message)
+        ? `${message}请稍后重试；若持续失败，请联系管理员。`
+        : "宿主或防护服务暂时不可用。请稍后重试；若持续失败，请联系管理员。",
+      label: "重新加载",
+    };
+  }
+  return {
+    kind: "unavailable",
+    title: "暂时无法加载 Web 防火墙",
+    desc: /[\u4e00-\u9fff]/.test(message)
+      ? `${message}请重新加载；若问题持续，请联系管理员。`
+      : "页面没有拿到防护状态。请重新加载；若问题持续，请联系管理员。",
+    label: "重新加载",
+  };
+};
+
+const hideFailure = () => {
+  if (unavailableNode) unavailableNode.hidden = true;
+  if (deniedNode) deniedNode.hidden = true;
+};
+
+const showFailure = (error) => {
+  const copy = failureCopy(error);
+  setLoading(false);
+  if (contextNode) contextNode.hidden = true;
+  if (workspaceNode) workspaceNode.hidden = true;
+  if (copy.kind === "denied") {
+    if (unavailableNode) unavailableNode.hidden = true;
+    if (deniedNode) deniedNode.hidden = false;
+    if (deniedTitle) deniedTitle.textContent = copy.title;
+    if (deniedDesc) deniedDesc.textContent = copy.desc;
+    const retry = $("#app-denied-retry");
+    if (retry) retry.textContent = copy.label;
+    return;
+  }
+  if (deniedNode) deniedNode.hidden = true;
+  if (unavailableNode) unavailableNode.hidden = false;
+  if (unavailableTitle) unavailableTitle.textContent = copy.title;
+  if (unavailableDesc) unavailableDesc.textContent = copy.desc;
+  const retry = $("#app-unavailable-retry");
+  if (retry) retry.textContent = copy.label;
+};
 
 const targetLabel = (target) =>
   ({ path: "请求路径", query: "查询参数", headers: "请求头", body: "请求体" })[
@@ -914,22 +1032,61 @@ bindTabs(
   switchRuleTab,
 );
 
+const closeRuleDialog = () => {
+  if (ruleDialog?.open) ruleDialog.close();
+  [customForm, exclusionForm].forEach((form) => {
+    if (!form) return;
+    form.reset();
+    clearFormFieldErrors(form);
+    markFormClean(form);
+  });
+  const alert = $("#rule-dialog-error");
+  if (alert) {
+    alert.hidden = true;
+    alert.textContent = "";
+  }
+};
+
+const requestRuleDialogClose = async () => {
+  if (!ruleDialog?.open) return;
+  const form = activeRuleForm();
+  if (form && isFormDirty(form)) {
+    const discard = await askConfirm({
+      title: "改动尚未保存",
+      desc: "表单里有未保存的规则内容。丢弃后这些输入会被清空，规则不会被添加。",
+      label: "丢弃修改",
+    });
+    if (!discard) return;
+  }
+  closeRuleDialog();
+};
+
 const openRuleDialog = (kind, event = null) => {
   if (!ruleDialog) return;
-  if (customForm) customForm.hidden = kind !== "custom";
-  if (exclusionForm) exclusionForm.hidden = kind !== "exclusion";
-  $("#rule-dialog-title").textContent =
-    kind === "custom" ? "添加自定义规则" : "添加排除";
-  $("#rule-dialog-desc").textContent =
-    kind === "custom"
-      ? "只支持字面量匹配，不支持正则、CRS 或 PCRE 规则。"
-      : "仅排除指定规则在匹配路径下的检查。";
-  $("#rule-dialog-error").hidden = true;
-  if (event && exclusionForm) {
-    exclusionForm.reset();
+  const custom = kind === "custom";
+  if (customForm) customForm.hidden = !custom;
+  if (exclusionForm) exclusionForm.hidden = custom;
+  $("#rule-dialog-title").textContent = custom
+    ? "添加自定义规则"
+    : "添加排除";
+  $("#rule-dialog-desc").textContent = custom
+    ? "只支持字面量匹配，不支持正则、CRS 或 PCRE 规则。"
+    : "仅排除指定规则在匹配路径下的检查。";
+  const alert = $("#rule-dialog-error");
+  if (alert) {
+    alert.hidden = true;
+    alert.textContent = "";
+  }
+  customForm?.reset();
+  exclusionForm?.reset();
+  clearFormFieldErrors(customForm);
+  clearFormFieldErrors(exclusionForm);
+  if (!custom && event && exclusionForm) {
     exclusionForm.elements.rule_id.value = event.rule_id;
     exclusionForm.elements.path_prefix.value = "";
   }
+  markFormClean(customForm);
+  markFormClean(exclusionForm);
   ruleDialog.showModal();
 };
 $("#add-rule")?.addEventListener("click", () =>
@@ -976,6 +1133,198 @@ document
 confirmDialog?.addEventListener("cancel", (event) => {
   event.preventDefault();
   settleConfirm(false);
+});
+
+const activeRuleForm = () =>
+  ruleDialog && customForm && !customForm.hidden
+    ? customForm
+    : ruleDialog && exclusionForm && !exclusionForm.hidden
+      ? exclusionForm
+      : null;
+
+const formSnapshot = (form) =>
+  JSON.stringify(Array.from(new FormData(form).entries()));
+
+const markFormClean = (form) => {
+  if (form) form.dataset.baseline = formSnapshot(form);
+};
+
+const isFormDirty = (form) => {
+  if (!form || typeof form.dataset.baseline !== "string") return false;
+  return formSnapshot(form) !== form.dataset.baseline;
+};
+
+const hasDirtyRuleForm = () => {
+  const form = activeRuleForm();
+  return Boolean(ruleDialog?.open && form && isFormDirty(form));
+};
+
+const rememberFieldHints = (form) => {
+  form
+    ?.querySelectorAll("[aria-describedby]")
+    .forEach((input) => {
+      if (!input.dataset.hintId)
+        input.dataset.hintId = input.getAttribute("aria-describedby");
+    });
+};
+
+const clearFormField = (input) => {
+  if (!input) return;
+  if (window.NREUI && window.NREUI.clearFieldError) {
+    window.NREUI.clearFieldError(input);
+  } else {
+    input.removeAttribute("aria-invalid");
+    const field = input.closest(".ui-field");
+    const error = field ? field.querySelector(".ui-error-text") : null;
+    if (error) error.textContent = "";
+  }
+  if (input.dataset.hintId)
+    input.setAttribute("aria-describedby", input.dataset.hintId);
+  else input.removeAttribute("aria-describedby");
+};
+
+const clearFormFieldErrors = (form) => {
+  form
+    ?.querySelectorAll("[aria-invalid='true']")
+    .forEach((input) => clearFormField(input));
+};
+
+const showFormFieldError = (input, message) => {
+  if (!input || !message) return false;
+  if (window.NREUI && window.NREUI.fieldError) {
+    window.NREUI.fieldError(input, message);
+  } else {
+    input.setAttribute("aria-invalid", "true");
+    const field = input.closest(".ui-field") || input.parentElement || input;
+    let error = field.querySelector(".ui-error-text");
+    if (!error) {
+      error = document.createElement("p");
+      error.className = "ui-error-text";
+      error.setAttribute("role", "alert");
+      field.appendChild(error);
+    }
+    if (!error.id)
+      error.id = "field-error-" + Math.random().toString(36).slice(2, 10);
+    error.textContent = message;
+    input.setAttribute("aria-describedby", error.id);
+  }
+  if (input.focus) input.focus();
+  return true;
+};
+
+const bindFieldErrorClearing = (form) => {
+  const clear = (event) => {
+    const input = event.target;
+    if (
+      input &&
+      input.getAttribute &&
+      input.getAttribute("aria-invalid") === "true"
+    )
+      clearFormField(input);
+  };
+  form?.addEventListener("input", clear);
+  form?.addEventListener("change", clear);
+};
+
+const ruleIDPattern = /^[a-z][a-z0-9-]{0,31}$/;
+const ruleTargets = new Set(["path", "query", "headers", "body"]);
+
+const literalLength = (value) => [...String(value || "")].length;
+
+const printableLiteral = (value, minimum, maximum) => {
+  const text = String(value || "");
+  const length = literalLength(text);
+  return (
+    length >= minimum &&
+    length <= maximum &&
+    !/[\r\n\x00]/.test(text) &&
+    /^[\x20-\x7E]*$/.test(text)
+  );
+};
+
+const serverFieldError = (form, error) => {
+  if (!form || !error || error.status !== 400) return null;
+  const message = String(error.message || "");
+  if (/上限/.test(message)) return null;
+  if (form === customForm) {
+    if (/已存在/.test(message))
+      return {
+        input: form.elements.id,
+        message: "该规则 ID 已存在，请换一个唯一标识。",
+      };
+    if (!ruleIDPattern.test(String(form.elements.id.value || "").trim()))
+      return {
+        input: form.elements.id,
+        message:
+          "规则 ID 需以小写字母开头，只能包含小写字母、数字和连字符，最长 32 个字符。",
+      };
+    if (!ruleTargets.has(String(form.elements.target.value || "")))
+      return {
+        input: form.elements.target,
+        message: "请选择有效的检查目标。",
+      };
+    if (!printableLiteral(form.elements.needle.value, 2, 64))
+      return {
+        input: form.elements.needle,
+        message: "匹配内容需为 2–64 个可打印 ASCII 字符。",
+      };
+  }
+  if (form === exclusionForm) {
+    const ruleID = String(form.elements.rule_id.value || "").trim();
+    if (!ruleIDPattern.test(ruleID))
+      return {
+        input: form.elements.rule_id,
+        message:
+          "规则 ID 需以小写字母开头，只能包含小写字母、数字和连字符，最长 32 个字符。",
+      };
+    if (!printableLiteral(form.elements.path_prefix.value, 1, 96))
+      return {
+        input: form.elements.path_prefix,
+        message: "路径前缀需为 1–96 个可打印 ASCII 字符。",
+      };
+    if (!String(form.elements.path_prefix.value || "").startsWith("/"))
+      return {
+        input: form.elements.path_prefix,
+        message: "路径前缀需以 / 开头，例如 /api/health。",
+      };
+    if (/排除项无效/.test(message))
+      return {
+        input: form.elements.rule_id,
+        message: "找不到该规则 ID，请从内置检测或自定义规则中选择。",
+      };
+  }
+  return null;
+};
+
+const showSubmitError = (form, alert, error) => {
+  clearFormFieldErrors(form);
+  const field = serverFieldError(form, error);
+  if (field && showFormFieldError(field.input, field.message)) {
+    if (alert) {
+      alert.hidden = true;
+      alert.textContent = "";
+    }
+    return;
+  }
+  const copy = failureCopy(error);
+  const raw = String(error.message || "");
+  const status = Number(error.status) || 0;
+  const localized =
+    copy.kind === "denied" ||
+    error.network ||
+    status >= 500 ||
+    !/[\u4e00-\u9fff]/.test(raw);
+  const message = localized ? copy.desc : raw;
+  if (alert) {
+    alert.textContent = message;
+    alert.hidden = false;
+  }
+};
+
+[customForm, exclusionForm].forEach((form) => {
+  if (!form) return;
+  rememberFieldHints(form);
+  bindFieldErrorClearing(form);
 });
 
 const deleteRecord = async (kind, rule, button) => {
@@ -1219,11 +1568,11 @@ const renderOverview = () => {
 
 const renderWorkspace = async () => {
   const sequence = ++requestSequence;
-  loadingNode.hidden = true;
-  deniedNode.hidden = true;
-  unavailableNode.hidden = true;
+  setLoading(true, "正在加载防护状态…");
+  hideFailure();
   showStatus("", false);
   if (!selectedAgentID) {
+    setLoading(false);
     showContext("node-empty");
     return;
   }
@@ -1237,41 +1586,55 @@ const renderWorkspace = async () => {
   query.set("event_page", listState.event.page);
   query.set("event_query", listState.event.query);
   query.set("event_mode", listState.event.mode);
-  const payload = await panelJSON(`api/state?${query}`);
-  if (sequence !== requestSequence) return;
-  latestState = payload;
-  latestEvents = {
-    events: payload.events || [],
-    recent: payload.recent_events || [],
-    summary: payload.event_summary || {},
-    ...payload.events_page,
-  };
-  eventFailure = payload.events_available ? null : "宿主事件记录暂时不可用。";
-  if (latestState.ready === false) {
-    showContext("unavailable");
-    return;
+  try {
+    const payload = await panelJSON(`api/state?${query}`);
+    if (sequence !== requestSequence) return;
+    latestState = payload;
+    latestEvents = {
+      events: payload.events || [],
+      recent: payload.recent_events || [],
+      summary: payload.event_summary || {},
+      ...payload.events_page,
+    };
+    eventFailure = payload.events_available ? null : "宿主事件记录暂时不可用。";
+    if (latestState.ready === false) {
+      showContext("unavailable");
+      return;
+    }
+    showContext("");
+    renderEntries(latestState.entries || []);
+    renderPagination("entry", latestState.entries_page);
+    renderEvents();
+    renderRules();
+    renderOverview();
+    if (latestState.error) showStatus(latestState.error, true);
+  } finally {
+    if (sequence === requestSequence) setLoading(false);
   }
-  showContext("");
-  renderEntries(latestState.entries || []);
-  renderPagination("entry", latestState.entries_page);
-  renderEvents();
-  renderRules();
-  renderOverview();
-  if (latestState.error) showStatus(latestState.error, true);
 };
 
 const refreshWorkspace = async () => {
   const refreshButton = $("#refresh-state");
-  if (refreshButton) refreshButton.disabled = true;
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.setAttribute("aria-busy", "true");
+    refreshButton.textContent = "正在刷新…";
+  }
   try {
     await renderWorkspace();
   } catch (error) {
-    if (error.denied) {
-      deniedNode.hidden = false;
-      workspaceNode.hidden = true;
-    } else showStatus(error.message, true);
+    console.error("[waf] refresh failed", error);
+    if (failureCopy(error).kind === "denied") showFailure(error);
+    else {
+      setLoading(false);
+      showStatus(failureCopy(error).desc, true);
+    }
   } finally {
-    if (refreshButton) refreshButton.disabled = false;
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.removeAttribute("aria-busy");
+      refreshButton.textContent = "刷新数据";
+    }
   }
 };
 $("#refresh-state")?.addEventListener("click", refreshWorkspace);
@@ -1289,8 +1652,21 @@ $("#refresh-state")?.addEventListener("click", refreshWorkspace);
 });
 
 agentPicker.onChange = async (value) => {
-  selectedAgentID = String(value || "");
-  ruleDialog?.close();
+  const next = String(value || "");
+  if (next === selectedAgentID) return;
+  if (hasDirtyRuleForm()) {
+    const discard = await askConfirm({
+      title: "改动尚未保存",
+      desc: "切换节点会关闭规则表单。丢弃后已填写的内容会被清空，规则不会被添加。",
+      label: "丢弃并切换",
+    });
+    if (!discard) {
+      agentPicker.setValue(selectedAgentID);
+      return;
+    }
+  }
+  closeRuleDialog();
+  selectedAgentID = next;
   eventDialog?.close();
   settleConfirm(false);
   workspaceNode.hidden = true;
@@ -1358,7 +1734,36 @@ const bindDialog = (dialog, selector) => {
       dialog.close();
   });
 };
-bindDialog(ruleDialog, "#close-rule-dialog,[data-close-dialog]");
+const bindRuleDialog = () => {
+  document
+    .querySelectorAll("#close-rule-dialog,[data-close-dialog]")
+    .forEach((button) =>
+      button.addEventListener("click", () => void requestRuleDialogClose()),
+    );
+  ruleDialog?.addEventListener("click", (event) => {
+    if (event.target !== ruleDialog) return;
+    const rect = ruleDialog.getBoundingClientRect();
+    if (
+      event.clientX < rect.left ||
+      event.clientX > rect.right ||
+      event.clientY < rect.top ||
+      event.clientY > rect.bottom
+    )
+      void requestRuleDialogClose();
+  });
+  ruleDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    void requestRuleDialogClose();
+  });
+  ruleDialog?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.isComposing) return;
+    if (confirmDialog?.open) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void requestRuleDialogClose();
+  });
+};
+bindRuleDialog();
 bindDialog(eventDialog, "[data-close-event]");
 
 [
@@ -1370,35 +1775,51 @@ bindDialog(eventDialog, "[data-close-event]");
     const submit = form.querySelector("[type=submit]");
     if (submit.disabled) return;
     submit.disabled = true;
-    $("#rule-dialog-error").hidden = true;
+    submit.setAttribute("aria-busy", "true");
+    const alert = $("#rule-dialog-error");
+    if (alert) {
+      alert.hidden = true;
+      alert.textContent = "";
+    }
+    clearFormFieldErrors(form);
     try {
       const body = Object.fromEntries(new FormData(form));
       body.agent_id = selectedAgentID;
       await panelJSON(path, { method: "POST", body: JSON.stringify(body) });
-      form.reset();
-      ruleDialog?.close();
+      closeRuleDialog();
       await refreshWorkspace();
       showStatus("规则已添加。", false);
     } catch (error) {
-      $("#rule-dialog-error").textContent = error.message;
-      $("#rule-dialog-error").hidden = false;
+      showSubmitError(form, alert, error);
     } finally {
       submit.disabled = false;
+      submit.removeAttribute("aria-busy");
     }
   });
 });
 
+if (typeof window.addEventListener === "function") {
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasDirtyRuleForm()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+}
+
+$("#app-unavailable-retry")?.addEventListener("click", () => void start());
+$("#app-denied-retry")?.addEventListener("click", () => void start());
+
 const start = async () => {
+  setLoading(true, "正在加载防护状态…");
+  hideFailure();
   try {
     await loadAgents();
     await renderWorkspace();
   } catch (error) {
-    loadingNode.hidden = true;
-    if (error.denied) deniedNode.hidden = false;
-    else {
-      unavailableNode.hidden = false;
-      unavailableNode.textContent = error.message;
-    }
+    console.error("[waf] start failed", error);
+    showFailure(error);
+  } finally {
+    setLoading(false);
   }
 };
 start();

@@ -224,7 +224,10 @@ let events = Array.from({ length: 31 }, (_, i) => ({
 }));
 let custom = [],
   exclusions = [],
-  eventError = false;
+  eventError = false,
+  stateDelay = 0,
+  stateStatus = 0,
+  stateNetwork = false;
 const calls = [];
 const mode = (e) =>
   e.disposition === "deny"
@@ -266,6 +269,16 @@ const server = createServer(async (req, res) => {
         ],
       });
     if (url.pathname === "/api/state") {
+      if (stateDelay) await delay(stateDelay);
+      if (stateNetwork) {
+        req.destroy();
+        return;
+      }
+      if (stateStatus)
+        return json(
+          { ready: false, error: "暂时无法管理 Web 防火墙。" },
+          stateStatus,
+        );
       const filtered = entries.filter(
         (e) =>
           (!url.searchParams.get("entry_mode") ||
@@ -321,6 +334,11 @@ const server = createServer(async (req, res) => {
       if (url.pathname === "/api/custom-rules") {
         if (req.method === "DELETE")
           custom = custom.filter((r) => r.id !== body.id);
+        else if (custom.some((rule) => rule.id === body.id))
+          return json(
+            { ready: false, error: "自定义规则 ID 已存在。" },
+            400,
+          );
         else custom.push(body);
         return json({ ready: true });
       }
@@ -330,6 +348,8 @@ const server = createServer(async (req, res) => {
             (r) =>
               r.rule_id !== body.rule_id || r.path_prefix !== body.path_prefix,
           );
+        else if (!String(body.path_prefix || "").startsWith("/"))
+          return json({ ready: false, error: "排除项无效。" }, 400);
         else exclusions.push(body);
         return json({ ready: true });
       }
@@ -345,7 +365,11 @@ const server = createServer(async (req, res) => {
       }
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "app.js", "style.css"].includes(name)) {
+    if (
+      !["index.html", "app.js", "style.css", "ui-kit.css", "ui-kit.js"].includes(
+        name,
+      )
+    ) {
       res.statusCode = 404;
       return res.end();
     }
@@ -355,6 +379,8 @@ const server = createServer(async (req, res) => {
         "index.html": "text/html; charset=utf-8",
         "app.js": "text/javascript; charset=utf-8",
         "style.css": "text/css",
+        "ui-kit.css": "text/css",
+        "ui-kit.js": "text/javascript; charset=utf-8",
       }[name],
     );
     res.end(await readFile(join(assets, name)));
@@ -471,7 +497,28 @@ try {
   );
   assert.equal(await page.visible("#view-scope"), false);
   await capture("overview");
-  console.log("PASS installed-node picker and overview");
+  stateDelay = 400;
+  await page.click("#refresh-state");
+  await page.waitVisible("#app-loading");
+  assert.equal(
+    await page.evaluate(
+      "document.querySelector('#app-workspace').getAttribute('aria-busy')",
+    ),
+    "true",
+  );
+  await loaded();
+  assert.equal(
+    await page.evaluate("document.querySelector('#app-loading').hidden"),
+    true,
+  );
+  assert.equal(
+    await page.evaluate(
+      "document.querySelector('#app-workspace').hasAttribute('aria-busy')",
+    ),
+    false,
+  );
+  stateDelay = 0;
+  console.log("PASS api/state loading state and aria-busy");
   await page.click('[data-event-mode="observe"]');
   await loaded();
   assert.equal(
@@ -513,7 +560,22 @@ try {
     ),
     "",
   );
+  await fill("#exclusion-form [name=path_prefix]", "api/content");
+  await page.click("#exclusion-form [type=submit]");
+  await page.waitVisible("#exclusion-path[aria-invalid=true]");
+  assert.ok(
+    await page.evaluate(
+      "document.getElementById(document.querySelector('#exclusion-path').getAttribute('aria-describedby')).textContent.includes('以 / 开头')",
+    ),
+  );
   await fill("#exclusion-form [name=path_prefix]", "/api/content");
+  await eventually(
+    () =>
+      page.evaluate(
+        "!document.querySelector('#exclusion-path').hasAttribute('aria-invalid')",
+      ),
+    "exclusion field error cleared",
+  );
   await page.click("#exclusion-form [type=submit]");
   await eventually(
     () =>
@@ -529,6 +591,8 @@ try {
     "1",
   );
   await page.click("#exclusion-list button");
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
   await eventually(
     () =>
       page.evaluate(
@@ -550,7 +614,78 @@ try {
       ),
     "custom rule rendered",
   );
+  await page.click("#add-rule");
+  await fill("#custom-form [name=id]", "protect-private");
+  await fill("#custom-form [name=needle]", "/private2");
+  await page.click("#custom-form [type=submit]");
+  await page.waitVisible("#custom-id[aria-invalid=true]");
+  const duplicateError = await page.evaluate(`(() => {
+    const input = document.querySelector("#custom-id");
+    const described = input.getAttribute("aria-describedby");
+    const error = described ? document.getElementById(described) : null;
+    return {
+      invalid: input.getAttribute("aria-invalid"),
+      described: Boolean(described),
+      text: (error && error.textContent) || "",
+    };
+  })()`);
+  assert.equal(duplicateError.invalid, "true");
+  assert.ok(duplicateError.described);
+  assert.ok(duplicateError.text.includes("已存在"));
+  assert.equal(
+    await page.evaluate(
+      "(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; })()",
+    ),
+    true,
+  );
+  await page.click("#custom-form [data-close-dialog]");
+  await page.waitVisible("#confirm-dialog");
+  assert.equal(await page.visible("#rule-dialog"), true);
+  await page.click("[data-confirm-cancel]");
+  await eventually(
+    () => page.evaluate("!document.querySelector('#confirm-dialog').open"),
+    "discard cancelled",
+  );
+  assert.equal(await page.visible("#rule-dialog"), true);
+  assert.equal(
+    await page.evaluate("document.querySelector('#custom-id').value"),
+    "protect-private",
+  );
+  await page.click("#custom-form [data-close-dialog]");
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
+  await eventually(
+    () => page.evaluate("!document.querySelector('#rule-dialog').open"),
+    "draft discarded",
+  );
+  assert.equal(
+    await page.evaluate("document.querySelector('#custom-id').value"),
+    "",
+  );
+  await page.click("#add-rule");
+  await fill("#custom-form [name=id]", "draft-escape");
+  await page.key("Escape");
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
+  await eventually(
+    () => page.evaluate("!document.querySelector('#rule-dialog').open"),
+    "escape discarded",
+  );
+  await page.click("#add-rule");
+  await fill("#custom-form [name=id]", "draft-backdrop");
+  await page.evaluate(
+    "(() => { const dialog = document.querySelector('#rule-dialog'); dialog.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 2, clientY: 2 })); })()",
+  );
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
+  await eventually(
+    () => page.evaluate("!document.querySelector('#rule-dialog').open"),
+    "backdrop discarded",
+  );
+  console.log("PASS field-level server error and unsaved-draft discard");
   await page.click("#custom-list button");
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
   await eventually(
     () =>
       page.evaluate(
@@ -569,7 +704,7 @@ try {
   console.log("PASS managed detection visibility and custom rule lifecycle");
   await page.click("#tab-scope");
   assert.equal(
-    await page.evaluate("document.querySelectorAll('#entry-list li').length"),
+    await page.evaluate("document.querySelectorAll('#entry-list tr').length"),
     10,
   );
   await page.click("#entry-pagination .actions button:last-child");
@@ -580,16 +715,18 @@ try {
     ),
   );
   await capture("scope");
-  await page.click("#entry-list li:first-child [data-mode=deny][type=button]");
+  await page.click("#entry-list tr:first-child [data-mode=deny][type=button]");
   await eventually(
     () =>
       page.evaluate(
-        "document.querySelector('#entry-list li:first-child [data-mode=deny][type=button]').getAttribute('aria-pressed')==='true'",
+        "document.querySelector('#entry-list tr:first-child [data-mode=deny][type=button]').getAttribute('aria-pressed')==='true'",
       ),
     "entry mode rendered",
   );
   assert.ok(calls.some((call) => call.path === "/api/entries/mode"));
   await page.click("#global-deny");
+  await page.waitVisible("#confirm-dialog");
+  await page.click("#confirm-accept");
   await eventually(
     () => page.evaluate("!document.querySelector('#global-deny').disabled"),
     "bulk completed",
@@ -629,6 +766,45 @@ try {
   events = savedEvents;
   await page.click("#refresh-state");
   await loaded();
+  stateStatus = 503;
+  await page.send("Page.navigate", { url: origin + "/?agent_id=local" });
+  await page.waitVisible("#app-unavailable");
+  assert.ok(
+    await page.evaluate(
+      "document.querySelector('#app-unavailable').textContent.includes('服务暂时不可用')",
+    ),
+  );
+  await capture("error-state");
+  stateStatus = 0;
+  await page.click("#app-unavailable-retry");
+  await page.waitVisible("#view-overview");
+  await loaded();
+  stateNetwork = true;
+  await page.send("Page.navigate", { url: origin + "/?agent_id=local" });
+  await page.waitVisible("#app-unavailable");
+  assert.ok(
+    await page.evaluate(
+      "document.querySelector('#app-unavailable').textContent.includes('网络连接失败')",
+    ),
+  );
+  stateNetwork = false;
+  await page.click("#app-unavailable-retry");
+  await page.waitVisible("#view-overview");
+  await loaded();
+  stateStatus = 403;
+  await page.send("Page.navigate", { url: origin + "/?agent_id=local" });
+  await page.waitVisible("#app-denied");
+  assert.ok(
+    await page.evaluate(
+      "document.querySelector('#app-denied').textContent.includes('无权管理 Web 防火墙')",
+    ),
+  );
+  await capture("denied-state");
+  stateStatus = 0;
+  await page.click("#app-denied-retry");
+  await page.waitVisible("#view-overview");
+  await loaded();
+  console.log("PASS Chinese failure states and retry");
   await page.evaluate(
     "document.documentElement.setAttribute('data-theme','dark')",
   );
@@ -639,6 +815,32 @@ try {
     deviceScaleFactor: 1,
     mobile: true,
   });
+  await page.click("#tab-scope");
+  await page.waitVisible(".waf-help > summary");
+  await page.click(".agent-search-select__trigger");
+  await page.waitVisible(".agent-search-select__dropdown");
+  const mobileTargets = await page.evaluate(`(() => {
+    const height = (selector) => {
+      const node = document.querySelector(selector);
+      return node ? Math.round(node.getBoundingClientRect().height) : 0;
+    };
+    return {
+      help: height(".waf-help > summary"),
+      search: height(".agent-search-select__search-input"),
+      chip: height(".agent-search-select__chip"),
+    };
+  })()`);
+  assert.ok(mobileTargets.help >= 44, "help summary touch target");
+  assert.ok(mobileTargets.search >= 44, "node search touch target");
+  assert.ok(mobileTargets.chip >= 44, "filter chip touch target");
+  await page.key("Escape");
+  await eventually(
+    () =>
+      page.evaluate(
+        "document.querySelector('.agent-search-select__dropdown').hidden",
+      ),
+    "picker closed",
+  );
   assert.ok(
     await page.evaluate("document.documentElement.scrollWidth<=innerWidth"),
   );
