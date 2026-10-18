@@ -30,6 +30,7 @@ const relayHops = document.querySelector("#relay-hops");
 const relayAdd = document.querySelector("#relay-add");
 const catalogErrorNode = document.querySelector("#catalog-error");
 const mappingIDDisplay = document.querySelector("#mapping-id-display");
+const catalogLoadingNode = document.querySelector("#catalog-loading");
 const confirmDialog = document.querySelector("#confirm-dialog");
 const confirmTitle = document.querySelector("#confirm-title");
 const confirmDesc = document.querySelector("#confirm-desc");
@@ -49,12 +50,19 @@ const totalSteps = 3;
 const maxRelayHops = 32;
 
 let busy = false;
+let busyButton = null;
+let busyButtonText = "";
+let busyButtonAria = null;
 let editingID = "";
 let wizardStep = 1;
 let catalogReady = false;
 let agentsCache = [];
 let listenersCache = [];
 let pendingConfirm = null;
+let canWrite = true;
+let formBaseline = null;
+let formTrigger = null;
+let pendingFormFocus = null;
 
 const panelAuthHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -139,39 +147,98 @@ const newOperationKey = () => {
   return `operation/ui/${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 };
 
-const panelJSON = async (path, options = {}) => {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
-  });
-  const payload = await response.json().catch(() => null);
-  if (response.status === 403) {
-    throw Object.assign(new Error((payload && (payload.error || payload.message)) || "无权访问"), { denied: true });
+const requestJSON = async (path, options = {}) => {
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+      headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
+    });
+  } catch (cause) {
+    console.error("[reverse-l4] request failed", path, cause);
+    throw Object.assign(new Error("网络连接失败"), { network: true, status: 0, cause });
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403) {
+    throw Object.assign(
+      new Error((payload && (payload.error || payload.message)) || "无权管理反向穿透映射。"),
+      { denied: true, unauthorized: response.status === 401, status: response.status },
+    );
   }
   if (!response.ok) {
-    throw new Error((payload && (payload.error || payload.message)) || "请求失败");
+    console.error("[reverse-l4] request rejected", path, response.status, payload);
+    throw Object.assign(
+      new Error((payload && (payload.error || payload.message)) || "请求失败"),
+      { status: response.status, unavailable: response.status >= 500 },
+    );
   }
   if (!payload || typeof payload !== "object") {
-    throw new Error("目录响应不是 JSON。");
+    throw Object.assign(new Error("响应不是有效的 JSON。"), { status: response.status });
   }
   return payload;
 };
 
-const pluginJSON = async (path, options = {}) => {
-  const headers = { ...panelAuthHeaders(), ...(options.headers || {}) };
+const panelJSON = (path, options = {}) => requestJSON(path, options);
+
+const pluginJSON = (path, options = {}) => {
+  const headers = { ...(options.headers || {}) };
   if (!options.method || options.method === "POST") {
     headers["X-NRE-Operation-Key"] = newOperationKey();
   }
-  const response = await fetch(path, { credentials: "same-origin", ...options, headers });
-  const payload = await response.json().catch(() => ({}));
-  if (response.status === 403) {
-    throw Object.assign(new Error(payload.error || payload.message || "无权访问"), { denied: true });
+  return requestJSON(path, { ...options, headers });
+};
+
+const chineseText = (value) => /[\u4e00-\u9fff]/.test(String(value || ""));
+
+const invalidMappingCopy = (raw) => {
+  if (/entry and exit agents must differ/i.test(raw)) return "入口与出口节点不能相同。请重新选择出口节点。";
+  if (/listen port/i.test(raw)) return "监听端口无效。请填写 1–65535 之间的整数。";
+  if (/backend port/i.test(raw)) return "内网服务端口无效。请填写 1–65535 之间的整数。";
+  if (/backend host/i.test(raw)) return "内网服务地址格式不正确。请填写主机名或 IP，不要包含协议、路径或空格。";
+  if (/listen host/i.test(raw)) return "监听地址格式不正确。请填写本机地址，或保留默认的 0.0.0.0。";
+  if (/protocol/i.test(raw)) return "协议只支持 TCP 或 UDP。请重新选择协议。";
+  if (/relay chain hop/i.test(raw)) return "中继链路中有无效监听器。请重新选择每一跳。";
+  if (/relay chain exceeds/i.test(raw)) return "中继跳数超过上限。请减少中继后再试。";
+  if (/name/i.test(raw)) return "名称不符合要求。请精简到 128 个字符以内。";
+  if (/\bid\b/i.test(raw)) return "映射 ID 无效。请刷新列表后重试。";
+  return "";
+};
+
+const errorCopy = (error) => {
+  const status = Number(error && error.status) || 0;
+  const raw = String((error && error.message) || "");
+  if (error && error.denied) {
+    return error.unauthorized || status === 401
+      ? "登录状态已失效。请重新登录宿主，然后刷新页面重试。"
+      : "当前账号没有反向穿透映射的管理权限。请联系管理员授予权限后刷新页面。";
   }
-  if (!response.ok) {
-    throw new Error(payload.error || payload.message || "请求失败");
+  if (
+    (error && (error.network || error.name === "TypeError")) ||
+    status === 0 ||
+    /Failed to fetch|NetworkError|Load failed|network error/i.test(raw)
+  ) {
+    return "网络连接失败。请检查网络或宿主连接，然后重试。";
   }
-  return payload;
+  if (status >= 500) {
+    if (/state store is unavailable/i.test(raw)) {
+      return "映射状态存储暂时不可用。请稍后重试；若持续失败，请联系管理员。";
+    }
+    if (/host runtime|channel session|l4 rule|reverse channel/i.test(raw)) {
+      return "宿主反向通道暂时不可用。请稍后重试，或确认宿主反向通道已就绪。";
+    }
+    return chineseText(raw)
+      ? `${raw}请稍后重试；若持续失败，请联系管理员。`
+      : "服务暂时不可用。请稍后重试；若持续失败，请联系管理员。";
+  }
+  if (status === 400) {
+    return invalidMappingCopy(raw) || (chineseText(raw)
+      ? raw
+      : "映射配置不完整或格式不正确。请检查入口、出口、端口和内网服务地址后重试。");
+  }
+  if (status === 404) return "该映射不存在或已被删除。请刷新列表后重试。";
+  if (status === 409) return "已存在相同 ID 的映射。请刷新列表后重试。";
+  return chineseText(raw) ? raw : "请求未完成。请刷新页面后重试；若持续失败，请联系管理员。";
 };
 
 const parseAgentTime = (value) => {
@@ -201,6 +268,10 @@ const getAgentStatus = (agent) => {
 };
 
 const isAgentOnline = (agent) => getAgentStatus(agent) === "online";
+
+const STATUS_LABELS = { online: "在线", offline: "离线", failed: "连接失败", pending: "等待连接" };
+
+const statusLabel = (agent) => STATUS_LABELS[getAgentStatus(agent)] || "离线";
 
 const listenerID = (listener) => {
   const raw = listener && (listener.id ?? listener.listener_id);
@@ -346,22 +417,26 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
   const syncTrigger = () => {
     hiddenInput.value = picker.selected;
     const agent = selectedAgent();
+    statusDot.setAttribute("aria-hidden", "true");
     if (agent) {
-      label.textContent = agentDisplayName(agent);
+      label.textContent = `${agentDisplayName(agent)} · ${statusLabel(agent)}`;
       label.dataset.empty = "false";
       statusDot.hidden = false;
       statusDot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
       trigger.title = agentLabel(agent);
+      trigger.setAttribute("aria-label", `${placeholder}：${agentLabel(agent)}`);
     } else if (picker.selected) {
       label.textContent = picker.selected;
       label.dataset.empty = "false";
       statusDot.hidden = true;
       trigger.title = picker.selected;
+      trigger.setAttribute("aria-label", `${placeholder}：${picker.selected}`);
     } else {
       label.textContent = placeholder;
       label.dataset.empty = "true";
       statusDot.hidden = true;
       trigger.title = placeholder;
+      trigger.removeAttribute("aria-label");
     }
   };
 
@@ -407,12 +482,20 @@ const mountAgentSearchSelect = (root, hiddenInput, placeholder) => {
       option.setAttribute("aria-selected", agent.id === picker.selected ? "true" : "false");
       const dot = document.createElement("span");
       dot.className = `agent-search-select__status agent-search-select__status--${getAgentStatus(agent)}`;
+      dot.setAttribute("aria-hidden", "true");
       const name = document.createElement("span");
       name.className = "agent-search-select__option-name";
       name.textContent = agentDisplayName(agent);
       const meta = document.createElement("span");
       meta.className = "agent-search-select__option-meta";
-      meta.textContent = timeAgo(agent.last_seen_at) || (isAgentOnline(agent) ? "在线" : "离线");
+      const lastSeen = timeAgo(agent.last_seen_at);
+      meta.textContent = [statusLabel(agent), lastSeen].filter(Boolean).join(" · ");
+      option.setAttribute(
+        "aria-label",
+        [agentDisplayName(agent), statusLabel(agent), lastSeen ? `最近活跃 ${lastSeen}` : ""]
+          .filter(Boolean)
+          .join("，"),
+      );
       option.append(dot, name, meta);
       option.addEventListener("click", () => {
         picker.setValue(agent.id);
@@ -644,13 +727,14 @@ const mountListenerSearchSelect = (root, hiddenInput, placeholder) => {
   const syncTrigger = () => {
     hiddenInput.value = picker.selected > 0 ? String(picker.selected) : "";
     const listener = selectedListener();
+    statusDot.setAttribute("aria-hidden", "true");
     if (listener) {
       const id = listenerID(listener);
-      label.textContent = listenerLabel(listener, id);
+      label.textContent = `${listenerLabel(listener, id)} · ${isListenerEnabled(listener) ? "启用" : "停用"}`;
       label.dataset.empty = "false";
       statusDot.hidden = false;
       statusDot.className = `agent-search-select__status agent-search-select__status--${isListenerEnabled(listener) ? "online" : "offline"}`;
-      trigger.title = listenerLabel(listener, id);
+      trigger.title = label.textContent;
     } else if (picker.selected > 0) {
       label.textContent = `监听器 ${picker.selected}`;
       label.dataset.empty = "false";
@@ -706,6 +790,7 @@ const mountListenerSearchSelect = (root, hiddenInput, placeholder) => {
       option.setAttribute("aria-selected", id === picker.selected ? "true" : "false");
       const dot = document.createElement("span");
       dot.className = `agent-search-select__status agent-search-select__status--${isListenerEnabled(listener) ? "online" : "offline"}`;
+      dot.setAttribute("aria-hidden", "true");
       const copy = document.createElement("span");
       copy.className = "agent-search-select__option-copy";
       const name = document.createElement("span");
@@ -816,8 +901,42 @@ const relabelRelayHops = () => {
   });
 };
 
+const formSnapshot = () => {
+  if (!formNode) return "";
+  const valueOf = (node) => (node ? String(node.value || "") : "");
+  return JSON.stringify({
+    name: valueOf(fieldNodes.name),
+    protocol: valueOf(fieldNodes.protocol),
+    listen_host: valueOf(fieldNodes.listenHost),
+    listen_port: valueOf(fieldNodes.listenPort),
+    backend_host: valueOf(fieldNodes.backendHost),
+    backend_port: valueOf(fieldNodes.backendPort),
+    entry: valueOf(entryInput),
+    exit: valueOf(exitInput),
+    relays: relayHops
+      ? Array.from(relayHops.querySelectorAll("input[data-relay-hop]")).map((input) => input.value)
+      : [],
+  });
+};
+
+const markFormClean = () => {
+  formBaseline = formSnapshot();
+};
+
+const isFormDirty = () => Boolean(
+  mappingDialog && mappingDialog.open && formBaseline !== null && formSnapshot() !== formBaseline,
+);
+
+const showCatalogLoading = (loading) => {
+  const active = Boolean(loading);
+  if (catalogLoadingNode) catalogLoadingNode.hidden = !active;
+  if (!mappingDialog) return;
+  if (active) mappingDialog.setAttribute("aria-busy", "true");
+  else mappingDialog.removeAttribute("aria-busy");
+};
+
 const syncFormControls = () => {
-  const ready = catalogReady;
+  const ready = catalogReady && canWrite;
   if (formSubmit) formSubmit.disabled = busy || !ready;
   if (wizardNext) wizardNext.disabled = busy || !ready;
   if (wizardBack) wizardBack.disabled = busy;
@@ -827,19 +946,45 @@ const syncFormControls = () => {
   }
 };
 
-const setBusy = (next) => {
-  busy = Boolean(next);
-  if (busy) closeAllPickers();
+const setBusy = (next, options = {}) => {
+  const active = Boolean(next);
+  busy = active;
+  if (active) closeAllPickers();
   [workspaceNode, mappingDialog, confirmDialog].forEach((root) => {
     if (!root) return;
+    if (active) root.setAttribute("aria-busy", "true");
+    else root.removeAttribute("aria-busy");
     root.querySelectorAll("button, input, select").forEach((node) => {
-      node.disabled = busy;
+      node.disabled = active;
     });
   });
-  entryPicker.setDisabled(busy);
-  exitPicker.setDisabled(busy);
-  listenerPickers.forEach((picker) => picker.setDisabled(busy));
-  if (!busy) syncFormControls();
+  if (active && options.button) {
+    busyButton = options.button;
+    busyButtonText = busyButton.textContent;
+    busyButtonAria = busyButton.getAttribute("aria-busy");
+    busyButton.setAttribute("aria-busy", "true");
+    if (options.label) busyButton.textContent = options.label;
+  }
+  entryPicker.setDisabled(active);
+  exitPicker.setDisabled(active);
+  listenerPickers.forEach((picker) => picker.setDisabled(active));
+  if (active) return;
+  if (busyButton) {
+    if (busyButtonAria === null) busyButton.removeAttribute("aria-busy");
+    else busyButton.setAttribute("aria-busy", busyButtonAria);
+    if (busyButtonText) busyButton.textContent = busyButtonText;
+    busyButton = null;
+    busyButtonText = "";
+    busyButtonAria = null;
+  }
+  if (!canWrite) setWriteAllowed(false);
+  syncFormControls();
+  if (pendingFormFocus) {
+    const target = pendingFormFocus;
+    pendingFormFocus = null;
+    if (target && target.focus) target.focus();
+  }
+  if (options.focus && options.focus.focus) options.focus.focus();
 };
 
 const addRelayHop = (selected) => {
@@ -1018,11 +1163,18 @@ const resetWizard = () => {
   }
   if (formTitle) formTitle.textContent = "新建映射";
   if (formDesc) formDesc.textContent = "按公网入口、反向通道、出口内网服务三步填写。";
+  formBaseline = null;
+  showCatalogLoading(false);
   applyStep(1, { clear: true });
   syncFormControls();
 };
 
-const openForm = async (mapping) => {
+const openForm = async (mapping, trigger) => {
+  if (!canWrite) {
+    showStatus("当前账号没有写权限，无法新建或编辑映射。", true);
+    return;
+  }
+  formTrigger = trigger || document.activeElement || null;
   editingID = mapping ? String(mapping.id || "") : "";
   if (formTitle) formTitle.textContent = editingID ? "编辑映射" : "新建映射";
   if (formDesc) {
@@ -1052,6 +1204,7 @@ const openForm = async (mapping) => {
   }
   catalogReady = false;
   applyStep(1, { clear: true });
+  showCatalogLoading(true);
   if (mappingDialog && !mappingDialog.open) mappingDialog.showModal();
   try {
     await loadCatalogs();
@@ -1061,21 +1214,50 @@ const openForm = async (mapping) => {
       showCatalogError("暂无可用节点，无法创建映射。");
     }
   } catch (error) {
+    if (error && error.denied) setWriteAllowed(false);
     catalogReady = false;
     agentsCache = [];
     listenersCache = [];
     fillAgentPickers(mapping ? mapping.entry_agent_id : "", mapping ? mapping.exit_agent_id : "");
     renderRelayHops([]);
-    showCatalogError(error.message || "无法加载节点或中继目录，不能手输 ID 创建映射。");
+    showCatalogError(`${errorCopy(error)} 暂时不能手动填写节点 ID 创建映射。`);
+  } finally {
+    showCatalogLoading(false);
+    markFormClean();
+    syncFormControls();
   }
-  syncFormControls();
-  if (fieldNodes.name) fieldNodes.name.focus();
+  if (fieldNodes.name && mappingDialog && mappingDialog.open) fieldNodes.name.focus();
+};
+
+const formFocusTarget = () => {
+  const target = formTrigger;
+  formTrigger = null;
+  if (target && target.isConnected && !target.hidden && target.offsetParent !== null) return target;
+  if (createToggle && !createToggle.hidden) return createToggle;
+  return null;
 };
 
 const closeForm = () => {
   if (mappingDialog && mappingDialog.open) mappingDialog.close();
   resetWizard();
-  if (createToggle) createToggle.focus();
+  formBaseline = null;
+  const target = formFocusTarget();
+  if (busy) pendingFormFocus = target;
+  else if (target) target.focus();
+};
+
+const requestFormClose = async () => {
+  if (!mappingDialog || !mappingDialog.open) return;
+  if (busy) return;
+  if (isFormDirty()) {
+    const discard = await askConfirm({
+      title: "改动尚未保存",
+      desc: "表单里还有未保存的入口、通道或出口内容。丢弃后这些输入会被清空，映射不会改变。",
+      label: "丢弃修改",
+    });
+    if (!discard) return;
+  }
+  closeForm();
 };
 
 const goNext = () => {
@@ -1130,6 +1312,7 @@ const actionButton = (text, toneClass, handler) => {
   button.type = "button";
   button.className = `ui-btn ui-btn--sm ${toneClass}`;
   button.textContent = text;
+  button.dataset.writeAction = "true";
   button.addEventListener("click", handler);
   return button;
 };
@@ -1223,30 +1406,46 @@ const renderMapping = (mapping) => {
   const actions = document.createElement("div");
   actions.className = "map-actions";
   const editButton = actionButton("编辑", "ui-btn--ghost", async () => {
-    if (busy) return;
+    if (busy || !canWrite) return;
     setBusy(true);
     try {
-      await openForm(mapping);
+      await openForm(mapping, editButton);
     } catch (error) {
-      showStatus(error.message, true);
+      handleWriteError(error);
     } finally {
-      setBusy(false);
+      setBusy(false, { focus: fieldNodes.name });
     }
   });
-  const toggleButton = actionButton(mapping.enabled ? "停用" : "启用", "ui-btn--ghost", async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await postAction(mapping, mapping.enabled ? "disable" : "enable");
-      showStatus(mapping.enabled ? "已停用映射，规则停止转发并拆除通道。" : "已启用映射，通道重建完成。", false);
-    } catch (error) {
-      showStatus(error.message, true);
-    } finally {
-      setBusy(false);
-    }
-  });
+  const toggleButton = actionButton(
+    mapping.enabled ? "停用" : "启用",
+    mapping.enabled ? "ui-btn--danger-soft" : "ui-btn--ghost",
+    async () => {
+      if (busy || !canWrite) return;
+      const disabling = mapping.enabled;
+      if (disabling) {
+        const confirmed = await askConfirm({
+          title: "停用映射",
+          desc: `将停用“${mappingTitle(mapping)}”：入口 L4 规则立即停止转发，反向通道会被拆除；可随时用“启用”恢复。`,
+          label: "确认停用",
+        });
+        if (!confirmed) {
+          showStatus("已取消，映射保持启用。", false);
+          return;
+        }
+      }
+      setBusy(true, { button: toggleButton, label: disabling ? "停用中…" : "启用中…" });
+      try {
+        await postAction(mapping, disabling ? "disable" : "enable");
+        showStatus(disabling ? "已停用映射，规则停止转发并拆除通道。" : "已启用映射，通道重建完成。", false);
+      } catch (error) {
+        handleWriteError(error);
+      } finally {
+        setBusy(false);
+      }
+    },
+  );
   const deleteButton = actionButton("删除", "ui-btn--danger-soft", async () => {
-    if (busy) return;
+    if (busy || !canWrite) return;
     const confirmed = await askConfirm({
       title: "删除映射",
       desc: `将删除“${mappingTitle(mapping)}”。入口 L4 规则与反向通道会一并释放，删除后无法恢复。`,
@@ -1256,16 +1455,22 @@ const renderMapping = (mapping) => {
       showStatus("已取消，映射未更改。", false);
       return;
     }
-    setBusy(true);
+    setBusy(true, { button: deleteButton, label: "删除中…" });
     try {
       await postAction(mapping, "delete", { confirm: mapping.id });
       showStatus("已删除映射。", false);
     } catch (error) {
-      showStatus(error.message, true);
+      handleWriteError(error);
     } finally {
       setBusy(false);
     }
   });
+  if (!canWrite) {
+    [editButton, toggleButton, deleteButton].forEach((button) => {
+      button.disabled = true;
+      button.title = "当前账号没有写权限";
+    });
+  }
   actions.append(editButton, toggleButton, deleteButton);
   head.append(identity, actions);
   card.append(head);
@@ -1311,12 +1516,42 @@ const renderMappings = (mappings) => {
   }
 };
 
+const setWriteAllowed = (allowed) => {
+  canWrite = Boolean(allowed);
+  [createToggle, createEmpty].forEach((node) => {
+    if (!node) return;
+    node.hidden = !canWrite;
+    node.disabled = !canWrite;
+    if (canWrite) node.removeAttribute("title");
+    else node.title = "当前账号没有写权限";
+  });
+  if (listNode) {
+    listNode.querySelectorAll("[data-write-action]").forEach((node) => {
+      node.disabled = !canWrite;
+      if (canWrite) node.removeAttribute("title");
+      else node.title = "当前账号没有写权限";
+    });
+  }
+};
+
+const applyAccess = (access) => {
+  if (!access || typeof access !== "object") return;
+  setWriteAllowed(access.can_write !== false);
+};
+
+const handleWriteError = (error) => {
+  if (error && error.denied) setWriteAllowed(false);
+  showStatus(errorCopy(error), true);
+};
+
 const postAction = async (mapping, action, body = {}) => {
   const payload = await pluginJSON(`api/mappings/${encodeURIComponent(mapping.id)}/${action}`, {
     method: "POST",
     body: JSON.stringify(body),
   });
   renderMappings(payload.mappings);
+  applyAccess(payload.access);
+  return payload;
 };
 
 const refresh = async (loadNames = false) => {
@@ -1329,6 +1564,7 @@ const refresh = async (loadNames = false) => {
     }
   }
   renderMappings(payload.mappings);
+  applyAccess(payload.access);
 };
 
 const settleConfirm = (value) => {
@@ -1369,8 +1605,19 @@ if (confirmDialog) {
 if (mappingDialog) {
   mappingDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
-    closeForm();
+    void requestFormClose();
   });
+  // 点击遮罩时先走脏值确认，阻止 kit 直接关闭对话框。
+  mappingDialog.addEventListener(
+    "click",
+    (event) => {
+      if (event.target !== mappingDialog) return;
+      event.stopImmediatePropagation();
+      event.preventDefault();
+      void requestFormClose();
+    },
+    true,
+  );
   mappingDialog.addEventListener("close", () => {
     if (!mappingDialog.open) resetWizard();
   });
@@ -1379,20 +1626,20 @@ if (mappingDialog) {
 [createToggle, createEmpty].forEach((button) => {
   if (!button) return;
   button.addEventListener("click", async () => {
-    if (busy) return;
+    if (busy || !canWrite) return;
     setBusy(true);
     try {
-      await openForm(null);
+      await openForm(null, button);
     } catch (error) {
-      showStatus(error.message, true);
+      handleWriteError(error);
     } finally {
-      setBusy(false);
+      setBusy(false, { focus: fieldNodes.name });
     }
   });
 });
 
-if (formCancel) formCancel.addEventListener("click", closeForm);
-if (formClose) formClose.addEventListener("click", closeForm);
+if (formCancel) formCancel.addEventListener("click", () => void requestFormClose());
+if (formClose) formClose.addEventListener("click", () => void requestFormClose());
 if (wizardNext) wizardNext.addEventListener("click", goNext);
 if (wizardBack) wizardBack.addEventListener("click", goBack);
 
@@ -1406,37 +1653,45 @@ if (relayAdd) {
 if (formNode) {
   formNode.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || !canWrite) return;
     clearFieldErrors();
     showWizardError("");
     if (!catalogReady) {
-      const message = (catalogErrorNode && catalogErrorNode.textContent)
-        || "节点或中继目录不可用，无法保存映射。";
-      showWizardError(message);
-      showStatus(message, true);
+      showWizardError(
+        (catalogErrorNode && catalogErrorNode.textContent) || "节点或中继目录不可用，无法保存映射。",
+      );
       return;
     }
     if (!checkAllSteps()) return;
     const mapping = formMapping();
     const updating = Boolean(editingID);
-    setBusy(true);
+    setBusy(true, { button: formSubmit, label: updating ? "保存中…" : "创建中…" });
     try {
       if (updating) {
         await postAction({ id: editingID }, "update", mapping);
       } else {
         const payload = await pluginJSON("api/mappings", { method: "POST", body: JSON.stringify(mapping) });
         renderMappings(payload.mappings);
+        applyAccess(payload.access);
       }
+      formBaseline = null;
       closeForm();
       showStatus(updating ? "已保存映射。" : "已创建映射。", false);
     } catch (error) {
-      showWizardError(error.message);
-      showStatus(error.message, true);
+      if (error && error.denied) setWriteAllowed(false);
+      showWizardError(errorCopy(error));
+      console.error("[reverse-l4] submit failed", error);
     } finally {
       setBusy(false);
     }
   });
 }
+
+window.addEventListener("beforeunload", (event) => {
+  if (!isFormDirty()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 (async () => {
   try {
@@ -1445,12 +1700,16 @@ if (formNode) {
     if (workspaceNode) workspaceNode.hidden = false;
   } catch (error) {
     if (loadingNode) loadingNode.hidden = true;
-    if (error.denied) {
+    if (workspaceNode) workspaceNode.hidden = true;
+    if (error && error.denied) {
+      setWriteAllowed(false);
       if (deniedNode) deniedNode.hidden = false;
+      const deniedDesc = deniedNode && deniedNode.querySelector(".ui-denied__desc");
+      if (deniedDesc) deniedDesc.textContent = `${errorCopy(error)} 新建和编辑入口已隐藏。`;
     } else if (unavailableNode) {
       unavailableNode.hidden = false;
       const desc = document.querySelector("#map-unavailable-desc");
-      if (desc) desc.textContent = error.message || desc.textContent;
+      if (desc) desc.textContent = errorCopy(error);
     }
   }
 })();

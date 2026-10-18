@@ -266,7 +266,30 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	if strings.Contains(html, `name="id"`) {
 		t.Fatal("management page still has a mapping id input")
 	}
-	for _, want := range []string{`name="entry_agent_id"`, `name="exit_agent_id"`, `data-agent-picker="entry"`, `data-agent-picker="exit"`, `id="relay-hops"`, `class="route-guide"`, "127.0.0.1</code> 表示出口节点自身"} {
+	for _, want := range []string{
+		`data-theme-mode="host"`,
+		`src="ui-kit.js"`,
+		`href="ui-kit.css"`,
+		`name="entry_agent_id"`,
+		`name="exit_agent_id"`,
+		`data-agent-picker="entry"`,
+		`data-agent-picker="exit"`,
+		`id="relay-hops"`,
+		`id="mapping-dialog"`,
+		`id="wizard-step-1"`,
+		`id="wizard-step-2"`,
+		`id="wizard-step-3"`,
+		`id="wizard-next"`,
+		`id="wizard-back"`,
+		`id="wizard-error"`,
+		`id="create-toggle"`,
+		`id="map-list"`,
+		`id="map-empty"`,
+		`id="confirm-dialog"`,
+		`class="route-guide"`,
+		"还没有映射",
+		"127.0.0.1</code> 表示出口节点自身",
+	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("management page missing %q", want)
 		}
@@ -277,12 +300,36 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	if strings.Contains(html, `name="relay_chain"`) || strings.Contains(html, "逗号分隔") {
 		t.Fatal("management page still uses comma-separated relay ids")
 	}
+	mainEnd := strings.Index(html, "</main>")
+	dialog := strings.Index(html, `id="mapping-dialog"`)
+	if mainEnd < 0 || dialog < mainEnd {
+		t.Fatal("create wizard must be a dialog outside the first-screen flow")
+	}
 	jsBytes, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "app.js"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	js := string(jsBytes)
-	for _, want := range []string{"/panel-api/agents", "/panel-api/relay-listeners", "搜索节点", "最近活跃", "mountAgentSearchSelect", "mountListenerSearchSelect", "搜索中继", "agentIdentity", "listenerIdentity", "流量路径", "技术标识"} {
+	for _, want := range []string{
+		"/panel-api/agents",
+		"/panel-api/relay-listeners",
+		"搜索节点",
+		"最近活跃",
+		"mountAgentSearchSelect",
+		"mountListenerSearchSelect",
+		"搜索中继",
+		"agentIdentity",
+		"listenerIdentity",
+		"流量路径",
+		"技术标识",
+		"openForm",
+		"applyStep",
+		"checkStep",
+		"checkAllSteps",
+		"确认删除",
+		"ui-card map-card",
+		"ui-badge",
+	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("management script missing catalog %q", want)
 		}
@@ -290,53 +337,33 @@ func TestReverseManagementPageGeneratedIDsAndCatalogSelects(t *testing.T) {
 	if strings.Contains(js, `.split(",")`) {
 		t.Fatal("management script still parses relay hops from comma-separated text")
 	}
+	if strings.Contains(js, "applyHostTheme") || strings.Contains(js, "window.confirm") {
+		t.Fatal("management script must defer theme resolution to ui-kit.js and use the confirm dialog")
+	}
 	cssBytes, err := os.ReadFile(filepath.Join(pluginDir, "assets", "ui", "style.css"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	css := string(cssBytes)
 	for _, want := range []string{
-		"@media (max-width: 720px)",
-		"grid-template-columns: 1fr",
-		"--control-height: 32px",
-		"--content-max: 1200px",
+		".map-route",
+		".wizard-steps",
+		".agent-search-select",
+		".map-toast__text",
+		"@media (max-width: 900px)",
+		"@media (max-width: 640px)",
+		"@media (max-width: 480px)",
+		"@media (min-width: 1600px)",
+		"var(--ui-",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("management stylesheet missing functional rule %q", want)
 		}
 	}
-	wide := cssFrom(css, "@media (min-width: 1400px)")
-	if wide == "" {
-		t.Fatal("management stylesheet missing the wide-viewport rule")
-	}
-	wideList := cssRule(wide, ".map-list")
-	if !strings.Contains(wideList, "grid-template-columns:") || !strings.Contains(wideList, "repeat(2") {
-		t.Fatal("wide viewport does not expand the mapping list into multiple columns")
+	if strings.Contains(css, "--color-") {
+		t.Fatal("management stylesheet must consume --ui-* kit tokens")
 	}
 }
-
-func cssFrom(css, marker string) string {
-	start := strings.Index(css, marker)
-	if start < 0 {
-		return ""
-	}
-	return css[start:]
-}
-
-func cssRule(css, selector string) string {
-	needle := selector + " {"
-	start := strings.Index(css, needle)
-	if start < 0 {
-		return ""
-	}
-	rest := css[start:]
-	end := strings.Index(rest, "}")
-	if end < 0 {
-		return rest
-	}
-	return rest[:end]
-}
-
 func handshakeRequest(grants []string) pluginsdk.RPCHandshakeRequest {
 	return pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: reversel4.PluginID, PluginVersion: reversel4.PluginVersion,

@@ -11,11 +11,14 @@ const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
 const agents = [
   { id: "edge-hk", name: "香港入口", online: true, status: "online", last_seen_at: "2026-10-17T08:00:00Z", last_seen_ip: "192.0.2.10" },
   { id: "home", name: "家庭出口", online: true, status: "online", last_seen_at: "2026-10-17T08:05:00Z", last_seen_ip: "192.0.2.20" },
+  // 离线节点用于确认在线/离线不只靠圆点颜色表达。
+  { id: "lab-offline", name: "实验室出口", online: false, status: "offline", last_seen_at: "2026-10-16T02:00:00Z", last_seen_ip: "192.0.2.30" },
 ];
 
 const listeners = [
   { id: 7, name: "香港中继", agent_name: "香港入口", agent_id: "edge-hk", enabled: true, public_addr: "192.0.2.10:7000" },
   { id: 8, name: "家庭中继", agent_name: "家庭出口", agent_id: "home", enabled: true, public_addr: "192.0.2.20:7000" },
+  { id: 9, name: "实验室中继", agent_name: "实验室出口", agent_id: "lab-offline", enabled: false, public_addr: "192.0.2.30:7000" },
 ];
 
 const saved = [

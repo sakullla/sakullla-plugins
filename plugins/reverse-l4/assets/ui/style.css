@@ -184,6 +184,10 @@
   overflow-wrap: anywhere;
 }
 
+.map-dialog-loading {
+  margin: 0 0 var(--ui-space-3);
+}
+
 .form-stage {
   display: grid;
   gap: var(--ui-space-4);
@@ -720,6 +724,36 @@
 @media (max-width: 480px) {
   #wizard-steps .wizard-step__index {
     display: none;
+  }
+
+  /* 触屏上页面自定义控件也要达到 44×44，kit 的通用规则只覆盖 .ui-btn/.ui-input 等。 */
+  .map-help > summary,
+  .map-technical summary,
+  .agent-search-select__trigger,
+  .agent-search-select__search-input,
+  .agent-search-select__chip {
+    min-height: var(--ui-touch);
+  }
+
+  .agent-search-select__search-shell {
+    min-height: var(--ui-touch);
+  }
+
+  .agent-search-select__chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: var(--ui-touch);
+  }
+
+  .map-technical summary {
+    min-width: var(--ui-touch);
+  }
+
+  #form-close {
+    flex: 0 0 auto;
+    min-width: var(--ui-touch);
+    min-height: var(--ui-touch);
   }
 
   .map-dialog-footer {
