@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
@@ -1050,6 +1051,67 @@ func (c *Controller) projectListens(ctx context.Context, agentID string) ([]list
 		views = append(views, c.projectListenView(ctx, listener, node))
 	}
 	return views, nil
+}
+
+// listenReconcileInterval is how often a running control-plane plugin checks
+// that each saved listen is still bound. Agent restarts drop the sockets
+// without telling this process; the panel list path is not the only trigger.
+var listenReconcileInterval = 15 * time.Second
+
+func (c *Controller) startListenReconciler() {
+	if c == nil || c.listenHost == nil {
+		return
+	}
+	c.stopListenReconciler()
+	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	c.reconcileStop = cancel
+	c.mu.Unlock()
+	go c.reconcileListensUntilStopped(ctx)
+}
+
+func (c *Controller) stopListenReconciler() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	stop := c.reconcileStop
+	c.reconcileStop = nil
+	c.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+func (c *Controller) reconcileListensUntilStopped(ctx context.Context) {
+	interval := listenReconcileInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.reconcileStoredListens(ctx)
+		}
+	}
+}
+
+func (c *Controller) reconcileStoredListens(ctx context.Context) {
+	if c == nil || c.listenHost == nil {
+		return
+	}
+	seen := map[string]struct{}{}
+	for _, listener := range c.directory().Listeners {
+		if _, ok := seen[listener.AgentID]; ok || !validAgentID(listener.AgentID) {
+			continue
+		}
+		seen[listener.AgentID] = struct{}{}
+		c.reconcileAgentListens(ctx, listener.AgentID)
+	}
 }
 
 // reconcileAgentListens refreshes process-local status after a control-plane

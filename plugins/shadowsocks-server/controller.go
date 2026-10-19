@@ -58,6 +58,7 @@ type Controller struct {
 	controlSecrets *issuedSecrets
 	instanceID     string
 	managedRuntime *hostCapabilityRuntime
+	reconcileStop  func()
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -347,6 +348,13 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 			return rpcplugin.ErrRevoked
 		}
 		if c.managedRuntime != nil {
+			// Managed listens are applied on the Agent by plugin.call. Push the
+			// saved set when this control-plane process starts, then keep
+			// checking so an Agent restart rebinds without opening the panel.
+			if c.listenHost != nil {
+				c.reconcileStoredListens(ctx)
+				c.startListenReconciler()
+			}
 			return nil
 		}
 		prepared, err := c.admission.Prepare(ctx, request, configuration)
@@ -423,6 +431,7 @@ func (c *Controller) activate(ctx context.Context, generation *rpcplugin.Generat
 }
 
 func (c *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
+	c.stopListenReconciler()
 	if c.listenExec != nil {
 		c.listenExec.stopAll()
 	}
