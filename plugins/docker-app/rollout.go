@@ -195,9 +195,33 @@ type ImageTagLister interface {
 	ListImageTags(context.Context, App) ([]string, error)
 }
 
+// ImageTagEntryLister is the richer form of ImageTagLister. A runtime that
+// can publish the registry digest of every tag implements it so a moving tag
+// such as latest can be matched to the release it points at.
+type ImageTagEntryLister interface {
+	ListImageTagEntries(context.Context, App) ([]ImageTagEntry, error)
+}
+
+// ImageDigestResolver resolves a remote reference to the digest the registry
+// publishes for it. It lets the control plane place a moving tag on a release
+// even when the tag list carries no digest.
+type ImageDigestResolver interface {
+	ResolveImageDigest(context.Context, App, string) (string, error)
+}
+
 func asImageTagLister(observer ImageUpdateObserver) ImageTagLister {
 	lister, _ := observer.(ImageTagLister)
 	return lister
+}
+
+func asImageTagEntryLister(observer ImageUpdateObserver) ImageTagEntryLister {
+	lister, _ := observer.(ImageTagEntryLister)
+	return lister
+}
+
+func asImageDigestResolver(observer ImageUpdateObserver) ImageDigestResolver {
+	resolver, _ := observer.(ImageDigestResolver)
+	return resolver
 }
 
 type ImageUpdateObserverFunc func(context.Context, App) (UpdateObservation, error)

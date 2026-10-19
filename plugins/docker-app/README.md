@@ -96,10 +96,35 @@ registry images retain their own registry. Manifest reads preserve the original
 image reference and do not pull or recreate containers. Failed digest checks
 remain unavailable rather than being reported as an up-to-date image.
 
+Version detection reads the release line of a repository, not only the digest of
+one tag. A pinned tag such as `fatedier/frpc:v0.71.1` is compared with the
+repository's newest release, so the page can state "已是最新版本 v0.71.1" or
+offer `v0.71.1` as the next candidate. A moving tag such as
+`xream/sub-store:latest` is matched against the release it currently points at
+using the digest the registry publishes for each tag, so the page can report
+"当前 2.42.6" and offer the concrete release as a pin. When a registry only
+publishes tag names, the node is asked for the digest of the newest release in
+the background so the same answer is still available. Suffix variants such as
+`2.42.6-http-meta` stay a separate release line, and a `v`-prefixed tag family
+such as `v0.71.1` is handled like any other semantic version. The release line
+is read from the same configured mirror as the tag list, and a repository with
+over a thousand tags is read completely instead of being truncated.
+
 Detail pages share a one-second foreground image-check budget while background
 checks continue. The page refreshes pending image results without discarding an
 open editor. Agent Docker proxy support for `docker info` and formatted
 `docker image inspect` is required; update the Agent alongside this plugin.
+
+The management page reads as one console. A command bar names the node and its
+engine state, an inventory strip counts running, updatable, and stopped
+applications, and every application is a card that keeps its identity, ports,
+images, and available actions in one row. The detail page keeps a sticky
+header with the title, status, and lifecycle actions, and splits its overview
+into a service column and a fact column, so the running image, the
+repository's newest release, and the offered candidates are readable without
+scrolling. Operation feedback floats above the page rather than pushing it: a
+status toast appears and disappears without reflowing the content and without
+intercepting a click.
 
 An optional read-only field diagnostic accepts image names at runtime through
 `NRE_DOCKER_APP_LIVE_IMAGES` (space-separated). Run `TestLiveDockerImageMetadata`

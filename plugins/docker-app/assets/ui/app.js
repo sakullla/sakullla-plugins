@@ -11,6 +11,7 @@ const listNode = document.querySelector("#app-list");
 const appCardTemplate = document.querySelector("#app-card-template");
 const emptyNode = document.querySelector("#app-empty");
 const countNode = document.querySelector("#app-count");
+const inventoryChipsNode = document.querySelector("#inventory-chips");
 const createPanel = document.querySelector("#app-create");
 const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-head");
@@ -2087,8 +2088,29 @@ const serviceListingCopy = {
 
 const serviceImageStatus = (service) => {
   const candidates = Array.isArray(service.candidates) ? service.candidates : [];
-  if (candidates.some((candidate) => candidate.digest)) return { state: "ready", text: "镜像有新 digest" };
-  if (service.update) return { state: "ready", text: "有允许候选" };
+  const versionState = String(service.version_state || "").trim();
+  const latest = String(service.latest || "").trim();
+  const version = String(service.version || "").trim();
+  const digestCandidate = candidates.find((candidate) => candidate.digest);
+  // The control plane resolves the release line of the repository, so a pinned
+  // tag can say "up to date" and a moving tag can name the release it runs.
+  if (versionState === "outdated") {
+    return { state: "outdated", text: latest ? `可升级到 ${latest}` : "有可用新版本" };
+  }
+  // A published digest that the node does not run yet is the more actionable
+  // fact, so it wins over the release the tag already points at.
+  if (digestCandidate) return { state: "outdated", text: "镜像有新 digest" };
+  if (versionState === "current") {
+    return { state: "ready", text: version ? `已是最新 ${version}` : "已是最新版本" };
+  }
+  if (versionState === "floating") {
+    if (version) return { state: "release", text: `当前 ${version}` };
+    return { state: "release", text: "跟随浮动标签" };
+  }
+  if (service.update) {
+    const tag = candidates.find((candidate) => candidate.tag)?.tag || "";
+    return { state: "outdated", text: tag ? `可升级到 ${tag}` : "有允许候选" };
+  }
   const message = String(service.message || "").trim();
   if (message) {
     const pending = service.listing === "pending" || message === serviceListingCopy.pending;
@@ -2151,6 +2173,13 @@ const renderUpdateServiceRow = (service, options = {}) => {
   identity.append(title);
   pick.append(selectBox, identity);
   head.append(pick);
+  const latest = String(service.latest || "").trim();
+  if (latest && latest !== service.tag) {
+    const release = document.createElement("span");
+    release.className = "update-current";
+    release.textContent = `仓库最新：${latest}`;
+    head.append(release);
+  }
   const body = document.createElement("div");
   body.className = "update-service-body";
   const flow = document.createElement("div");
@@ -2177,9 +2206,11 @@ const renderUpdateServiceRow = (service, options = {}) => {
       const option = document.createElement("option");
       option.value = candidate.tag;
       if (candidate.digest) option.textContent = `${candidate.tag}（新 digest）`;
+      else if (candidate.release) option.textContent = `${candidate.tag}（固定版本）`;
       else option.textContent = candidate.major ? `${candidate.tag}（主版本）` : candidate.tag;
       if (candidate.major) option.dataset.major = "true";
       if (candidate.digest) option.dataset.digest = "true";
+      if (candidate.release) option.dataset.release = "true";
       if (candidate.tag === defaultTag) option.selected = true;
       select.append(option);
     });
@@ -2386,6 +2417,20 @@ const renderApp = (app) => {
       image.textContent = shown;
       image.title = shown;
       row.append(image);
+      // The version story of the service, next to the image it runs.
+      const versionState = String(service.version_state || "").trim();
+      const latest = String(service.latest || "").trim();
+      const current = String(service.version || "").trim();
+      if (versionState) {
+        const badge = document.createElement("span");
+        badge.className = "app-card-version";
+        badge.dataset.state = versionState;
+        if (versionState === "outdated" && latest) badge.textContent = `→ ${latest}`;
+        else if (current) badge.textContent = current;
+        else badge.textContent = "版本未知";
+        badge.title = versionState === "outdated" ? `仓库最新：${latest}` : `当前版本：${current}`;
+        row.append(badge);
+      }
       imageNode.append(row);
     });
     if (images.length > 2) {
@@ -2540,7 +2585,12 @@ const renderOverview = (app) => {
 
   const sheet = document.createElement("div");
   sheet.className = "overview-sheet";
-  const addBlock = (title) => {
+  const mainColumn = document.createElement("div");
+  mainColumn.className = "overview-column";
+  const railColumn = document.createElement("div");
+  railColumn.className = "overview-column overview-column--rail";
+  sheet.append(mainColumn, railColumn);
+  const addBlock = (title, column = mainColumn) => {
     const block = document.createElement("section");
     block.className = "overview-block";
     const heading = document.createElement("h3");
@@ -2548,7 +2598,7 @@ const renderOverview = (app) => {
     const grid = document.createElement("dl");
     grid.className = "overview-grid";
     block.append(heading, grid);
-    sheet.append(block);
+    column.append(block);
     return grid;
   };
   const addRow = (grid, label, value, options = {}) => {
@@ -2583,6 +2633,8 @@ const renderOverview = (app) => {
     serviceViews.forEach((service) => {
       const item = document.createElement("div");
       item.className = "overview-service";
+      const versionState = String(service.version_state || "").trim();
+      if (versionState) item.dataset.versionState = versionState;
       const head = document.createElement("div");
       head.className = "overview-service-head";
       const name = document.createElement("strong");
@@ -2602,6 +2654,13 @@ const renderOverview = (app) => {
         flag.textContent = status.text;
         tools.append(flag);
       }
+      const latest = String(service.latest || "").trim();
+      if (latest && latest !== service.tag) {
+        const release = document.createElement("p");
+        release.className = "service-policy-summary";
+        release.textContent = `仓库最新：${latest}`;
+        tools.append(release);
+      }
       const ignored = persistedIgnoredTags(service);
       if (service.lock) {
         const currentPolicy = document.createElement("p");
@@ -2619,7 +2678,14 @@ const renderOverview = (app) => {
       if (candidateTags.length) {
         const candidates = document.createElement("p");
         candidates.className = "service-candidates";
-        candidates.textContent = `候选：${candidateTags.join("、")}`;
+        const label = document.createElement("span");
+        label.textContent = "候选：";
+        candidates.append(label);
+        candidateTags.forEach((tag) => {
+          const code = document.createElement("code");
+          code.textContent = tag;
+          candidates.append(code);
+        });
         tools.append(candidates);
       }
       const manage = actionButton({ id: "service-policy" }, "ui-btn ui-btn--secondary ui-btn--sm", "管理版本策略");
@@ -2653,7 +2719,7 @@ const renderOverview = (app) => {
   addRow(run, "自动更新", app.auto_update === true ? "已开启" : "默认关闭");
   if (hasUpdate) addRow(run, "更新", "镜像有新版本");
 
-  const net = addBlock("入口");
+  const net = addBlock("入口", railColumn);
   if (app.rules_error) addRow(net, "读取状态", app.rules_error);
   if (rules.length) {
     const list = document.createElement("div");
@@ -2680,7 +2746,7 @@ const renderOverview = (app) => {
     addRow(net, "域名", "未配置 HTTP 入口");
   }
 
-  const store = addBlock("存储");
+  const store = addBlock("存储", railColumn);
   if (volumes.length) {
     const list = document.createElement("ul");
     list.className = "overview-mounts";
@@ -3313,8 +3379,38 @@ const renderApps = (apps) => {
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
+  renderInventoryChips(list);
   applyInventoryFilter();
   syncListPanel();
+};
+
+// A one-line read on the node: how many apps run, how many can be updated.
+const renderInventoryChips = (apps) => {
+  if (!inventoryChipsNode) return;
+  const list = Array.isArray(apps) ? apps : [];
+  if (!list.length) {
+    inventoryChipsNode.hidden = true;
+    inventoryChipsNode.replaceChildren();
+    return;
+  }
+  const running = list.filter((app) => app.status === "运行中").length;
+  const updates = list.filter((app) => app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update)).length;
+  const groups = [
+    ["total", "全部", list.length],
+    ["running", "运行中", running],
+    ["updates", "可更新", updates],
+    ["stopped", "已停止", Math.max(0, list.length - running)],
+  ];
+  inventoryChipsNode.replaceChildren(...groups.map(([tone, label, value]) => {
+    const chip = document.createElement("span");
+    chip.className = "inventory-chip";
+    chip.dataset.tone = tone;
+    const count = document.createElement("b");
+    count.textContent = String(value);
+    chip.append(count, document.createTextNode(label));
+    return chip;
+  }));
+  inventoryChipsNode.hidden = false;
 };
 
 const renderEngineBadge = (engine) => {

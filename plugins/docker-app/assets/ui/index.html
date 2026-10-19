@@ -20,7 +20,7 @@
       <div class="ui-page-actions page-head-agent">
         <div class="node-card">
           <div class="node-strip">
-            <label class="agent-field">节点
+            <label class="agent-field"><span class="agent-field-label">节点</span>
               <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
               <div class="agent-search-select" data-agent-picker="workspace"></div>
             </label>
@@ -132,6 +132,7 @@
           <button id="deploy-toggle" class="ui-btn" type="button">部署应用</button>
         </div>
       </div>
+      <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
       <section class="ui-card panel" id="app-list-panel" aria-labelledby="app-list-title">
         <div class="ui-toolbar inventory-toolbar">
           <label class="inventory-search ui-toolbar__grow">
@@ -153,20 +154,22 @@
       </section>
       <section class="ui-card panel" id="app-detail" aria-labelledby="detail-title" hidden>
         <header class="detail-head">
-          <button id="detail-back" class="ui-btn ui-btn--ghost back-link" type="button">返回列表</button>
-          <div class="detail-head-copy">
+          <div class="detail-head-bar">
+            <button id="detail-back" class="ui-btn ui-btn--ghost back-link" type="button">返回列表</button>
             <div class="detail-title-row">
               <h2 id="detail-title" class="ui-title" tabindex="-1">应用详情</h2>
               <p id="detail-status" class="app-card-status ui-badge" data-detail-status></p>
             </div>
+            <div class="detail-head-actions">
+              <a id="detail-open" class="ui-btn" data-action="open" hidden target="_blank" rel="noopener noreferrer">打开</a>
+              <button type="button" class="ui-btn ui-btn--secondary" id="detail-start" data-action="start" hidden>启动</button>
+              <button type="button" class="ui-btn ui-btn--secondary" id="detail-stop" data-action="stop" hidden>停止</button>
+              <button type="button" class="ui-btn ui-btn--secondary" id="detail-restart" data-action="restart" hidden>重启</button>
+            </div>
+          </div>
+          <div class="detail-head-copy">
             <p id="detail-context" class="ui-text-secondary"></p>
             <a id="detail-domain" class="detail-domain http-rule-open" hidden target="_blank" rel="noopener noreferrer"></a>
-          </div>
-          <div class="detail-head-actions">
-            <a id="detail-open" class="ui-btn" data-action="open" hidden target="_blank" rel="noopener noreferrer">打开</a>
-            <button type="button" class="ui-btn ui-btn--secondary" id="detail-start" data-action="start" hidden>启动</button>
-            <button type="button" class="ui-btn ui-btn--secondary" id="detail-stop" data-action="stop" hidden>停止</button>
-            <button type="button" class="ui-btn ui-btn--secondary" id="detail-restart" data-action="restart" hidden>重启</button>
           </div>
         </header>
         <nav id="detail-nav" class="ui-tabs detail-nav" role="tablist" data-ui-tabs aria-label="应用分区">
@@ -229,16 +232,16 @@
                 <p class="app-card-status ui-badge" data-app-status></p>
               </div>
             </div>
+            <p class="app-card-ports" data-app-ports></p>
+          </div>
+          <div class="app-card-actions">
+            <button type="button" class="ui-btn ui-btn--sm" data-action="open" hidden>打开</button>
+            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-action="update" hidden>更新</button>
+            <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
           </div>
         </div>
         <div class="app-card-meta" data-app-image></div>
-        <p class="app-card-ports" data-app-ports></p>
         <p class="app-card-url" data-app-url hidden></p>
-        <div class="app-card-actions">
-          <button type="button" class="ui-btn ui-btn--sm" data-action="open" hidden>打开</button>
-          <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-action="update" hidden>更新</button>
-          <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
-        </div>
       </article>
     </template>
     <template id="app-files-template">

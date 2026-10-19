@@ -20,8 +20,8 @@ function reset() {
   first.id = first.name = "miaospeed";
   first.ports = [8765]; first.services = ["frpc", "miaospeed"]; first.rules = [];
   first.service_images = [
-    {name:"frpc",image:"fatedier/frpc:v0.71.0",tag:"v0.71.0",candidates:[],ignored:[],lock_options:[{id:"minor",label:"次版本",constraint:"^0.71.0"}]},
-    {name:"miaospeed",image:"airportr/miaospeed:latest",tag:"latest",update:true,default_tag:"latest",candidates:[{tag:"latest",digest:true}],ignored:[]},
+    {name:"frpc",image:"fatedier/frpc:v0.71.0",tag:"v0.71.0",version:"v0.71.0",latest:"v0.71.1",version_state:"outdated",update:true,default_tag:"v0.71.1",candidates:[{tag:"v0.71.1"}],ignored:[],lock_options:[{id:"minor",label:"次版本",constraint:"^0.71.0"}]},
+    {name:"miaospeed",image:"airportr/miaospeed:latest",tag:"latest",version:"2.42.6",latest:"2.42.6",version_state:"floating",floating:true,update:true,default_tag:"latest",candidates:[{tag:"latest",digest:true},{tag:"2.42.6",release:true}],ignored:[]},
   ];
   first.compose = 'services:\n  frpc:\n    image: fatedier/frpc:v0.71.0\n    restart: unless-stopped\n  miaospeed:\n    image: airportr/miaospeed:latest\n    ports:\n      - "8765:8765"\n    restart: unless-stopped\n';
   first.version = "airportr/miaospeed:latest"; first.notice = "有新版本";

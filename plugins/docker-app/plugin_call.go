@@ -863,6 +863,8 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 		return controller.callImageObserve(ctx, request)
 	case "list-tags":
 		return controller.callImageListTags(ctx, request)
+	case "digest":
+		return controller.callImageDigest(ctx, request)
 	case "preview", "preview-prune":
 		return controller.callDiskPrune(ctx, true, false)
 	case "prune":
@@ -872,7 +874,62 @@ func (controller *Controller) callImage(ctx context.Context, payload []byte) ([]
 	}
 }
 
+// callImageDigest answers the digest the registry publishes for one reference.
+// The node does not need the image locally, so a moving tag can be matched to
+// a release the service may move to.
+func (controller *Controller) callImageDigest(ctx context.Context, request imageCallRequest) ([]byte, error) {
+	image := strings.TrimSpace(request.Image)
+	if image == "" {
+		return nil, errors.New(imageObserveRequiredMessage)
+	}
+	digest := controller.registryIndexDigest(ctx, image)
+	if digest == "" {
+		return nil, errors.New("registry did not publish a digest for the image")
+	}
+	return json.Marshal(map[string]any{"digest": digest})
+}
+
+// registryIndexDigest resolves a reference to the digest the registry
+// publishes for it.
+func (controller *Controller) registryIndexDigest(ctx context.Context, image string) string {
+	ctx, cancel := context.WithTimeout(ctx, registryLookupTimeout)
+	defer cancel()
+	if registry, repository := splitDockerRepository(image); registry == "docker.io" {
+		mirrors, err := controller.dockerRegistryMirrors(ctx)
+		if err == nil {
+			for _, mirror := range mirrors {
+				if digest, err := mirrorIndexDigest(ctx, mirror, image, repository); err == nil && digest != "" {
+					return digest
+				}
+			}
+			if len(mirrors) > 0 {
+				return ""
+			}
+		}
+	}
+	if output, err := controller.runCommand(ctx, "", "docker", "buildx", "imagetools", "inspect", "--format", registryImagetoolsFormat, image); err == nil {
+		if digest := parseRegistryDigest(output); digest != "" {
+			return digest
+		}
+	}
+	if output, err := controller.runCommand(ctx, "", "docker", "manifest", "inspect", "--verbose", image); err == nil {
+		if digest := parseRegistryDigest(output); digest != "" {
+			return digest
+		}
+	}
+	return ""
+}
+
 func (controller *Controller) callImageListTags(ctx context.Context, request imageCallRequest) ([]byte, error) {
+	if lister := asImageTagEntryLister(controller.callImages); lister != nil {
+		entries, err := lister.ListImageTagEntries(ctx, App{
+			ID: request.AppID, AgentID: request.AgentID, Image: request.Image,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return marshalImageTags(entries)
+	}
 	if lister := asImageTagLister(controller.callImages); lister != nil {
 		tags, err := lister.ListImageTags(ctx, App{
 			ID: request.AppID, AgentID: request.AgentID, Image: request.Image,
@@ -880,23 +937,40 @@ func (controller *Controller) callImageListTags(ctx context.Context, request ima
 		if err != nil {
 			return nil, err
 		}
-		return marshalImageTags(tags)
+		return marshalImageTags(imageTagEntriesFromNames(tags))
 	}
 	if strings.TrimSpace(request.Image) == "" {
 		return nil, errors.New(imageObserveRequiredMessage)
 	}
-	tags, err := controller.dockerImageTags(ctx, request.Image)
+	entries, err := controller.dockerImageTagEntries(ctx, request.Image)
 	if err != nil {
 		return nil, err
 	}
-	return marshalImageTags(tags)
+	return marshalImageTags(entries)
 }
 
-func marshalImageTags(tags []string) ([]byte, error) {
-	if tags == nil {
-		tags = []string{}
+// imageTagEntriesFromNames adapts a plain tag list to the entry form.
+func imageTagEntriesFromNames(tags []string) []ImageTagEntry {
+	entries := make([]ImageTagEntry, 0, len(tags))
+	for _, tag := range tags {
+		name := strings.TrimSpace(tag)
+		if name == "" {
+			continue
+		}
+		entries = append(entries, ImageTagEntry{Tag: name})
 	}
-	return json.Marshal(map[string]any{"tags": tags})
+	return entries
+}
+
+func marshalImageTags(entries []ImageTagEntry) ([]byte, error) {
+	if entries == nil {
+		entries = []ImageTagEntry{}
+	}
+	tags := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		tags = append(tags, entry.Tag)
+	}
+	return json.Marshal(map[string]any{"tags": tags, "entries": entries})
 }
 
 var (
@@ -909,7 +983,17 @@ var (
 	}
 )
 
+// dockerImageTags keeps the plain tag listing for callers that only need the
+// tag names.
 func (controller *Controller) dockerImageTags(ctx context.Context, image string) ([]string, error) {
+	entries, err := controller.dockerImageTagEntries(ctx, image)
+	if err != nil {
+		return nil, err
+	}
+	return imageTagNames(entries), nil
+}
+
+func (controller *Controller) dockerImageTagEntries(ctx context.Context, image string) ([]ImageTagEntry, error) {
 	registry, repository := splitDockerRepository(image)
 	if repository == "" {
 		return nil, errors.New(imageObserveRequiredMessage)
@@ -922,35 +1006,37 @@ func (controller *Controller) dockerImageTags(ctx context.Context, image string)
 			return nil, err
 		}
 		for _, mirror := range mirrors {
-			if tags, err := listMirrorTags(ctx, mirror, repository); err == nil {
-				return tags, nil
+			if entries, err := listMirrorTagEntries(ctx, mirror, repository); err == nil {
+				return entries, nil
 			}
 		}
 		if len(mirrors) > 0 {
 			return nil, errors.New("configured Docker registry mirrors could not list image tags")
 		}
-		return listDockerHubTags(ctx, repository)
+		return listDockerHubTagEntries(ctx, repository)
 	}
-	return listRegistryTags(ctx, registry, repository)
+	return listRegistryTagEntries(ctx, registry, repository)
 }
 
-func listDockerHubTags(ctx context.Context, repository string) ([]string, error) {
+func listDockerHubTagEntries(ctx context.Context, repository string) ([]ImageTagEntry, error) {
 	url := dockerHubTagListURL(repository)
 	seen := map[string]struct{}{}
-	tags := make([]string, 0, 32)
-	for url != "" && len(tags) < MaxCollectionItems {
+	entries := make([]ImageTagEntry, 0, 32)
+	for url != "" && len(entries) < MaxImageTags {
 		payload, err := fetchImageTagJSON(ctx, url)
 		if err != nil {
-			return tags, err
+			return entries, err
 		}
 		var document struct {
 			Next    string `json:"next"`
 			Results []struct {
-				Name string `json:"name"`
+				Name        string `json:"name"`
+				Digest      string `json:"digest"`
+				LastUpdated string `json:"last_updated"`
 			} `json:"results"`
 		}
 		if json.Unmarshal(payload, &document) != nil {
-			return tags, errors.New("image tags payload is invalid")
+			return entries, errors.New("image tags payload is invalid")
 		}
 		for _, item := range document.Results {
 			name := strings.TrimSpace(item.Name)
@@ -961,17 +1047,21 @@ func listDockerHubTags(ctx context.Context, repository string) ([]string, error)
 				continue
 			}
 			seen[name] = struct{}{}
-			tags = append(tags, name)
-			if len(tags) >= MaxCollectionItems {
+			entries = append(entries, ImageTagEntry{
+				Tag:       name,
+				Digest:    imageDigestValue(item.Digest),
+				UpdatedAt: strings.TrimSpace(item.LastUpdated),
+			})
+			if len(entries) >= MaxImageTags {
 				break
 			}
 		}
 		url = strings.TrimSpace(document.Next)
 	}
-	return tags, nil
+	return entries, nil
 }
 
-func listRegistryTags(ctx context.Context, registry, repository string) ([]string, error) {
+func listRegistryTagEntries(ctx context.Context, registry, repository string) ([]ImageTagEntry, error) {
 	payload, err := fetchImageTagJSON(ctx, registryTagListURL(registry, repository))
 	if err != nil {
 		return nil, err
@@ -983,7 +1073,7 @@ func listRegistryTags(ctx context.Context, registry, repository string) ([]strin
 		return nil, errors.New("image tags payload is invalid")
 	}
 	seen := map[string]struct{}{}
-	tags := make([]string, 0, len(document.Tags))
+	entries := make([]ImageTagEntry, 0, len(document.Tags))
 	for _, tag := range document.Tags {
 		tag = strings.TrimSpace(tag)
 		if tag == "" {
@@ -993,12 +1083,12 @@ func listRegistryTags(ctx context.Context, registry, repository string) ([]strin
 			continue
 		}
 		seen[tag] = struct{}{}
-		tags = append(tags, tag)
-		if len(tags) >= MaxCollectionItems {
+		entries = append(entries, ImageTagEntry{Tag: tag})
+		if len(entries) >= MaxImageTags {
 			break
 		}
 	}
-	return tags, nil
+	return entries, nil
 }
 
 func fetchImageTagJSON(ctx context.Context, url string) ([]byte, error) {

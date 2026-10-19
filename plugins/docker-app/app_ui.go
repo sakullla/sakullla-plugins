@@ -1130,21 +1130,33 @@ func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh b
 	if len(images) == 0 {
 		return nil
 	}
+	entryLister := asImageTagEntryLister(controller.uiImageObserver)
 	lister := asImageTagLister(controller.uiImageObserver)
 	result := make(map[string]serviceTagListing, len(images))
 	for _, service := range images {
-		if tags, ok := controller.cachedImageTags(app.ID, service.Image); ok {
-			result[service.Name] = serviceTagListing{Tags: tags, Known: true}
+		if tags, entries, ok := controller.cachedImageTags(app.ID, service.Image); ok {
+			result[service.Name] = serviceTagListing{Tags: tags, Entries: entries, Known: true}
 			continue
 		}
 		failed := controller.cachedImageTagFailed(app.ID, service.Image)
-		if !refresh || lister == nil {
+		if !refresh || (lister == nil && entryLister == nil) {
 			if failed {
 				result[service.Name] = serviceTagListing{Failed: true}
 			}
 			continue
 		}
-		listed, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
+		var (
+			listed  []string
+			entries []ImageTagEntry
+			err     error
+		)
+		if entryLister != nil {
+			entries, err = entryLister.ListImageTagEntries(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
+			listed = imageTagNames(entries)
+		} else {
+			listed, err = lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: service.Image})
+			entries = imageTagEntriesFromNames(listed)
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				controller.storeImageTagFailure(app.ID, service.Image)
@@ -1155,8 +1167,8 @@ func (controller *Controller) tagsForApp(ctx context.Context, app App, refresh b
 		if listed == nil {
 			listed = []string{}
 		}
-		controller.storeImageTags(app.ID, service.Image, listed)
-		result[service.Name] = serviceTagListing{Tags: listed, Known: true}
+		controller.storeImageTags(app.ID, service.Image, listed, entries)
+		result[service.Name] = serviceTagListing{Tags: listed, Entries: entries, Known: true}
 	}
 	return result
 }
@@ -1186,7 +1198,7 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 			// A fresh node observation takes precedence over deployment history,
 			// which can describe a digest no longer used by this application.
 			if ok {
-				result[service.Name] = serviceDigestState{Available: current != latest, Current: current == latest}
+				result[service.Name] = serviceDigestState{Available: current != latest, Current: current == latest, Latest: latest}
 				continue
 			}
 			appLatest := controller.cachedLatestDigest(app)
@@ -1194,13 +1206,13 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 				appLatest = latest
 			}
 			if appImageUpdateAvailable(deployment, appLatest) {
-				result[service.Name] = serviceDigestState{Available: true}
+				result[service.Name] = serviceDigestState{Available: true, Latest: appLatest}
 				continue
 			}
 			if ok && current != "" && latest != "" && current == latest {
-				result[service.Name] = serviceDigestState{Current: true}
+				result[service.Name] = serviceDigestState{Current: true, Latest: latest}
 			} else if deployment.ImageDigest != "" && (appLatest == "" || deployment.ImageDigest == appLatest) {
-				result[service.Name] = serviceDigestState{Current: true}
+				result[service.Name] = serviceDigestState{Current: true, Latest: appLatest}
 			}
 			continue
 		}
@@ -1208,11 +1220,11 @@ func (controller *Controller) serviceDigestAvailability(ctx context.Context, app
 			continue
 		}
 		if current != "" && latest != "" && current != latest {
-			result[service.Name] = serviceDigestState{Available: true}
+			result[service.Name] = serviceDigestState{Available: true, Latest: latest}
 			continue
 		}
 		if current != "" && latest != "" {
-			result[service.Name] = serviceDigestState{Current: true}
+			result[service.Name] = serviceDigestState{Current: true, Latest: latest}
 		}
 	}
 	return result
@@ -1329,16 +1341,18 @@ func (controller *Controller) persistCatalogCompose(ctx context.Context, appID, 
 	return controller.replaceApps(ctx, apps)
 }
 
-func (controller *Controller) listAppImageTags(ctx context.Context, app App) (listed map[string][]string, failed []string) {
+func (controller *Controller) listAppImageTags(ctx context.Context, app App) (listed map[string][]string, entries map[string][]ImageTagEntry, failed []string) {
+	entryLister := asImageTagEntryLister(controller.uiImageObserver)
 	lister := asImageTagLister(controller.uiImageObserver)
-	if lister == nil {
-		return nil, nil
+	if lister == nil && entryLister == nil {
+		return nil, nil, nil
 	}
 	images := appServiceImages(app)
 	if len(images) == 0 && strings.TrimSpace(app.Image) != "" {
 		images = []ServiceImage{{Image: app.Image}}
 	}
 	listed = map[string][]string{}
+	entries = map[string][]ImageTagEntry{}
 	seen := map[string]struct{}{}
 	for _, service := range images {
 		image := strings.TrimSpace(service.Image)
@@ -1349,28 +1363,41 @@ func (controller *Controller) listAppImageTags(ctx context.Context, app App) (li
 			continue
 		}
 		seen[image] = struct{}{}
-		tags, err := lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: image})
+		var (
+			tags    []string
+			details []ImageTagEntry
+			err     error
+		)
+		if entryLister != nil {
+			details, err = entryLister.ListImageTagEntries(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: image})
+			tags = imageTagNames(details)
+		} else {
+			tags, err = lister.ListImageTags(ctx, App{ID: app.ID, AgentID: app.AgentID, Image: image})
+			details = imageTagEntriesFromNames(tags)
+		}
 		if err != nil {
 			failed = append(failed, image)
 			continue
 		}
 		listed[image] = append([]string(nil), tags...)
+		entries[image] = append([]ImageTagEntry(nil), details...)
 	}
-	return listed, failed
+	return listed, entries, failed
 }
 
-func (controller *Controller) cachedImageTags(appID, image string) ([]string, bool) {
+func (controller *Controller) cachedImageTags(appID, image string) ([]string, []ImageTagEntry, bool) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	cached, ok := controller.imageCache[appID]
 	if !ok || cached.TagsByImage == nil || imageObservationExpired(cached.ObservedAt) {
-		return nil, false
+		return nil, nil, false
 	}
 	tags, ok := cached.TagsByImage[image]
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	return append([]string(nil), tags...), true
+	entries := cached.TagEntriesByImage[image]
+	return append([]string(nil), tags...), append([]ImageTagEntry(nil), entries...), true
 }
 
 func (controller *Controller) cachedImageTagFailed(appID, image string) bool {
@@ -1383,7 +1410,7 @@ func (controller *Controller) cachedImageTagFailed(appID, image string) bool {
 	return cached.FailedByImage[image]
 }
 
-func (controller *Controller) storeImageTags(appID, image string, tags []string) {
+func (controller *Controller) storeImageTags(appID, image string, tags []string, entries []ImageTagEntry) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	cached := controller.imageCache[appID]
@@ -1391,6 +1418,10 @@ func (controller *Controller) storeImageTags(appID, image string, tags []string)
 		cached.TagsByImage = map[string][]string{}
 	}
 	cached.TagsByImage[image] = append([]string(nil), tags...)
+	if cached.TagEntriesByImage == nil {
+		cached.TagEntriesByImage = map[string][]ImageTagEntry{}
+	}
+	cached.TagEntriesByImage[image] = append([]ImageTagEntry(nil), entries...)
 	if cached.FailedByImage != nil {
 		delete(cached.FailedByImage, image)
 	}
@@ -1400,12 +1431,28 @@ func (controller *Controller) storeImageTags(appID, image string, tags []string)
 	controller.imageCache[appID] = cached
 }
 
+// imageTagNames keeps the tag order of a tag entry list.
+func imageTagNames(entries []ImageTagEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Tag)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 func (controller *Controller) storeImageTagFailure(appID, image string) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	cached := controller.imageCache[appID]
 	if cached.TagsByImage != nil {
 		delete(cached.TagsByImage, image)
+	}
+	if cached.TagEntriesByImage != nil {
+		delete(cached.TagEntriesByImage, image)
 	}
 	if cached.FailedByImage == nil {
 		cached.FailedByImage = map[string]bool{}
@@ -1505,11 +1552,12 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		controller.mu.Unlock()
 		return
 	}
-	listed, failed := controller.listAppImageTags(ctx, live)
+	listed, listedEntries, failed := controller.listAppImageTags(ctx, live)
 	if tags := tagsByServiceName(live, listed); len(tags) > 0 {
 		observed.TagsByService = tags
 	}
 	extraDigests := controller.observeFloatingServiceDigests(ctx, live)
+	listedEntries = controller.resolveFloatingReleaseDigests(ctx, live, listedEntries)
 	unlock := controller.lockImageUpdate(app.ID)
 	defer unlock()
 	var view UpdateView
@@ -1542,15 +1590,20 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 			if cached.TagsByImage == nil {
 				cached.TagsByImage = map[string][]string{}
 			}
+			if cached.TagEntriesByImage == nil {
+				cached.TagEntriesByImage = map[string][]ImageTagEntry{}
+			}
 			if cached.FailedByImage == nil {
 				cached.FailedByImage = map[string]bool{}
 			}
 			for image, tags := range listed {
 				cached.TagsByImage[image] = append([]string(nil), tags...)
+				cached.TagEntriesByImage[image] = append([]ImageTagEntry(nil), listedEntries[image]...)
 				delete(cached.FailedByImage, image)
 			}
 			for _, image := range failed {
 				delete(cached.TagsByImage, image)
+				delete(cached.TagEntriesByImage, image)
 				cached.FailedByImage[image] = true
 			}
 		}
@@ -1566,6 +1619,43 @@ func (controller *Controller) observeImageInBackground(app App, token, epoch uin
 		_ = controller.setAppRunning(ctx, live.ID, true)
 		controller.publishHTTPBackendOffers(ctx)
 	}
+}
+
+// resolveFloatingReleaseDigests asks the node which digest the registry
+// publishes for the newest release of a repository. It lets a moving tag be
+// placed on a release even when the registry only publishes tag names, and it
+// runs in the background so the page never waits for it.
+func (controller *Controller) resolveFloatingReleaseDigests(ctx context.Context, app App, entries map[string][]ImageTagEntry) map[string][]ImageTagEntry {
+	resolver := asImageDigestResolver(controller.uiImageObserver)
+	if resolver == nil || len(entries) == 0 {
+		return entries
+	}
+	for image, details := range entries {
+		if len(details) == 0 || hasReleaseDigest(details) {
+			continue
+		}
+		if _, _, semver := ParseSemverTag(image); semver {
+			continue
+		}
+		releases := imageReleases(details)
+		if len(releases) == 0 {
+			continue
+		}
+		latest, ok := newestRelease(primaryReleaseLine(releases))
+		if !ok {
+			continue
+		}
+		repository := imageRepository(image)
+		if repository == "" {
+			continue
+		}
+		digest, err := resolver.ResolveImageDigest(ctx, app, repository+":"+latest.Tag)
+		if err != nil || strings.TrimSpace(digest) == "" {
+			continue
+		}
+		entries[image] = appendTagDigest(details, latest.Tag, digest)
+	}
+	return entries
 }
 
 func (controller *Controller) observeFloatingServiceDigests(ctx context.Context, app App) map[string]cachedImageDigest {

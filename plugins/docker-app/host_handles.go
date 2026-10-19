@@ -414,6 +414,68 @@ func (runtime *hostCapabilityRuntime) ListImageTags(ctx context.Context, app App
 	return append([]string(nil), result.Tags...), nil
 }
 
+var _ ImageTagEntryLister = (*hostCapabilityRuntime)(nil)
+
+// ListImageTagEntries reads the repository tags with the digest the registry
+// publishes for each of them. Older agents answer with tag names only, so the
+// plain list is used as the fallback.
+func (runtime *hostCapabilityRuntime) ListImageTagEntries(ctx context.Context, app App) ([]ImageTagEntry, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(app.AgentID) {
+		return nil, ErrAgentOffline
+	}
+	var result struct {
+		Tags    []string        `json:"tags"`
+		Entries []ImageTagEntry `json:"entries"`
+	}
+	if err := runtime.pluginCall(ctx, app.AgentID, pluginCallImageName, map[string]any{
+		"action": "list-tags", "agent_id": app.AgentID, "app_id": app.ID, "image": app.Image,
+	}, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Entries) > 0 {
+		return append([]ImageTagEntry(nil), result.Entries...), nil
+	}
+	entries := make([]ImageTagEntry, 0, len(result.Tags))
+	for _, tag := range result.Tags {
+		name := strings.TrimSpace(tag)
+		if name == "" {
+			continue
+		}
+		entries = append(entries, ImageTagEntry{Tag: name})
+	}
+	return entries, nil
+}
+
+var _ ImageDigestResolver = (*hostCapabilityRuntime)(nil)
+
+// ResolveImageDigest asks the node which digest the registry publishes for a
+// reference. It lets a moving tag be matched to a release even when the tag
+// list carries no digest of its own.
+func (runtime *hostCapabilityRuntime) ResolveImageDigest(ctx context.Context, app App, image string) (string, error) {
+	if runtime == nil || runtime.client == nil {
+		return "", ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(app.AgentID) {
+		return "", ErrAgentOffline
+	}
+	reference := strings.TrimSpace(image)
+	if reference == "" {
+		return "", errors.New("image reference is required")
+	}
+	var result struct {
+		Digest string `json:"digest"`
+	}
+	if err := runtime.pluginCall(ctx, app.AgentID, pluginCallImageName, map[string]any{
+		"action": "digest", "agent_id": app.AgentID, "app_id": app.ID, "image": reference,
+	}, &result); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Digest), nil
+}
+
 type hostRolloutRuntime struct {
 	runtime *hostCapabilityRuntime
 }

@@ -19,13 +19,17 @@ import (
 
 const (
 	PluginID                 = "docker-app"
-	PluginVersion            = "0.1.52"
+	PluginVersion            = "0.1.53"
 	DeclaredResourceGroupRef = "resource-group/docker-app"
 	MaxApps                  = 128
 	MaxDiscoveries           = 512
 	MaxComposeServices       = 128
 	MaxCollectionItems       = 256
 	MaxSecretRefs            = MaxCollectionItems
+	// MaxImageTags bounds one repository tag listing. Release-heavy
+	// repositories publish well over a thousand tags, so the version detector
+	// reads more than the generic collection budget.
+	MaxImageTags = 2048
 )
 
 var resourceGroupRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)

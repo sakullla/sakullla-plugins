@@ -32,6 +32,15 @@ const (
 	serviceDigestCurrentMessage  = "已是该 tag 当前镜像"
 )
 
+// serviceVersionCurrentMessage reports that the running tag already carries
+// the newest release of its repository.
+func serviceVersionCurrentMessage(version string) string {
+	if version == "" {
+		return "已是最新版本"
+	}
+	return "已是最新版本 " + version
+}
+
 type appServiceView struct {
 	Name        string          `json:"name"`
 	Image       string          `json:"image,omitempty"`
@@ -45,24 +54,39 @@ type appServiceView struct {
 	Unknown     bool            `json:"unknown,omitempty"`
 	Listing     string          `json:"listing,omitempty"`
 	Message     string          `json:"message,omitempty"`
+	// Version is the release tag the service currently runs.
+	Version string `json:"version,omitempty"`
+	// Latest is the newest release the repository publishes.
+	Latest string `json:"latest,omitempty"`
+	// VersionState is current, outdated, floating or unknown.
+	VersionState string `json:"version_state,omitempty"`
+	// Floating marks a service that follows a moving tag such as latest.
+	Floating bool `json:"floating,omitempty"`
 }
 
 type serviceTagListing struct {
-	Tags   []string
-	Failed bool
-	Known  bool
+	Tags []string
+	// Entries keeps the registry metadata of every tag when the registry
+	// publishes it, so a moving tag can be matched to its release.
+	Entries []ImageTagEntry
+	Failed  bool
+	Known   bool
 }
 
 type serviceDigestState struct {
 	Available bool
 	Current   bool
 	Failed    bool
+	// Latest is the digest the registry currently publishes for the tag.
+	Latest string
 }
 
 type appCandidate struct {
 	Tag    string `json:"tag"`
 	Major  bool   `json:"major,omitempty"`
 	Digest bool   `json:"digest,omitempty"`
+	// Release marks a candidate that pins a moving tag to a release.
+	Release bool `json:"release,omitempty"`
 }
 
 type appLockOption struct {
@@ -103,6 +127,12 @@ func projectServiceView(app App, service ServiceImage, listing serviceTagListing
 		Ignored:     ignored,
 		LockOptions: serviceLockOptions(service.Image),
 	}
+	release := projectServiceRelease(service.Image, listing, digest.Latest)
+	view.Version = release.Version
+	view.Latest = release.Latest
+	view.VersionState = release.State
+	view.Floating = release.Floating
+
 	_, _, semver := ParseSemverTag(service.Image)
 	if !semver {
 		if digest.Failed {
@@ -113,11 +143,23 @@ func projectServiceView(app App, service ServiceImage, listing serviceTagListing
 		if digest.Available && tag != "" && !ignoredUpdateTag(tag, ignored) {
 			view.Update = true
 			view.DefaultTag = tag
-			view.Candidates = []appCandidate{{Tag: tag, Digest: true}}
+			view.Candidates = append(view.Candidates, appCandidate{Tag: tag, Digest: true})
+			view.Candidates = append(view.Candidates, releaseUpgradeCandidates(release, tag, ignored)...)
 			return view
 		}
 		if digest.Current {
 			view.Message = serviceDigestCurrentMessage
+		}
+		// A moving tag can still be pinned to the newest release of the
+		// repository. Only a proven gap between the running release and the
+		// newest one counts as an update; an unresolved version stays an offer.
+		upgrades := releaseUpgradeCandidates(release, tag, ignored)
+		if len(upgrades) > 0 {
+			view.Candidates = upgrades
+			if release.State == VersionStateOutdated {
+				view.Update = true
+				view.DefaultTag = upgrades[0].Tag
+			}
 		}
 		return view
 	}
@@ -133,6 +175,9 @@ func projectServiceView(app App, service ServiceImage, listing serviceTagListing
 	}
 	allowed := allowedServiceCandidates(service.Image, listing.Tags, lock, ignored)
 	if len(allowed) == 0 {
+		if release.State == VersionStateCurrent {
+			view.Message = serviceVersionCurrentMessage(release.Version)
+		}
 		return view
 	}
 	view.Update = true

@@ -83,10 +83,14 @@ func fetchRegistryDocument(ctx context.Context, endpoint *url.URL, accept string
 	return data, response.Header, nil
 }
 
-func listMirrorTags(ctx context.Context, mirror *url.URL, repository string) ([]string, error) {
+// listMirrorTagEntries reads the tags of one repository from the configured
+// mirror. The standard distribution endpoint answers first because every
+// registry mirror serves it; the accelerator-sources catalog answers next and
+// also publishes the digest of each tag.
+func listMirrorTagEntries(ctx context.Context, mirror *url.URL, repository string) ([]ImageTagEntry, error) {
 	endpoint := mirrorEndpoint(mirror, "/v2/"+repository+"/tags/list")
-	if tags, err := listMirrorTagPages(ctx, endpoint, false); err == nil {
-		return tags, nil
+	if entries, err := listMirrorTagPages(ctx, endpoint, false); err == nil {
+		return entries, nil
 	}
 	// accelerator-sources serves Docker Hub's catalog separately from its
 	// distribution API. Keep pagination on that mirror, even when Hub's JSON
@@ -96,10 +100,10 @@ func listMirrorTags(ctx context.Context, mirror *url.URL, repository string) ([]
 	return listMirrorTagPages(ctx, endpoint, true)
 }
 
-func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([]string, error) {
+func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([]ImageTagEntry, error) {
 	seenPages, seenTags := map[string]bool{}, map[string]bool{}
-	tags := make([]string, 0, 32)
-	for len(tags) < MaxCollectionItems && len(seenPages) < MaxCollectionItems {
+	entries := make([]ImageTagEntry, 0, 32)
+	for len(entries) < MaxImageTags && len(seenPages) < MaxImageTags {
 		if seenPages[endpoint.String()] {
 			return nil, errors.New("registry tag pagination repeated a page")
 		}
@@ -109,9 +113,9 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 			return nil, err
 		}
 		var page struct {
-			Tags    json.RawMessage         `json:"tags"`
-			Results []struct{ Name string } `json:"results"`
-			Next    string                  `json:"next"`
+			Tags    json.RawMessage     `json:"tags"`
+			Results []registryTagResult `json:"results"`
+			Next    string              `json:"next"`
 		}
 		if json.Unmarshal(data, &page) != nil || (!catalog && page.Tags == nil) || (catalog && page.Results == nil) {
 			return nil, errors.New("registry tags payload is invalid")
@@ -126,14 +130,26 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 		}
 		for _, name := range names {
 			name = strings.TrimSpace(name)
-			if name != "" && !seenTags[name] && len(tags) < MaxCollectionItems {
-				seenTags[name] = true
-				tags = append(tags, name)
+			if name == "" || seenTags[name] || len(entries) >= MaxImageTags {
+				continue
 			}
+			seenTags[name] = true
+			entry := ImageTagEntry{Tag: name}
+			if catalog {
+				for _, item := range page.Results {
+					if strings.TrimSpace(item.Name) != name {
+						continue
+					}
+					entry.Digest = imageDigestValue(item.Digest)
+					entry.UpdatedAt = strings.TrimSpace(item.LastUpdated)
+					break
+				}
+			}
+			entries = append(entries, entry)
 		}
 		if catalog {
 			if page.Next == "" {
-				return tags, nil
+				return entries, nil
 			}
 			next, err := url.Parse(page.Next)
 			if err != nil {
@@ -150,7 +166,7 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 		}
 		link := headers.Get("Link")
 		if link == "" {
-			return tags, nil
+			return entries, nil
 		}
 		left, right := strings.Index(link, "<"), strings.Index(link, ">")
 		if left < 0 || right <= left || !strings.Contains(link[right:], `rel="next"`) {
@@ -162,7 +178,14 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 		}
 		endpoint = next
 	}
-	return tags, nil
+	return entries, nil
+}
+
+// registryTagResult is one entry of a Docker Hub tag catalog page.
+type registryTagResult struct {
+	Name        string `json:"name"`
+	Digest      string `json:"digest"`
+	LastUpdated string `json:"last_updated"`
 }
 
 func mirrorImageDigest(ctx context.Context, mirror *url.URL, image, repository, current, arch string) (string, error) {
@@ -192,3 +215,30 @@ func mirrorImageDigest(ctx context.Context, mirror *url.URL, image, repository, 
 	}
 	return resolveRegistryDigest(current, digest, parseRegistryPlatforms(data), arch), nil
 }
+
+// mirrorIndexDigest returns the manifest digest a mirror publishes for a
+// reference. Unlike mirrorImageDigest it does not compare the reference to a
+// locally installed image, so it also works for a tag the node never pulled.
+func mirrorIndexDigest(ctx context.Context, mirror *url.URL, image, repository string) (string, error) {
+	reference := extractDockerTag(image)
+	if reference == "" || !strings.Contains(image[strings.LastIndex(image, "/")+1:], ":") {
+		reference = "latest"
+	}
+	if _, digest, ok := strings.Cut(image, "@"); ok {
+		reference = digest
+	}
+	endpoint := mirrorEndpoint(mirror, "/v2/"+repository+"/manifests/"+reference)
+	data, headers, err := fetchRegistryDocument(ctx, endpoint, registryManifestAccept)
+	if err != nil {
+		return "", err
+	}
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+	if supplied := headers.Get("Docker-Content-Digest"); supplied != "" && supplied != digest {
+		return "", errors.New("registry manifest digest does not match its body")
+	}
+	return digest, nil
+}
+
+// registryManifestAccept asks a registry for the widest set of manifest
+// flavours so an image index is preferred over a single platform manifest.
+const registryManifestAccept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
