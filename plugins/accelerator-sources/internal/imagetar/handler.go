@@ -346,6 +346,9 @@ func (handler *Handler) resolveImage(ctx context.Context, value, platformValue s
 		if err != nil {
 			return resolvedImage{}, err
 		}
+		// Decode the image independently: omitted fields must not retain the
+		// parent index's manifests (or its schema/version metadata).
+		document = manifestDocument{}
 		if err := json.Unmarshal(body, &document); err != nil || document.SchemaVersion != 2 {
 			return resolvedImage{}, errors.New("invalid selected manifest")
 		}

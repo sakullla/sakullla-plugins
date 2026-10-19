@@ -61,7 +61,13 @@ func TestOfflinePlatformSelectionBatchTarAndDigest(t *testing.T) {
 	configDescriptor := descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: digest(config), Size: int64(len(config))}
 	layerDescriptor := descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: digest(layer), Size: int64(len(layer))}
 	selected := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.manifest.v1+json", Config: configDescriptor, Layers: []descriptor{layerDescriptor}}
-	selectedBody, _ := json.Marshal(selected)
+	// Registries omit the index-only manifests field in a selected image.
+	// Encoding manifestDocument would emit manifests:null and hide stale
+	// index fields left behind when decoding the selected document.
+	selectedBody, _ := json.Marshal(map[string]any{
+		"schemaVersion": selected.SchemaVersion, "mediaType": selected.MediaType,
+		"config": selected.Config, "layers": selected.Layers,
+	})
 	selectedDigest := digest(selectedBody)
 	index := manifestDocument{SchemaVersion: 2, MediaType: "application/vnd.oci.image.index.v1+json", Manifests: []descriptor{
 		{Digest: digest([]byte("arm")), Size: 3, Platform: platform{OS: "linux", Architecture: "arm64"}},

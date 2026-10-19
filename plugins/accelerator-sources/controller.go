@@ -24,7 +24,7 @@ import (
 
 const (
 	PluginID       = "accelerator-sources"
-	PluginVersion  = "0.1.17"
+	PluginVersion  = "0.1.18"
 	ProviderID     = "default"
 	MaxConfigBytes = 4096
 	maxSources     = 32
