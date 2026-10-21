@@ -41,7 +41,7 @@
 | docker-app | apps | 表格 | — | — | — | 不适用（页面主流程没有表格） |
 | docker-app | apps | 徽章 | p.app-card-status.ui-badge | 是 | 是 | 已消除（布局类：app-card-status） |
 | docker-app | files | 对话框 | dialog#files-mkdir-dialog.ui-dialog.files-dialog | 是 | 是 | 已消除（布局类：files-dialog） |
-| docker-app | apps | 空状态 | div#app-empty.ui-empty（测量时临时解除 hidden） | 是 | 是 | 已消除 |
+| docker-app | apps | 空状态 | div#app-empty.ui-empty.app-empty（测量时临时解除 hidden） | 是 | 是 | 已消除（状态面板变体（--ui-border-subtle，实线边框））（布局类：app-empty） |
 | doh | endpoint | 主按钮 | button#copy-doh-url.ui-btn.ui-btn--lg.doh-copy | 是 | 是 | 已消除（布局类：doh-copy） |
 | doh | endpoint | 输入 | — | — | — | 不适用（页面主流程没有输入控件） |
 | doh | endpoint | 表格 | — | — | — | 不适用（页面主流程没有表格） |
@@ -86,7 +86,7 @@
 - 表格：5/9 页存在；类名与 token 检查全部通过；页面布局类：ip-rule-table、listing、routing-table、routing-table--rules、waf-events-table；不适用：accelerator-sources、docker-app、doh、reverse-l4。
 - 徽章：9/9 页存在；类名与 token 检查全部通过；kit 变体：ui-badge--info、ui-badge--plain、ui-badge--success；页面布局类：app-card-status。
 - 对话框：7/9 页存在；类名与 token 检查全部通过；页面布局类：files-dialog；不适用：accelerator-sources、doh。
-- 空状态：8/9 页存在；类名与 token 检查全部通过；页面布局类：ip-province-empty；不适用：doh。
+- 空状态：8/9 页存在；类名与 token 检查全部通过；token 变体：状态面板变体（--ui-border-subtle，实线边框）；页面布局类：app-empty、ip-province-empty；不适用：doh。
 
 ## 结论
 

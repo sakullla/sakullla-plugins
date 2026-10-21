@@ -115,16 +115,18 @@ checks continue. The page refreshes pending image results without discarding an
 open editor. Agent Docker proxy support for `docker info` and formatted
 `docker image inspect` is required; update the Agent alongside this plugin.
 
-The management page reads as one console. A command bar names the node and its
-engine state, an inventory strip counts running, updatable, and stopped
-applications, and every application is a card that keeps its identity, ports,
-images, and available actions in one row. The detail page keeps a sticky
-header with the title, status, and lifecycle actions, and splits its overview
-into a service column and a fact column, so the running image, the
-repository's newest release, and the offered candidates are readable without
-scrolling. Operation feedback floats above the page rather than pushing it: a
-status toast appears and disappears without reflowing the content and without
-intercepting a click.
+The management page reads as one console. A container-deck header carries the
+node picker and live engine badge, a fleet strip counts running, updatable,
+and stopped applications, and every application is a card with a status rail,
+monogram, published ports, service images, ingress link, and a compact action
+footer. The detail page keeps a sticky header with the monogram, title, status,
+domain, and lifecycle actions, followed by a segmented section bar. Its
+overview pairs a status metric row with service-image cards, run parameters,
+and ingress and storage rails, then closes with an action deck. Compose and
+workspace files use titled editor windows, while logs use a dedicated terminal
+window with a light toolbar. Operation feedback floats above the page rather
+than pushing it: a status toast appears and disappears without reflowing the
+content and without intercepting a click.
 
 An optional read-only field diagnostic accepts image names at runtime through
 `NRE_DOCKER_APP_LIVE_IMAGES` (space-separated). Run `TestLiveDockerImageMetadata`

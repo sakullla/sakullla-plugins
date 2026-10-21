@@ -780,6 +780,18 @@ const escapeHtml = (value) => String(value)
   .replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;");
 
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const iconNode = (name, className = "ui-icon") => {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const use = document.createElementNS(SVG_NAMESPACE, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+};
+
 const tok = (name, text) => `<span class="tok-${name}">${escapeHtml(text)}</span>`;
 const tokHtml = (name, html) => `<span class="tok-${name}">${html}</span>`;
 
@@ -1102,6 +1114,7 @@ const syncListPanel = () => {
   if (listPanel) listPanel.hidden = inDetail;
   if (detailPanel) detailPanel.hidden = !inDetail;
   if (workspaceHead) workspaceHead.hidden = inDetail;
+  if (inventoryChipsNode) inventoryChipsNode.hidden = inDetail || !hasApps;
   const canOperate = selectedAgentID && engineReady && agentOnline;
   if (deployToggle) deployToggle.hidden = inDetail || !canOperate;
   if (diskCleanup) diskCleanup.hidden = inDetail || !canOperate;
@@ -1611,6 +1624,10 @@ const mountAppFiles = () => {
         item.setAttribute("aria-selected", selectedPath === entryPath ? "true" : "false");
         const nameWrap = document.createElement("div");
         nameWrap.className = "files-list-name";
+        const kind = document.createElement("span");
+        kind.className = "files-kind";
+        kind.dataset.kind = entry.dir ? "dir" : "file";
+        kind.append(iconNode(entry.dir ? "folder" : "file"));
         const open = document.createElement("button");
         open.type = "button";
         open.className = "files-name";
@@ -1622,7 +1639,7 @@ const mountAppFiles = () => {
           if (entry.dir) requestList(entryPath);
           else selectEntry(entryPath, entry.name || entryPath, false, snapshot.owner, snapshot.binding);
         });
-        nameWrap.append(open);
+        nameWrap.append(kind, open);
         item.append(nameWrap);
         if (!entry.dir && entry.size != null) {
           const size = document.createElement("span");
@@ -2406,7 +2423,11 @@ const renderApp = (app) => {
       if (!shown) return;
       const row = document.createElement("div");
       row.className = "app-card-image-row";
-      if (services.length > 1) {
+      const kind = document.createElement("span");
+      kind.className = "app-card-image-icon";
+      kind.append(iconNode("image"));
+      row.append(kind);
+      if (service.name) {
         const name = document.createElement("span");
         name.className = "app-card-service";
         name.textContent = service.name;
@@ -2451,6 +2472,7 @@ const renderApp = (app) => {
         const bit = document.createElement("span");
         bit.className = "app-port";
         bit.textContent = String(port);
+        bit.title = `已发布端口 ${port}`;
         portNode.append(bit);
       });
     } else {
@@ -2562,23 +2584,32 @@ const renderOverview = (app) => {
   const user = parseComposeScalar(app.compose, "user");
   const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
   const statusValue = app.status && app.status !== "有新版本" ? app.status : (hasUpdate ? "有新版本" : "已停止");
+  const statusTone = statusValue === "运行中" ? "success" : statusValue === "异常" ? "danger" : statusValue === "有新版本" ? "warning" : statusValue === "发布中" ? "primary" : "muted";
 
   const stats = document.createElement("div");
   stats.className = "overview-stats";
   [
-    [statusValue, "状态"],
-    [String(services.length || 1), "服务"],
-    [String(ports.length), "端口"],
-    [app.rules_error ? "未知" : String(rules.length), "入口"],
-  ].forEach(([value, label]) => {
+    { value: statusValue, label: "当前状态", tone: statusTone, icon: "pulse", status: statusValue },
+    { value: String(services.length || 1), label: "服务", tone: "primary", icon: "layers" },
+    { value: String(ports.length), label: "发布端口", tone: "accent", icon: "globe" },
+    { value: app.rules_error ? "未知" : String(rules.length), label: "HTTP 入口", tone: "info", icon: "globe" },
+  ].forEach(({ value, label, tone, icon, status }) => {
     const item = document.createElement("div");
     item.className = "overview-stat";
-    if (label === "状态") item.dataset.status = value;
+    item.dataset.tone = tone;
+    if (status) item.dataset.status = status;
+    const mark = document.createElement("span");
+    mark.className = "overview-stat__icon";
+    mark.append(iconNode(icon));
+    const copy = document.createElement("span");
+    copy.className = "overview-stat__copy";
     const small = document.createElement("span");
+    small.className = "overview-stat__label";
     small.textContent = label;
     const strong = document.createElement("strong");
     strong.textContent = value;
-    item.append(small, strong);
+    copy.append(small, strong);
+    item.append(mark, copy);
     stats.append(item);
   });
   overviewPanel.append(stats);
@@ -2590,11 +2621,17 @@ const renderOverview = (app) => {
   const railColumn = document.createElement("div");
   railColumn.className = "overview-column overview-column--rail";
   sheet.append(mainColumn, railColumn);
-  const addBlock = (title, column = mainColumn) => {
+
+  const addBlock = (title, column, icon) => {
     const block = document.createElement("section");
     block.className = "overview-block";
     const heading = document.createElement("h3");
-    heading.textContent = title;
+    const headingIcon = document.createElement("span");
+    headingIcon.className = "overview-block__icon";
+    headingIcon.append(iconNode(icon));
+    const headingText = document.createElement("span");
+    headingText.textContent = title;
+    heading.append(headingIcon, headingText);
     const grid = document.createElement("dl");
     grid.className = "overview-grid";
     block.append(heading, grid);
@@ -2609,51 +2646,80 @@ const renderOverview = (app) => {
     else dd.textContent = value;
     if (options.title) dd.title = options.title;
     if (options.mono) dd.classList.add("overview-mono");
+    if (options.wide) {
+      dt.classList.add("overview-grid__wide");
+      dd.classList.add("overview-grid__wide");
+    }
     grid.append(dt, dd);
   };
 
-  const run = addBlock("运行");
-  addRow(run, "节点", agentDisplayName(agent) || app.agent_id || "未绑定节点");
+  const servicesBlock = document.createElement("section");
+  servicesBlock.className = "overview-block overview-block--services";
+  const servicesHeading = document.createElement("h3");
+  const servicesHeadingIcon = document.createElement("span");
+  servicesHeadingIcon.className = "overview-block__icon";
+  servicesHeadingIcon.append(iconNode("layers"));
+  const servicesHeadingText = document.createElement("span");
+  servicesHeadingText.textContent = "服务镜像";
+  const servicesHeadingCount = document.createElement("span");
+  servicesHeadingCount.className = "overview-block__count";
+  servicesHeadingCount.textContent = String(serviceViews.length || services.length || 1);
+  servicesHeading.append(servicesHeadingIcon, servicesHeadingText, servicesHeadingCount);
+  servicesBlock.append(servicesHeading);
+
   const imageNode = document.createElement("div");
   imageNode.className = "overview-image";
+  const imageMark = document.createElement("span");
+  imageMark.className = "overview-image__mark";
+  imageMark.append(iconNode("container"));
+  const imageCopy = document.createElement("span");
+  imageCopy.className = "overview-image__copy";
   const imageName = document.createElement("span");
   imageName.className = "overview-mono";
   imageName.textContent = image.name;
   imageName.title = version;
-  imageNode.append(imageName);
+  imageCopy.append(imageName);
+  imageNode.append(imageMark, imageCopy);
   if (image.digest) {
     const digest = chip(image.digest.slice(0, 12));
     digest.className = "chip app-version";
     digest.title = version;
     imageNode.append(digest);
   }
+
   if (serviceViews.length) {
     const list = document.createElement("div");
     list.className = "overview-services";
     serviceViews.forEach((service) => {
-      const item = document.createElement("div");
+      const item = document.createElement("article");
       item.className = "overview-service";
       const versionState = String(service.version_state || "").trim();
       if (versionState) item.dataset.versionState = versionState;
       const head = document.createElement("div");
       head.className = "overview-service-head";
+      const serviceMark = document.createElement("span");
+      serviceMark.className = "overview-service__icon";
+      serviceMark.append(iconNode("image"));
+      const identity = document.createElement("div");
+      identity.className = "overview-service__identity";
       const name = document.createElement("strong");
       name.textContent = service.name;
-      const image = document.createElement("span");
-      image.className = "overview-mono";
-      image.textContent = service.image || service.tag || "未解析镜像";
-      head.append(name, image);
-      item.append(head);
-      const tools = document.createElement("div");
-      tools.className = "overview-service-tools";
+      const imageNameNode = document.createElement("span");
+      imageNameNode.className = "overview-mono";
+      imageNameNode.textContent = service.image || service.tag || "未解析镜像";
+      identity.append(name, imageNameNode);
+      head.append(serviceMark, identity);
       const status = serviceImageStatus(service);
       if (status.text) {
         const flag = document.createElement("p");
         flag.className = "overview-service-flag";
         flag.dataset.state = status.state;
         flag.textContent = status.text;
-        tools.append(flag);
+        head.append(flag);
       }
+      item.append(head);
+      const tools = document.createElement("div");
+      tools.className = "overview-service-tools";
       const latest = String(service.latest || "").trim();
       if (latest && latest !== service.tag) {
         const release = document.createElement("p");
@@ -2688,28 +2754,48 @@ const renderOverview = (app) => {
         });
         tools.append(candidates);
       }
+      const actions = document.createElement("div");
+      actions.className = "overview-service-actions";
       const manage = actionButton({ id: "service-policy" }, "ui-btn ui-btn--secondary ui-btn--sm", "管理版本策略");
       manage.dataset.service = service.name;
       manage.addEventListener("click", () => saveServicePolicy(app, service.name));
-      tools.append(manage);
+      actions.append(manage);
       if (service.update && (service.candidates || []).length && (app.actions || []).some((action) => action.id === "update")) {
         const update = actionButton({id:"service-update"}, "ui-btn ui-btn--sm", "更新镜像");
         update.dataset.service = service.name;
         update.addEventListener("click", () => runAppAction(app, {id:"update", service:service.name}));
-        tools.append(update);
+        actions.append(update);
       }
-      item.append(tools);
+      if (tools.childNodes.length) item.append(tools);
+      item.append(actions);
       list.append(item);
     });
-    addRow(run, "服务镜像", "", { node: list });
+    servicesBlock.append(list);
   } else {
-    addRow(run, "镜像", "", { node: imageNode });
-    addRow(run, "服务", services.length ? services.join(" · ") : app.id);
+    const imageCard = document.createElement("div");
+    imageCard.className = "overview-image-card";
+    imageCard.append(imageNode);
+    const serviceCopy = document.createElement("p");
+    serviceCopy.className = "service-policy-summary";
+    serviceCopy.textContent = `服务：${services.length ? services.join(" · ") : app.id}`;
+    imageCard.append(serviceCopy);
+    servicesBlock.append(imageCard);
+  }
+  mainColumn.append(servicesBlock);
+
+  const run = addBlock("运行参数", mainColumn, "pulse");
+  addRow(run, "节点", agentDisplayName(agent) || app.agent_id || "未绑定节点");
+  if (serviceViews.length) {
+    addRow(run, "主镜像", "", { node: imageNode, wide: true });
   }
   if (ports.length) {
     const list = document.createElement("div");
     list.className = "overview-chips";
-    ports.forEach((port) => list.append(chip(String(port))));
+    ports.forEach((port) => {
+      const bit = chip(String(port));
+      bit.className = "app-port";
+      list.append(bit);
+    });
     addRow(run, "端口", "", { node: list });
   } else {
     addRow(run, "端口", "无发布端口");
@@ -2719,7 +2805,7 @@ const renderOverview = (app) => {
   addRow(run, "自动更新", app.auto_update === true ? "已开启" : "默认关闭");
   if (hasUpdate) addRow(run, "更新", "镜像有新版本");
 
-  const net = addBlock("入口", railColumn);
+  const net = addBlock("HTTP 入口", railColumn, "globe");
   if (app.rules_error) addRow(net, "读取状态", app.rules_error);
   if (rules.length) {
     const list = document.createElement("div");
@@ -2727,6 +2813,13 @@ const renderOverview = (app) => {
     rules.forEach((rule) => {
       const domain = String(rule.domain || "").trim();
       const openURL = rule.enabled === false ? "" : firstEnabledRuleURL({ rules: [rule] });
+      const entry = document.createElement("div");
+      entry.className = "overview-rule";
+      entry.dataset.enabled = rule.enabled === false ? "false" : "true";
+      const mark = document.createElement("span");
+      mark.className = "overview-rule__icon";
+      mark.append(iconNode("globe"));
+      entry.append(mark);
       if (openURL) {
         const link = document.createElement("a");
         link.href = openURL;
@@ -2734,19 +2827,21 @@ const renderOverview = (app) => {
         link.rel = "noopener noreferrer";
         link.className = "http-rule-open";
         link.textContent = displayHost(openURL) || domain || openURL;
-        list.append(link);
+        entry.append(link);
       } else {
         const span = document.createElement("span");
+        span.className = "overview-rule__domain";
         span.textContent = domain ? `${domain}${rule.enabled === false ? "（已停用）" : ""}` : "未命名入口";
-        list.append(span);
+        entry.append(span);
       }
+      list.append(entry);
     });
-    addRow(net, "域名", "", { node: list });
+    addRow(net, "域名", "", { node: list, wide: true });
   } else if (!app.rules_error) {
     addRow(net, "域名", "未配置 HTTP 入口");
   }
 
-  const store = addBlock("存储", railColumn);
+  const store = addBlock("存储", railColumn, "database");
   if (volumes.length) {
     const list = document.createElement("ul");
     list.className = "overview-mounts";
@@ -2764,7 +2859,7 @@ const renderOverview = (app) => {
       item.append(src, arrow, dst);
       list.append(item);
     });
-    addRow(store, "数据卷", "", { node: list });
+    addRow(store, "数据卷", "", { node: list, wide: true });
   } else {
     addRow(store, "数据卷", "无数据卷");
   }
@@ -2775,6 +2870,16 @@ const renderOverview = (app) => {
     overviewPanel.append(history);
   }
   overviewPanel.append(sheet);
+  const actionsWrap = document.createElement("div");
+  actionsWrap.className = "overview-actions";
+  const actionsHead = document.createElement("div");
+  actionsHead.className = "overview-actions__head";
+  const actionsTitle = document.createElement("h3");
+  actionsTitle.textContent = "操作";
+  const actionsHint = document.createElement("p");
+  actionsHint.textContent = "生命周期与镜像操作都会在确认后执行。";
+  actionsHead.append(actionsTitle, actionsHint);
+  actionsWrap.append(actionsHead);
   actionGroups(app, { overview: true }).forEach((group) => {
     if (group.classList.contains("app-actions-danger")) {
       const copy = document.createElement("p");
@@ -2782,8 +2887,9 @@ const renderOverview = (app) => {
       copy.textContent = "删除会先处理关联 HTTP 入口，再停止容器并清掉应用工作区。";
       group.prepend(copy);
     }
-    overviewPanel.append(group);
+    actionsWrap.append(group);
   });
+  overviewPanel.append(actionsWrap);
 };
 
 const runHTTPAction = async (app, action, body, form) => {
@@ -2826,6 +2932,22 @@ const renderHTTP = (app) => {
   httpPanel.dataset.owner = owner;
   const ports = appPorts(app);
   const rules = Array.isArray(app.rules) ? app.rules : [];
+
+  const head = document.createElement("div");
+  head.className = "section-head";
+  const headCopy = document.createElement("div");
+  const kicker = document.createElement("p");
+  kicker.className = "section-kicker";
+  kicker.textContent = "INGRESS";
+  const title = document.createElement("h3");
+  title.textContent = "HTTP 入口";
+  headCopy.append(kicker, title);
+  const retry = actionButton({id:"refresh-http"}, "ui-btn ui-btn--secondary ui-btn--sm", "刷新入口");
+  retry.prepend(iconNode("refresh"));
+  retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
+  head.append(headCopy, retry);
+  httpPanel.append(head);
+
   const feedback = document.createElement("p");
   feedback.id = "http-feedback";
   feedback.className = "resource-error";
@@ -2833,41 +2955,48 @@ const renderHTTP = (app) => {
   feedback.textContent = app.rules_error || "";
   feedback.hidden = !app.rules_error;
   httpPanel.append(feedback);
-  const retry = actionButton({id:"refresh-http"}, "ui-btn ui-btn--secondary ui-btn--sm", "刷新入口");
-  retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
-  httpPanel.append(retry);
+
   if (rules.length) {
     const ruleList = document.createElement("ul");
     ruleList.className = "http-rules";
     rules.forEach((rule) => {
       const item = document.createElement("li");
       item.dataset.ruleRef = rule.ref || "";
-      const domain = String(rule.domain || "").trim();
-      const openURL = publicURLFromRule(rule);
+      item.dataset.enabled = rule.enabled === false ? "false" : "true";
+      const mark = document.createElement("span");
+      mark.className = "http-rule-mark";
+      mark.append(iconNode(rule.enabled === false ? "close" : "globe"));
       const main = document.createElement("div");
       main.className = "http-rule-main";
+      const identity = document.createElement("div");
+      identity.className = "http-rule-identity";
       const label = document.createElement("strong");
-      label.textContent = domain || "未命名入口";
-      main.append(label, chip(rule.enabled === false ? "已停用" : "已启用"));
+      label.textContent = rule.domain || "未命名入口";
+      identity.append(label);
+      main.append(identity);
+      const tools = document.createElement("div");
+      tools.className = "http-rule-tools";
+      tools.append(chip(rule.enabled === false ? "已停用" : "已启用"));
       const backendPort = backendPortFromRule(rule);
-      if (backendPort) main.append(chip(`发布端口 ${backendPort}`));
+      if (backendPort) tools.append(chip(`发布端口 ${backendPort}`));
+      main.append(tools);
       const target = document.createElement("p");
       target.className = "http-rule-target";
-      target.textContent = openURL ? `访问目标：${openURL}` : "已停用，不提供访问链接";
+      target.textContent = publicURLFromRule(rule) ? `访问目标：${publicURLFromRule(rule)}` : "已停用，不提供访问链接";
       main.append(target);
-      if (openURL) {
+      if (publicURLFromRule(rule)) {
         const link = document.createElement("a");
         link.className = "http-rule-open";
-        link.href = openURL;
+        link.href = publicURLFromRule(rule);
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.textContent = "访问";
         main.append(link);
       }
-      item.append(main);
+      item.append(mark, main);
       if (rule.ref) {
         const deleteRule = actionButton({id:"delete-http"}, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
-        deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:domain || rule.ref}));
+        deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:rule.domain || rule.ref}));
         item.append(deleteRule);
       }
       ruleList.append(item);
@@ -2876,15 +3005,23 @@ const renderHTTP = (app) => {
   } else if (!app.rules_error) {
     const empty = document.createElement("p");
     empty.className = "http-empty";
-    empty.textContent = "还没有 HTTP 入口。";
+    empty.append(iconNode("globe"));
+    empty.append(document.createTextNode("还没有 HTTP 入口。配置域名后可从外网访问这个应用。"));
     httpPanel.append(empty);
   }
+
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
-    const title = document.createElement("p");
-    title.className = "http-form-title";
-    title.textContent = "添加入口";
+    const copy = document.createElement("div");
+    copy.className = "http-form-copy";
+    const formTitle = document.createElement("p");
+    formTitle.className = "http-form-title";
+    formTitle.textContent = "添加入口";
+    const formHint = document.createElement("p");
+    formHint.className = "hint";
+    formHint.textContent = "把域名绑定到一个已发布端口。保存后会创建宿主 HTTP 规则。";
+    copy.append(formTitle, formHint);
     const portLabel = document.createElement("label");
     portLabel.append("发布端口");
     const portSelect = document.createElement("select");
@@ -2905,7 +3042,11 @@ const renderHTTP = (app) => {
     domainLabel.append(domain);
     const submit = document.createElement("button");
     submit.type = "submit"; submit.className = "ui-btn ui-btn--sm"; submit.textContent = "添加入口";
-    form.append(title,portLabel,domainLabel,submit);
+    submit.prepend(iconNode("plus"));
+    const fields = document.createElement("div");
+    fields.className = "http-form-fields";
+    fields.append(portLabel, domainLabel, submit);
+    form.append(copy, fields);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!domain.value.trim()) { domain.focus(); return; }
@@ -3096,6 +3237,12 @@ const paintDetail = (app, composeRevision) => {
   detailApp = app;
   selectedAppID = app.id;
   if (detailTitle) detailTitle.textContent = app.name || app.id;
+  const detailMark = document.querySelector("#detail-mark");
+  if (detailMark) {
+    const mark = appMark(app.name || app.id);
+    detailMark.textContent = mark.letters;
+    detailMark.dataset.tone = mark.tone;
+  }
   document.querySelector("#detail-context").textContent = `节点：${agentDisplayName(selectedAgent())} · 应用：${app.id}`;
   if (detailStatus) {
     const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
@@ -3370,8 +3517,31 @@ const applyInventoryFilter = () => {
   const updates = rows.filter((row) => row.dataset.updateAvailable === "true").length;
   document.querySelector("#inventory-summary").textContent = query || filter !== "all" ? `${visible} / ${rows.length} 个应用` : updates ? `${updates} 个应用可更新` : `${rows.length} 个应用`;
 };
-document.querySelector("#app-search")?.addEventListener("input", applyInventoryFilter);
+const searchInput = document.querySelector("#app-search");
+const searchClear = document.querySelector("#app-search-clear");
+const syncSearchClear = () => {
+  if (searchClear) searchClear.hidden = !(searchInput && searchInput.value);
+};
+searchInput?.addEventListener("input", () => { syncSearchClear(); applyInventoryFilter(); });
+searchClear?.addEventListener("click", () => {
+  if (!searchInput) return;
+  searchInput.value = "";
+  syncSearchClear();
+  applyInventoryFilter();
+  searchInput.focus();
+});
 document.querySelector("#app-filter")?.addEventListener("change", applyInventoryFilter);
+document.querySelector("#empty-deploy")?.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+  const target = event.target;
+  const editable = target instanceof HTMLElement
+    && (target.matches("input, textarea, select") || target.isContentEditable);
+  if (editable || view !== "list" || !searchInput?.getClientRects().length) return;
+  event.preventDefault();
+  searchInput.focus();
+  searchInput.select();
+});
 
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
@@ -3407,7 +3577,10 @@ const renderInventoryChips = (apps) => {
     chip.dataset.tone = tone;
     const count = document.createElement("b");
     count.textContent = String(value);
-    chip.append(count, document.createTextNode(label));
+    const copy = document.createElement("span");
+    copy.className = "inventory-chip__label";
+    copy.textContent = label;
+    chip.append(count, copy);
     return chip;
   }));
   inventoryChipsNode.hidden = false;

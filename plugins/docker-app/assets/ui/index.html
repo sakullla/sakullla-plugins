@@ -3,58 +3,184 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Docker 应用</title>
   <script src="ui-kit.js"></script>
   <link rel="stylesheet" href="ui-kit.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="ui-page ui-page--wide">
+  <svg class="ui-sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-container" viewBox="0 0 24 24">
+      <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/>
+      <path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>
+      <path d="M8 9.5v3.2M12 11.6v3.2M16 9.5v3.2"/>
+    </symbol>
+    <symbol id="i-server" viewBox="0 0 24 24">
+      <rect x="3.5" y="4" width="17" height="6.5" rx="2"/>
+      <rect x="3.5" y="13.5" width="17" height="6.5" rx="2"/>
+      <path d="M7 7.25h.01M7 16.75h.01M11 7.25h6M11 16.75h6"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <path d="M20 11.5a8 8 0 1 1-2.4-5.6"/>
+      <path d="M20 3.8v5.4h-5.4"/>
+    </symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24">
+      <path d="M4 7h16M9.5 11v6.5M14.5 11v6.5"/>
+      <path d="M6.2 7 7 20.2h10L17.8 7M9 7V4.5h6V7"/>
+    </symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24">
+      <path d="M12 4.5v15M4.5 12h15"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24">
+      <circle cx="10.8" cy="10.8" r="6.3"/>
+      <path d="m20 20-4.6-4.6"/>
+    </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24">
+      <path d="m12 3 8.5 4.7L12 12.4 3.5 7.7z"/>
+      <path d="m3.5 12.6 8.5 4.7 8.5-4.7M3.5 17.2l8.5 4.7 8.5-4.7"/>
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24">
+      <path d="M6 3.5h7.6L18 7.9v12.6H6z"/>
+      <path d="M13.6 3.5v4.4H18M9 12h6M9 15.5h6"/>
+    </symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24">
+      <rect x="3" y="4.5" width="18" height="15" rx="2.5"/>
+      <path d="m7 9.5 3 3-3 3M13 15.5h4"/>
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5"/>
+      <path d="M3.5 12h17M12 3.5a14 14 0 0 1 0 17M12 3.5a14 14 0 0 0 0 17"/>
+    </symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24">
+      <path d="M20 12H4M11 5l-7 7 7 7"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="11" height="11.5" rx="2"/>
+      <path d="M5 15.5V5.5A1.5 1.5 0 0 1 6.5 4H16"/>
+    </symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24">
+      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4.6l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v9.8A1.5 1.5 0 0 1 19 20H5a1.5 1.5 0 0 1-1.5-1.5z"/>
+    </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24">
+      <path d="M12 3.5 2.5 20.5h19z"/>
+      <path d="M12 9.5v5M12 17.5h.01"/>
+    </symbol>
+    <symbol id="i-image" viewBox="0 0 24 24">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2"/>
+      <circle cx="8.5" cy="9.5" r="1.6"/>
+      <path d="m20.5 15-4.7-4.7L5 20"/>
+    </symbol>
+    <symbol id="i-database" viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/>
+      <path d="M4.5 5.5v6c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-6"/>
+      <path d="M4.5 11.5v6c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-6"/>
+    </symbol>
+    <symbol id="i-close" viewBox="0 0 24 24">
+      <path d="M6 6l12 12M18 6 6 18"/>
+    </symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24">
+      <path d="M12 16V4.5M7 9.5l5-5 5 5"/>
+      <path d="M4 16v3a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-3"/>
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M12 4.5V16M7 11l5 5 5-5"/>
+      <path d="M4 16v3a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-3"/>
+    </symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24">
+      <path d="M2.5 12h4l2.2-6.5L13 18.5l2.3-6.5h6.2"/>
+    </symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24">
+      <path d="m14.5 5.5 4 4M4.5 19.5l1-4.5L16 4.5a2.1 2.1 0 0 1 3 0l.5.5a2.1 2.1 0 0 1 0 3L9 18.5z"/>
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24">
+      <path d="M12 3 4.5 6v5.5c0 4.3 3 8 7.5 9.5 4.5-1.5 7.5-5.2 7.5-9.5V6z"/>
+      <path d="m8.8 12 2.3 2.3 4.4-4.6"/>
+    </symbol>
+  </svg>
+
+  <div class="page-aura" aria-hidden="true"></div>
+
+  <main class="ui-page ui-page--wide deck">
     <header class="page-head ui-page-head">
-      <div class="ui-page-head__copy page-head-copy">
-        <p class="ui-eyebrow console-eyebrow"><span aria-hidden="true">✦</span> SAKULLLA / APP CONSOLE</p>
-        <h1 class="ui-title">Docker 应用</h1>
-        <p class="ui-lede">部署、启动和照看节点上的 Compose 应用；入口、文件与日志都收在详情里。</p>
+      <div class="page-head-copy deck-head__copy">
+        <div class="deck-brand">
+          <span class="deck-brand__mark" aria-hidden="true">
+            <svg class="ui-icon ui-icon--lg"><use href="#i-container"></use></svg>
+          </span>
+          <div class="deck-brand__text">
+            <p class="ui-eyebrow console-eyebrow"><span class="deck-live-dot" aria-hidden="true"></span> CONTAINER DECK</p>
+            <h1 class="ui-title">Docker 应用</h1>
+          </div>
+        </div>
+        <p class="ui-lede">在节点上部署并照看 Compose 应用。镜像、入口、文件与日志，都收在这一页。</p>
         <p class="sr-only">有发布端口时可管理入口域名。引擎状态与应用镜像版本分开显示。</p>
       </div>
       <div class="ui-page-actions page-head-agent">
         <div class="node-card">
+          <div class="node-card__head">
+            <span class="node-card__label"><svg class="ui-icon" aria-hidden="true"><use href="#i-server"></use></svg>目标节点</span>
+            <p id="engine-status" class="engine-status" hidden></p>
+          </div>
           <div class="node-strip">
-            <label class="agent-field"><span class="agent-field-label">节点</span>
+            <label class="agent-field">
+              <span class="ui-sr-only">节点</span>
               <input type="hidden" id="agent-select" name="agent_id" value="" autocomplete="off">
               <div class="agent-search-select" data-agent-picker="workspace"></div>
             </label>
-            <button id="workspace-refresh" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">刷新节点状态</button>
+            <button id="workspace-refresh" class="ui-btn ui-btn--secondary ui-btn--sm node-refresh" type="button" title="刷新节点状态" aria-label="刷新节点状态">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+              <span class="node-refresh__label">刷新</span>
+            </button>
           </div>
-          <p id="engine-status" class="engine-status" hidden></p>
         </div>
       </div>
     </header>
-    <p id="app-loading" class="ui-loading" role="status" aria-live="polite">
-      <span class="ui-spinner" aria-hidden="true"></span>
-      <span>正在加载应用…</span>
-    </p>
+
+    <div id="app-loading" class="ui-loading deck-loading" role="status" aria-live="polite">
+      <div class="deck-loading__status"><span class="ui-spinner" aria-hidden="true"></span><span>正在连接节点并读取应用…</span></div>
+      <div class="deck-loading__skeleton" aria-hidden="true">
+        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
+        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
+        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
+      </div>
+    </div>
+
     <section id="app-unavailable" class="ui-empty state-panel" role="status" hidden>
-      <h2 class="ui-empty__title">暂时无法管理 Docker 应用。</h2>
+      <span class="ui-empty__icon" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-alert"></use></svg></span>
+      <h2 class="ui-empty__title">暂时无法管理 Docker 应用</h2>
       <p class="ui-empty__desc">请稍后刷新；如果持续失败，请检查宿主连接。</p>
     </section>
-    <section id="app-denied" class="ui-denied state-panel" role="alert" hidden>
-      <h2 class="ui-empty__title">无权管理 Docker 应用。</h2>
+    <section id="app-denied" class="ui-empty ui-denied state-panel" role="alert" hidden>
+      <span class="ui-empty__icon" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-shield"></use></svg></span>
+      <h2 class="ui-empty__title">无权管理 Docker 应用</h2>
       <p class="ui-denied__desc">请使用具备该节点管理权限的账号后重试。</p>
     </section>
+
     <p id="app-status" class="app-status" role="status" aria-live="polite" hidden></p>
+
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel ui-empty" id="app-detection-failed" hidden>
-        <h2 class="ui-empty__title">无法检测节点状态</h2>
-        <p class="ui-empty__desc">本次检测未完成，无法确认 Docker 状态。请重试或检查节点上的插件状态。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-alert"></use></svg></span>
+          <div>
+            <h2>无法检测节点状态</h2>
+            <p>本次检测未完成，无法确认 Docker 状态。请重试或检查节点上的插件状态。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel ui-empty" id="app-node-denied" hidden>
-        <h2 class="ui-empty__title">无权管理该节点</h2>
-        <p class="ui-empty__desc">请使用具备该节点管理权限的账号后重试。</p>
+        <div class="setup-hero">
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-shield"></use></svg></span>
+          <div>
+            <h2>无权管理该节点</h2>
+            <p>请使用具备该节点管理权限的账号后重试。</p>
+          </div>
+        </div>
       </section>
       <section class="state-panel ui-empty" id="app-undeployed" hidden>
         <div class="setup-hero">
-          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <span class="setup-mark" data-kind="node" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-server"></use></svg></span>
           <div>
             <h2>还没有可操作的节点</h2>
             <p>请先到插件详情页部署执行面，再回到本页部署或改动 Compose。</p>
@@ -63,7 +189,7 @@
       </section>
       <section class="state-panel ui-empty" id="app-node-empty" hidden>
         <div class="setup-hero">
-          <span class="setup-mark" data-kind="node" aria-hidden="true"></span>
+          <span class="setup-mark" data-kind="node" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-server"></use></svg></span>
           <div>
             <h2>未选择节点</h2>
             <p>请先选择一台在线节点，再照看这台上的应用。</p>
@@ -72,7 +198,7 @@
       </section>
       <section class="state-panel ui-empty" id="app-offline" hidden>
         <div class="setup-hero">
-          <span class="setup-mark" data-kind="offline" aria-hidden="true"></span>
+          <span class="setup-mark" data-kind="offline" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-pulse"></use></svg></span>
           <div>
             <h2>节点离线</h2>
             <p>该节点离线，不能部署或改动 compose 应用。</p>
@@ -81,7 +207,7 @@
       </section>
       <section class="state-panel ui-empty" id="app-execution-unavailable" hidden>
         <div class="setup-hero">
-          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"></span>
+          <span class="setup-mark" data-kind="unavailable" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-alert"></use></svg></span>
           <div>
             <h2>该节点暂时无法执行应用</h2>
             <p>该节点在线，但暂时不能执行应用操作。请刷新节点状态，或检查该节点上的 docker-app 插件状态。</p>
@@ -89,10 +215,12 @@
         </div>
       </section>
     </section>
+
     <section class="ui-card engine-guide" id="engine-guide" aria-labelledby="engine-guide-title" hidden>
-      <div class="setup-hero">
-        <span class="setup-mark" aria-hidden="true"></span>
+      <div class="engine-guide__head">
+        <span class="engine-guide__mark" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-container"></use></svg></span>
         <div>
+          <p class="section-kicker">NODE SETUP</p>
           <h2 id="engine-guide-title">该节点还没有 Docker</h2>
           <p>在节点本机执行官方安装命令。面板不会代为安装。装好后刷新本页再部署。</p>
         </div>
@@ -104,7 +232,9 @@
             <strong>复制命令，在节点 SSH 里执行</strong>
             <div class="engine-command">
               <pre id="engine-install-script">curl -fsSL https://get.docker.com | sh</pre>
-              <button id="copy-install-script" class="ui-btn" type="button">复制命令</button>
+              <button id="copy-install-script" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">
+                <svg class="ui-icon" aria-hidden="true"><use href="#i-copy"></use></svg>复制命令
+              </button>
             </div>
           </div>
         </li>
@@ -115,30 +245,46 @@
             <p>已配置镜像加速，把下面内容写入 /etc/docker/daemon.json：</p>
             <div class="engine-command">
               <pre id="engine-daemon-json"></pre>
-              <button id="copy-daemon-json" class="ui-btn ui-btn--secondary" type="button">复制 daemon.json</button>
+              <button id="copy-daemon-json" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">
+                <svg class="ui-icon" aria-hidden="true"><use href="#i-copy"></use></svg>复制 daemon.json
+              </button>
             </div>
           </div>
         </li>
       </ol>
     </section>
+
     <section id="app-workspace" class="workspace-region" hidden>
       <div class="workspace-head">
         <div class="workspace-head-copy">
-          <h2 id="app-list-title">应用</h2>
-          <p id="app-count" class="count" hidden></p>
+          <p class="section-kicker"><span class="workspace-pulse" aria-hidden="true"></span>FLEET OVERVIEW</p>
+          <div class="workspace-title-line">
+            <h2 id="app-list-title">应用</h2>
+            <p id="app-count" class="count" hidden></p>
+          </div>
         </div>
         <div class="workspace-head-actions">
-          <button id="disk-cleanup" class="ui-btn ui-btn--secondary" type="button">清理磁盘</button>
-          <button id="deploy-toggle" class="ui-btn" type="button">部署应用</button>
+          <button id="disk-cleanup" class="ui-btn ui-btn--secondary" type="button">
+            <svg class="ui-icon" aria-hidden="true"><use href="#i-trash"></use></svg>清理磁盘
+          </button>
+          <button id="deploy-toggle" class="ui-btn" type="button">
+            <svg class="ui-icon" aria-hidden="true"><use href="#i-plus"></use></svg>部署应用
+          </button>
         </div>
       </div>
+
       <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
+
       <section class="ui-card panel" id="app-list-panel" aria-labelledby="app-list-title">
         <div class="ui-toolbar inventory-toolbar">
-          <label class="inventory-search ui-toolbar__grow">
-            <span class="ui-sr-only">搜索应用、服务或镜像</span>
+          <div class="inventory-search ui-toolbar__grow">
+            <span class="inventory-search__icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-search"></use></svg></span>
             <input class="ui-input" id="app-search" type="search" placeholder="搜索应用、服务或镜像" aria-label="搜索应用、服务或镜像" autocomplete="off">
-          </label>
+            <kbd class="inventory-search__kbd" aria-hidden="true">/</kbd>
+            <button id="app-search-clear" class="inventory-search__clear" type="button" aria-label="清空搜索" hidden>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-close"></use></svg>
+            </button>
+          </div>
           <label class="inventory-filter">
             <span class="ui-sr-only">应用状态</span>
             <select class="ui-select" id="app-filter" aria-label="应用状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="updates">有更新</option><option value="stopped">已停止</option></select>
@@ -147,18 +293,29 @@
         </div>
         <div id="app-list" class="app-list" data-card-wall="apps"></div>
         <p id="app-no-results" class="inventory-no-results" role="status" hidden>没有匹配的应用，试试其他名称或状态。</p>
-        <div id="app-empty" class="ui-empty" hidden>
+        <div id="app-empty" class="ui-empty app-empty" hidden>
+          <span class="ui-empty__icon" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-container"></use></svg></span>
           <h2 class="ui-empty__title">还没有应用</h2>
-          <p class="ui-empty__desc">点「部署应用」开始。</p>
+          <p class="ui-empty__desc">写一份 Compose，把这台节点变成你的应用底座。</p>
+          <div class="ui-empty__actions"><button id="empty-deploy" class="ui-btn" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#i-plus"></use></svg>部署第一个应用</button></div>
         </div>
       </section>
-      <section class="ui-card panel" id="app-detail" aria-labelledby="detail-title" hidden>
+
+      <section id="app-detail" class="ui-card panel" aria-labelledby="detail-title" hidden>
         <header class="detail-head">
           <div class="detail-head-bar">
-            <button id="detail-back" class="ui-btn ui-btn--ghost back-link" type="button">返回列表</button>
+            <button id="detail-back" class="ui-btn ui-btn--ghost back-link" type="button">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg>返回列表
+            </button>
             <div class="detail-title-row">
-              <h2 id="detail-title" class="ui-title" tabindex="-1">应用详情</h2>
-              <p id="detail-status" class="app-card-status ui-badge" data-detail-status></p>
+              <span id="detail-mark" class="detail-mark" aria-hidden="true"></span>
+              <div class="detail-title-copy">
+                <div class="detail-title-line">
+                  <h2 id="detail-title" class="ui-title" tabindex="-1">应用详情</h2>
+                  <p id="detail-status" class="app-card-status ui-badge" data-detail-status></p>
+                </div>
+                <p id="detail-context" class="detail-context"></p>
+              </div>
             </div>
             <div class="detail-head-actions">
               <a id="detail-open" class="ui-btn" data-action="open" hidden target="_blank" rel="noopener noreferrer">打开</a>
@@ -168,35 +325,48 @@
             </div>
           </div>
           <div class="detail-head-copy">
-            <p id="detail-context" class="ui-text-secondary"></p>
             <a id="detail-domain" class="detail-domain http-rule-open" hidden target="_blank" rel="noopener noreferrer"></a>
           </div>
         </header>
         <nav id="detail-nav" class="ui-tabs detail-nav" role="tablist" data-ui-tabs aria-label="应用分区">
-          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="overview" aria-selected="true">概览</button>
-          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="compose" aria-selected="false">Compose</button>
-          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="files" aria-selected="false">文件</button>
-          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="logs" aria-selected="false">日志</button>
-          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="http" aria-selected="false">HTTP 入口</button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="overview" aria-selected="true"><svg class="ui-icon" aria-hidden="true"><use href="#i-layers"></use></svg><span>概览</span></button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="compose" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg><span>Compose</span></button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="files" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件</span></button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="logs" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-terminal"></use></svg><span>日志</span></button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="http" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-globe"></use></svg><span>HTTP 入口</span></button>
         </nav>
+
         <section id="detail-overview" class="detail-section" data-section-panel="overview" role="tabpanel"></section>
+
         <section id="detail-compose" class="detail-section" data-section-panel="compose" role="tabpanel" hidden>
-          <p class="editor-context">修改当前应用的部署配置，保存后重新部署。留空 .env 会复用节点上的已有文件。</p>
-          <p id="compose-dirty" class="draft-marker" hidden>有未保存的输入</p>
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">DEPLOYMENT SOURCE</p>
+              <h3>Compose 配置</h3>
+            </div>
+            <p class="editor-context">修改后会重新部署当前应用。留空 .env 会复用节点上的已有文件。</p>
+          </div>
+          <p id="compose-dirty" class="draft-marker" hidden><span aria-hidden="true"></span>有未保存的输入</p>
           <form id="compose-form" method="post" aria-describedby="compose-feedback">
             <p id="compose-feedback" class="form-feedback" data-form-feedback role="alert" hidden></p>
-            <label class="code-field">Compose YAML
-              <span class="code-editor" data-lang="yaml">
-                <pre class="code-editor__highlight" aria-hidden="true"></pre>
-                <textarea name="compose" class="code-editor__input" required spellcheck="false"></textarea>
-              </span>
-            </label>
-            <label class="code-field">Compose .env（可选）
-              <span class="code-editor" data-lang="env">
-                <pre class="code-editor__highlight" aria-hidden="true"></pre>
-                <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="留空表示复用已有文件"></textarea>
-              </span>
-            </label>
+            <div class="editor-card">
+              <div class="editor-card__bar" aria-hidden="true"><span class="editor-card__dot"></span><span class="editor-card__name">compose.yaml</span><span class="editor-card__hint">Ctrl / ⌘ + S 保存</span></div>
+              <label class="code-field code-field--flush">Compose YAML
+                <span class="code-editor" data-lang="yaml">
+                  <pre class="code-editor__highlight" aria-hidden="true"></pre>
+                  <textarea name="compose" class="code-editor__input" required spellcheck="false"></textarea>
+                </span>
+              </label>
+            </div>
+            <div class="editor-card editor-card--env">
+              <div class="editor-card__bar" aria-hidden="true"><span class="editor-card__dot"></span><span class="editor-card__name">.env</span><span class="editor-card__hint">可选</span></div>
+              <label class="code-field code-field--flush">Compose .env
+                <span class="code-editor" data-lang="env">
+                  <pre class="code-editor__highlight" aria-hidden="true"></pre>
+                  <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="留空表示复用已有文件"></textarea>
+                </span>
+              </label>
+            </div>
             <p class="hint">.env 会保存在应用配置和目标 Agent，并在编辑时回显；已有应用留空保存会复用当前值。</p>
             <div class="form-footer">
               <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
@@ -204,10 +374,23 @@
             </div>
           </form>
         </section>
+
         <section id="detail-files" class="detail-section" data-section-panel="files" role="tabpanel" hidden></section>
+
         <section id="detail-logs" class="detail-section" data-section-panel="logs" role="tabpanel" hidden>
-          <p id="logs-context" class="resource-context"></p>
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">RUNTIME OUTPUT</p>
+              <h3>服务日志</h3>
+            </div>
+            <p id="logs-context" class="resource-context"></p>
+          </div>
           <div class="logs-panel">
+            <div class="logs-chrome" aria-hidden="true">
+              <span class="logs-chrome__dots"><i></i><i></i><i></i></span>
+              <span class="logs-chrome__title">container logs</span>
+              <span class="logs-chrome__live"><i></i>LIVE</span>
+            </div>
             <div class="logs-toolbar">
               <label>服务 <select id="logs-service" class="ui-select" name="service"></select></label>
               <button id="logs-refresh" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">刷新快照</button>
@@ -215,12 +398,19 @@
               <p id="logs-status" class="hint">自动刷新</p>
             </div>
             <p id="logs-empty" class="logs-empty" hidden>当前服务的快照没有日志。</p>
-            <pre id="logs-view" class="logs-terminal"></pre>
+            <div class="logs-terminal-shell"><pre id="logs-view" class="logs-terminal"></pre></div>
           </div>
         </section>
+
         <section id="detail-http" class="detail-section" data-section-panel="http" role="tabpanel" hidden></section>
       </section>
     </section>
+
+    <footer class="deck-footer" aria-hidden="true">
+      <span><svg class="ui-icon" aria-hidden="true"><use href="#i-container"></use></svg>Compose 由目标节点 Agent 执行</span>
+      <span>SAKULLLA / APP CONSOLE</span>
+    </footer>
+
     <template id="app-card-template">
       <article class="ui-card app-card" tabindex="0">
         <div class="app-card-head">
@@ -234,38 +424,60 @@
             </div>
             <p class="app-card-ports" data-app-ports></p>
           </div>
-          <div class="app-card-actions">
-            <button type="button" class="ui-btn ui-btn--sm" data-action="open" hidden>打开</button>
-            <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-action="update" hidden>更新</button>
-            <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
-          </div>
         </div>
         <div class="app-card-meta" data-app-image></div>
         <p class="app-card-url" data-app-url hidden></p>
+        <div class="app-card-actions">
+          <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" data-action="open" hidden>打开</button>
+          <button type="button" class="ui-btn ui-btn--sm" data-action="update" hidden>更新</button>
+          <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
+        </div>
       </article>
     </template>
+
     <template id="app-files-template">
       <section class="app-section app-files" id="app-files">
-        <h4>文件</h4>
-        <p class="hint">应用工作区内的相对路径；文本文件最大 1MiB，上传仅支持 UTF-8 文本。</p>
+        <div class="section-head files-head">
+          <div>
+            <p class="section-kicker">WORKSPACE</p>
+            <h3>应用工作区</h3>
+          </div>
+          <p class="hint">相对路径；文本文件最大 1MiB，上传仅支持 UTF-8 文本。</p>
+        </div>
         <p id="files-status" class="resource-feedback" role="status" hidden></p>
         <div id="files-browser" class="files-browser">
           <nav class="files-path" aria-label="工作区路径">
-            <button id="files-up" type="button" class="ui-btn ui-btn--ghost ui-btn--sm" hidden>上一级</button>
+            <button id="files-up" type="button" class="ui-btn ui-btn--ghost ui-btn--icon" aria-label="上一级目录" hidden>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg>
+            </button>
             <div id="files-breadcrumb" class="files-breadcrumb"></div>
-            <button id="files-refresh" class="ui-btn ui-btn--ghost ui-btn--sm" type="button">刷新目录</button>
+            <button id="files-refresh" class="ui-btn ui-btn--ghost ui-btn--sm" type="button">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>刷新
+            </button>
           </nav>
           <div class="files-toolbar">
-            <button id="files-mkdir" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">新建目录</button>
-            <button id="files-new-text" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">新建文本文件</button>
-            <button id="files-upload" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">上传</button>
+            <button id="files-mkdir" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-folder"></use></svg>新建目录
+            </button>
+            <button id="files-new-text" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg>新建文件
+            </button>
+            <button id="files-upload" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-upload"></use></svg>上传
+            </button>
             <input data-files-input type="file" class="ui-sr-only" tabindex="-1" aria-hidden="true">
           </div>
           <div id="files-selection" class="files-selection">
             <p id="files-selected" class="hint">请选择一个文件或目录后再编辑、下载或删除。</p>
-            <button id="files-edit" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled>编辑</button>
-            <button id="files-download" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled>下载</button>
-            <button id="files-delete" type="button" class="ui-btn ui-btn--danger-soft ui-btn--sm" disabled>删除</button>
+            <button id="files-edit" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-edit"></use></svg>编辑
+            </button>
+            <button id="files-download" type="button" class="ui-btn ui-btn--secondary ui-btn--sm" disabled>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-download"></use></svg>下载
+            </button>
+            <button id="files-delete" type="button" class="ui-btn ui-btn--danger-soft ui-btn--sm" disabled>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-trash"></use></svg>删除
+            </button>
           </div>
           <ul id="files-list" class="files-list"></ul>
           <p class="hint files-empty" hidden>这个目录还没有相对路径文件。</p>
@@ -273,7 +485,10 @@
         <dialog id="files-mkdir-dialog" class="ui-dialog files-dialog" aria-labelledby="files-mkdir-title">
           <form id="files-mkdir-form" class="files-dialog-form">
             <div class="ui-dialog__head">
-              <h3 id="files-mkdir-title" class="ui-dialog__title">新建目录</h3>
+              <div>
+                <p class="section-kicker">NEW FOLDER</p>
+                <h3 id="files-mkdir-title" class="ui-dialog__title">新建目录</h3>
+              </div>
             </div>
             <p data-dialog-feedback class="resource-feedback" role="alert" hidden></p>
             <p class="files-dialog-copy">在当前路径下创建一个目录。</p>
@@ -289,7 +504,10 @@
         <dialog id="files-new-dialog" class="ui-dialog files-dialog" aria-labelledby="files-new-title">
           <form id="files-new-form" class="files-dialog-form">
             <div class="ui-dialog__head">
-              <h3 id="files-new-title" class="ui-dialog__title">新建文本文件</h3>
+              <div>
+                <p class="section-kicker">NEW FILE</p>
+                <h3 id="files-new-title" class="ui-dialog__title">新建文本文件</h3>
+              </div>
             </div>
             <p data-dialog-feedback class="resource-feedback" role="alert" hidden></p>
             <p class="files-dialog-copy">在当前路径新建文本文件，保存后写入工作区。</p>
@@ -304,6 +522,7 @@
         </dialog>
         <div id="files-editor" class="files-editor" hidden>
           <div class="files-editor-head">
+            <svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg>
             <strong id="files-editor-name"></strong>
             <span id="files-dirty" class="files-dirty" hidden>未保存</span>
             <button id="files-editor-close" type="button" class="ui-btn ui-btn--secondary ui-btn--sm">关闭</button>
@@ -325,23 +544,26 @@
 
   <dialog id="app-create" class="ui-dialog ui-dialog--drawer" aria-labelledby="app-create-title" hidden>
     <form id="create-form" method="post" aria-describedby="create-feedback">
-      <div class="ui-dialog__head">
-        <div>
+      <div class="ui-dialog__head create-head">
+        <div class="create-head__copy">
+          <p class="section-kicker">NEW APPLICATION</p>
           <h2 id="app-create-title" class="ui-dialog__title">部署应用</h2>
           <p id="create-context" class="ui-dialog__desc editor-context"></p>
         </div>
-        <button id="create-back" class="ui-btn ui-btn--ghost" type="button">返回</button>
+        <button id="create-back" class="ui-btn ui-btn--ghost ui-btn--icon" type="button" aria-label="返回应用列表">
+          <svg class="ui-icon" aria-hidden="true"><use href="#i-close"></use></svg>
+        </button>
       </div>
-      <div class="ui-dialog__body">
-        <p id="create-dirty" class="draft-marker" hidden>有未保存的输入</p>
+      <div class="ui-dialog__body create-body">
+        <p id="create-dirty" class="draft-marker" hidden><span aria-hidden="true"></span>有未保存的输入</p>
         <p id="create-feedback" class="form-feedback" data-form-feedback role="alert" hidden></p>
         <label class="ui-field">应用 ID
           <input class="ui-input" name="id" required autocomplete="off" spellcheck="false" placeholder="media" pattern="^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$">
         </label>
         <div class="create-templates" id="create-templates">
           <div class="create-templates-head">
-            <span class="create-templates-label">起步模板</span>
-            <p class="hint">常用模板会填入 YAML，仍可再改。</p>
+            <span class="create-templates-label">选择起步模板</span>
+            <p class="hint">模板只填入 YAML，之后仍可修改。</p>
           </div>
           <div class="create-template-list" role="group" aria-label="起步模板">
             <button type="button" class="template-card" data-template="site" aria-pressed="false">
@@ -382,22 +604,28 @@
             </button>
           </div>
         </div>
-        <label class="code-field">Compose YAML
-          <span class="code-editor" data-lang="yaml">
-            <pre class="code-editor__highlight" aria-hidden="true"></pre>
-            <textarea name="compose" class="code-editor__input" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea>
-          </span>
-        </label>
-        <label class="code-field">Compose .env（可选）
-          <span class="code-editor" data-lang="env">
-            <pre class="code-editor__highlight" aria-hidden="true"></pre>
-            <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="可选：VARIABLE=value"></textarea>
-          </span>
-        </label>
+        <div class="editor-card">
+          <div class="editor-card__bar" aria-hidden="true"><span class="editor-card__dot"></span><span class="editor-card__name">compose.yaml</span><span class="editor-card__hint">YAML</span></div>
+          <label class="code-field code-field--flush">Compose YAML
+            <span class="code-editor" data-lang="yaml">
+              <pre class="code-editor__highlight" aria-hidden="true"></pre>
+              <textarea name="compose" class="code-editor__input" required spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:1.27&#10;    ports:&#10;      - &quot;8080:80&quot;"></textarea>
+            </span>
+          </label>
+        </div>
+        <div class="editor-card editor-card--env">
+          <div class="editor-card__bar" aria-hidden="true"><span class="editor-card__dot"></span><span class="editor-card__name">.env</span><span class="editor-card__hint">可选</span></div>
+          <label class="code-field code-field--flush">Compose .env
+            <span class="code-editor" data-lang="env">
+              <pre class="code-editor__highlight" aria-hidden="true"></pre>
+              <textarea name="env" class="code-editor__input" spellcheck="false" autocomplete="off" placeholder="可选：VARIABLE=value"></textarea>
+            </span>
+          </label>
+        </div>
         <p class="hint">.env 会保存在应用配置和目标 Agent，并在编辑时回显；已有应用留空保存会复用当前值。</p>
         <p class="hint hint-footnote">相对路径映射到应用工作目录。未点更新不会换镜像。</p>
       </div>
-      <div class="ui-dialog__footer">
+      <div class="ui-dialog__footer create-footer">
         <label class="inline-check"><input name="auto_update" type="checkbox"> 自动更新（默认关闭）</label>
         <button type="button" class="ui-btn ui-btn--secondary" id="create-cancel">取消</button>
         <button type="submit" class="ui-btn" id="create-submit">部署</button>
@@ -408,7 +636,7 @@
   <aside id="companion-assistant" class="companion-assistant" data-minimized="true" aria-label="看板娘快捷帮助">
     <p id="companion-message" class="companion-message" role="status" hidden></p>
     <section id="companion-panel" class="ui-card companion-panel" aria-labelledby="companion-title" hidden>
-      <div class="companion-panel-head"><strong id="companion-title">应用小助手</strong><button id="companion-close" class="ui-btn ui-btn--ghost ui-btn--icon" type="button" aria-label="关闭快捷帮助">×</button></div>
+      <div class="companion-panel-head"><strong id="companion-title">应用小助手</strong><button id="companion-close" class="ui-btn ui-btn--ghost ui-btn--icon" type="button" aria-label="关闭快捷帮助"><svg class="ui-icon" aria-hidden="true"><use href="#i-close"></use></svg></button></div>
       <p id="companion-copy">应用的日常管理，交给这里就好。</p>
       <div class="companion-shortcuts">
         <button type="button" data-companion-action="deploy" class="ui-btn ui-btn--secondary ui-btn--sm">部署应用</button>
@@ -427,10 +655,11 @@
     </button>
   </aside>
 
-  <dialog id="update-dialog" class="ui-dialog files-dialog update-dialog" aria-labelledby="update-title">
+  <dialog id="update-dialog" class="ui-dialog update-dialog" aria-labelledby="update-title">
     <form method="dialog" id="update-form" class="files-dialog-form">
       <div class="ui-dialog__head">
         <div>
+          <p class="section-kicker">IMAGE POLICY</p>
           <h3 id="update-title" class="ui-dialog__title">服务版本与策略</h3>
           <p id="update-copy" class="ui-dialog__desc files-dialog-copy">按服务选择要写入 compose 的目标版本。取消不会改 compose 或运行镜像。</p>
         </div>
@@ -444,10 +673,15 @@
       </div>
     </form>
   </dialog>
-  <dialog id="confirm-dialog" class="ui-dialog files-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+
+  <dialog id="confirm-dialog" class="ui-dialog confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog" class="files-dialog-form">
-      <div class="ui-dialog__head">
-        <h3 id="confirm-title" class="ui-dialog__title">确认</h3>
+      <div class="ui-dialog__head confirm-head">
+        <span class="confirm-mark" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-alert"></use></svg></span>
+        <div>
+          <p class="section-kicker">PLEASE CONFIRM</p>
+          <h3 id="confirm-title" class="ui-dialog__title">确认</h3>
+        </div>
       </div>
       <p id="confirm-body" class="ui-dialog__desc files-dialog-copy"></p>
       <div class="ui-dialog__footer dialog-actions">
@@ -456,6 +690,7 @@
       </div>
     </form>
   </dialog>
+
   <script src="app.js" defer></script>
   <script src="companion.js" type="module"></script>
 </body>
