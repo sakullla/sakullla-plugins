@@ -18,7 +18,7 @@
         </span>
         <div class="accel-brand__copy">
           <h1 class="ui-title accel-title">资源加速</h1>
-          <p class="ui-lede accel-lede">把 GitHub、Hugging Face 与 Docker 镜像，全部走你自己的域名。</p>
+          <p class="ui-lede accel-lede">把 GitHub、Hugging Face、Docker 镜像与 npm registry，全部走你自己的域名。</p>
         </div>
       </div>
       <div class="ui-page-actions accel-head-actions">
@@ -228,6 +228,26 @@
             </div>
             <pre class="snippet-body" data-example="hf-clone"></pre>
           </div>
+        </section>
+
+        <section class="ui-card accel-cap" aria-labelledby="cap-npm">
+          <div class="accel-cap__head">
+            <span class="accel-cap__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 4h16v16H9.6l-3.2-3.2V8.8L4 6.4V4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.6 8.8h3.2v6.4l3.2-3.2v3.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <div>
+              <h3 class="accel-cap__title" id="cap-npm">npm</h3>
+              <p class="accel-cap__desc">包管理器 registry</p>
+            </div>
+          </div>
+          <div class="snippet">
+            <div class="snippet-chrome">
+              <p class="snippet-label">设置 registry</p>
+              <button type="button" class="snippet-copy" data-copy="npm-registry"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" stroke="currentColor" stroke-width="1.8"/></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>复制</span></button>
+            </div>
+            <pre class="snippet-body" data-example="npm-registry"></pre>
+          </div>
+          <p class="pane-note">pnpm、yarn 可用各自的 registry 配置（如 <code>pnpm config set registry</code>、<code>yarn config set npmRegistryServer</code>）指向同一地址。</p>
         </section>
       </div>
     </section>

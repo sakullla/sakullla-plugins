@@ -283,6 +283,7 @@ const examples = {
   "hf-download": `curl -fLO ${origin}/huggingface.co/bert-base-uncased/resolve/main/config.json`,
   "hf-endpoint": `export HF_ENDPOINT=${origin}`,
   "hf-clone": `git clone ${origin}/huggingface.co/bigscience/bloom-560m.git`,
+  "npm-registry": `npm config set registry ${origin}/npm/`,
   "offline-cli": "",
 };
 
