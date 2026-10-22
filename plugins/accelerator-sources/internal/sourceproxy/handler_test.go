@@ -41,7 +41,7 @@ func fixtureHandler(t *testing.T, serve http.HandlerFunc) (*Handler, *upstream.M
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	targets := map[string]*url.URL{}
-	for _, host := range []string{"github.com", "api.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "huggingface.co"} {
+	for _, host := range []string{"github.com", "api.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "huggingface.co", "registry.npmjs.org"} {
 		targets[host] = endpoint
 	}
 	handler, err := NewHandler(Options{Upstream: manager, Targets: targets, AllowHTTP: true, AllowPrivate: true})
@@ -476,5 +476,171 @@ func TestGitHubRejectsUnsupportedAndPrivateTargets(t *testing.T) {
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("unsupported target %q returned %d", target, recorder.Code)
 		}
+	}
+}
+
+func TestNpmShortNameAndHostTargetResolution(t *testing.T) {
+	var upstreamPaths []string
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		upstreamPaths = append(upstreamPaths, request.Method+" "+request.URL.Path)
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Header().Set("ETag", `"express-metadata"`)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(writer, `{"name":"express"}`)
+	})
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, target := range []string{"/npm/express", "/registry.npmjs.org/express"} {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(method, target, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("%s %s failed: status=%d body=%q", method, target, recorder.Code, recorder.Body.String())
+			}
+			if recorder.Header().Get("Content-Type") != "application/json" || recorder.Header().Get("ETag") != `"express-metadata"` {
+				t.Fatalf("%s %s metadata headers were not passed through: %v", method, target, recorder.Header())
+			}
+			if method == http.MethodGet && recorder.Body.String() != `{"name":"express"}` {
+				t.Fatalf("%s %s body mismatch: %q", method, target, recorder.Body.String())
+			}
+			if method == http.MethodHead && recorder.Body.Len() != 0 {
+				t.Fatalf("HEAD %s returned a body: %q", target, recorder.Body.String())
+			}
+		}
+	}
+	if len(upstreamPaths) != 4 {
+		t.Fatalf("unexpected upstream call count: %v", upstreamPaths)
+	}
+	for _, call := range upstreamPaths {
+		if !strings.HasSuffix(call, " /express") {
+			t.Fatalf("npm target did not resolve to the registry path: %v", upstreamPaths)
+		}
+	}
+}
+
+func TestNpmTarballStreamingPassthrough(t *testing.T) {
+	payload := strings.Repeat("tarball-bytes-", 8192)
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/express/-/express-4.21.2.tgz" {
+			t.Errorf("unexpected tarball path %q", request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.WriteString(writer, payload)
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/npm/express/-/express-4.21.2.tgz", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != payload {
+		t.Fatalf("npm tarball was not streamed: status=%d bytes=%d", recorder.Code, recorder.Body.Len())
+	}
+	if recorder.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("tarball content type was not passed through: %q", recorder.Header().Get("Content-Type"))
+	}
+}
+
+func TestNpmWriteMethodsRejected(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("npm write method reached upstream")
+	})
+	for _, method := range []string{http.MethodPut, http.MethodPost, http.MethodDelete} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(method, "/npm/express", strings.NewReader("publish")))
+		if recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s was not rejected: status=%d", method, recorder.Code)
+		}
+		if allow := recorder.Header().Get("Allow"); allow != "GET, HEAD" {
+			t.Fatalf("%s response missing Allow header: %q", method, allow)
+		}
+	}
+}
+
+func TestNpmConditionalHeaderForwarding(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "" {
+			t.Errorf("Authorization was forwarded to npm upstream: %q", authorization)
+		}
+		if accept := request.Header.Get("Accept"); accept != "application/vnd.npm.install-v1+json" {
+			t.Errorf("Accept was not forwarded: %q", accept)
+		}
+		if match := request.Header.Get("If-None-Match"); match != `"express-metadata"` {
+			t.Errorf("If-None-Match was not forwarded: %q", match)
+		}
+		writer.Header().Set("ETag", `"express-metadata"`)
+		_, _ = io.WriteString(writer, `{"name":"express"}`)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/npm/express", nil)
+	request.Header.Set("Authorization", "Bearer npm-token")
+	request.Header.Set("Accept", "application/vnd.npm.install-v1+json")
+	request.Header.Set("If-None-Match", `"express-metadata"`)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("conditional npm request failed: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestNpmUpstreamNotModifiedPassthrough(t *testing.T) {
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("If-None-Match") != `"express-metadata"` {
+			t.Errorf("conditional request was not forwarded: %q", request.Header.Get("If-None-Match"))
+		}
+		writer.Header().Set("ETag", `"express-metadata"`)
+		writer.WriteHeader(http.StatusNotModified)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/npm/express", nil)
+	request.Header.Set("If-None-Match", `"express-metadata"`)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotModified {
+		t.Fatalf("upstream 304 was not passed through: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("304 response carried a body: %q", recorder.Body.String())
+	}
+}
+
+func TestNpmSameHostRedirectFollowedCrossHostRejected(t *testing.T) {
+	var calls atomic.Int32
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			writer.Header().Set("Location", "/express/-/express-4.21.2.tgz")
+			writer.WriteHeader(http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(writer, "tarball")
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/npm/express", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "tarball" {
+		t.Fatalf("same-host npm redirect was not followed: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	crossHandler, _ := fixtureHandler(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Location", "https://cdn.example.com/express-4.21.2.tgz")
+		writer.WriteHeader(http.StatusFound)
+	})
+	crossRecorder := httptest.NewRecorder()
+	crossHandler.ServeHTTP(crossRecorder, httptest.NewRequest(http.MethodGet, "/npm/express", nil))
+	if crossRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("cross-host npm redirect was not rejected: status=%d body=%q", crossRecorder.Code, crossRecorder.Body.String())
+	}
+}
+
+func TestNpmScriptSuffixPathIsNotRewritten(t *testing.T) {
+	payload := "curl https://github.com/acme/tool/releases/download/v1/tool\n"
+	handler, _ := fixtureHandler(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/weird-package.sh" {
+			t.Errorf("unexpected npm script-suffix path %q", request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Header().Set("ETag", `"weird-package"`)
+		_, _ = io.WriteString(writer, payload)
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/npm/weird-package.sh", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("npm .sh path required script authority or failed: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != payload {
+		t.Fatalf("npm .sh body was rewritten: %q", recorder.Body.String())
+	}
+	if etag := recorder.Header().Get("ETag"); etag != `"weird-package"` {
+		t.Fatalf("npm .sh response was treated as a transformed script: ETag=%q", etag)
 	}
 }

@@ -1,5 +1,5 @@
-// Package sourceproxy provides the fixed GitHub and Hugging Face acceleration
-// routes owned by accelerator-sources.
+// Package sourceproxy provides the fixed GitHub, Hugging Face, and npm registry
+// acceleration routes owned by accelerator-sources.
 package sourceproxy
 
 import (
@@ -60,7 +60,7 @@ func NewHandler(options Options) (*Handler, error) {
 }
 
 func defaultTargets() map[string]*url.URL {
-	hosts := []string{"github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github.githubassets.com", "huggingface.co"}
+	hosts := []string{"github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com", "gist.github.com", "gist.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github.githubassets.com", "huggingface.co", "registry.npmjs.org"}
 	targets := make(map[string]*url.URL, len(hosts))
 	for _, host := range hosts {
 		targets[host] = &url.URL{Scheme: "https", Host: host}
@@ -79,7 +79,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusMethodNotAllowed, "unsupported source method")
 		return
 	}
-	isScript := (request.Method == http.MethodGet || request.Method == http.MethodHead) && (strings.EqualFold(path.Ext(target.Path), ".sh") || strings.EqualFold(path.Ext(target.Path), ".ps1"))
+	isScript := (class == "github" || class == "huggingface") && (request.Method == http.MethodGet || request.Method == http.MethodHead) && (strings.EqualFold(path.Ext(target.Path), ".sh") || strings.EqualFold(path.Ext(target.Path), ".ps1"))
 	var authority *url.URL
 	if isScript {
 		authority, err = ExternalAuthority(request)
@@ -131,6 +131,8 @@ func (handler *Handler) resolve(incoming *url.URL) (*url.URL, string, error) {
 		host = "gist.github.com"
 	} else if host == "huggingface" {
 		host = "huggingface.co"
+	} else if host == "npm" {
+		host = "registry.npmjs.org"
 	} else if host == "proxy" && len(segments) >= 3 {
 		host = strings.ToLower(segments[1])
 		segments = segments[1:]
@@ -164,6 +166,9 @@ func (handler *Handler) resolve(incoming *url.URL) (*url.URL, string, error) {
 func sourceClass(host string) string {
 	if host == "huggingface.co" {
 		return "huggingface"
+	}
+	if host == "registry.npmjs.org" {
+		return "npm"
 	}
 	return "github"
 }
@@ -229,6 +234,9 @@ func (handler *Handler) allowedRedirect(target *url.URL, class string) bool {
 	host := strings.ToLower(target.Hostname())
 	if class == "github" {
 		return host == "github.com" || host == "api.github.com" || host == "codeload.github.com" || host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com")
+	}
+	if class == "npm" {
+		return host == "registry.npmjs.org"
 	}
 	return host == "huggingface.co" || strings.HasSuffix(host, ".huggingface.co") || host == "hf.co" || strings.HasSuffix(host, ".hf.co") || strings.HasSuffix(host, ".xethub.hf.co")
 }
