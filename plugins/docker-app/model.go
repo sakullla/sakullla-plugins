@@ -112,9 +112,38 @@ func (app App) Validate() error {
 }
 
 type Configuration struct {
-	Apps             []App  `json:"apps"`
-	RegistryMirror   string `json:"registry_mirror,omitempty"`
-	ResourceGroupRef string `json:"resource_group_ref,omitempty"`
+	Apps             []App          `json:"apps"`
+	RegistryMirror   string         `json:"registry_mirror,omitempty"`
+	ResourceGroupRef string         `json:"resource_group_ref,omitempty"`
+	Backup           BackupSettings `json:"backup"`
+}
+
+// BackupSettings is the backup destination configuration group
+// (config.schema.json "backup"): an optional S3-compatible destination and
+// the node destination switch. Empty fields mean "not configured".
+type BackupSettings struct {
+	S3   BackupS3Settings   `json:"s3"`
+	Node BackupNodeSettings `json:"node"`
+}
+
+// BackupS3Settings carries reference strings only; credentials material never
+// enters configuration.
+type BackupS3Settings struct {
+	Endpoint          string `json:"endpoint,omitempty"`
+	Bucket            string `json:"bucket,omitempty"`
+	Prefix            string `json:"prefix,omitempty"`
+	CredentialsSecret string `json:"credentials_secret,omitempty"`
+}
+
+// BackupNodeSettings gates the node backup destination; it defaults to off.
+type BackupNodeSettings struct {
+	Enabled bool `json:"enabled"`
+}
+
+// S3Configured reports whether an S3 destination is configured: a non-empty
+// endpoint and bucket, mirroring the execution-face unconfigured gate.
+func (settings BackupSettings) S3Configured() bool {
+	return strings.TrimSpace(settings.S3.Endpoint) != "" && strings.TrimSpace(settings.S3.Bucket) != ""
 }
 
 func (configuration Configuration) Validate() error {
@@ -122,6 +151,9 @@ func (configuration Configuration) Validate() error {
 		return err
 	}
 	if err := validateResourceGroupRef(configuration.ResourceGroupRef); err != nil {
+		return err
+	}
+	if err := validateBackupSettings(configuration.Backup); err != nil {
 		return err
 	}
 	if len(configuration.Apps) > MaxApps {
@@ -150,9 +182,10 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 	decoder := json.NewDecoder(bytes.NewReader(wire))
 	decoder.DisallowUnknownFields()
 	var document struct {
-		Apps             *[]App `json:"apps"`
-		RegistryMirror   string `json:"registry_mirror"`
-		ResourceGroupRef string `json:"resource_group_ref"`
+		Apps             *[]App         `json:"apps"`
+		RegistryMirror   string         `json:"registry_mirror"`
+		ResourceGroupRef string         `json:"resource_group_ref"`
+		Backup           BackupSettings `json:"backup"`
 	}
 	if err := decoder.Decode(&document); err != nil {
 		return Configuration{}, fmt.Errorf("config JSON is invalid: %w", err)
@@ -164,7 +197,7 @@ func ParseConfiguration(wire []byte) (Configuration, error) {
 	if document.Apps == nil {
 		return Configuration{}, errors.New("config requires apps")
 	}
-	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror, ResourceGroupRef: document.ResourceGroupRef}
+	configuration := Configuration{Apps: *document.Apps, RegistryMirror: document.RegistryMirror, ResourceGroupRef: document.ResourceGroupRef, Backup: document.Backup}
 	for index := range configuration.Apps {
 		if err := configuration.Apps[index].bindCompose(); err != nil {
 			return Configuration{}, err
@@ -233,6 +266,45 @@ func validateRegistryMirror(value string) error {
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("registry_mirror contains unsupported components")
+	}
+	return nil
+}
+
+// validateBackupSettings checks the backup destination group against the
+// config.schema.json patterns: empty strings mean "not configured".
+func validateBackupSettings(settings BackupSettings) error {
+	if err := validateBackupS3Endpoint(settings.S3.Endpoint); err != nil {
+		return err
+	}
+	bucket := strings.TrimSpace(settings.S3.Bucket)
+	if bucket != "" && !backupS3BucketPattern.MatchString(bucket) {
+		return errors.New("backup s3 bucket is invalid")
+	}
+	prefix := strings.TrimSpace(settings.S3.Prefix)
+	if prefix != "" && !backupS3PrefixPattern.MatchString(prefix) {
+		return errors.New("backup s3 prefix is invalid")
+	}
+	credentials := strings.TrimSpace(settings.S3.CredentialsSecret)
+	if credentials != "" && (len(credentials) > 512 || !strings.HasPrefix(credentials, "{") ||
+		!strings.HasSuffix(credentials, "}") || strings.ContainsAny(credentials, "\x00\r\n")) {
+		return errors.New("backup s3 credentials secret is invalid")
+	}
+	return nil
+}
+
+func validateBackupS3Endpoint(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	if len(value) > 512 || strings.ContainsAny(value, "\x00\r\n") {
+		return errors.New("backup s3 endpoint is invalid")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Opaque != "" {
+		return errors.New("backup s3 endpoint must be an https URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("backup s3 endpoint contains unsupported components")
 	}
 	return nil
 }

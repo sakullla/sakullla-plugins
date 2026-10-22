@@ -17,6 +17,7 @@ const (
 	pluginCallImageName           = "image"
 	pluginCallFilesName           = "files"
 	pluginCallVolumeName          = "volume"
+	pluginCallBackupPackName      = "backup-pack"
 	hostHTTPRuleOperation         = pluginsdk.HostRuntimeHTTPRule
 	hostHTTPBackendOfferOperation = "http.backend-offer"
 	hostHTTPRuleActionCreate      = pluginsdk.HTTPRuleActionCreate
@@ -25,6 +26,7 @@ const (
 	pluginAppsStateKey            = "apps"
 	pluginRuntimeStateKey         = "app-runtime"
 	pluginDeploymentsStateKey     = "deployments"
+	pluginBackupsStateKey         = "backups"
 )
 
 type hostRuntimeCaller interface {
@@ -32,7 +34,8 @@ type hostRuntimeCaller interface {
 }
 
 type hostCapabilityRuntime struct {
-	client hostRuntimeCaller
+	client  hostRuntimeCaller
+	backups *persistedBackupStore
 }
 
 type hostOperationKeyContextKey struct{}
@@ -57,7 +60,9 @@ func newHostCapabilityRuntime(client hostRuntimeCaller) *hostCapabilityRuntime {
 	if client == nil {
 		return nil
 	}
-	return &hostCapabilityRuntime{client: client}
+	runtime := &hostCapabilityRuntime{client: client}
+	runtime.backups = newPersistedBackupStore(runtime)
+	return runtime
 }
 
 func (runtime *hostCapabilityRuntime) Report(ctx context.Context, agentID string) (AgentEngineReport, error) {

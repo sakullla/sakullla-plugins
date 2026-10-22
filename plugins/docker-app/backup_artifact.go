@@ -29,8 +29,11 @@ import (
 //	workspace/<rel>      one member per workspace file (compose excluded)
 //	volumes/<name>.tar   one uncompressed tar per application volume
 //
-// Creation stages every member beside the destination and renames the finished
-// artifact into place, so a failed run never leaves a usable product behind.
+// The plugin-owned workspace trees backups/ (finished artifacts) and
+// backup-staging/ (staged volume archives) are never packed as workspace
+// members. Creation stages every member beside the destination and renames
+// the finished artifact into place, so a failed run never leaves a usable
+// product behind.
 
 const (
 	// BackupManifestName is the first tar member of every backup artifact.
@@ -225,6 +228,11 @@ func stageBackupMembers(staging string, source BackupSource) ([]stagedBackupMemb
 				return errors.New("backup workspace contains a symlink")
 			}
 			if entry.IsDir() {
+				if isBackupOwnedWorkspaceTree(filepath.ToSlash(rel)) {
+					// Plugin-owned backup trees (finished artifacts and staged
+					// volume archives) never become workspace members.
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if !entry.Type().IsRegular() {
