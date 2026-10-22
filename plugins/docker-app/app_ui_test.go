@@ -5878,7 +5878,7 @@ func (fake *recordingBackupRuntime) RunBackup(_ context.Context, appID string, s
 	}, nil
 }
 
-func (fake *recordingBackupRuntime) RestoreBackup(_ context.Context, recordID, targetAgentID, confirm string, _ BackupSettings, _ string) (App, error) {
+func (fake *recordingBackupRuntime) RestoreBackup(_ context.Context, recordID, targetAgentID, confirm string, _ BackupSettings) (App, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	// Unconfirmed overwrites are rejected before any effect, mirroring the

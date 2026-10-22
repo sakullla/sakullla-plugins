@@ -21,7 +21,7 @@ import (
 type BackupRuntime interface {
 	ListBackups(context.Context) ([]BackupRecord, error)
 	RunBackup(ctx context.Context, appID string, settings BackupSettings, destination, targetAgentID string) (BackupRecord, error)
-	RestoreBackup(ctx context.Context, recordID, targetAgentID, confirm string, settings BackupSettings, workDirRoot string) (App, error)
+	RestoreBackup(ctx context.Context, recordID, targetAgentID, confirm string, settings BackupSettings) (App, error)
 	DeleteBackup(ctx context.Context, recordID, confirm string, settings BackupSettings) error
 	ManagedBackupAgents(context.Context) ([]string, error)
 	StoreInstanceConfig(ctx context.Context, config json.RawMessage) error

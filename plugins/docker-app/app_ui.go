@@ -628,7 +628,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "backup-restore")})
 			return
 		}
-		if _, err := controller.uiBackup.RestoreBackup(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), body.Record, target, body.Confirm, controller.BackupSettingsSnapshot(), controller.uiWorkDirRoot); err != nil {
+		if _, err := controller.uiBackup.RestoreBackup(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), body.Record, target, body.Confirm, controller.BackupSettingsSnapshot()); err != nil {
 			response := controller.appCollectionResponse(request.Context(), app.AgentID)
 			response.Error = publicAppActionError(err, "backup-restore")
 			writeAppJSON(writer, appStatus(err), response)

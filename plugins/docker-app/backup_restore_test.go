@@ -402,7 +402,7 @@ func assertRestoredWorkspace(t *testing.T, root string, fixture backupRestoreFix
 func TestRestoreBackupS3RunsOnTargetAgentFaceAndAdopts(t *testing.T) {
 	t.Parallel()
 	root, fixture, runtime, stub := newRestoreCase(t, nil)
-	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false), root)
+	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +464,7 @@ func TestRestoreBackupS3RunsOnTargetAgentFaceAndAdopts(t *testing.T) {
 	}
 }
 
-func TestRestoreBackupNodeSameAgentReadsWorkspaceArtifact(t *testing.T) {
+func TestRestoreBackupNodeSameAgentRestoresOnAgentFace(t *testing.T) {
 	t.Parallel()
 	fixture := buildRestoreFixture(t)
 	apps := []App{{ID: "media", AgentID: "agent-1", Compose: "services: {app: {image: example/app:0}}", Generation: "generation-1", Env: "KEY=value\n"}}
@@ -475,14 +475,29 @@ func TestRestoreBackupNodeSameAgentReadsWorkspaceArtifact(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "media", backupArtifactDir, fixture.name), fixture.content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stub.restoreBytes = fixture.content
 	// Same-name managed app: the app id is the confirm token.
-	if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-1", "media", backupRunTestSettings(false, false), root); err != nil {
+	if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-1", "media", backupRunTestSettings(false, false)); err != nil {
 		t.Fatal(err)
 	}
-	if len(stub.restorePayloads) != 0 {
-		t.Fatalf("same-node restore dispatched to the agent face: %#v", stub.restorePayloads)
+	// The restore is dispatched to the target Agent execution face; the
+	// control plane never unpacks the artifact itself, same-node or not.
+	if len(stub.restorePayloads) != 1 {
+		t.Fatalf("restore payloads = %#v", stub.restorePayloads)
 	}
+	restore := stub.restorePayloads[0]
+	if restore["action"] != backupRestoreActionRestore || restore["agent_id"] != "agent-1" ||
+		restore["app_id"] != "media" || restore["source"] != BackupDestinationNode ||
+		restore["path"] != backupArtifactDir+"/"+fixture.name ||
+		restore["sha256"] != fixture.sha256 || restore["size"] != float64(fixture.size) {
+		t.Fatalf("restore payload = %#v", restore)
+	}
+	// Same-node: the artifact already lives on the target, so no probe and no
+	// transfer push precede the dispatch.
+	if len(stub.probePayloads) != 0 || len(stub.sendRequests) != 0 {
+		t.Fatalf("same-node restore probed or pushed: %#v %#v", stub.probePayloads, stub.sendRequests)
+	}
+	// The target Agent face rebuilt the workspace, compose, and bind members,
+	// and staged the named-volume archive.
 	assertRestoredWorkspace(t, root, fixture)
 	if len(stub.composePayloads) != 2 || stub.composePayloads[0]["action"] != "apply" || stub.composePayloads[1]["action"] != "start" {
 		t.Fatalf("compose payloads = %#v", stub.composePayloads)
@@ -513,7 +528,7 @@ func TestRestoreBackupNodeCrossAgentProbesPushesAndRestores(t *testing.T) {
 	}
 	root, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.nodeRecord("agent-1")})
 	stub.restoreBytes = fixture.content
-	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, true), root)
+	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +575,7 @@ func TestRestoreBackupNodeCrossAgentReusesPresentArtifactWithoutPush(t *testing.
 	if err := os.WriteFile(filepath.Join(root, "media", backupArtifactDir, fixture.name), fixture.content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, true), root); err != nil {
+	if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, true)); err != nil {
 		t.Fatal(err)
 	}
 	if len(stub.sendRequests) != 0 {
@@ -579,8 +594,8 @@ func TestRestoreBackupNodeCrossAgentDisabledDestinationKeepsGate(t *testing.T) {
 		{ID: "media", AgentID: "agent-1", Compose: backupRestoreTestCompose, Generation: "generation-1"},
 		{ID: "other", AgentID: "agent-2", Compose: "services: {side: {image: example/side:1}}", Generation: "generation-1"},
 	}
-	root, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.nodeRecord("agent-1")})
-	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, false), root)
+	_, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.nodeRecord("agent-1")})
+	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(false, false))
 	if err == nil || !strings.Contains(err.Error(), nodeStageDisabled) {
 		t.Fatalf("disabled cross-node err = %v", err)
 	}
@@ -596,7 +611,7 @@ func TestRestoreBackupOverwriteWithoutConfirmRejectedZeroSideEffects(t *testing.
 	t.Parallel()
 	apps := []App{{ID: "media", AgentID: "agent-2", Compose: "services: {app: {image: example/app:0}}", Generation: "generation-1"}}
 	root, fixture, runtime, stub := newRestoreCase(t, apps)
-	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false), root)
+	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false))
 	if !errors.Is(err, ErrDeleteUnconfirmed) {
 		t.Fatalf("err = %v want %v", err, ErrDeleteUnconfirmed)
 	}
@@ -615,7 +630,7 @@ func TestRestoreBackupOverwriteWithConfirmSucceeds(t *testing.T) {
 	t.Parallel()
 	apps := []App{{ID: "media", AgentID: "agent-2", Compose: "services: {app: {image: example/app:0}}", Generation: "generation-1"}}
 	root, fixture, runtime, stub := newRestoreCase(t, apps)
-	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(true, false), root)
+	restored, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "media", backupRunTestSettings(true, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +648,7 @@ func TestRestoreBackupCorruptArtifactFailsExplicitly(t *testing.T) {
 	t.Run("retrieved bytes do not match the record", func(t *testing.T) {
 		root, fixture, runtime, stub := newRestoreCase(t, nil)
 		stub.restoreBytes = fixture.content[:len(fixture.content)-1]
-		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false), root)
+		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false))
 		if err == nil || !strings.Contains(err.Error(), backupRestoreStageRetrieve) {
 			t.Fatalf("err = %v", err)
 		}
@@ -654,7 +669,7 @@ func TestRestoreBackupCorruptArtifactFailsExplicitly(t *testing.T) {
 		record.SizeBytes = int64(len(tampered))
 		stub.records.Records[record.ID] = record
 		stub.restoreBytes = tampered
-		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false), root)
+		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false))
 		if err == nil || !strings.Contains(err.Error(), backupRestoreStageRetrieve) {
 			t.Fatalf("err = %v", err)
 		}
@@ -680,8 +695,11 @@ func TestRestoreBackupCorruptArtifactFailsExplicitly(t *testing.T) {
 		if err := os.WriteFile(artifact, fixture.content, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-1", "media", backupRunTestSettings(false, false), root)
-		if !errors.Is(err, ErrBackupArtifactCorrupt) || !strings.Contains(err.Error(), backupRestoreStageChecksum) {
+		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-1", "media", backupRunTestSettings(false, false))
+		// The target Agent face rejects the checksum mismatch; the control
+		// plane surfaces it as a retrieve-stage restore failure (the safe
+		// failure policy keeps agent-face details off the wire message).
+		if err == nil || !strings.Contains(err.Error(), backupRestoreStageRetrieve) {
 			t.Fatalf("err = %v", err)
 		}
 		// The origin workspace artifact is never deleted by a failed restore.
@@ -696,9 +714,9 @@ func TestRestoreBackupCorruptArtifactFailsExplicitly(t *testing.T) {
 
 func TestRestoreBackupApplyFailureKeepsRecordAndManagedState(t *testing.T) {
 	t.Parallel()
-	root, fixture, runtime, stub := newRestoreCase(t, nil)
+	_, fixture, runtime, stub := newRestoreCase(t, nil)
 	stub.failApply = errors.New("compose apply failed")
-	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false), root)
+	_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(true, false))
 	if err == nil || !strings.Contains(err.Error(), backupRestoreStageApply) || !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
@@ -717,13 +735,13 @@ func TestRestoreBackupGates(t *testing.T) {
 	t.Parallel()
 	t.Run("nil runtime", func(t *testing.T) {
 		var runtime *hostCapabilityRuntime
-		if _, err := runtime.RestoreBackup(context.Background(), "record", "agent-1", "", backupRunTestSettings(true, false), ""); !errors.Is(err, ErrTypedHandlesUnavailable) {
+		if _, err := runtime.RestoreBackup(context.Background(), "record", "agent-1", "", backupRunTestSettings(true, false)); !errors.Is(err, ErrTypedHandlesUnavailable) {
 			t.Fatalf("nil runtime err = %v", err)
 		}
 	})
 	t.Run("unknown record", func(t *testing.T) {
 		_, runtime, stub := newBackupRestoreRuntime(t, nil, nil)
-		if _, err := runtime.RestoreBackup(context.Background(), "missing", "agent-1", "", backupRunTestSettings(true, false), ""); !errors.Is(err, ErrBackupRecordUnknown) {
+		if _, err := runtime.RestoreBackup(context.Background(), "missing", "agent-1", "", backupRunTestSettings(true, false)); !errors.Is(err, ErrBackupRecordUnknown) {
 			t.Fatalf("unknown record err = %v", err)
 		}
 		if len(stub.restorePayloads) != 0 {
@@ -732,7 +750,7 @@ func TestRestoreBackupGates(t *testing.T) {
 	})
 	t.Run("invalid record id", func(t *testing.T) {
 		_, runtime, _ := newBackupRestoreRuntime(t, nil, nil)
-		_, err := runtime.RestoreBackup(context.Background(), strings.Repeat("x", 161), "agent-1", "", backupRunTestSettings(true, false), "")
+		_, err := runtime.RestoreBackup(context.Background(), strings.Repeat("x", 161), "agent-1", "", backupRunTestSettings(true, false))
 		if err == nil || !strings.Contains(err.Error(), backupRestoreStageRecord) {
 			t.Fatalf("invalid record err = %v", err)
 		}
@@ -740,8 +758,8 @@ func TestRestoreBackupGates(t *testing.T) {
 	t.Run("unmanaged target agent", func(t *testing.T) {
 		fixture := buildRestoreFixture(t)
 		apps := []App{{ID: "media", AgentID: "agent-1", Compose: backupRestoreTestCompose, Generation: "generation-1"}}
-		root, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.s3Record()})
-		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-9", "media", backupRunTestSettings(true, false), root)
+		_, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.s3Record()})
+		_, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-9", "media", backupRunTestSettings(true, false))
 		if err == nil || !strings.Contains(err.Error(), backupRestoreStageAgent) {
 			t.Fatalf("unmanaged agent err = %v", err)
 		}
@@ -751,15 +769,15 @@ func TestRestoreBackupGates(t *testing.T) {
 	})
 	t.Run("offline target agent id", func(t *testing.T) {
 		_, runtime, _ := newBackupRestoreRuntime(t, nil, nil)
-		if _, err := runtime.RestoreBackup(context.Background(), "missing", "", "", backupRunTestSettings(true, false), ""); !errors.Is(err, ErrAgentOffline) {
+		if _, err := runtime.RestoreBackup(context.Background(), "missing", "", "", backupRunTestSettings(true, false)); !errors.Is(err, ErrAgentOffline) {
 			t.Fatalf("invalid agent err = %v", err)
 		}
 	})
 	t.Run("s3 destination unconfigured", func(t *testing.T) {
 		fixture := buildRestoreFixture(t)
 		apps := []App{{ID: "other", AgentID: "agent-2", Compose: "services: {side: {image: example/side:1}}", Generation: "generation-2"}}
-		root, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.s3Record()})
-		if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(false, false), root); !errors.Is(err, ErrBackupDestinationUnconfigured) {
+		_, runtime, stub := newBackupRestoreRuntime(t, apps, []BackupRecord{fixture.s3Record()})
+		if _, err := runtime.RestoreBackup(context.Background(), fixture.name, "agent-2", "", backupRunTestSettings(false, false)); !errors.Is(err, ErrBackupDestinationUnconfigured) {
 			t.Fatalf("unconfigured err = %v", err)
 		}
 		if len(stub.restorePayloads) != 0 {

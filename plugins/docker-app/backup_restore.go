@@ -20,10 +20,10 @@ import (
 // workspace and compose document, and restores named volumes. The control
 // plane only gates (record exists, target managed, overwrite confirm), routes
 // the artifact to the target (S3 parameters, or a node-transfer push when a
-// node-destination artifact is not already present on the target), and then
-// applies, starts, and records the restored app; it never unpacks artifacts
-// locally. Same-node node-destination restores keep the direct workspace read:
-// the artifact already lives where the restore runs. Every stage failure
+// cross-node node-destination artifact is not already present on the target),
+// and then applies, starts, and records the restored app; it never unpacks
+// artifacts locally, including same-node node-destination restores where the
+// artifact already lives on the target Agent. Every stage failure
 // returns a stage-named error, leaves the record untouched, and removes
 // restore residue best-effort so no half-built workspace survives. Delete
 // removes the destination object first and the record second: a failed record
@@ -288,13 +288,11 @@ func (controller *Controller) backupRestoreCleanResidue(root, appID, artifactPat
 // Gating: the runtime must be bound, the record must exist, the target must
 // be a managed Agent (some stored app is bound to it), and overwriting a
 // managed app with the same id requires confirm == appID (the app-delete
-// confirm precedent). The restore itself runs on the target Agent execution
-// face; same-node node-destination restores read the workspace artifact
-// directly. Any stage failure leaves the record, the managed app list, and
+// confirm precedent). The restore itself always runs on the target Agent
+// execution face; the control plane never reads or rebuilds workspace bytes.
+// Any stage failure leaves the record, the managed app list, and
 // (best-effort) the target workspace without restore residue.
-// workDirRoot is the managed workspace root used for same-node direct reads;
-// an empty value falls back to the execution-face default.
-func (runtime *hostCapabilityRuntime) RestoreBackup(ctx context.Context, recordID, targetAgentID, confirm string, settings BackupSettings, workDirRoot string) (App, error) {
+func (runtime *hostCapabilityRuntime) RestoreBackup(ctx context.Context, recordID, targetAgentID, confirm string, settings BackupSettings) (App, error) {
 	if runtime == nil || runtime.client == nil {
 		return App{}, ErrTypedHandlesUnavailable
 	}
@@ -352,20 +350,11 @@ func (runtime *hostCapabilityRuntime) RestoreBackup(ctx context.Context, recordI
 		}
 		compose = result.Compose
 	case BackupDestinationNode:
-		if record.Destination.Location == targetAgentID {
-			root := strings.TrimSpace(workDirRoot)
-			if root == "" {
-				root = defaultExecutionWorkDirRoot()
-			}
-			compose, err = runtime.restoreLocalNodeArtifact(ctx, record, targetAgentID, existing, root)
-			if err != nil {
-				return App{}, err
-			}
-		} else {
+		if record.Destination.Location != targetAgentID {
 			// Cross-node node destination: reuse an artifact already present on
 			// the target (the transfer is idempotent but not free), otherwise
-			// push it there over the node-transfer channel, then restore on the
-			// target Agent face.
+			// push it there over the node-transfer channel. A same-node
+			// restore skips both; the artifact already lives on the target.
 			present, err := runtime.probeTargetBackupArtifact(ctx, record, targetAgentID, existing)
 			if err != nil {
 				return App{}, err
@@ -378,12 +367,12 @@ func (runtime *hostCapabilityRuntime) RestoreBackup(ctx context.Context, recordI
 					return App{}, fmt.Errorf("backup restore failed: %s: %w", backupRestoreStageTransfer, err)
 				}
 			}
-			result, err := runtime.dispatchAgentBackupRestore(ctx, record, settings, targetAgentID, existing, false)
-			if err != nil {
-				return App{}, err
-			}
-			compose = result.Compose
 		}
+		result, err := runtime.dispatchAgentBackupRestore(ctx, record, settings, targetAgentID, existing, false)
+		if err != nil {
+			return App{}, err
+		}
+		compose = result.Compose
 	default:
 		return App{}, backupRestoreFailure(backupRunStageObjectReference)
 	}
@@ -418,59 +407,6 @@ func (runtime *hostCapabilityRuntime) adoptRestoredApp(ctx context.Context, apps
 		return App{}, backupRestoreFailure(backupRestoreStageAdopt, err)
 	}
 	return restored, nil
-}
-
-// restoreLocalNodeArtifact is the same-node direct path: the artifact already
-// lives in the workspace the restore runs against, so the control plane reads
-// it in place and drives the existing staged-volume restore operations.
-func (runtime *hostCapabilityRuntime) restoreLocalNodeArtifact(ctx context.Context, record BackupRecord, targetAgentID string, existing App, root string) (string, error) {
-	workdir, err := AppWorkDir(root, record.AppID)
-	if err != nil {
-		return "", backupRestoreFailure(backupRestoreStageWorkspace, err)
-	}
-	artifactPath := filepath.Join(workdir, backupArtifactDir, record.ID)
-	digest, size, err := hashFileContents(artifactPath)
-	if err != nil {
-		return "", backupRestoreFailure(backupRestoreStageRetrieve, err)
-	}
-	if size != record.SizeBytes || digest != record.SHA256 {
-		return "", fmt.Errorf("backup restore failed: %s: %w", backupRestoreStageChecksum, ErrBackupArtifactCorrupt)
-	}
-	reader, err := OpenBackupArtifact(artifactPath)
-	if err != nil {
-		return "", fmt.Errorf("backup restore failed: %s: %w", backupRestoreStageCorrupt, err)
-	}
-	if reader.Manifest().AppID != record.AppID {
-		return "", backupRestoreFailure(backupRestoreStageCorrupt, "artifact app id does not match the record")
-	}
-	compose, err := reader.ReadCompose()
-	if err != nil {
-		return "", fmt.Errorf("backup restore failed: %s: %w", backupRestoreStageCorrupt, err)
-	}
-	workspace, err := PrepareAppWorkspace(root, record.AppID, compose)
-	if err != nil {
-		return "", backupRestoreFailure(backupRestoreStageWorkspace, err)
-	}
-	if err := reader.ExtractWorkspace(workspace.Dir); err != nil {
-		return "", fmt.Errorf("backup restore failed: %s: %w", backupRestoreStageWorkspace, err)
-	}
-	plans, err := planBackupVolumes(compose)
-	if err != nil {
-		return "", backupRestoreFailure(backupRestoreStageWorkspace, err)
-	}
-	restoreApp := App{ID: record.AppID, AgentID: targetAgentID, WorkDir: existing.WorkDir}
-	for _, plan := range plans {
-		if classifyBindSource(volumeSource(plan.Spec)) != bindNamed {
-			continue
-		}
-		if err := stageBackupVolumeMember(reader, root, record.AppID, plan); err != nil {
-			return "", err
-		}
-		if err := runtime.VolumeRestore(ctx, restoreApp, plan.Spec); err != nil {
-			return "", fmt.Errorf("backup restore failed: %s (%s): %w", backupRestoreStageVolume, plan.Spec, err)
-		}
-	}
-	return compose, nil
 }
 
 // agentBackupRestoreResult is the verified agent-face restore answer the
