@@ -87,6 +87,7 @@ type ControllerConfig struct {
 	CallImages                                                 ImageUpdateObserver
 	UIAppState                                                 AppStateStore
 	UIDeploymentState                                          DeploymentStateStore
+	BackupSecrets                                              ScopedSecretSource
 }
 
 type Controller struct {
@@ -119,6 +120,7 @@ type Controller struct {
 	commandRunner      CommandRunner
 	callImages         ImageUpdateObserver
 	uiAppState         AppStateStore
+	backupSecrets      ScopedSecretSource
 	appRuntime         map[string]bool
 	imageCache         map[string]cachedImageObservation
 	imageRefresh       map[string]bool
@@ -187,8 +189,9 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
-		appRuntime: map[string]bool{},
-		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{}, imageDeleteEpoch: map[string]uint64{},
+		backupSecrets: config.BackupSecrets,
+		appRuntime:    map[string]bool{},
+		imageCache:    map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{}, imageDeleteEpoch: map[string]uint64{},
 		imageSlots: make(chan struct{}, 2),
 		uiRollout:  Rollout{Store: deployments, Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}

@@ -266,6 +266,14 @@ func walkSchemaRequired(node any, visit func(string) error) error {
 		}
 		if properties, ok := typed["properties"].(map[string]any); ok {
 			for name, child := range properties {
+				// The install/deploy form gate covers user-facing fields.
+				// hostInjected subtrees (apps, backup destinations, ...) are
+				// host-written state, not form input.
+				if childMap, ok := child.(map[string]any); ok {
+					if injected, _ := childMap["hostInjected"].(bool); injected {
+						continue
+					}
+				}
 				if err := visit(name); err != nil {
 					return err
 				}

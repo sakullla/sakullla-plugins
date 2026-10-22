@@ -107,6 +107,13 @@
               "pattern": "^$|^[A-Za-z0-9._/-]{1,512}$",
               "hostInjected": true,
               "description": "对象键前缀。空串表示未配置。"
+            },
+            "credentials_secret": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^$|^\\{.*\\}$",
+              "hostInjected": true,
+              "description": "凭证 secret 引用。空串表示未配置凭证。"
             }
           }
         },

@@ -705,6 +705,9 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 		return config
 	}
 	runtime := newHostCapabilityRuntime(client)
+	if source, ok := client.(ScopedSecretSource); ok {
+		config.BackupSecrets = source
+	}
 	config.UIEngineSource = runtime
 	config.UIAppState = runtime
 	config.UIApply = runtime
