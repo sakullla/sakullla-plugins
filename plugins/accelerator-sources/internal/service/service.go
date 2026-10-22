@@ -103,7 +103,7 @@ func NewHandler(options Options) (*Handler, error) {
 	mux.Handle("/api/tags", catalogHandler)
 	mux.Handle("/api/offline", imageHandler)
 	mux.Handle("/api/offline/", imageHandler)
-	for _, prefix := range []string{"/github/", "/github-api/", "/github-raw/", "/github-gist/", "/huggingface/", "/proxy/", "/github.com/", "/api.github.com/", "/codeload.github.com/", "/raw.githubusercontent.com/", "/gist.github.com/", "/gist.githubusercontent.com/", "/objects.githubusercontent.com/", "/release-assets.githubusercontent.com/", "/github.githubassets.com/", "/huggingface.co/"} {
+	for _, prefix := range []string{"/github/", "/github-api/", "/github-raw/", "/github-gist/", "/huggingface/", "/npm/", "/proxy/", "/github.com/", "/api.github.com/", "/codeload.github.com/", "/raw.githubusercontent.com/", "/gist.github.com/", "/gist.githubusercontent.com/", "/objects.githubusercontent.com/", "/release-assets.githubusercontent.com/", "/github.githubassets.com/", "/huggingface.co/", "/registry.npmjs.org/"} {
 		mux.Handle(prefix, sourceHandler)
 	}
 	mux.Handle("/", webHandler)
