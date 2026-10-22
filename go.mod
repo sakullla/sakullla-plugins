@@ -2,7 +2,7 @@ module github.com/sakullla/sakullla-plugins
 
 go 1.27.0
 
-// Locked via nre-ci sdk --update --tag plugin-sdk/v0.12.0.
+// Locked via nre-ci sdk --update --tag plugin-sdk/v0.13.1.
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -27,7 +27,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/klauspost/compress v1.19.2
 	github.com/minio/minio-go/v7 v7.4.1
-	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.0
+	github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/mod v0.41.0

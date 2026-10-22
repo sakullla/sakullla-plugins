@@ -63,7 +63,7 @@
     },
     {
       "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
-      "version": "v0.13.0",
+      "version": "v0.13.1",
       "license": "GPL-3.0-only"
     },
     {
