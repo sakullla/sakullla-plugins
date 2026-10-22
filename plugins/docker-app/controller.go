@@ -88,6 +88,7 @@ type ControllerConfig struct {
 	UIAppState                                                 AppStateStore
 	UIDeploymentState                                          DeploymentStateStore
 	BackupSecrets                                              ScopedSecretSource
+	UIBackup                                                   BackupRuntime
 }
 
 type Controller struct {
@@ -121,6 +122,9 @@ type Controller struct {
 	callImages         ImageUpdateObserver
 	uiAppState         AppStateStore
 	backupSecrets      ScopedSecretSource
+	uiBackup           BackupRuntime
+	backupSettings     BackupSettings
+	configDocument     []byte
 	appRuntime         map[string]bool
 	imageCache         map[string]cachedImageObservation
 	imageRefresh       map[string]bool
@@ -189,9 +193,9 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
-		backupSecrets: config.BackupSecrets,
-		appRuntime:    map[string]bool{},
-		imageCache:    map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{}, imageDeleteEpoch: map[string]uint64{},
+		backupSecrets: config.BackupSecrets, uiBackup: config.UIBackup,
+		appRuntime: map[string]bool{},
+		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{}, imageDeleteEpoch: map[string]uint64{},
 		imageSlots: make(chan struct{}, 2),
 		uiRollout:  Rollout{Store: deployments, Executor: config.UIRolloutExecutor, Auditor: auditor},
 	}
@@ -291,6 +295,8 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 			controller.apps = nil
 			controller.registryMirror = ""
 			controller.resourceGroupRef = ""
+			controller.backupSettings = BackupSettings{}
+			controller.configDocument = nil
 			controller.commit = nil
 			controller.epoch = nil
 		}
@@ -314,6 +320,11 @@ func (controller *Controller) prepare(ctx context.Context, generation *rpcplugin
 		}
 		controller.registryMirror = configuration.RegistryMirror
 		controller.resourceGroupRef = configuration.ResourceGroupRef
+		// Backup destination settings are host-injected with the config
+		// overlay; the raw document is retained so a settings save can rewrite
+		// only the backup group and hand the overlay back to the host.
+		controller.backupSettings = configuration.Backup
+		controller.configDocument = append([]byte(nil), config...)
 		controller.commit = handle
 		controller.epoch = epoch
 		return nil
@@ -355,10 +366,28 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 	controller.apps = nil
 	controller.registryMirror = ""
 	controller.resourceGroupRef = ""
+	controller.backupSettings = BackupSettings{}
+	controller.configDocument = nil
 	controller.commit = nil
 	controller.epoch = nil
 	controller.mu.Unlock()
 	return nil
+}
+
+// BackupSettings returns the host-injected backup destination settings of the
+// live generation.
+func (controller *Controller) BackupSettingsSnapshot() BackupSettings {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.backupSettings
+}
+
+// setBackupSettings updates the live settings snapshot after a settings save
+// was committed to the host; the next prepare re-states it authoritatively.
+func (controller *Controller) setBackupSettings(settings BackupSettings) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.backupSettings = settings
 }
 
 // generationHandleScope binds process-local overlay state to the panel grant.

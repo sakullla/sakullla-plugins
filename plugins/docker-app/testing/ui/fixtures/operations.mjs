@@ -1,4 +1,4 @@
-import { makeApp } from "./workspace.mjs";
+import { makeApp, makeBackupRecord } from "./workspace.mjs";
 
 const services = () => [
   { name:"web", image:"nginx:1.27", tag:"1.27", update:true, default_tag:"1.28", candidates:[{tag:"1.28"},{tag:"2.0",major:true}], lock:"", lock_options:[{id:"minor",label:"1.x",constraint:"^1.27"}], ignored:["1.26"] },
@@ -8,8 +8,18 @@ const actions = (history = true) => [
   {id:"stop",label:"停止"},{id:"restart",label:"重启"},{id:"update",label:"更新"},
   ...(history ? [{id:"rollback",label:"回滚"}] : []),{id:"delete",label:"删除"},
 ];
+const backupSettings = () => ({
+  s3_configured:true, node_enabled:false, endpoint:"https://s3.example.test",
+  bucket:"backups", prefix:"docker-app", credentials_configured:true, managed_agents:["node-a","node-b"],
+});
+const seedBackups = () => [
+  makeBackupRecord("alpha-20261022T080910Z.tar.zst", "alpha", {
+    destination:"s3", destination_label:"S3 · docker-app/alpha-20261022T080910Z.tar.zst", size_bytes: 1048576,
+  }),
+];
 const seedApps = () => [
-  makeApp("alpha", "node-a", {services:["web","db"], service_images:services(), actions:actions(), rules:[{ref:"entry-alpha",domain:"alpha.example.test",port:8080,enabled:true}]}),
+  makeApp("alpha", "node-a", {services:["web","db"], service_images:services(), actions:actions(), rules:[{ref:"entry-alpha",domain:"alpha.example.test",port:8080,enabled:true}],
+    backup:backupSettings(), backups:seedBackups()}),
   makeApp("single", "node-a", {service_images:[services()[0]], actions:actions(false)}),
   makeApp("steady", "node-a", {service_images:[{...services()[0], candidates:[], default_tag:"", update:false, lock:"^1.27"}], actions:[{id:"stop",label:"停止"},{id:"delete",label:"删除"}]}),
 ];
@@ -20,11 +30,14 @@ export const createOperationsState = () => {
       apps:seedApps(), calls:[], applied:[], listError:false, actionError:"", deleteMode:"", riskDigests:[], previewError:false,
       cleanupPreview:{preview:true,empty:false,status:"success",images:"闲置镜像 120 MB",builder_cache:"构建缓存 80 MB"},
       cleanupResult:{accepted:true,status:"success",images_status:"success",builder_cache_status:"success",images:"已释放 120 MB",builder_cache:"已释放 80 MB"},
+      backupSettings:backupSettings(), backups:seedBackups(), backupError:false, backupActionError:"", backupSettingsError:"",
     });
   }};
   state.reset();
   return state;
 };
+
+const decorateApp = (state, app) => app ? {...app, backup:state.backupSettings, backups:app.id === "alpha" ? state.backups : [], backups_error:state.backupError ? "备份记录读取失败，请刷新后重试" : ""} : app;
 
 export async function handleOperationsRequest({url,request,json,state,record}) {
   if (url.pathname === "/api/apps" && request.method === "GET") {
@@ -38,9 +51,13 @@ export async function handleOperationsRequest({url,request,json,state,record}) {
     else json({cleanup:state.cleanupPreview});
     return true;
   }
+  if (url.pathname === "/api/backup-settings" && request.method === "GET") {
+    json({app:{id:"backup-settings", backup:state.backupSettings, backups:[], backups_error:""}});
+    return true;
+  }
   if (/^\/api\/apps\/[^/]+$/.test(url.pathname) && request.method === "GET") {
     const app = state.apps.find((app) => app.id === decodeURIComponent(url.pathname.split("/")[3]));
-    json(app ? {app} : {error:"应用已不存在。"},app ? 200 : 404);
+    json(app ? {app:decorateApp(state, app)} : {error:"应用已不存在。"},app ? 200 : 404);
     return true;
   }
   if (request.method !== "POST" || !url.pathname.startsWith("/api/")) return false;
@@ -52,6 +69,18 @@ export async function handleOperationsRequest({url,request,json,state,record}) {
     json(state.cleanupResult === null ? {accepted:true} : {cleanup:state.cleanupResult});
     return true;
   }
+  if (url.pathname === "/api/backup-settings") {
+    state.calls.push({id:"node-a",action:"backup-settings",body});
+    if (state.backupSettingsError) { json({error:state.backupSettingsError},500); return true; }
+    state.backupSettings = {
+      ...state.backupSettings,
+      endpoint:body.endpoint || "", bucket:body.bucket || "", prefix:body.prefix || "",
+      s3_configured: Boolean(body.endpoint && body.bucket),
+      node_enabled: Boolean(body.node_enabled),
+    };
+    json({accepted:true, app:{id:"backup-settings", backup:state.backupSettings, backups:[], backups_error:""}});
+    return true;
+  }
   const [, , , encoded, action] = url.pathname.split("/");
   const id = decodeURIComponent(encoded || "");
   const app = state.apps.find((app) => app.id === id);
@@ -59,6 +88,32 @@ export async function handleOperationsRequest({url,request,json,state,record}) {
   state.calls.push({id,action,body});
   if (!app) { json({error:"应用已不存在。"},404); return true; }
   if (state.actionError) { json({error:state.actionError},500); return true; }
+  if (action === "backup-run") {
+    if (state.backupActionError) { json({error:state.backupActionError},500); return true; }
+    const created = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d{3}Z$/,"Z");
+    const name = `alpha-${created.slice(0,15)}.tar.zst`.replace("T","T");
+    const record = makeBackupRecord(name, id, {
+      destination:body.destination || "s3",
+      destination_label:(body.destination === "node" ? "节点 · " : "S3 · docker-app/") + name,
+      size_bytes: 2097152,
+    });
+    if (id === "alpha") state.backups = [record, ...state.backups];
+    json({apps:state.apps, backup_record:record});
+    return true;
+  }
+  if (action === "backup-delete") {
+    if (body.confirm !== id) { json({error:"delete was not confirmed"},400); return true; }
+    if (state.backupActionError) { json({error:state.backupActionError},500); return true; }
+    state.backups = state.backups.filter((item) => item.id !== body.record);
+    json({apps:state.apps});
+    return true;
+  }
+  if (action === "backup-restore") {
+    if (body.confirm !== id) { json({error:"delete was not confirmed"},400); return true; }
+    if (state.backupActionError) { json({error:state.backupActionError},500); return true; }
+    json({apps:state.apps});
+    return true;
+  }
   if (action === "update") {
     if (state.riskDigests.length) {
       if (body.confirm === state.riskDigests[0]) state.riskDigests.shift();

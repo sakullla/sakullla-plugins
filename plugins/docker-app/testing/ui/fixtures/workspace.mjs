@@ -17,8 +17,13 @@ export const makeApp = (id, agent = "node-a", overrides = {}) => ({
   ...overrides,
 });
 
-export const longApp = makeApp("long-application-" + "identity-".repeat(8), "node-a", {
-  version: "registry.example.test/" + "namespace/".repeat(14) + "image:release-2026",
+export const makeBackupRecord = (id, app = "alpha", overrides = {}) => ({
+  id, app_id: app, created: "2026-10-22T08:09:10Z", size_bytes: 4096,
+  destination: "s3", destination_label: `S3 · docker-app/${id}`,
+  ...overrides,
+});
+
+export const longApp = makeApp("long-application-" + "identity-".repeat(8), "node-a", {  version: "registry.example.test/" + "namespace/".repeat(14) + "image:release-2026",
   services: ["web", "database", "cache"], ports: [8080, 8081, 9000, 9001, 9002, 9003],
   rules: [{ id: "long-entry", enabled: true, domain: "long-app.example.test", port: 8080 }],
   actions: [{ id: "update", label: "更新" }, { id: "stop", label: "停止" }, { id: "delete", label: "删除" }],

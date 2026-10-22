@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -263,5 +265,115 @@ func TestBackupDeleteDispatchesDiscardWireAndS3DeleteGate(t *testing.T) {
 	})
 	if err == nil || err.Error() != "backup-s3 delete failed: destination is not configured" {
 		t.Fatalf("delete gate err = %v", err)
+	}
+}
+
+// TestBackupRestoreWireRebuildsWorkspaceOnAgentFace drives the full
+// agent-face restore call: S3-source retrieval simulation is out of scope
+// here (the backup-s3 suite covers the download wire); this test lands the
+// artifact in the workspace and runs the "backup-restore" wire name that
+// verifies, rebuilds, and restores volumes locally before the control plane
+// applies and starts the app.
+func TestBackupRestoreWireRebuildsWorkspaceOnAgentFace(t *testing.T) {
+	root := t.TempDir()
+	name, artifact, volumeTar := buildRestoreWireArtifact(t)
+	var commands []string
+	controller, err := dockerapp.NewController(dockerapp.ControllerConfig{
+		PackageDigest: "package", ArtifactDigest: "artifact",
+		UIWorkDirRoot: root,
+		CommandRunner: dockerapp.CommandRunnerFunc(func(_ context.Context, dir, command string, args ...string) ([]byte, error) {
+			if command != "docker" {
+				t.Fatalf("command = %s", command)
+			}
+			joined := strings.Join(args, " ")
+			commands = append(commands, joined)
+			if joined == "volume restore appdata" {
+				staged := filepath.Join(root, "media", filepath.FromSlash(pluginsdk.DockerVolumeStagingDir), "appdata.tar")
+				stagedContent, readErr := os.ReadFile(staged)
+				if readErr != nil || !bytes.Equal(stagedContent, volumeTar) {
+					t.Fatalf("staged volume archive mismatch: err = %v", readErr)
+				}
+			}
+			return []byte("ok"), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(artifact)
+	if err := os.MkdirAll(filepath.Join(root, "media", "backups"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "media", "backups", name), artifact, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := restoreWirePluginCall(t, controller, "backup-restore", map[string]any{
+		"action": "restore", "agent_id": "agent-1", "app_id": "media",
+		"source": "node", "path": "backups/" + name,
+		"sha256": hex.EncodeToString(digest[:]), "size": len(artifact),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Accepted bool   `json:"accepted"`
+		Compose  string `json:"compose"`
+		SHA256   string `json:"sha256"`
+		Size     int64  `json:"size"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || !result.Accepted {
+		t.Fatalf("restore result = %s err = %v", raw, err)
+	}
+	if result.Compose != restoreWireCompose || result.SHA256 != hex.EncodeToString(digest[:]) || result.Size != int64(len(artifact)) {
+		t.Fatalf("restore result = %#v", result)
+	}
+	// The workspace was rebuilt with the artifact contents.
+	if notes, readErr := os.ReadFile(filepath.Join(root, "media", "notes.txt")); readErr != nil || string(notes) != "workspace-note" {
+		t.Fatalf("restored notes = %q err = %v", notes, readErr)
+	}
+	if bind, readErr := os.ReadFile(filepath.Join(root, "media", "data", "db.txt")); readErr != nil || string(bind) != "bind-db" {
+		t.Fatalf("restored bind data = %q err = %v", bind, readErr)
+	}
+	if !strings.Contains(strings.Join(commands, " | "), "volume restore appdata") {
+		t.Fatalf("wire commands = %v", commands)
+	}
+
+	// The probe action answers whether the exact artifact is already present.
+	raw, err = restoreWirePluginCall(t, controller, "backup-restore", map[string]any{
+		"action": "probe", "agent_id": "agent-1", "app_id": "media",
+		"source": "node", "path": "backups/" + name,
+		"sha256": hex.EncodeToString(digest[:]), "size": len(artifact),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe struct {
+		Present bool `json:"present"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || !probe.Present {
+		t.Fatalf("probe result = %s err = %v", raw, err)
+	}
+	other := sha256.Sum256([]byte("not the artifact"))
+	raw, err = restoreWirePluginCall(t, controller, "backup-restore", map[string]any{
+		"action": "probe", "agent_id": "agent-1", "app_id": "media",
+		"source": "node", "path": "backups/" + name,
+		"sha256": hex.EncodeToString(other[:]), "size": len(artifact),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || probe.Present {
+		t.Fatalf("mismatch probe result = %s err = %v", raw, err)
+	}
+
+	// A checksum mismatch is rejected with the closed stage.
+	_, err = restoreWirePluginCall(t, controller, "backup-restore", map[string]any{
+		"action": "restore", "agent_id": "agent-1", "app_id": "media",
+		"source": "node", "path": "backups/" + name,
+		"sha256": hex.EncodeToString(other[:]), "size": len(artifact),
+	})
+	if err == nil || err.Error() != "backup-restore failed: artifact does not match its record" {
+		t.Fatalf("checksum gate err = %v", err)
 	}
 }

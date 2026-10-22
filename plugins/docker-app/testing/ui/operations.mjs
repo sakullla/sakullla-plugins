@@ -266,6 +266,103 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
     }
   });
 
+
+  const backupSection = async (id = "alpha") => {
+    await reset(id);
+    await page.click('#detail-nav [data-section="backup"]');
+    await page.waitVisible("#backup-run-form");
+  };
+  const closeRestore = async (ok) => {
+    await page.waitVisible("#restore-dialog");
+    const sequence = await page.evaluate(`(() => {
+      const dialog = document.querySelector('#restore-dialog');
+      const next = Number(dialog.dataset.testCloseSequence || 0) + 1;
+      dialog.addEventListener('close', () => { dialog.dataset.testCloseSequence = String(next); }, {once:true});
+      return next;
+    })()`);
+    await page.click(ok ? "#restore-confirm" : "#restore-cancel");
+    await eventually(() => page.evaluate(`Number(document.querySelector('#restore-dialog').dataset.testCloseSequence || 0) >= ${sequence}`), "restore dialog close event");
+    await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  };
+  const backupCalls = (action) => state.calls.filter((call) => call.action === action);
+
+  await test("backup panel lists records with destination and runs backups against s3", async () => {
+    await backupSection();
+    const row = await text('.backup-list tbody tr[data-record="alpha-20261022T080910Z.tar.zst"]');
+    for (const word of ["alpha", "2026/", "1.0 MiB", "S3 · docker-app/"]) assert.ok(row.includes(word), `backup row missing ${word}`);
+    // Default settings keep the node destination off: no node entry at all.
+    assert.equal(await page.evaluate(`document.querySelector('#backup-destination option[value="node"]') === null`), true, "node destination is absent by default");
+    assert.equal(await page.visible("#backup-target"), false, "node target entry is absent by default");
+    await page.click("#backup-run"); await status("succeeded"); await idle();
+    assert.equal(backupCalls("backup-run").length, 1);
+    assert.deepEqual(backupCalls("backup-run")[0].body, {destination: "s3", target_agent: ""});
+    await eventually(() => page.evaluate(`document.querySelectorAll('.backup-list tbody tr').length === 2`), "backup list refreshed after run");
+    state.backupActionError = "发起备份失败，请检查备份目的地配置与目标 Agent 状态";
+    await page.click("#backup-run"); await status("failed"); await idle();
+    assert.equal(backupCalls("backup-run").length, 2);
+    state.backupActionError = "";
+  });
+
+  await test("backup delete confirms before sending the server confirm token", async () => {
+    await backupSection();
+    for (const mode of ["cancel", "escape", "confirm"]) {
+      await page.click('.backup-list [data-action="backup-delete"]'); await dialog();
+      assert.match(await text("#confirm-title"), /删除备份/);
+      assert.match(await text("#confirm-body"), /删除备份记录与目的地/);
+      if (mode === "escape") await cancelEsc();
+      else await close(mode === "confirm");
+      await idle();
+      assert.equal(backupCalls("backup-delete").length, mode === "confirm" ? 1 : 0, `${mode} dispatch count`);
+    }
+    assert.deepEqual(backupCalls("backup-delete")[0].body, {record: "alpha-20261022T080910Z.tar.zst", confirm: "alpha"});
+    await eventually(() => page.evaluate(`document.querySelector('.backup-empty') !== null`), "record removed from list");
+  });
+
+  await test("restore asks for a target agent and rejects without overwrite confirmation", async () => {
+    state.reset(); state.backups = [ {id:"alpha-20261022T080910Z.tar.zst", app_id:"alpha", created:"2026-10-22T08:09:10Z", size_bytes: 1048576, destination:"s3", destination_label:"S3 · docker-app/alpha-20261022T080910Z.tar.zst"} ];
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    await page.click('#detail-nav [data-section="backup"]'); await page.waitVisible("#backup-run-form");
+    await page.click('.backup-list [data-action="backup-restore"]'); await page.waitVisible("#restore-dialog");
+    const options = await page.evaluate(`Array.from(document.querySelectorAll('#restore-agent option')).map((option) => option.value)`);
+    assert.deepEqual(options, ["node-a", "node-b"]);
+    await choose("#restore-agent", "node-b");
+    await closeRestore(false); await idle();
+    assert.equal(backupCalls("backup-restore").length, 0, "cancelled restore dialog submits nothing");
+    await page.click('.backup-list [data-action="backup-restore"]'); await closeRestore(true);
+    await dialog();
+    assert.match(await text("#confirm-title"), /覆盖确认/);
+    assert.match(await text("#confirm-body"), /当前数据会被替换/);
+    await close(false); await idle();
+    assert.equal(backupCalls("backup-restore").length, 0, "unconfirmed overwrite submits nothing");
+    await page.click('.backup-list [data-action="backup-restore"]'); await page.waitVisible("#restore-dialog"); await choose("#restore-agent", "node-b"); await closeRestore(true); await dialog(); await close(true);
+    await status("succeeded"); await idle();
+    assert.deepEqual(backupCalls("backup-restore")[0].body, {record: "alpha-20261022T080910Z.tar.zst", target_agent: "node-b", confirm: "alpha"});
+  });
+
+  await test("backup settings save through the host-injected settings form", async () => {
+    await backupSection();
+    await page.evaluate(`(() => {
+      const form = document.querySelector('#backup-settings-form');
+      form.querySelector('input[name="endpoint"]').value = "https://s3.relay.test";
+      form.querySelector('input[name="bucket"]').value = "vault";
+      form.querySelector('input[name="prefix"]').value = "docker-app";
+      form.querySelector('input[name="access_key_id"]').value = "FIXTUREKEY";
+      form.querySelector('input[name="secret_access_key"]').value = "fixture-secret";
+    })()`);
+    await page.click("#backup-settings-save"); await dialog();
+    assert.match(await text("#confirm-body"), /宿主受管 secret/);
+    await close(false); await idle();
+    assert.equal(backupCalls("backup-settings").length, 0, "cancelled settings save submits nothing");
+    await page.click("#backup-settings-save"); await close(true);
+    await status("succeeded"); await idle();
+    assert.equal(backupCalls("backup-settings").length, 1);
+    assert.deepEqual(backupCalls("backup-settings")[0].body, {
+      endpoint: "https://s3.relay.test", bucket: "vault", prefix: "docker-app",
+      node_enabled: false, access_key_id: "FIXTUREKEY", secret_access_key: "fixture-secret",
+    });
+    assert.equal(state.backupSettings.endpoint, "https://s3.relay.test");
+  });
   await test("old refresh cannot change an operation target during confirmation or submission", async () => {
     await reset();
     const oldList = hold("/api/apps?agent_id=node-a");

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -58,15 +59,16 @@ const (
 // Control-plane run failure stages. Closed strings, wrapped with the failing
 // sub-call error where one exists.
 const (
-	backupRunStageAppInvalid      = "app id is invalid"
-	backupRunStageVolumeInvalid   = "volume name is invalid"
-	backupRunStageUnmanagedBind   = "relative bind is not operable"
-	backupRunStageStagingSource   = "bind source is inside the staging tree"
-	backupRunStageConflict        = "volume archive names conflict"
-	backupRunStageVolumeLimit     = "volume count exceeds limit"
-	backupRunStageRecordStore     = "backup record could not be stored"
-	backupRunStageObjectMismatch  = "uploaded object does not match the artifact"
-	backupRunStageObjectReference = "backup object reference is invalid"
+	backupRunStageAppInvalid         = "app id is invalid"
+	backupRunStageVolumeInvalid      = "volume name is invalid"
+	backupRunStageUnmanagedBind      = "relative bind is not operable"
+	backupRunStageStagingSource      = "bind source is inside the staging tree"
+	backupRunStageConflict           = "volume archive names conflict"
+	backupRunStageVolumeLimit        = "volume count exceeds limit"
+	backupRunStageRecordStore        = "backup record could not be stored"
+	backupRunStageObjectMismatch     = "uploaded object does not match the artifact"
+	backupRunStageObjectReference    = "backup object reference is invalid"
+	backupRunStageDestinationInvalid = "backup destination selection is invalid"
 )
 
 const backupRunCleanupTimeout = 15 * time.Second
@@ -142,7 +144,7 @@ func planBackupVolumes(document string) ([]backupVolumePlan, error) {
 		case bindHost:
 			continue
 		case bindNamed:
-			if !validBackupVolumeName(source) {
+			if !validBackupVolumeName(source) || len(stagedNameWithSuffix(source)) > backupVolumeNameMax {
 				return nil, backupRunFailure(backupRunStageVolumeInvalid, source)
 			}
 			plans = append(plans, backupVolumePlan{Spec: source, Staged: source, Member: "vol-" + source})
@@ -153,6 +155,9 @@ func planBackupVolumes(document string) ([]backupVolumePlan, error) {
 			}
 			if backupSourceInsideStaging(source) {
 				return nil, backupRunFailure(backupRunStageStagingSource, source)
+			}
+			if len(stagedNameWithSuffix(flattened)) > backupVolumeNameMax {
+				return nil, backupRunFailure(backupRunStageVolumeInvalid, source)
 			}
 			plans = append(plans, backupVolumePlan{Spec: source, Staged: flattened, Member: "bind-" + flattened})
 		}
@@ -177,6 +182,15 @@ func backupSourceInsideStaging(source string) bool {
 	normalized = strings.TrimPrefix(normalized, "./")
 	cleaned := path.Clean(normalized)
 	return cleaned == backupStagingDir || strings.HasPrefix(cleaned, backupStagingDir+"/")
+}
+
+// stagedNameWithSuffix is the staged archive file name (member plus ".tar")
+// the execution face writes for one planned volume. The SDK staging name
+// budget matches the artifact volume-name budget, so a staged name whose file
+// name would exceed it is rejected during planning instead of failing the
+// agent-side archive step after work has started.
+func stagedNameWithSuffix(staged string) string {
+	return staged + ".tar"
 }
 
 type backupPackRequest struct {
@@ -341,13 +355,19 @@ type packedBackupArtifact struct {
 }
 
 // RunBackup orchestrates one app backup. Gating: a destination must be
-// configured (S3 endpoint+bucket or the node destination enabled) and the app
-// must be stored and bound to an online Agent. The app lifecycle is never
-// touched; every stage failure returns a stage-named error and leaves no
-// record, no staging residue, and no partial artifact. If the record cannot
-// be stored after a successful destination write, the destination object is
-// removed best-effort so no unrecorded object remains.
-func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID string, settings BackupSettings) (BackupRecord, error) {
+// chosen and configured (S3 endpoint+bucket or the node destination enabled)
+// and the app must be stored and bound to an online Agent. destination is one
+// of BackupDestinationS3, BackupDestinationNode, or "" (the first configured
+// one, S3 first). A node destination with a non-empty targetAgentID pushes
+// the finished artifact to that managed Agent over the node-transfer channel;
+// without one the artifact stays in the origin Agent workspace. The app
+// lifecycle is never touched; every stage failure returns a stage-named error
+// and leaves no record, no staging residue, and no partial artifact. If the
+// record cannot be stored after a successful destination write, the
+// destination object is removed best-effort so no unrecorded object remains.
+// Runs of one app are serialized: a second concurrent run fails fast instead
+// of interleaving staging trees of the same workspace.
+func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID string, settings BackupSettings, destination, targetAgentID string) (BackupRecord, error) {
 	if runtime == nil || runtime.client == nil {
 		return BackupRecord{}, ErrTypedHandlesUnavailable
 	}
@@ -355,9 +375,29 @@ func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID strin
 	if !validID(appID) {
 		return BackupRecord{}, backupRunFailure(backupRunStageAppInvalid)
 	}
-	useS3 := settings.S3Configured()
-	if !useS3 && !settings.Node.Enabled {
+	switch destination {
+	case "", BackupDestinationS3, BackupDestinationNode:
+	default:
+		return BackupRecord{}, backupRunFailure(backupRunStageDestinationInvalid)
+	}
+	useS3 := destination == BackupDestinationS3 || destination == "" && settings.S3Configured()
+	if useS3 && !settings.S3Configured() {
 		return BackupRecord{}, ErrBackupDestinationUnconfigured
+	}
+	if destination == BackupDestinationNode && !settings.Node.Enabled {
+		return BackupRecord{}, fmt.Errorf("backup run failed: %w", ErrBackupNodeDisabled)
+	}
+	if destination == "" && !useS3 && !settings.Node.Enabled {
+		return BackupRecord{}, ErrBackupDestinationUnconfigured
+	}
+	targetAgentID = strings.TrimSpace(targetAgentID)
+	if targetAgentID != "" && (useS3 || !validAgentID(targetAgentID)) {
+		return BackupRecord{}, backupRunFailure(backupRunStageDestinationInvalid)
+	}
+	unlock, busy := runtime.lockBackupRun(appID)
+	defer unlock()
+	if busy {
+		return BackupRecord{}, ErrBackupRunBusy
 	}
 	apps, _, err := runtime.LoadApps(ctx)
 	if err != nil {
@@ -376,6 +416,15 @@ func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID strin
 	}
 	if !validAgentID(app.AgentID) {
 		return BackupRecord{}, ErrAgentOffline
+	}
+	if targetAgentID != "" {
+		managedAgents, err := runtime.ManagedBackupAgents(ctx)
+		if err != nil {
+			return BackupRecord{}, err
+		}
+		if !managedAgentContains(managedAgents, targetAgentID) {
+			return BackupRecord{}, backupNodeFailure(nodeStageTargetUnmanaged)
+		}
 	}
 	plans, err := planBackupVolumes(app.Compose)
 	if err != nil {
@@ -410,6 +459,17 @@ func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID strin
 			return BackupRecord{}, fmt.Errorf("backup run failed at upload: %w", err)
 		}
 		record.Destination = BackupDestinationRef{Type: BackupDestinationS3, Location: object}
+	} else if targetAgentID != "" {
+		// Node destination with an explicit target: the finished artifact is
+		// pushed to the target Agent's plugin-managed backups/ tree; the record
+		// location names that target so cross-node restore can find it.
+		result, err := runtime.PushPackedBackupArtifact(ctx, settings, app, targetAgentID, packed)
+		if err != nil {
+			runtime.cleanBackupStaging(ctx, app)
+			runtime.discardBackupArtifact(ctx, app, packed.Path)
+			return BackupRecord{}, fmt.Errorf("backup run failed at node transfer: %w", err)
+		}
+		record.Destination = BackupDestinationRef{Type: BackupDestinationNode, Location: result.TargetAgentID}
 	} else {
 		// Node destination: the artifact stays in the origin Agent workspace.
 		record.Destination = BackupDestinationRef{Type: BackupDestinationNode, Location: app.AgentID}
@@ -420,9 +480,29 @@ func (runtime *hostCapabilityRuntime) RunBackup(ctx context.Context, appID strin
 	return record, nil
 }
 
+// backupRunLocks serializes backup runs per app: two concurrent runs of one
+// app would interleave their staging trees inside the same workspace.
+var backupRunLocks sync.Map // app ID -> *sync.Mutex
+
+// lockBackupRun fails fast when another backup of the same app is already
+// running; busy then reports that fast failure and unlock is a no-op.
+func (runtime *hostCapabilityRuntime) lockBackupRun(appID string) (unlock func(), busy bool) {
+	value, _ := backupRunLocks.LoadOrStore(appID, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	if !mutex.TryLock() {
+		return func() {}, true
+	}
+	return mutex.Unlock, false
+}
+
+// ErrBackupRunBusy reports a backup rejected because another backup of the
+// same app is already running.
+var ErrBackupRunBusy = errors.New("backup run failed: another backup of this app is already running")
+
 // compensateFailedRecord removes the destination object of a run whose record
-// could not be stored, best-effort, and reports both the store failure and
-// the cleanup outcome.
+// could not be stored and reports both the store failure and the cleanup
+// outcome, mirroring the s3 path for node artifacts: a discard failure is part
+// of the returned error so no silent unrecorded artifact remains.
 func (runtime *hostCapabilityRuntime) compensateFailedRecord(ctx context.Context, app App, settings BackupSettings, record BackupRecord, cause error) error {
 	if record.Destination.Type == BackupDestinationS3 {
 		if err := runtime.deleteBackupObject(ctx, app, settings, record); err != nil {
@@ -430,7 +510,14 @@ func (runtime *hostCapabilityRuntime) compensateFailedRecord(ctx context.Context
 		}
 		return fmt.Errorf("backup run failed: %s: %w", backupRunStageRecordStore, cause)
 	}
-	runtime.discardBackupArtifact(ctx, app, path.Join(backupArtifactDir, record.ID))
+	if location := strings.TrimSpace(record.Destination.Location); location != "" && location != app.AgentID {
+		if err := runtime.discardBackupArtifactChecked(ctx, App{ID: app.ID, AgentID: location, WorkDir: app.WorkDir}, path.Join(backupArtifactDir, record.ID)); err != nil {
+			return fmt.Errorf("backup run failed: %s: %v (target workspace artifact could not be removed: %v)", backupRunStageRecordStore, cause, err)
+		}
+	}
+	if err := runtime.discardBackupArtifactChecked(ctx, app, path.Join(backupArtifactDir, record.ID)); err != nil {
+		return fmt.Errorf("backup run failed: %s: %v (workspace artifact could not be removed: %v)", backupRunStageRecordStore, cause, err)
+	}
 	return fmt.Errorf("backup run failed: %s: %w", backupRunStageRecordStore, cause)
 }
 
@@ -543,13 +630,27 @@ func (runtime *hostCapabilityRuntime) cleanBackupStaging(ctx context.Context, ap
 // discardBackupArtifact asks the Agent face to remove one partial artifact of
 // a failed run. Best-effort.
 func (runtime *hostCapabilityRuntime) discardBackupArtifact(ctx context.Context, app App, artifactPath string) {
+	_ = runtime.discardBackupArtifactChecked(ctx, app, artifactPath)
+}
+
+// discardBackupArtifactChecked is discardBackupArtifact with the dispatch
+// outcome, so record-store compensation can surface a failed cleanup.
+func (runtime *hostCapabilityRuntime) discardBackupArtifactChecked(ctx context.Context, app App, artifactPath string) error {
 	if runtime == nil || runtime.client == nil || !validAgentID(app.AgentID) || strings.TrimSpace(artifactPath) == "" {
-		return
+		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupRunCleanupTimeout)
 	defer cancel()
-	_ = runtime.pluginCall(cleanupCtx, app.AgentID, pluginCallBackupPackName, map[string]any{
+	return runtime.pluginCall(cleanupCtx, app.AgentID, pluginCallBackupPackName, map[string]any{
 		"action": backupPackActionDiscard, "agent_id": app.AgentID, "app_id": app.ID,
 		"workdir": app.WorkDir, "path": artifactPath,
 	}, nil)
+}
+
+// ListBackups returns every stored backup record, newest first.
+func (runtime *hostCapabilityRuntime) ListBackups(ctx context.Context) ([]BackupRecord, error) {
+	if runtime == nil || runtime.client == nil || runtime.backups == nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	return runtime.backups.List(ctx)
 }

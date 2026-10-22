@@ -35,6 +35,10 @@ const pluginCallBackupS3Name = "backup-s3"
 // backupSecretScope mirrors plugin.yaml's secret-scope:docker-app-backup grant.
 const backupSecretScope = "docker-app-backup"
 
+// backupS3SecretID names the scoped secret holding the S3 destination
+// credentials this plugin creates and rotates through the settings page.
+const backupS3SecretID = "backup-s3-credentials"
+
 const (
 	backupS3ActionUpload   = "upload"
 	backupS3ActionDownload = "download"

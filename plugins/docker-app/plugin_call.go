@@ -115,6 +115,8 @@ func (controller *Controller) Call(ctx context.Context, generation, name string,
 		return controller.callBackupPack(ctx, payload)
 	case pluginCallBackupS3Name:
 		return controller.callBackupS3(ctx, payload)
+	case pluginCallBackupRestoreName:
+		return controller.callBackupRestore(ctx, payload)
 	default:
 		return nil, fmt.Errorf("%w: plugin call name %q is unknown", ErrTypedHandlesUnavailable, name)
 	}

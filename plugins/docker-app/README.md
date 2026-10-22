@@ -128,6 +128,20 @@ window with a light toolbar. Operation feedback floats above the page rather
 than pushing it: a status toast appears and disappears without reflowing the
 content and without intercepting a click.
 
+The detail page also carries a backup section. It lists this application's
+backup records (application, time, size, destination) with per-record restore
+and delete entries, starts backups against a chosen destination (S3, or a
+managed node when that destination is enabled), and edits the host-injected
+destination settings: the S3 endpoint/bucket/prefix form plus the node
+destination switch. Destination settings are written through the host
+`instance.config` operation and re-injected by the lifecycle; S3 credentials
+go to the host scoped-secret store (create/rotate) and only the returned
+reference is persisted in `backup.s3.credentials_secret`. Restore and delete
+reuse the page's confirmation dialog and the server-side confirm token (the
+application id): an unconfirmed overwrite or deletion is rejected with zero
+side effects. The node destination stays off by default and its entries are
+not rendered while it is off; the server-side gate remains authoritative.
+
 An optional read-only field diagnostic accepts image names at runtime through
 `NRE_DOCKER_APP_LIVE_IMAGES` (space-separated). Run `TestLiveDockerImageMetadata`
 from a compiled Go test binary on the Agent to verify real tag enumeration,

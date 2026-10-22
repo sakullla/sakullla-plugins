@@ -334,6 +334,7 @@
           <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="files" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件</span></button>
           <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="logs" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-terminal"></use></svg><span>日志</span></button>
           <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="http" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-globe"></use></svg><span>HTTP 入口</span></button>
+          <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="backup" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-database"></use></svg><span>备份</span></button>
         </nav>
 
         <section id="detail-overview" class="detail-section" data-section-panel="overview" role="tabpanel"></section>
@@ -403,6 +404,8 @@
         </section>
 
         <section id="detail-http" class="detail-section" data-section-panel="http" role="tabpanel" hidden></section>
+
+        <section id="detail-backup" class="detail-section" data-section-panel="backup" role="tabpanel" hidden></section>
       </section>
     </section>
 
@@ -670,6 +673,28 @@
       <div class="ui-dialog__footer dialog-actions">
         <button type="submit" value="cancel" class="ui-btn ui-btn--secondary" id="update-cancel">取消</button>
         <button type="submit" value="ok" class="ui-btn" id="update-confirm">确认应用</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="restore-dialog" class="ui-dialog restore-dialog" aria-labelledby="restore-title">
+    <form method="dialog" id="restore-form" class="files-dialog-form">
+      <div class="ui-dialog__head">
+        <div>
+          <p class="section-kicker">BACKUP RESTORE</p>
+          <h3 id="restore-title" class="ui-dialog__title">恢复备份</h3>
+          <p id="restore-copy" class="ui-dialog__desc files-dialog-copy"></p>
+        </div>
+      </div>
+      <div class="ui-dialog__body">
+        <label class="ui-field">目标 Agent
+          <select class="ui-select" id="restore-agent" name="agent"></select>
+        </label>
+        <p class="hint">恢复会在目标 Agent 上重建工作区与数据卷并启动应用。覆盖同名应用需要再次确认。</p>
+      </div>
+      <div class="ui-dialog__footer dialog-actions">
+        <button type="submit" value="cancel" class="ui-btn ui-btn--secondary" id="restore-cancel">取消</button>
+        <button type="submit" value="ok" class="ui-btn" id="restore-confirm">继续</button>
       </div>
     </form>
   </dialog>

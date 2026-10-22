@@ -206,7 +206,6 @@ func backupRunTestApp(compose string) []App {
 }
 
 func TestRunBackupRejectsUnconfiguredDestination(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name     string
 		settings BackupSettings
@@ -223,7 +222,7 @@ func TestRunBackupRejectsUnconfiguredDestination(t *testing.T) {
 				t.Fatal("unconfigured destination still dispatched to the host")
 				return nil
 			}))
-			record, err := runtime.RunBackup(context.Background(), "media", test.settings)
+			record, err := runtime.RunBackup(context.Background(), "media", test.settings, "", "")
 			if !errors.Is(err, ErrBackupDestinationUnconfigured) {
 				t.Fatalf("err = %v want %v", err, ErrBackupDestinationUnconfigured)
 			}
@@ -235,12 +234,11 @@ func TestRunBackupRejectsUnconfiguredDestination(t *testing.T) {
 }
 
 func TestRunBackupGatesUnknownAppAndInvalidInput(t *testing.T) {
-	t.Parallel()
 	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
-	if _, err := runtime.RunBackup(context.Background(), "other", backupRunTestSettings(true, false)); !errors.Is(err, ErrBackupRunAppUnknown) {
+	if _, err := runtime.RunBackup(context.Background(), "other", backupRunTestSettings(true, false), "", ""); !errors.Is(err, ErrBackupRunAppUnknown) {
 		t.Fatalf("unknown app err = %v", err)
 	}
-	if _, err := runtime.RunBackup(context.Background(), "Bad_ID", backupRunTestSettings(true, false)); err == nil || !strings.Contains(err.Error(), backupRunStageAppInvalid) {
+	if _, err := runtime.RunBackup(context.Background(), "Bad_ID", backupRunTestSettings(true, false), "", ""); err == nil || !strings.Contains(err.Error(), backupRunStageAppInvalid) {
 		t.Fatalf("invalid app id err = %v", err)
 	}
 	if len(stub.volumeSpecs) != 0 || len(stub.packPayloads) != 0 || stub.putCount != 0 {
@@ -249,9 +247,8 @@ func TestRunBackupGatesUnknownAppAndInvalidInput(t *testing.T) {
 }
 
 func TestRunBackupSuccessUploadsAndStoresRecord(t *testing.T) {
-	t.Parallel()
 	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
-	record, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+	record, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,9 +320,8 @@ func TestRunBackupSuccessUploadsAndStoresRecord(t *testing.T) {
 }
 
 func TestRunBackupNodeDestinationKeepsArtifactOnAgent(t *testing.T) {
-	t.Parallel()
 	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
-	record, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true))
+	record, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +337,6 @@ func TestRunBackupNodeDestinationKeepsArtifactOnAgent(t *testing.T) {
 }
 
 func TestRunBackupVolumePlanFailuresDispatchNothing(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		compose string
@@ -371,7 +366,7 @@ func TestRunBackupVolumePlanFailuresDispatchNothing(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, stub := newBackupRunRuntime(t, backupRunTestApp(test.compose))
-			_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+			_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 			if err == nil || !strings.Contains(err.Error(), "backup run failed") || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err = %v want stage %q", err, test.want)
 			}
@@ -383,10 +378,9 @@ func TestRunBackupVolumePlanFailuresDispatchNothing(t *testing.T) {
 }
 
 func TestRunBackupVolumeArchiveFailureCleansStagingWithoutRecord(t *testing.T) {
-	t.Parallel()
 	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
 	stub.failVolume = "appdata"
-	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 	if err == nil || !strings.Contains(err.Error(), "backup run failed at volume archive (appdata)") || !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
@@ -399,10 +393,9 @@ func TestRunBackupVolumeArchiveFailureCleansStagingWithoutRecord(t *testing.T) {
 }
 
 func TestRunBackupUploadFailureDiscardsArtifactWithoutRecord(t *testing.T) {
-	t.Parallel()
 	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
 	stub.failUpload = errors.New("backup-s3 upload failed: access was denied")
-	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 	if err == nil || !strings.Contains(err.Error(), "backup run failed at upload") || !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
@@ -421,12 +414,11 @@ func TestRunBackupUploadFailureDiscardsArtifactWithoutRecord(t *testing.T) {
 }
 
 func TestRunBackupRecordStoreFailureCompensatesDestination(t *testing.T) {
-	t.Parallel()
 	storeFailure := errors.New("state backend refused")
 	t.Run("object removed", func(t *testing.T) {
 		runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
 		stub.failPut = storeFailure
-		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 		if err == nil || !strings.Contains(err.Error(), backupRunStageRecordStore) {
 			t.Fatalf("err = %v", err)
 		}
@@ -448,7 +440,7 @@ func TestRunBackupRecordStoreFailureCompensatesDestination(t *testing.T) {
 		runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
 		stub.failPut = storeFailure
 		stub.failDelete = errors.New("backup-s3 delete failed: access was denied")
-		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false))
+		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
 		if err == nil || !strings.Contains(err.Error(), backupRunStageRecordStore) || !strings.Contains(err.Error(), "destination object could not be removed") {
 			t.Fatalf("err = %v", err)
 		}
@@ -456,7 +448,7 @@ func TestRunBackupRecordStoreFailureCompensatesDestination(t *testing.T) {
 	t.Run("node artifact discarded", func(t *testing.T) {
 		runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
 		stub.failPut = storeFailure
-		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true))
+		_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true), "", "")
 		if err == nil || !strings.Contains(err.Error(), backupRunStageRecordStore) {
 			t.Fatalf("err = %v", err)
 		}
@@ -467,18 +459,16 @@ func TestRunBackupRecordStoreFailureCompensatesDestination(t *testing.T) {
 }
 
 func TestRunBackupUnavailableWithoutHostClient(t *testing.T) {
-	t.Parallel()
 	var runtime *hostCapabilityRuntime
-	if _, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false)); !errors.Is(err, ErrTypedHandlesUnavailable) {
+	if _, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", ""); !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("nil runtime err = %v", err)
 	}
-	if _, err := newHostCapabilityRuntime(nil).RunBackup(context.Background(), "media", backupRunTestSettings(true, false)); !errors.Is(err, ErrTypedHandlesUnavailable) {
+	if _, err := newHostCapabilityRuntime(nil).RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", ""); !errors.Is(err, ErrTypedHandlesUnavailable) {
 		t.Fatalf("nil client err = %v", err)
 	}
 }
 
 func TestPlanBackupVolumes(t *testing.T) {
-	t.Parallel()
 	plans, err := planBackupVolumes(backupRunTestCompose)
 	if err != nil {
 		t.Fatal(err)
@@ -524,7 +514,6 @@ func writeStagedVolumeArchive(t *testing.T, root, name string) {
 }
 
 func TestCallBackupPackCreatesArtifact(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	workdir := filepath.Join(root, "media")
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
@@ -614,7 +603,6 @@ func TestCallBackupPackCreatesArtifact(t *testing.T) {
 }
 
 func TestCallBackupPackFailures(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "media"), 0o755); err != nil {
 		t.Fatal(err)
@@ -734,7 +722,6 @@ func TestCallBackupPackFailures(t *testing.T) {
 }
 
 func TestCallBackupPackCleanAndDiscard(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	workdir := filepath.Join(root, "media")
 	if err := os.MkdirAll(filepath.Join(workdir, filepath.FromSlash(pluginsdk.DockerVolumeStagingDir)), 0o755); err != nil {
@@ -816,7 +803,6 @@ func backupStoreTestRecord(id string) BackupRecord {
 }
 
 func TestPersistedBackupStore(t *testing.T) {
-	t.Parallel()
 	backend := &fakeBackupSnapshotStore{}
 	store := newPersistedBackupStore(backend)
 	if err := store.Append(context.Background(), backupStoreTestRecord("b")); err != nil {
@@ -875,7 +861,6 @@ func TestPersistedBackupStore(t *testing.T) {
 }
 
 func TestHostCapabilityRuntimeBackupsStateRoundTrip(t *testing.T) {
-	t.Parallel()
 	var stored backupStoreSnapshot
 	client := hostCallFunc(func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
 		var request struct {
@@ -937,7 +922,6 @@ func TestHostCapabilityRuntimeBackupsStateRoundTrip(t *testing.T) {
 }
 
 func TestParseConfigurationBackupSettings(t *testing.T) {
-	t.Parallel()
 	full := fmt.Sprintf(`{
 		"apps": [],
 		"backup": {
@@ -980,5 +964,129 @@ func TestParseConfigurationBackupSettings(t *testing.T) {
 		if _, err := ParseConfiguration([]byte(invalid)); err == nil {
 			t.Fatalf("invalid config accepted: %s", invalid)
 		}
+	}
+}
+
+// A volume whose staged archive file name (member plus ".tar") would exceed
+// the artifact name budget is rejected during planning, before any host
+// dispatch.
+func TestRunBackupRejectsStagedNameOverBudget(t *testing.T) {
+	long := "v" + strings.Repeat("o", 124) // 125 bytes; staged + ".tar" = 129 > 128.
+	runtime, stub := newBackupRunRuntime(t, backupRunTestApp("services:\n  app:\n    image: example/app:1\n    volumes:\n      - "+long+":/data\n"))
+	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
+	if err == nil || !strings.Contains(err.Error(), backupRunStageVolumeInvalid) {
+		t.Fatalf("long staged name err = %v", err)
+	}
+	if len(stub.volumeSpecs) != 0 || len(stub.packPayloads) != 0 || stub.putCount != 0 {
+		t.Fatalf("oversize staged name dispatched work")
+	}
+}
+
+// A second concurrent run of the same app fails fast instead of interleaving
+// staging trees of the same workspace.
+func TestRunBackupSameAppConcurrentSecondRunFailsFast(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	apps := backupRunTestApp(backupRunTestCompose)
+	first := &backupRunStub{t: t, apps: apps}
+	firstGate := func(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		if call.Operation == pluginsdk.HostRuntimePluginCall {
+			request := decodePluginCallRequest(t, call)
+			if request.Name == pluginCallVolumeName {
+				select {
+				case started <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+		}
+		return first.call(context.Background(), call, target)
+	}
+	firstRuntime := newHostCapabilityRuntime(hostCallFunc(firstGate))
+	done := make(chan error, 1)
+	go func() {
+		_, err := firstRuntime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
+		done <- err
+	}()
+	<-started
+	secondRuntime, second := newBackupRunRuntime(t, apps)
+	_, err := secondRuntime.RunBackup(context.Background(), "media", backupRunTestSettings(true, false), "", "")
+	if !errors.Is(err, ErrBackupRunBusy) {
+		t.Fatalf("second run err = %v want %v", err, ErrBackupRunBusy)
+	}
+	if len(second.packPayloads) != 0 || second.putCount != 0 {
+		t.Fatalf("busy second run dispatched work")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first run err = %v", err)
+	}
+}
+
+// A node-destination run with an explicit target pushes the packed artifact
+// to that managed agent and records the target as the destination location.
+func TestRunBackupNodeDestinationPushesToTargetAgent(t *testing.T) {
+	apps := []App{
+		{ID: "media", AgentID: "agent-1", Compose: backupRunTestCompose, Generation: "generation-1"},
+		{ID: "other", AgentID: "agent-2", Compose: backupRunTestCompose, Generation: "generation-1"},
+	}
+	stub := &backupRunStub{t: t, apps: apps}
+	var sends []pluginsdk.NodeTransferRequest
+	runtime := newHostCapabilityRuntime(hostCallFunc(func(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+		switch call.Operation {
+		case pluginsdk.HostRuntimeNodeTransfer:
+			var request pluginsdk.NodeTransferRequest
+			if err := json.Unmarshal(call.Payload, &request); err != nil {
+				t.Fatalf("node.transfer payload: %v", err)
+			}
+			sends = append(sends, request)
+			return copyHostResult(pluginsdk.NodeTransferResponse{
+				TransferID: "nt-1", State: pluginsdk.NodeTransferStateCompleted, BytesTransferred: request.SizeBytes,
+			}, target)
+		case pluginsdk.HostRuntimePluginCall:
+			request := decodePluginCallRequest(t, call)
+			if request.Name == pluginCallEngineName {
+				payload := decodePluginCallInner(t, request)
+				agentID, _ := payload["agent_id"].(string)
+				return copyHostResult(map[string]any{"agent_id": agentID, "online": true, "installed": true}, target)
+			}
+		}
+		return stub.call(ctx, call, target)
+	}))
+	if runtime == nil {
+		t.Fatal("runtime is nil")
+	}
+	record, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true), BackupDestinationNode, "agent-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) != 1 {
+		t.Fatalf("send requests = %d", len(sends))
+	}
+	sent := sends[0]
+	if sent.SourceAgentID != "agent-1" || sent.TargetAgentID != "agent-2" || sent.AppID != "media" || sent.ArtifactName != record.ID || sent.SHA256 != backupRunTestSHA256 {
+		t.Fatalf("send request = %#v", sent)
+	}
+	if record.Destination != (BackupDestinationRef{Type: BackupDestinationNode, Location: "agent-2"}) {
+		t.Fatalf("record destination = %#v", record.Destination)
+	}
+	if len(stub.uploadPayloads) != 0 {
+		t.Fatalf("node push run uploaded to s3: %#v", stub.uploadPayloads)
+	}
+	if stub.putCount != 1 || stub.stored.Records[record.ID] != record {
+		t.Fatalf("stored record = %#v puts = %d", stub.stored, stub.putCount)
+	}
+}
+
+// A node-destination target outside the managed agent set is rejected before
+// any dispatch.
+func TestRunBackupNodeTargetMustBeManaged(t *testing.T) {
+	runtime, stub := newBackupRunRuntime(t, backupRunTestApp(backupRunTestCompose))
+	_, err := runtime.RunBackup(context.Background(), "media", backupRunTestSettings(false, true), BackupDestinationNode, "agent-9")
+	if err == nil || !strings.Contains(err.Error(), nodeStageTargetUnmanaged) {
+		t.Fatalf("unmanaged target err = %v", err)
+	}
+	if len(stub.volumeSpecs) != 0 || len(stub.packPayloads) != 0 || stub.putCount != 0 {
+		t.Fatalf("unmanaged target dispatched work")
 	}
 }

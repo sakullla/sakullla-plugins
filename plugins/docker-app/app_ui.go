@@ -45,22 +45,48 @@ func diskCleanupFailurePublicMessage(kind string) string {
 }
 
 type appView struct {
-	ID            string            `json:"id"`
-	AgentID       string            `json:"agent_id,omitempty"`
-	Name          string            `json:"name"`
-	Status        string            `json:"status"`
-	Notice        string            `json:"notice,omitempty"`
-	ImageChecking bool              `json:"image_checking,omitempty"`
-	Version       string            `json:"version"`
-	Compose       string            `json:"compose,omitempty"`
-	Env           string            `json:"env,omitempty"`
-	AutoUpdate    bool              `json:"auto_update,omitempty"`
-	Ports         []uint16          `json:"ports,omitempty"`
-	Services      []string          `json:"services,omitempty"`
-	ServiceImages []appServiceView  `json:"service_images,omitempty"`
-	Actions       []OpsAction       `json:"actions,omitempty"`
-	Rules         []appHTTPRuleView `json:"rules,omitempty"`
-	RulesError    string            `json:"rules_error,omitempty"`
+	ID            string              `json:"id"`
+	AgentID       string              `json:"agent_id,omitempty"`
+	Name          string              `json:"name"`
+	Status        string              `json:"status"`
+	Notice        string              `json:"notice,omitempty"`
+	ImageChecking bool                `json:"image_checking,omitempty"`
+	Version       string              `json:"version"`
+	Compose       string              `json:"compose,omitempty"`
+	Env           string              `json:"env,omitempty"`
+	AutoUpdate    bool                `json:"auto_update,omitempty"`
+	Ports         []uint16            `json:"ports,omitempty"`
+	Services      []string            `json:"services,omitempty"`
+	ServiceImages []appServiceView    `json:"service_images,omitempty"`
+	Actions       []OpsAction         `json:"actions,omitempty"`
+	Rules         []appHTTPRuleView   `json:"rules,omitempty"`
+	RulesError    string              `json:"rules_error,omitempty"`
+	Backup        *backupSettingsView `json:"backup,omitempty"`
+	Backups       []backupRecordView  `json:"backups,omitempty"`
+	BackupsError  string              `json:"backups_error,omitempty"`
+}
+
+// backupSettingsView projects the host-injected backup destination settings
+// for the management page. Credentials never travel; only a configured flag.
+type backupSettingsView struct {
+	S3Configured          bool     `json:"s3_configured"`
+	NodeEnabled           bool     `json:"node_enabled"`
+	Endpoint              string   `json:"endpoint,omitempty"`
+	Bucket                string   `json:"bucket,omitempty"`
+	Prefix                string   `json:"prefix,omitempty"`
+	CredentialsConfigured bool     `json:"credentials_configured"`
+	ManagedAgents         []string `json:"managed_agents,omitempty"`
+}
+
+// backupRecordView is one backup list entry: application, time, size, and
+// destination of the stored artifact.
+type backupRecordView struct {
+	ID               string `json:"id"`
+	AppID            string `json:"app_id"`
+	Created          string `json:"created"`
+	SizeBytes        int64  `json:"size_bytes"`
+	Destination      string `json:"destination"`
+	DestinationLabel string `json:"destination_label"`
 }
 
 type appHTTPRuleView struct {
@@ -93,6 +119,32 @@ type appFilesRequest struct {
 	Content string `json:"content"`
 }
 
+// appBackupWriteRequest is the body of the backup panel actions. Confirm
+// follows the app-delete precedent: the server requires confirm == appID for
+// restore overwrite and backup deletion.
+type appBackupWriteRequest struct {
+	Record      string `json:"record"`
+	Confirm     string `json:"confirm"`
+	Destination string `json:"destination"`
+	TargetAgent string `json:"target_agent"`
+	Endpoint    string `json:"endpoint"`
+	Bucket      string `json:"bucket"`
+	Prefix      string `json:"prefix"`
+	NodeEnabled bool   `json:"node_enabled"`
+	AccessKeyID string `json:"access_key_id"`
+	SecretKey   string `json:"secret_access_key"`
+}
+
+func decodeAppBackup(request *http.Request) (appBackupWriteRequest, error) {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, request.Body, MaxConfigBytes))
+	decoder.DisallowUnknownFields()
+	var body appBackupWriteRequest
+	if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return appBackupWriteRequest{}, err
+	}
+	return body, nil
+}
+
 var errWorkspaceFilePath = errors.New("只能使用应用工作区内的相对路径")
 
 type installCommandView struct {
@@ -110,19 +162,20 @@ type engineAPIView struct {
 }
 
 type appAPIResponse struct {
-	Apps     []appView            `json:"apps,omitempty"`
-	App      *appView             `json:"app,omitempty"`
-	Logs     string               `json:"logs,omitempty"`
-	Error    string               `json:"error,omitempty"`
-	Engine   *engineAPIView       `json:"engine,omitempty"`
-	Rules    []HostHTTPRule       `json:"rules,omitempty"`
-	Path     string               `json:"path,omitempty"`
-	Content  string               `json:"content,omitempty"`
-	Entries  []workspaceFileEntry `json:"entries,omitempty"`
-	Accepted bool                 `json:"accepted,omitempty"`
-	Preview  *riskPreviewView     `json:"preview,omitempty"`
-	Cleanup  *DiskCleanupReport   `json:"cleanup,omitempty"`
-	Access   struct {
+	Apps         []appView            `json:"apps,omitempty"`
+	App          *appView             `json:"app,omitempty"`
+	Logs         string               `json:"logs,omitempty"`
+	Error        string               `json:"error,omitempty"`
+	Engine       *engineAPIView       `json:"engine,omitempty"`
+	Rules        []HostHTTPRule       `json:"rules,omitempty"`
+	Path         string               `json:"path,omitempty"`
+	Content      string               `json:"content,omitempty"`
+	Entries      []workspaceFileEntry `json:"entries,omitempty"`
+	Accepted     bool                 `json:"accepted,omitempty"`
+	Preview      *riskPreviewView     `json:"preview,omitempty"`
+	Cleanup      *DiskCleanupReport   `json:"cleanup,omitempty"`
+	BackupRecord *backupRecordView    `json:"backup_record,omitempty"`
+	Access       struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -162,6 +215,10 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	if path == "/api/disk-cleanup" {
 		controller.serveDiskCleanup(writer, request)
+		return
+	}
+	if path == "/api/backup-settings" {
+		controller.serveBackupSettings(writer, request)
 		return
 	}
 	appID, action, ok := parseAppAPIPath(path)
@@ -355,7 +412,13 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		writeAppJSON(writer, http.StatusNotFound, appAPIResponse{Error: "app is unknown"})
 		return
 	}
-	if action != "get" && action != "http-rule" && action != "http-rule-delete" {
+	if action == "backup-run" || action == "backup-delete" || action == "backup-restore" {
+		if controller.uiBackup == nil {
+			writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: publicAppActionError(ErrTypedHandlesUnavailable, action)})
+			return
+		}
+	}
+	if action != "get" && action != "http-rule" && action != "http-rule-delete" && action != "backup-restore" {
 		if err := controller.requireMutableAgent(request.Context(), app); err != nil {
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, action)})
 			return
@@ -375,6 +438,7 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		if listErr != nil {
 			view.RulesError = publicAppActionError(listErr, "http-rule-list")
 		}
+		controller.decorateBackupPanel(request.Context(), &view)
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
 	case "delete":
 		body, _ := decodeAppWrite(request)
@@ -520,8 +584,108 @@ func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *
 		writeAppJSON(writer, http.StatusOK, appAPIResponse{Logs: text})
 	case "files":
 		controller.serveAppFiles(writer, request, app)
+	case "backup-run":
+		body, err := decodeAppBackup(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "backup request is invalid"})
+			return
+		}
+		record, err := controller.uiBackup.RunBackup(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), appID, controller.BackupSettingsSnapshot(), body.Destination, body.TargetAgent)
+		if err != nil {
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "backup-run")
+			writeAppJSON(writer, appStatus(err), response)
+			return
+		}
+		recorded := projectBackupRecordView(record)
+		response := controller.appCollectionResponse(request.Context(), app.AgentID)
+		response.BackupRecord = &recorded
+		writeAppJSON(writer, http.StatusOK, response)
+	case "backup-delete":
+		body, err := decodeAppBackup(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "backup request is invalid"})
+			return
+		}
+		if err := controller.uiBackup.DeleteBackup(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), body.Record, body.Confirm, controller.BackupSettingsSnapshot()); err != nil {
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "backup-delete")
+			writeAppJSON(writer, appStatus(err), response)
+			return
+		}
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
+	case "backup-restore":
+		body, err := decodeAppBackup(request)
+		if err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "backup request is invalid"})
+			return
+		}
+		target := strings.TrimSpace(body.TargetAgent)
+		if target == "" {
+			target = app.AgentID
+		}
+		if err := controller.requireMutableAgent(request.Context(), App{AgentID: target}); err != nil {
+			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "backup-restore")})
+			return
+		}
+		if _, err := controller.uiBackup.RestoreBackup(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), body.Record, target, body.Confirm, controller.BackupSettingsSnapshot(), controller.uiWorkDirRoot); err != nil {
+			response := controller.appCollectionResponse(request.Context(), app.AgentID)
+			response.Error = publicAppActionError(err, "backup-restore")
+			writeAppJSON(writer, appStatus(err), response)
+			return
+		}
+		controller.publishHTTPBackendOffers(request.Context())
+		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), app.AgentID))
 	default:
 		http.Error(writer, "Docker 应用页未找到", http.StatusNotFound)
+	}
+}
+
+// decorateBackupPanel attaches the backup settings projection and this app's
+// backup records to one detail view. A missing backup handle leaves the panel
+// unavailable rather than failing the whole detail read.
+func (controller *Controller) decorateBackupPanel(ctx context.Context, view *appView) {
+	settings := controller.BackupSettingsSnapshot()
+	projection := &backupSettingsView{
+		S3Configured: settings.S3Configured(), NodeEnabled: settings.Node.Enabled,
+		Endpoint: strings.TrimSpace(settings.S3.Endpoint), Bucket: strings.TrimSpace(settings.S3.Bucket),
+		Prefix:                strings.TrimSpace(settings.S3.Prefix),
+		CredentialsConfigured: strings.TrimSpace(settings.S3.CredentialsSecret) != "",
+		ManagedAgents:         []string{},
+	}
+	view.Backup = projection
+	view.Backups = []backupRecordView{}
+	if controller.uiBackup == nil {
+		view.BackupsError = "备份服务不可用，请确认插件宿主连接后重试"
+		return
+	}
+	if agents, err := controller.uiBackup.ManagedBackupAgents(ctx); err == nil {
+		projection.ManagedAgents = agents
+	}
+	records, err := controller.uiBackup.ListBackups(ctx)
+	if err != nil {
+		view.BackupsError = "备份记录读取失败，请刷新后重试"
+		return
+	}
+	for _, record := range records {
+		if record.AppID != view.ID {
+			continue
+		}
+		view.Backups = append(view.Backups, projectBackupRecordView(record))
+	}
+}
+
+func projectBackupRecordView(record BackupRecord) backupRecordView {
+	label := record.Destination.Location
+	switch record.Destination.Type {
+	case BackupDestinationS3:
+		label = "S3 · " + record.Destination.Location
+	case BackupDestinationNode:
+		label = "节点 · " + record.Destination.Location
+	}
+	return backupRecordView{
+		ID: record.ID, AppID: record.AppID, Created: record.Created, SizeBytes: record.SizeBytes,
+		Destination: record.Destination.Type, DestinationLabel: label,
 	}
 }
 
@@ -1839,7 +2003,7 @@ func parseAppAPIPath(path string) (appID, action string, ok bool) {
 		return decoded, "get", true
 	}
 	switch action {
-	case "delete", "start", "stop", "restart", "update", "rollback", "http-rule", "http-rule-delete", "logs", "files":
+	case "delete", "start", "stop", "restart", "update", "rollback", "http-rule", "http-rule-delete", "logs", "files", "backup-run", "backup-delete", "backup-restore":
 		return decoded, action, true
 	default:
 		return "", "", false
@@ -1946,6 +2110,146 @@ func (controller *Controller) requireReadyAgent(ctx context.Context, agentID str
 	return controller.requireMutableAgent(ctx, App{AgentID: agentID})
 }
 
+// serveBackupSettings reads and saves the host-injected backup destination
+// settings. Saving routes credentials into the Host scoped-secret store
+// (create or rotate) and persists only the returned reference inside the
+// config overlay, which is committed back through the host instance.config
+// operation and re-injected into the lifecycle.
+func (controller *Controller) serveBackupSettings(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost:
+	default:
+		writer.Header().Set("Allow", "GET, HEAD, POST")
+		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := controller.uiIdentity(request); err != nil {
+		writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
+		return
+	}
+	if controller.uiBackup == nil {
+		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: publicAppActionError(ErrTypedHandlesUnavailable, "backup-settings")})
+		return
+	}
+	if request.Method != http.MethodPost {
+		view := appView{ID: "backup-settings"}
+		controller.decorateBackupPanel(request.Context(), &view)
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view})
+		return
+	}
+	body, err := decodeAppBackup(request)
+	if err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "备份目的地设置无效"})
+		return
+	}
+	settings := controller.BackupSettingsSnapshot()
+	next := BackupSettings{S3: BackupS3Settings{
+		Endpoint: strings.TrimSpace(body.Endpoint), Bucket: strings.TrimSpace(body.Bucket),
+		Prefix: strings.TrimSpace(body.Prefix), CredentialsSecret: strings.TrimSpace(settings.S3.CredentialsSecret),
+	}}
+	next.Node.Enabled = body.NodeEnabled
+	if err := validateBackupSettings(next); err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+		return
+	}
+	accessKey := strings.TrimSpace(body.AccessKeyID)
+	secretKey := strings.TrimSpace(body.SecretKey)
+	if next.S3Configured() && accessKey != "" {
+		if !boundedText(accessKey, 128) || !boundedText(secretKey, 256) {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "备份凭证无效"})
+			return
+		}
+		reference, secretErr := controller.storeBackupS3Credentials(request.Context(), accessKey, secretKey, settings.S3.CredentialsSecret)
+		if secretErr != nil {
+			writeAppJSON(writer, appStatus(secretErr), appAPIResponse{Error: publicAppActionError(secretErr, "backup-settings")})
+			return
+		}
+		next.S3.CredentialsSecret = reference
+	}
+	if !next.S3Configured() {
+		// Clearing the destination also drops the credentials reference; the
+		// secret itself stays revocable through the host.
+		next.S3.CredentialsSecret = ""
+	}
+	document, mergeErr := mergeBackupSettingsConfig(controller.retainedConfigDocument(), next)
+	if mergeErr != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: publicAppActionError(mergeErr, "backup-settings")})
+		return
+	}
+	if err := controller.uiBackup.StoreInstanceConfig(withHostOperationKey(request.Context(), request.Header.Get(appOperationHeader)), document); err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "backup-settings")})
+		return
+	}
+	controller.setBackupSettings(next)
+	view := appView{ID: "backup-settings"}
+	controller.decorateBackupPanel(request.Context(), &view)
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{App: &view, Accepted: true})
+}
+
+// retainedConfigDocument returns the host-injected config overlay of the live
+// generation; an empty document falls back to the minimal apps overlay.
+func (controller *Controller) retainedConfigDocument() []byte {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if len(controller.configDocument) == 0 {
+		return []byte(`{"apps":[]}`)
+	}
+	return append([]byte(nil), controller.configDocument...)
+}
+
+// storeBackupS3Credentials writes S3 credentials into the Host scoped-secret
+// store and returns the persistable reference JSON. Errors are sanitized:
+// credential material never reaches a message.
+func (controller *Controller) storeBackupS3Credentials(ctx context.Context, accessKey, secretKey, existing string) (string, error) {
+	if controller.backupSecrets == nil {
+		return "", ErrTypedHandlesUnavailable
+	}
+	instanceID, err := pluginsdk.PluginInstanceIDFromEnvironment()
+	if err != nil {
+		return "", ErrTypedHandlesUnavailable
+	}
+	encoded, err := json.Marshal(struct {
+		AccessKeyID     string `json:"access_key_id"`
+		SecretAccessKey string `json:"secret_access_key"`
+	}{AccessKeyID: accessKey, SecretAccessKey: secretKey})
+	if err != nil {
+		return "", errors.New("备份凭证无效")
+	}
+	material, err := pluginsdk.NewManagedSecretMaterial(encoded)
+	if err != nil {
+		return "", errors.New("备份凭证无效")
+	}
+	defer material.Close()
+	reference := pluginsdk.ScopedSecretReference{InstanceID: instanceID, ID: backupS3SecretID, Scope: backupSecretScope}
+	action := pluginsdk.ScopedSecretCreate
+	if current, ok := decodeBackupS3Reference(existing); ok && current.InstanceID == instanceID && current.ID == backupS3SecretID {
+		reference.Version = current.Version
+		action = pluginsdk.ScopedSecretRotate
+	}
+	request := pluginsdk.ScopedSecretRequest{
+		Action: action, Reference: reference, Material: material,
+		Binding: pluginsdk.ManagedBinding{InstanceID: instanceID, Generation: controller.backupS3Generation(), EntryID: instanceID},
+	}
+	if err := request.Validate(); err != nil {
+		return "", errors.New("备份凭证无效")
+	}
+	response, err := controller.backupSecrets.ScopedSecret(ctx, request)
+	if response.Material != nil {
+		response.Material.Close()
+	}
+	if err != nil {
+		return "", safeFailure(ErrOperationFailed, err)
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return "", ErrOperationFailed
+	}
+	persisted, err := json.Marshal(response.Reference)
+	if err != nil {
+		return "", ErrOperationFailed
+	}
+	return string(persisted), nil
+}
+
 func (controller *Controller) serveComposePreview(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
@@ -2012,9 +2316,11 @@ func appStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusForbidden
-	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrEmptyHTTPRuleRef), errors.Is(err, ErrUnknownHTTPRule), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview), errors.Is(err, errWorkspaceFilePath):
+	case errors.Is(err, ErrDeleteUnconfirmed), errors.Is(err, ErrEmptyIngressDomain), errors.Is(err, ErrEmptyHTTPRuleRef), errors.Is(err, ErrUnknownHTTPRule), errors.Is(err, ErrInvalidCompose), errors.Is(err, ErrMissingComposeImage), errors.Is(err, ErrMissingComposeVariable), errors.Is(err, ErrNoPublishedPort), errors.Is(err, ErrUnknownService), errors.Is(err, ErrInvalidPreview), errors.Is(err, errWorkspaceFilePath), errors.Is(err, ErrBackupRecordInvalid):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict):
+	case errors.Is(err, ErrBackupRecordUnknown), errors.Is(err, ErrBackupRunAppUnknown):
+		return http.StatusNotFound
+	case errors.Is(err, ErrAgentOffline), errors.Is(err, ErrAppAgentConflict), errors.Is(err, ErrBackupDestinationUnconfigured), errors.Is(err, ErrBackupNodeDisabled), errors.Is(err, ErrBackupRunBusy), errors.Is(err, ErrBackupS3Unconfigured), errors.Is(err, ErrBackupS3CredentialsMissing):
 		return http.StatusConflict
 	case errors.Is(err, ErrEngineNotReady), errors.Is(err, ErrTypedHandlesUnavailable):
 		return http.StatusServiceUnavailable
@@ -2049,6 +2355,18 @@ func publicAppError(err error) string {
 		return ErrUnknownService.Error()
 	case errors.Is(err, ErrInvalidPreview):
 		return ErrInvalidPreview.Error()
+	case errors.Is(err, ErrBackupDestinationUnconfigured):
+		return "备份目的地未配置，请先在备份设置中配置 S3 或开启节点目的地"
+	case errors.Is(err, ErrBackupNodeDisabled):
+		return "节点备份目的地未开启"
+	case errors.Is(err, ErrBackupRunBusy):
+		return ErrBackupRunBusy.Error()
+	case errors.Is(err, ErrBackupRecordUnknown):
+		return "备份记录不存在，请刷新列表"
+	case errors.Is(err, ErrBackupRunAppUnknown):
+		return ErrBackupRunAppUnknown.Error()
+	case errors.Is(err, ErrBackupS3Unconfigured), errors.Is(err, ErrBackupS3CredentialsMissing):
+		return "S3 备份目的地或凭证未配置"
 	case errors.Is(err, errWorkspaceFilePath):
 		return errWorkspaceFilePath.Error()
 	case errors.Is(err, ErrEngineNotReady):
@@ -2113,6 +2431,14 @@ func publicAppActionError(err error, action string) string {
 		staged = "工作区文件操作失败，请检查相对路径和目标 Agent 状态"
 	case "disk-cleanup":
 		staged = "清理节点磁盘失败，请检查目标 Agent 的 Docker 状态"
+	case "backup-run":
+		staged = "发起备份失败，请检查备份目的地配置与目标 Agent 状态"
+	case "backup-delete":
+		staged = "删除备份失败，请检查备份目的地可达性后重试"
+	case "backup-restore":
+		staged = "恢复备份失败，请检查备份产物完整性与目标 Agent 状态"
+	case "backup-settings":
+		staged = "保存备份目的地设置失败，请检查表单内容与宿主连接"
 	default:
 		return ErrOperationFailed.Error()
 	}

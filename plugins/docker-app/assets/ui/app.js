@@ -29,6 +29,9 @@ const createTemplates = document.querySelector("#create-templates");
 const overviewPanel = document.querySelector("#detail-overview");
 const filesPanel = document.querySelector("#detail-files");
 const httpPanel = document.querySelector("#detail-http");
+const backupPanel = document.querySelector("#detail-backup");
+const restoreDialog = document.querySelector("#restore-dialog");
+const restoreAgent = document.querySelector("#restore-agent");
 const composeForm = document.querySelector("#compose-form");
 const composeSubmit = document.querySelector("#compose-submit");
 const logsService = document.querySelector("#logs-service");
@@ -3061,6 +3064,453 @@ const renderHTTP = (app) => {
   }
 };
 
+const formatBackupSize = (size) => {
+  const value = Number(size);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+};
+
+const formatBackupTime = (created) => {
+  const ts = parseAgentTime(created);
+  if (!ts) return String(created || "");
+  return new Date(ts).toLocaleString();
+};
+
+const backupRecordSummary = (record) => `${formatBackupTime(record.created)} · ${formatBackupSize(record.size_bytes)} · ${record.destination_label || record.destination || ""}`;
+
+let restoreRequest = null;
+
+const openRestoreDialog = (app, record) => {
+  if (!restoreDialog || typeof restoreDialog.showModal !== "function") return;
+  if (restoreDialog.open) return;
+  restoreRequest = { app, record };
+  if (restoreAgent) {
+    restoreAgent.replaceChildren();
+    const agents = Array.isArray(app.backup && app.backup.managed_agents) && app.backup.managed_agents.length
+      ? app.backup.managed_agents
+      : [app.agent_id].filter(Boolean);
+    agents.forEach((id) => {
+      const option = document.createElement("option");
+      option.value = id;
+      const known = agentsCache.find((agent) => agent.id === id);
+      option.textContent = known ? `${agentDisplayName(known)}（${id}）` : id;
+      restoreAgent.append(option);
+    });
+    if (app.agent_id && agents.includes(app.agent_id)) restoreAgent.value = app.agent_id;
+  }
+  const copy = document.querySelector("#restore-copy");
+  if (copy) copy.textContent = `应用 ${app.id} · ${backupRecordSummary(record)}`;
+  openDialog(restoreDialog, restoreAgent);
+};
+
+const runBackupRestore = async (app, record, agentID) => {
+  if (busy || !app || !record) return;
+  const agent = agentsCache.find((item) => item.id === agentID);
+  const target = `节点 ${agentDisplayName(agent) || agentID} · 应用 ${app.id}`;
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    // Overwrite restore reuses the server-side confirm token: the app id.
+    if (!(await askConfirm({
+      title: "覆盖确认",
+      body: `${target}\n恢复将按备份内容重建工作区与数据卷并启动应用；同名应用的当前数据会被替换。\n${backupRecordSummary(record)}`,
+      confirm: "恢复", cancel: "取消", danger: true,
+    }))) { showStatus("已取消，应用未更改。", false); return; }
+    showStatus("正在恢复备份…", false, "running");
+    await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/backup-restore`, {
+      record: record.id, target_agent: agentID, confirm: app.id,
+    });
+    const message = `${target}：已恢复备份并启动应用。`;
+    try {
+      if (await renderWorkspace() === false) throw new Error("节点或详情未能刷新");
+      showStatus(message, false);
+    } catch (refreshError) {
+      showStatus(`${message}但页面刷新失败：${refreshError.message}`, true, "partial");
+    }
+  } catch (error) {
+    showStatus(`${target}：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (restoreDialog) {
+  restoreDialog.addEventListener("close", () => {
+    if (restoreDialog.returnValue !== "ok" || !restoreRequest) return;
+    const { app, record } = restoreRequest;
+    const agentID = restoreAgent ? restoreAgent.value : "";
+    restoreRequest = null;
+    runBackupRestore(app, record, agentID);
+  });
+}
+
+const runBackupDelete = async (app, record) => {
+  if (busy || !app || !record) return;
+  const target = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}`;
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    if (!(await askConfirm({
+      title: "删除备份",
+      body: `${target}\n将同时删除备份记录与目的地中的产物：\n${backupRecordSummary(record)}\n删除后不可恢复。取消不会更改备份。`,
+      confirm: "删除", cancel: "取消", danger: true,
+    }))) { showStatus("已取消，备份未更改。", false); return; }
+    await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/backup-delete`, {
+      record: record.id, confirm: app.id,
+    });
+    const message = `${target}：已删除备份。`;
+    try {
+      if (await renderWorkspace() === false) throw new Error("备份列表未能刷新");
+      showStatus(message, false);
+    } catch (refreshError) {
+      showStatus(`${message}但页面刷新失败：${refreshError.message}`, true, "partial");
+    }
+  } catch (error) {
+    showStatus(`${target}：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const runBackup = async (app, form) => {
+  if (busy || !app) return;
+  const destinationField = form ? form.querySelector("#backup-destination") : null;
+  const destination = destinationField ? destinationField.value : "";
+  const targetField = form ? form.querySelector("#backup-target") : null;
+  const targetAgent = destination === "node" && targetField ? targetField.value : "";
+  const target = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}`;
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    showStatus("正在创建备份…", false, "running");
+    const payload = await sendPluginJSON(`api/apps/${encodeURIComponent(app.id)}/backup-run`, {
+      destination, target_agent: targetAgent,
+    });
+    const record = payload.backup_record;
+    const message = `${target}：已创建备份${record ? `（${formatBackupSize(record.size_bytes)}）` : ""}。`;
+    try {
+      if (await renderWorkspace() === false) throw new Error("备份列表未能刷新");
+      showStatus(message, false);
+    } catch (refreshError) {
+      showStatus(`${message}但页面刷新失败：${refreshError.message}`, true, "partial");
+    }
+  } catch (error) {
+    showStatus(`${target}：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const saveBackupSettings = async (app, form) => {
+  if (busy || !form) return;
+  const data = new FormData(form);
+  const body = {
+    endpoint: String(data.get("endpoint") || "").trim(),
+    bucket: String(data.get("bucket") || "").trim(),
+    prefix: String(data.get("prefix") || "").trim(),
+    node_enabled: data.get("node_enabled") === "on",
+    access_key_id: String(data.get("access_key_id") || "").trim(),
+    secret_access_key: String(data.get("secret_access_key") || "").trim(),
+  };
+  const credentials = body.access_key_id || body.secret_access_key;
+  if (credentials && !(body.access_key_id && body.secret_access_key)) {
+    showStatus("备份凭证需要同时填写 Access Key 与 Secret Key。", true);
+    return;
+  }
+  const target = `节点 ${agentDisplayName(selectedAgent())} · 应用 ${app.id}`;
+  const trigger = document.activeElement;
+  setBusy(true);
+  busyFocusTarget = trigger;
+  try {
+    if (!(await askConfirm({
+      title: "保存备份目的地设置",
+      body: `${target}\n${credentials ? "凭证会写入宿主受管 secret 存储，配置中只保留引用。" : "已保存的凭证保持不变。"}\n设置写入实例配置后由宿主注入生效。取消不会更改设置。`,
+      confirm: "保存", cancel: "取消",
+    }))) { showStatus("已取消，设置未更改。", false); return; }
+    await sendPluginJSON("api/backup-settings", body);
+    const message = "已保存备份目的地设置。";
+    try {
+      if (await renderWorkspace() === false) throw new Error("备份设置未能刷新");
+      showStatus(message, false);
+    } catch (refreshError) {
+      showStatus(`${message}但页面刷新失败：${refreshError.message}`, true, "partial");
+    }
+  } catch (error) {
+    showStatus(`${target}：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const renderBackup = (app) => {
+  if (!backupPanel) return;
+  const owner = `${app.agent_id}/${app.id}`;
+  backupPanel.replaceChildren();
+  backupPanel.dataset.owner = owner;
+  const settings = app.backup || null;
+  const records = Array.isArray(app.backups) ? app.backups : null;
+
+  const head = document.createElement("div");
+  head.className = "section-head";
+  const headCopy = document.createElement("div");
+  const kicker = document.createElement("p");
+  kicker.className = "section-kicker";
+  kicker.textContent = "BACKUP";
+  const title = document.createElement("h3");
+  title.textContent = "应用备份";
+  headCopy.append(kicker, title);
+  const retry = actionButton({ id: "refresh-backup" }, "ui-btn ui-btn--secondary ui-btn--sm", "刷新备份");
+  retry.prepend(iconNode("refresh"));
+  retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "backup"); });
+  head.append(headCopy, retry);
+  backupPanel.append(head);
+
+  if (app.backups_error) {
+    const error = document.createElement("p");
+    error.className = "resource-error";
+    error.setAttribute("role", "alert");
+    error.textContent = app.backups_error;
+    backupPanel.append(error);
+  }
+  if (!settings) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "备份服务不可用，请确认插件宿主连接后刷新重试。";
+    backupPanel.append(empty);
+    return;
+  }
+
+  const destinations = [];
+  if (settings.s3_configured) destinations.push(["s3", `S3（${settings.bucket || "已配置"}）`]);
+  if (settings.node_enabled) destinations.push(["node", "节点"]);
+  const runForm = document.createElement("form");
+  runForm.className = "backup-run-form";
+  runForm.id = "backup-run-form";
+  const runCopy = document.createElement("div");
+  runCopy.className = "backup-run-copy";
+  const runTitle = document.createElement("p");
+  runTitle.className = "backup-form-title";
+  runTitle.textContent = "发起备份";
+  const runHint = document.createElement("p");
+  runHint.className = "hint";
+  runHint.textContent = "打包工作区、Compose 与数据卷；运行中的应用不会停止。";
+  runCopy.append(runTitle, runHint);
+  const fields = document.createElement("div");
+  fields.className = "backup-run-fields";
+  if (!destinations.length) {
+    const missing = document.createElement("p");
+    missing.className = "hint backup-no-destination";
+    missing.textContent = "还没有可用的备份目的地，请先在下方配置。";
+    fields.append(missing);
+  } else {
+    const destinationLabel = document.createElement("label");
+    destinationLabel.append("备份到");
+    const destination = document.createElement("select");
+    destination.id = "backup-destination";
+    destination.name = "destination";
+    destinations.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      destination.append(option);
+    });
+    destinationLabel.append(destination);
+    fields.append(destinationLabel);
+    // Node-destination entries (target agent choice) render only while the
+    // node destination is enabled; the server-side gate stays authoritative.
+    if (settings.node_enabled) {
+      const targetLabel = document.createElement("label");
+      targetLabel.className = "backup-target-field";
+      targetLabel.append("目标 Agent");
+      const target = document.createElement("select");
+      target.id = "backup-target";
+      target.name = "target_agent";
+      const agents = Array.isArray(settings.managed_agents) && settings.managed_agents.length
+        ? settings.managed_agents
+        : [app.agent_id].filter(Boolean);
+      agents.forEach((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id === app.agent_id ? `${id}（留在这台节点）` : id;
+        target.append(option);
+      });
+      if (app.agent_id && agents.includes(app.agent_id)) target.value = app.agent_id;
+      targetLabel.append(target);
+      fields.append(targetLabel);
+      const syncTargetVisibility = () => {
+        targetLabel.hidden = destination.value !== "node";
+      };
+      destination.addEventListener("change", syncTargetVisibility);
+      syncTargetVisibility();
+    }
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "ui-btn ui-btn--sm";
+    submit.id = "backup-run";
+    submit.dataset.action = "backup-run";
+    submit.textContent = "发起备份";
+    submit.prepend(iconNode("database"));
+    fields.append(submit);
+  }
+  runForm.append(runCopy, fields);
+  runForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!busy) runBackup(app, runForm);
+  });
+  backupPanel.append(runForm);
+
+  const listHead = document.createElement("div");
+  listHead.className = "backup-list-head";
+  const listTitle = document.createElement("p");
+  listTitle.className = "backup-form-title";
+  listTitle.textContent = "备份记录";
+  listHead.append(listTitle);
+  backupPanel.append(listHead);
+  if (records && records.length) {
+    const table = document.createElement("table");
+    table.className = "backup-list";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["应用", "时间", "大小", "目的地", "操作"].forEach((label) => {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = label;
+      headRow.append(th);
+    });
+    thead.append(headRow);
+    table.append(thead);
+    const tbody = document.createElement("tbody");
+    records.forEach((record) => {
+      const row = document.createElement("tr");
+      row.dataset.record = record.id || "";
+      const appCell = document.createElement("td");
+      appCell.className = "backup-cell-app";
+      appCell.textContent = record.app_id || app.id;
+      const createdCell = document.createElement("td");
+      createdCell.textContent = formatBackupTime(record.created);
+      const sizeCell = document.createElement("td");
+      sizeCell.textContent = formatBackupSize(record.size_bytes);
+      const destinationCell = document.createElement("td");
+      destinationCell.className = "backup-cell-destination";
+      destinationCell.textContent = record.destination_label || record.destination || "";
+      const actionsCell = document.createElement("td");
+      actionsCell.className = "backup-cell-actions";
+      const restore = actionButton({ id: "backup-restore" }, "ui-btn ui-btn--secondary ui-btn--sm", "恢复");
+      restore.dataset.record = record.id || "";
+      restore.addEventListener("click", () => { if (!busy) openRestoreDialog(app, record); });
+      const remove = actionButton({ id: "backup-delete" }, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
+      remove.dataset.record = record.id || "";
+      remove.addEventListener("click", () => { if (!busy) runBackupDelete(app, record); });
+      actionsCell.append(restore, remove);
+      row.append(appCell, createdCell, sizeCell, destinationCell, actionsCell);
+      tbody.append(row);
+    });
+    table.append(tbody);
+    backupPanel.append(table);
+  } else if (records) {
+    const empty = document.createElement("p");
+    empty.className = "hint backup-empty";
+    empty.textContent = "还没有这个应用的备份记录。";
+    backupPanel.append(empty);
+  }
+
+  const settingsForm = document.createElement("form");
+  settingsForm.className = "backup-settings-form";
+  settingsForm.id = "backup-settings-form";
+  const settingsHead = document.createElement("div");
+  settingsHead.className = "backup-settings-head";
+  const settingsTitle = document.createElement("p");
+  settingsTitle.className = "backup-form-title";
+  settingsTitle.textContent = "备份目的地设置";
+  const settingsHint = document.createElement("p");
+  settingsHint.className = "hint";
+  settingsHint.textContent = "设置写入实例配置并由宿主注入生效；凭证保存在宿主受管 secret 存储，配置中只保留引用。";
+  settingsHead.append(settingsTitle, settingsHint);
+  settingsForm.append(settingsHead);
+  const settingsFields = document.createElement("div");
+  settingsFields.className = "backup-settings-fields";
+  const endpointField = document.createElement("label");
+  endpointField.append("S3 端点");
+  const endpoint = document.createElement("input");
+  endpoint.className = "ui-input";
+  endpoint.type = "url";
+  endpoint.name = "endpoint";
+  endpoint.autocomplete = "off";
+  endpoint.spellcheck = false;
+  endpoint.placeholder = "https://s3.example.com";
+  endpoint.value = settings.endpoint || "";
+  endpointField.append(endpoint);
+  const bucketField = document.createElement("label");
+  bucketField.append("Bucket");
+  const bucket = document.createElement("input");
+  bucket.className = "ui-input";
+  bucket.name = "bucket";
+  bucket.autocomplete = "off";
+  bucket.spellcheck = false;
+  bucket.placeholder = "backups";
+  bucket.value = settings.bucket || "";
+  bucketField.append(bucket);
+  const prefixField = document.createElement("label");
+  prefixField.append("对象前缀");
+  const prefix = document.createElement("input");
+  prefix.className = "ui-input";
+  prefix.name = "prefix";
+  prefix.autocomplete = "off";
+  prefix.spellcheck = false;
+  prefix.placeholder = "docker-app";
+  prefix.value = settings.prefix || "";
+  prefixField.append(prefix);
+  settingsFields.append(endpointField, bucketField, prefixField);
+  const accessField = document.createElement("label");
+  accessField.append(`Access Key${settings.credentials_configured ? "（已配置，留空保持不变）" : ""}`);
+  const access = document.createElement("input");
+  access.className = "ui-input";
+  access.type = "password";
+  access.name = "access_key_id";
+  access.autocomplete = "new-password";
+  access.spellcheck = false;
+  accessField.append(access);
+  const secretField = document.createElement("label");
+  secretField.append(`Secret Key${settings.credentials_configured ? "（已配置，留空保持不变）" : ""}`);
+  const secret = document.createElement("input");
+  secret.className = "ui-input";
+  secret.type = "password";
+  secret.name = "secret_access_key";
+  secret.autocomplete = "new-password";
+  secret.spellcheck = false;
+  secretField.append(secret);
+  const credentialsWrap = document.createElement("div");
+  credentialsWrap.className = "backup-settings-credentials";
+  credentialsWrap.append(accessField, secretField);
+  settingsFields.append(credentialsWrap);
+  const nodeToggle = document.createElement("label");
+  nodeToggle.className = "inline-check backup-node-toggle";
+  const nodeCheck = document.createElement("input");
+  nodeCheck.type = "checkbox";
+  nodeCheck.name = "node_enabled";
+  nodeCheck.checked = settings.node_enabled === true;
+  nodeToggle.append(nodeCheck, " 节点备份目的地（开启后可在受管 Agent 之间传输备份）");
+  settingsFields.append(nodeToggle);
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "ui-btn ui-btn--sm";
+  save.id = "backup-settings-save";
+  save.textContent = "保存备份设置";
+  settingsFields.append(save);
+  settingsForm.append(settingsFields);
+  settingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!busy) saveBackupSettings(app, settingsForm);
+  });
+  backupPanel.append(settingsForm);
+};
+
 const fillLogServices = (app) => {
   const services = Array.isArray(app.services) ? app.services : [];
   const previous = logsService ? logsService.value : "";
@@ -3282,6 +3732,7 @@ const paintDetail = (app, composeRevision) => {
   renderOverview(app);
   if (composeFilledFor !== app.id) fillCompose(app, composeRevision);
   renderHTTP(app);
+  renderBackup(app);
   fillLogServices(app);
   if (appChanged) resetLogsTerminal();
   scheduleImageRefresh([app]);

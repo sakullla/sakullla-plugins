@@ -19,7 +19,7 @@ import (
 
 const (
 	PluginID                 = "docker-app"
-	PluginVersion            = "0.1.54"
+	PluginVersion            = "0.1.55"
 	DeclaredResourceGroupRef = "resource-group/docker-app"
 	MaxApps                  = 128
 	MaxDiscoveries           = 512
@@ -305,6 +305,11 @@ func validateBackupS3Endpoint(value string) error {
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("backup s3 endpoint contains unsupported components")
+	}
+	// The execution face (backupS3EndpointHost) only accepts host[:port]
+	// endpoints; a base path would be silently ignored there, so reject it here.
+	if path := strings.TrimSuffix(parsed.Path, "/"); path != "" {
+		return errors.New("backup s3 endpoint must not contain a path")
 	}
 	return nil
 }

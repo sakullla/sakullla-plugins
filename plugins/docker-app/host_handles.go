@@ -730,6 +730,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIImageObserver = runtime
 	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
 	config.UIDeploymentState = newPersistedDeploymentStore(runtime)
+	config.UIBackup = runtime
 	return config
 }
 

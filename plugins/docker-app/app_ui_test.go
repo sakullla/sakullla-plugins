@@ -4755,7 +4755,54 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 			t.Fatalf("cleanup result copy missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec", "备份还原", "资源监控"} {
+	// Backup panel: a detail section with a restore dialog carrying a target
+	// agent select, confirm-gated delete/restore, and host-injected
+	// destination settings.
+	if !strings.Contains(html, `data-section="backup"`) || !strings.Contains(html, `id="detail-backup"`) {
+		t.Fatal("detail page is missing the backup section")
+	}
+	if !strings.Contains(html, `id="restore-dialog"`) || !strings.Contains(html, `id="restore-agent"`) {
+		t.Fatal("restore dialog with a target agent select is missing")
+	}
+	backupStart := strings.Index(js, "const renderBackup = (app) => {")
+	backupEnd := strings.Index(js, "const fillLogServices = (app) => {")
+	if backupStart < 0 || backupEnd <= backupStart {
+		t.Fatal("renderBackup is missing")
+	}
+	backupFn := js[backupStart:backupEnd]
+	for _, want := range []string{"backup-run", "backup-delete", "backup-restore", "api/backup-settings", "destination_label"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("backup panel missing %q wiring", want)
+		}
+	}
+	for _, fn := range []string{"const runBackupRestore", "const runBackupDelete"} {
+		start := strings.Index(js, fn)
+		if start < 0 {
+			t.Fatalf("%s is missing", fn)
+		}
+		body := js[start : start+4000]
+		ask := strings.Index(body, "askConfirm")
+		dispatch := strings.Index(body, "sendPluginJSON")
+		if ask < 0 || dispatch < 0 || dispatch < ask {
+			t.Fatalf("%s does not confirm before dispatching", fn)
+		}
+	}
+	if !strings.Contains(js, "confirm: app.id,\n      record: record.id") && !strings.Contains(js, "record: record.id, target_agent: agentID, confirm: app.id") && !strings.Contains(js, "record: record.id, confirm: app.id") {
+		t.Fatal("backup actions do not carry the server-side confirm token")
+	}
+	// Node-destination entries (target agent choice, node option) render only
+	// while the destination is enabled; the default keeps them out.
+	if !strings.Contains(backupFn, "settings.node_enabled") {
+		t.Fatal("backup panel does not gate node entries on the destination switch")
+	}
+	for _, want := range []string{".backup-run-form", ".backup-list", ".backup-settings-form", ".backup-node-toggle"} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("stylesheet missing backup rule %q", want)
+		}
+	}
+	// Backups and restore are supported capabilities; the historical blanket
+	// ban on "备份还原" copy no longer applies to the backup panel.
+	for _, forbidden := range []string{"应用商店", "应用市场", "上架", "实时跟随", "容器终端", "docker exec", "资源监控"} {
 		if strings.Contains(html, forbidden) || strings.Contains(js, forbidden) {
 			t.Fatalf("management page grew %q copy", forbidden)
 		}
@@ -5065,6 +5112,8 @@ type uiControllerOptions struct {
 	files         AppFilesHandle
 	remove        AppRemoveExecutor
 	diskCleanup   DiskCleanupHandle
+	backup        BackupRuntime
+	backupSecrets ScopedSecretSource
 }
 
 func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Controller {
@@ -5131,6 +5180,8 @@ func newUIControllerWithOptions(t *testing.T, opts uiControllerOptions) *Control
 		UIRolloutExecutor:  opts.rollout,
 		UIAppState:         opts.appState,
 		UIDeploymentState:  deployments,
+		UIBackup:           opts.backup,
+		BackupSecrets:      opts.backupSecrets,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -5789,5 +5840,314 @@ func TestAppUIPageUsesSharedKitHostThemeAndDeployDrawer(t *testing.T) {
 		if response.Code != http.StatusOK || response.Body.String() != string(want) {
 			t.Fatalf("ui-kit asset response status=%d bytes=%d", response.Code, response.Body.Len())
 		}
+	}
+}
+
+// recordingBackupRuntime stands in for the control-plane backup handle.
+type recordingBackupRuntime struct {
+	mu       sync.Mutex
+	records  []BackupRecord
+	agents   []string
+	fail     error
+	runCalls []struct{ AppID, Destination, Target string }
+	restores []struct{ Record, Target, Confirm string }
+	deletes  []struct{ Record, Confirm string }
+	configs  []json.RawMessage
+}
+
+func (fake *recordingBackupRuntime) ListBackups(context.Context) ([]BackupRecord, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.fail != nil {
+		return nil, fake.fail
+	}
+	return append([]BackupRecord(nil), fake.records...), nil
+}
+
+func (fake *recordingBackupRuntime) RunBackup(_ context.Context, appID string, settings BackupSettings, destination, targetAgentID string) (BackupRecord, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.runCalls = append(fake.runCalls, struct{ AppID, Destination, Target string }{appID, destination, targetAgentID})
+	if fake.fail != nil {
+		return BackupRecord{}, fake.fail
+	}
+	return BackupRecord{
+		ID: "media-20261022T080910Z.tar.zst", AppID: appID, OriginAgentID: "agent-1",
+		Created: "2026-10-22T08:09:10Z", SizeBytes: 4096, SHA256: backupRunTestSHA256,
+		Destination: BackupDestinationRef{Type: BackupDestinationS3, Location: settings.S3.Prefix + "/media-20261022T080910Z.tar.zst"},
+	}, nil
+}
+
+func (fake *recordingBackupRuntime) RestoreBackup(_ context.Context, recordID, targetAgentID, confirm string, _ BackupSettings, _ string) (App, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	// Unconfirmed overwrites are rejected before any effect, mirroring the
+	// real runtime's zero-side-effect confirm gate.
+	if confirm != "media" {
+		return App{}, ErrDeleteUnconfirmed
+	}
+	if fake.fail != nil {
+		return App{}, fake.fail
+	}
+	fake.restores = append(fake.restores, struct{ Record, Target, Confirm string }{recordID, targetAgentID, confirm})
+	return App{ID: "media", AgentID: targetAgentID, Compose: backupRunTestCompose, Generation: "generation-1"}, nil
+}
+
+func (fake *recordingBackupRuntime) DeleteBackup(_ context.Context, recordID, confirm string, _ BackupSettings) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if confirm != "media" {
+		return ErrDeleteUnconfirmed
+	}
+	if fake.fail != nil {
+		return fake.fail
+	}
+	fake.deletes = append(fake.deletes, struct{ Record, Confirm string }{recordID, confirm})
+	return nil
+}
+
+func (fake *recordingBackupRuntime) ManagedBackupAgents(context.Context) ([]string, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]string(nil), fake.agents...), nil
+}
+
+func (fake *recordingBackupRuntime) StoreInstanceConfig(_ context.Context, config json.RawMessage) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.configs = append(fake.configs, append(json.RawMessage(nil), config...))
+	return nil
+}
+
+// fakeBackupSecretWriter stands in for the Host scoped-secret transport on
+// the write side: create/rotate answers with a fresh versioned reference.
+type fakeBackupSecretWriter struct {
+	mu       sync.Mutex
+	requests []pluginsdk.ScopedSecretRequest
+	fail     error
+}
+
+func (fake *fakeBackupSecretWriter) ScopedSecret(_ context.Context, request pluginsdk.ScopedSecretRequest) (pluginsdk.ScopedSecretResponse, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.requests = append(fake.requests, request)
+	if fake.fail != nil {
+		return pluginsdk.ScopedSecretResponse{}, fake.fail
+	}
+	version := fmt.Sprintf("version-%020d", len(fake.requests))
+	return pluginsdk.ScopedSecretResponse{Reference: pluginsdk.ScopedSecretReference{
+		InstanceID: request.Reference.InstanceID, ID: request.Reference.ID,
+		Version: version, Scope: backupSecretScope,
+	}}, nil
+}
+
+func newBackupUITestController(t *testing.T, backup BackupRuntime) *Controller {
+	t.Helper()
+	controller := newUIControllerWithOptions(t, uiControllerOptions{backup: backup})
+	uiDeployCompose(t, controller, "media", "agent-1", "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n")
+	return controller
+}
+
+func TestAppUIDetailDecoratesBackupPanel(t *testing.T) {
+	backup := &recordingBackupRuntime{
+		agents: []string{"agent-1", "agent-2"},
+		records: []BackupRecord{{
+			ID: "media-20261022T080910Z.tar.zst", AppID: "media", OriginAgentID: "agent-1",
+			Created: "2026-10-22T08:09:10Z", SizeBytes: 4096, SHA256: backupRunTestSHA256,
+			Destination: BackupDestinationRef{Type: BackupDestinationS3, Location: "docker-app/media-20261022T080910Z.tar.zst"},
+		}},
+	}
+	controller := newBackupUITestController(t, backup)
+	controller.setBackupSettings(BackupSettings{S3: BackupS3Settings{Endpoint: testBackupS3Endpoint, Bucket: testBackupS3Bucket, Prefix: testBackupS3Prefix, CredentialsSecret: testBackupS3CredentialsReferenceJSON}})
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiRequest(http.MethodGet, "/api/apps/media", ""))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("detail status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	view := decodeAppDetail(t, recorder.Body.Bytes())
+	if view.Backup == nil {
+		t.Fatal("detail view missing backup settings")
+	}
+	if !view.Backup.S3Configured || view.Backup.NodeEnabled || !view.Backup.CredentialsConfigured {
+		t.Fatalf("backup settings view = %#v", view.Backup)
+	}
+	if view.Backup.Endpoint != testBackupS3Endpoint || view.Backup.Bucket != testBackupS3Bucket {
+		t.Fatalf("backup settings view fields = %#v", view.Backup)
+	}
+	if len(view.Backup.ManagedAgents) != 2 || view.Backup.ManagedAgents[0] != "agent-1" {
+		t.Fatalf("managed agents = %#v", view.Backup.ManagedAgents)
+	}
+	if len(view.Backups) != 1 {
+		t.Fatalf("backup records = %#v", view.Backups)
+	}
+	record := view.Backups[0]
+	if record.AppID != "media" || record.SizeBytes != 4096 || record.Destination != BackupDestinationS3 {
+		t.Fatalf("backup record view = %#v", record)
+	}
+	if !strings.Contains(record.DestinationLabel, "S3 · ") || !strings.Contains(record.DestinationLabel, record.ID) {
+		t.Fatalf("destination label = %q", record.DestinationLabel)
+	}
+}
+
+func TestAppUIBackupActionsDispatchAndRequireConfirm(t *testing.T) {
+	backup := &recordingBackupRuntime{agents: []string{"agent-1"}}
+	controller := newBackupUITestController(t, backup)
+
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/backup-run", `{"destination":"s3"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("backup-run status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(backup.runCalls) != 1 || backup.runCalls[0].Destination != BackupDestinationS3 {
+		t.Fatalf("run calls = %#v", backup.runCalls)
+	}
+	var payload struct {
+		BackupRecord *backupRecordView `json:"backup_record"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || payload.BackupRecord == nil {
+		t.Fatalf("backup-run payload = %s err = %v", recorder.Body.String(), err)
+	}
+
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/backup-restore", `{"record":"media-20261022T080910Z.tar.zst"}`))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed restore status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(backup.restores) != 0 {
+		t.Fatalf("unconfirmed restore dispatched: %#v", backup.restores)
+	}
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/backup-restore", `{"record":"media-20261022T080910Z.tar.zst","target_agent":"agent-1","confirm":"media"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("restore status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(backup.restores) != 1 || backup.restores[0].Confirm != "media" || backup.restores[0].Target != "agent-1" {
+		t.Fatalf("restore calls = %#v", backup.restores)
+	}
+
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/backup-delete", `{"record":"media-20261022T080910Z.tar.zst","confirm":"wrong"}`))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed delete status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(backup.deletes) != 0 {
+		t.Fatalf("unconfirmed delete dispatched: %#v", backup.deletes)
+	}
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/backup-delete", `{"record":"media-20261022T080910Z.tar.zst","confirm":"media"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(backup.deletes) != 1 || backup.deletes[0].Confirm != "media" {
+		t.Fatalf("delete calls = %#v", backup.deletes)
+	}
+}
+
+func TestAppUIBackupActionsWithoutHandleFailClosed(t *testing.T) {
+	controller := newBackupUITestController(t, nil)
+	for _, action := range []string{"backup-run", "backup-delete", "backup-restore"} {
+		recorder := httptest.NewRecorder()
+		controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/apps/media/"+action, `{"record":"r","confirm":"media"}`))
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s without handle status = %d", action, recorder.Code)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiRequest(http.MethodGet, "/api/backup-settings", ""))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("settings without handle status = %d", recorder.Code)
+	}
+}
+
+func TestAppUIBackupSettingsSaveStoresCredentialsReference(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginInstanceID, "instance-a")
+	secrets := &fakeBackupSecretWriter{}
+	backup := &recordingBackupRuntime{}
+	controller := newUIControllerWithOptions(t, uiControllerOptions{backup: backup, backupSecrets: secrets})
+	uiDeployCompose(t, controller, "media", "agent-1", "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n")
+
+	recorder := httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/backup-settings", `{}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("empty settings save status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/backup-settings", `{"endpoint":"https://s3.example.test","bucket":"backups","prefix":"docker-app","node_enabled":true,"access_key_id":"KEY","secret_access_key":"SECRET"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("settings save status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(secrets.requests) != 1 {
+		t.Fatalf("scoped secret requests = %d", len(secrets.requests))
+	}
+	request := secrets.requests[0]
+	if request.Action != pluginsdk.ScopedSecretCreate || request.Reference.ID != backupS3SecretID || request.Reference.Scope != backupSecretScope {
+		t.Fatalf("scoped secret request = %#v", request)
+	}
+	if len(backup.configs) != 2 {
+		t.Fatalf("instance config writes = %d", len(backup.configs))
+	}
+	var stored struct {
+		Backup BackupSettings `json:"backup"`
+	}
+	if err := json.Unmarshal(backup.configs[1], &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Backup.S3Configured() || !stored.Backup.Node.Enabled {
+		t.Fatalf("stored settings = %#v", stored.Backup)
+	}
+	if !strings.Contains(stored.Backup.S3.CredentialsSecret, `"version":"version-00000000000000000001"`) {
+		t.Fatalf("credentials reference = %q", stored.Backup.S3.CredentialsSecret)
+	}
+	settings := controller.BackupSettingsSnapshot()
+	if !settings.S3Configured() || !settings.Node.Enabled {
+		t.Fatalf("live settings = %#v", settings)
+	}
+	var response struct {
+		App *appView `json:"app"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.App == nil || !response.App.Backup.CredentialsConfigured {
+		t.Fatalf("settings response = %s err = %v", recorder.Body.String(), err)
+	}
+
+	// A follow-up save rotates the existing reference instead of creating one.
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/backup-settings", `{"endpoint":"https://s3.example.test","bucket":"backups","prefix":"docker-app","node_enabled":true,"access_key_id":"KEY2","secret_access_key":"SECRET2"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rotate save status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(secrets.requests) != 2 || secrets.requests[1].Action != pluginsdk.ScopedSecretRotate {
+		t.Fatalf("rotate requests = %#v", secrets.requests)
+	}
+
+	// Invalid destinations are rejected before any host call.
+	backup.configs = nil
+	recorder = httptest.NewRecorder()
+	controller.ServeHTTP(recorder, uiJSONRequest(http.MethodPost, "/api/backup-settings", `{"endpoint":"not-a-url","bucket":"backups"}`))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid endpoint status = %d", recorder.Code)
+	}
+	if len(backup.configs) != 0 {
+		t.Fatalf("invalid settings reached the host")
+	}
+}
+
+func TestMergeBackupSettingsConfigKeepsHostFields(t *testing.T) {
+	document := []byte(`{"apps":[{"id":"media","compose":"services: {}","generation":"g1"}],"registry_mirror":"https://mirror.example.test","resource_group_ref":"resource-group/docker-app"}`)
+	merged, err := mergeBackupSettingsConfig(document, BackupSettings{Node: BackupNodeSettings{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(merged, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"apps", "registry_mirror", "resource_group_ref", "backup"} {
+		if _, exists := decoded[key]; !exists {
+			t.Fatalf("merged config lost %q: %s", key, merged)
+		}
+	}
+	if string(decoded["registry_mirror"]) != `"https://mirror.example.test"` {
+		t.Fatalf("registry mirror changed: %s", merged)
 	}
 }
