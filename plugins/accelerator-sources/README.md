@@ -2,8 +2,8 @@
 
 Accelerator Sources is an Agent-scoped, zero-configuration HTTP backend
 provider. The `default` provider serves Docker Registry-compatible endpoints,
-Docker Hub catalog and offline image export APIs, GitHub and Hugging Face
-proxies, script rewriting, and the embedded web interface.
+Docker Hub catalog and offline image export APIs, GitHub, Hugging Face, and npm
+registry proxies, script rewriting, and the embedded web interface.
 
 The plugin runs entirely in its own process. The Host owns the private provider
 socket, generation credential, readiness checks, and request authority. The
@@ -26,9 +26,13 @@ self-contained (no external requests, production CSP `default-src 'self'`).
   repositories become `git clone`) and Docker image references
   (`docker pull <host>/<ref>`) into an accelerated address. The result sits
   beside the input with link / curl / wget / pull formats, an `Enter`-to-copy
-  action and a one-click open. Below it, always-visible Docker, GitHub and
-  Hugging Face cards carry the copy-ready commands, including `HF_ENDPOINT` and
+  action and a one-click open. Below it, always-visible Docker, GitHub, Hugging
+  Face, and npm cards carry the copy-ready commands, including `HF_ENDPOINT` and
   Git LFS clone.
+- npm packages are accelerated the same way: `npm config set registry
+  https://<host>/npm/` points the package manager at the endpoint, and public
+  package metadata and tarball downloads are streamed from
+  `registry.npmjs.org`.
 - **镜像** — search Docker Hub, pick tags, and build an offline pack of up to
   16 images. Selected references are mirrored as a removable list beside the
   textarea. Before offering the download, the page `HEAD`s the prepared URL
