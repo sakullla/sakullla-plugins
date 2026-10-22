@@ -33,7 +33,8 @@
   "capability_cards": [
     { "id": "cap-docker", "examples": ["docker-pull", "docker-mirror", "docker-ghcr"], "os_switch": ["linux", "windows", "macos"] },
     { "id": "cap-github", "examples": ["file-sample", "script-sample", "clone-sample"] },
-    { "id": "cap-hf", "examples": ["hf-download", "hf-endpoint", "hf-clone"] }
+    { "id": "cap-hf", "examples": ["hf-download", "hf-endpoint", "hf-clone"] },
+    { "id": "cap-npm", "examples": ["npm-registry"] }
   ],
   "command_blocks": {
     "copy": [".snippet-copy", "#convert-copy", "[data-copy]"],
