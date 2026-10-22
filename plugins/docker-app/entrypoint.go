@@ -6,6 +6,10 @@ import (
 	"os"
 	"strings"
 
+	// Pins the S3 client dependency until the backup destination
+	// implementation (T4) imports it directly.
+	_ "github.com/minio/minio-go/v7"
+
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 

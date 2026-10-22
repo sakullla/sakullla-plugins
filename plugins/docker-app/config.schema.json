@@ -75,6 +75,57 @@
       "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$",
       "description": "可选镜像加速。"
     },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "hostInjected": true,
+      "description": "备份目的地配置。由插件管理页写入，不作为通用配置表单。",
+      "properties": {
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "hostInjected": true,
+          "description": "S3 兼容目的地。由插件管理页写入，不作为通用配置表单。",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^$|^https://[A-Za-z0-9._~:\\[\\]-]+(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$",
+              "hostInjected": true,
+              "description": "S3 兼容端点。空串表示未配置。"
+            },
+            "bucket": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
+              "hostInjected": true,
+              "description": "目标 bucket。空串表示未配置。"
+            },
+            "prefix": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^$|^[A-Za-z0-9._/-]{1,512}$",
+              "hostInjected": true,
+              "description": "对象键前缀。空串表示未配置。"
+            }
+          }
+        },
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "hostInjected": true,
+          "description": "节点备份目的地。由插件管理页写入，不作为通用配置表单。",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "hostInjected": true,
+              "description": "缺省关闭。开启后允许备份传输至受管 Agent 节点。"
+            }
+          }
+        }
+      }
+    },
     "resource_group_ref": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",

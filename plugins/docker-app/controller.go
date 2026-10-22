@@ -362,7 +362,10 @@ func (controller *Controller) stop(context.Context, *rpcplugin.Generation) error
 const generationHandleScope = "ui.dynamic"
 
 func requiredGrants() []string {
-	return []string{"http.rule", "ui.dynamic", "service.revocable-resource-handle", "storage.read", "storage.write"}
+	return []string{
+		"http.rule", "ui.dynamic", "service.revocable-resource-handle", "storage.read", "storage.write",
+		"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
+	}
 }
 
 func cloneApps(apps []App) []App {
