@@ -2254,6 +2254,29 @@ func TestControllerCallImageObserveFailsWhenLocalDigestMissing(t *testing.T) {
 	}
 }
 
+func TestControllerCallVolumeNameDispatchesToVolumeFace(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	controller := newCallController(t, root, CommandRunnerFunc(func(context.Context, string, string, ...string) ([]byte, error) {
+		t.Fatal("host bind reached the command surface")
+		return nil, nil
+	}), nil)
+	payload, err := json.Marshal(map[string]any{
+		"action": "archive", "agent_id": "agent-1", "app_id": "media", "volume": "/srv/appdata:/data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallVolumeName, payload); err == nil ||
+		err.Error() != "volume archive failed: host bind is not operable" {
+		t.Fatalf("host bind err = %v", err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", "volumes", payload); err == nil ||
+		!strings.Contains(err.Error(), "plugin call name") {
+		t.Fatalf("unknown call name err = %v", err)
+	}
+}
+
 func TestControllerCallUnknownComposeActionDoesNotWriteWorkspace(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

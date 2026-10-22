@@ -16,6 +16,7 @@ const (
 	pluginCallComposeName         = "compose"
 	pluginCallImageName           = "image"
 	pluginCallFilesName           = "files"
+	pluginCallVolumeName          = "volume"
 	hostHTTPRuleOperation         = pluginsdk.HostRuntimeHTTPRule
 	hostHTTPBackendOfferOperation = "http.backend-offer"
 	hostHTTPRuleActionCreate      = pluginsdk.HTTPRuleActionCreate
@@ -474,6 +475,49 @@ func (runtime *hostCapabilityRuntime) ResolveImageDigest(ctx context.Context, ap
 		return "", err
 	}
 	return strings.TrimSpace(result.Digest), nil
+}
+
+// VolumeArchive schedules one volume archive on the Agent execution face and
+// returns the staged archive path relative to the workspace root.
+func (runtime *hostCapabilityRuntime) VolumeArchive(ctx context.Context, app App, volume string) (string, error) {
+	return runtime.volumeOp(ctx, volumeActionArchive, app, volume)
+}
+
+// VolumeRestore schedules one volume restore on the Agent execution face.
+func (runtime *hostCapabilityRuntime) VolumeRestore(ctx context.Context, app App, volume string) error {
+	_, err := runtime.volumeOp(ctx, volumeActionRestore, app, volume)
+	return err
+}
+
+func (runtime *hostCapabilityRuntime) volumeOp(ctx context.Context, action string, app App, volume string) (string, error) {
+	if runtime == nil || runtime.client == nil {
+		return "", ErrTypedHandlesUnavailable
+	}
+	if !validAgentID(app.AgentID) {
+		return "", ErrAgentOffline
+	}
+	volume = strings.TrimSpace(volume)
+	if volume == "" {
+		return "", errors.New("volume reference is required")
+	}
+	var result struct {
+		Accepted    bool   `json:"accepted"`
+		ArchivePath string `json:"archive_path"`
+	}
+	if err := runtime.pluginCall(ctx, app.AgentID, pluginCallVolumeName, map[string]any{
+		"action": action, "agent_id": app.AgentID, "app_id": app.ID,
+		"workdir": app.WorkDir, "volume": volume,
+	}, &result); err != nil {
+		return "", err
+	}
+	if !result.Accepted {
+		return "", ErrTypedHandlesUnavailable
+	}
+	archivePath := strings.TrimSpace(result.ArchivePath)
+	if action == volumeActionArchive && archivePath == "" {
+		return "", ErrTypedHandlesUnavailable
+	}
+	return archivePath, nil
 }
 
 type hostRolloutRuntime struct {

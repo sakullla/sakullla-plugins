@@ -2,9 +2,11 @@ package dockerapp_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +64,7 @@ func TestAgentExecutionFacePreparesWithoutServingUI(t *testing.T) {
 		GrantedScopes: []string{
 			"event.emit", "http.outbound", "http.rule", "service.revocable-resource-handle",
 			"storage.read", "storage.write", "ui.dynamic",
+			"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
 		},
 		Generation: "generation-463-32417e6a4a9bc886", RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}
@@ -83,6 +86,27 @@ func TestAgentExecutionFacePreparesWithoutServingUI(t *testing.T) {
 type dockerWireClient struct {
 	connection grpc.ClientConnInterface
 	cookie     string
+}
+
+func (client dockerWireClient) pluginCall(ctx context.Context, generation, name string, payload []byte) ([]byte, *pluginsdk.RuntimeError) {
+	wire := newDockerWireMessage("PluginCallRequest")
+	setDockerWireString(wire, "generation", generation)
+	setDockerWireString(wire, "name", name)
+	wire.Set(dockerWireField(wire, "payload"), protoreflect.ValueOfBytes(payload))
+	response := newDockerWireMessage("PluginCallResponse")
+	err := client.connection.Invoke(metadata.AppendToOutgoingContext(ctx, "x-nre-plugin-cookie", client.cookie), "/nre.plugin.rpc.v1.PluginRuntime/Call", wire, response)
+	if err != nil {
+		return nil, &pluginsdk.RuntimeError{Code: pluginsdk.ErrorCode(status.Code(err)), Message: err.Error()}
+	}
+	if errorField := dockerWireField(response, "error"); response.Has(errorField) {
+		failure := response.Get(errorField).Message()
+		return nil, &pluginsdk.RuntimeError{
+			Code:      pluginsdk.ErrorCode(failure.Get(failure.Descriptor().Fields().ByName("code")).Enum()),
+			Message:   failure.Get(failure.Descriptor().Fields().ByName("message")).String(),
+			Retryable: failure.Get(failure.Descriptor().Fields().ByName("retryable")).Bool(),
+		}
+	}
+	return append([]byte(nil), response.Get(dockerWireField(response, "payload")).Bytes()...), nil
 }
 
 func (client dockerWireClient) handshake(ctx context.Context, request pluginsdk.RPCHandshakeRequest) (pluginsdk.RPCHandshakeResponse, error) {
@@ -115,6 +139,106 @@ func (client dockerWireClient) lifecycle(ctx context.Context, method string, req
 	errorField := dockerWireField(response, "error")
 	failure := response.Get(errorField).Message()
 	return pluginsdk.LifecycleResponse{Error: &pluginsdk.RuntimeError{Code: pluginsdk.ErrorCode(failure.Get(failure.Descriptor().Fields().ByName("code")).Enum()), Message: failure.Get(failure.Descriptor().Fields().ByName("message")).String(), Retryable: failure.Get(failure.Descriptor().Fields().ByName("retryable")).Bool()}}, nil
+}
+
+func TestAgentExecutionFacePluginCallVolumeOps(t *testing.T) {
+	root, err := os.MkdirTemp(os.TempDir(), "nre-da-vol-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	rpcSocket := filepath.Join(root, "rpc.sock")
+	cookie := "0123456789abcdef0123456789abcdef"
+	cookiePath := filepath.Join(root, "cookie")
+	if err := os.WriteFile(cookiePath, []byte(cookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NRE_PLUGIN_ENDPOINT", "unix:"+rpcSocket)
+	t.Setenv("NRE_PLUGIN_COOKIE_FILE", cookiePath)
+	t.Setenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT", "unix:"+filepath.Join(root, "docker-proxy.sock"))
+	t.Setenv("NRE_PLUGIN_APP_WORKDIR", filepath.Join(root, "apps"))
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "")
+
+	bindDir := filepath.Join(root, "apps", "media", "data")
+	if err := os.MkdirAll(bindDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bindDir, "db.txt"), []byte("fixture-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- dockerapp.RunEntrypoint(ctx, nil, os.Stdout) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("agent execution face entrypoint did not stop")
+		}
+	})
+
+	connection := dialDockerAgentRPC(t, rpcSocket, cookie)
+	defer connection.Close()
+	client := dockerWireClient{connection: connection, cookie: cookie}
+	generation := "generation-463-32417e6a4a9bc886"
+	request := pluginsdk.RPCHandshakeRequest{
+		ABI: pluginsdk.RPCABIV1, PluginID: dockerapp.PluginID, PluginVersion: dockerapp.PluginVersion,
+		PackageDigest:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ArtifactDigest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		GrantedScopes: []string{
+			"event.emit", "http.outbound", "http.rule", "service.revocable-resource-handle",
+			"storage.read", "storage.write", "ui.dynamic",
+			"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
+		},
+		Generation: generation, RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
+	}
+	if _, err := client.handshake(t.Context(), request); err != nil {
+		t.Fatalf("agent execution face handshake: %v", err)
+	}
+	config := []byte(`{"apps":[],"resource_group_ref":"resource-group/docker-app"}`)
+	if result, err := client.lifecycle(t.Context(), "Prepare", pluginsdk.LifecycleRequest{Generation: generation, Config: config}); err != nil || result.Error != nil {
+		t.Fatalf("agent execution face prepare = %+v, %v", result, err)
+	}
+	if result, err := client.lifecycle(t.Context(), "Activate", pluginsdk.LifecycleRequest{Generation: generation}); err != nil || result.Error != nil {
+		t.Fatalf("agent execution face activate = %+v, %v", result, err)
+	}
+
+	archivePayload, err := json.Marshal(map[string]any{
+		"action": "archive", "agent_id": "agent-1", "app_id": "media", "volume": "./data:/data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, callErr := client.pluginCall(t.Context(), generation, "volume", archivePayload)
+	if callErr != nil {
+		t.Fatalf("volume archive plugin.call err=%v", callErr)
+	}
+	var result struct {
+		Accepted    bool   `json:"accepted"`
+		ArchivePath string `json:"archive_path"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Accepted || result.ArchivePath != "media/"+pluginsdk.DockerVolumeStagingDir+"/data.tar" {
+		t.Fatalf("volume archive result=%s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(root, "apps", "media", filepath.FromSlash(pluginsdk.DockerVolumeStagingDir), "data.tar")); err != nil {
+		t.Fatalf("staged volume archive: %v", err)
+	}
+
+	hostPayload, err := json.Marshal(map[string]any{
+		"action": "archive", "agent_id": "agent-1", "app_id": "media", "volume": "/srv/appdata:/data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, callErr := client.pluginCall(t.Context(), generation, "volume", hostPayload); callErr == nil ||
+		!strings.Contains(callErr.Message, "host bind is not operable") {
+		t.Fatalf("host bind plugin.call err=%v", callErr)
+	}
 }
 
 func newDockerWireMessage(name string) *dynamicpb.Message {
