@@ -100,6 +100,38 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     assert.ok(await page.evaluate(`getComputedStyle(document.querySelector('[data-path="docs"] .files-list-name'), "::before").backgroundImage !== "none"`), "selected directory checks the leading control");
   });
 
+  await test("editing keeps the row selection and the save target on the same file", async () => {
+    await reset();
+    const composeInitial = state.files.get("compose.yaml");
+    await page.click(file("root.txt")); await page.click("#files-edit"); await page.waitVisible("#files-editor");
+    assert.equal(await text("#files-editor-name"),"root.txt");
+    await fill("#files-editor textarea","root draft\n");
+    // Picking another file while the editor is dirty asks first; cancelling
+    // keeps the editor and the row selection on root.txt.
+    await page.click(file("compose.yaml")); await page.waitVisible("#confirm-dialog"); await close(false);
+    assert.equal(await value("#files-editor textarea"),"root draft\n","a cancelled switch keeps the draft");
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="root.txt"]').getAttribute("aria-selected")`),"true","the selection follows the editor");
+    assert.equal(await page.evaluate(`document.querySelector('[data-path="compose.yaml"]').getAttribute("aria-selected")`),"false","the abandoned row stays unselected");
+    const writes = fileWrites().length;
+    await page.click("#files-save"); await eventually(() => fileWrites().length === writes + 1,"one save request"); await idle();
+    assert.equal(fileWrites().at(-1).body.path,"root.txt","the save writes the path the editor opened");
+    assert.equal(fileWrites().at(-1).body.content,"root draft\n");
+    assert.equal(state.files.get("root.txt"),"root draft\n");
+    assert.equal(state.files.get("compose.yaml"),composeInitial,"the other file keeps its own content");
+    // Confirming the switch loads compose.yaml into the editor, so the dropped
+    // root.txt draft can never be written into it.
+    await fill("#files-editor textarea","dropped root draft\n");
+    await page.click(file("compose.yaml")); await close(true);
+    await eventually(() => text("#files-editor-name").then((name) => name === "compose.yaml"),"the editor follows the picked file");
+    assert.equal(await value("#files-editor textarea"),composeInitial,"the switched editor shows the newly opened file");
+    await fill("#files-editor textarea","services:\n  web:\n    image: nginx:1.28\n");
+    const switched = fileWrites().length;
+    await page.click("#files-save"); await eventually(() => fileWrites().length === switched + 1,"switched file save"); await idle();
+    assert.equal(fileWrites().at(-1).body.path,"compose.yaml","the save follows the switched editor");
+    assert.equal(state.files.get("compose.yaml"),"services:\n  web:\n    image: nginx:1.28\n");
+    assert.equal(state.files.get("root.txt"),"root draft\n","the dropped draft never reaches the other file");
+  });
+
   await test("file creation, upload, deletion and cancellation keep relative targets", async () => {
     await reset();
     await page.click("#files-mkdir"); await page.waitVisible("#files-mkdir-dialog");
@@ -352,12 +384,35 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     await page.click("#logs-copy");
     await eventually(() => page.evaluate(`(window.__copiedLog||'').includes('line 119 ready')`), "copied snapshot");
     assert.equal(await page.evaluate(`(window.__copiedLog||'').includes('line 0 ready')`), true, "copy keeps the whole snapshot");
+    const copied = await page.evaluate(`window.__copiedLog||''`);
+    assert.equal(copied.split("\n").filter(Boolean).length, 120, "copy keeps one line per painted row");
+    assert.ok(copied.includes("line 0 ready\nline 1 ready"), "copy keeps the line breaks the reader sees");
     const before = await readdir(downloads);
     await page.click("#logs-download");
     await eventually(async () => (await readdir(downloads)).length > before.length, "downloaded log file");
     const added = (await readdir(downloads)).filter((name) => !before.includes(name));
     const content = await readFile(join(downloads, added[0]), "utf8");
     assert.match(content, /line 119 ready/, "download matches the visible snapshot");
+    assert.equal(content.split("\n").filter(Boolean).length, 120, "download keeps one line per painted row");
+    assert.ok(content.includes("line 0 ready\nline 1 ready"), "download keeps the line breaks the reader sees");
+    // Timestamps stay attached to their own line in copy and download.
+    const stamped = "2026-05-01T10:00:00Z ready\n2026-05-01T10:00:01Z second line";
+    state.logs.web = `${stamped}\n`;
+    await page.click("#logs-refresh");
+    await eventually(() => page.evaluate(`document.querySelector('#logs-view').textContent.includes('second line')`), "timestamped snapshot");
+    await page.click("#logs-copy");
+    await eventually(() => page.evaluate(`window.__copiedLog === ${JSON.stringify(stamped)}`), "copy keeps the timestamped snapshot verbatim");
+    // The download may land under the same name or a numbered one, so the
+    // snapshot is matched by content: the file must hold exactly the text the
+    // reader sees, line breaks and timestamps included.
+    await page.click("#logs-download");
+    await eventually(async () => {
+      for (const name of await readdir(downloads)) {
+        if (name.endsWith(".crdownload")) continue;
+        try { if ((await readFile(join(downloads, name), "utf8")) === stamped) return true; } catch { /* still being written */ }
+      }
+      return false;
+    }, "download keeps the timestamped snapshot verbatim", 20000);
     await page.click("#logs-pause");
   });
 

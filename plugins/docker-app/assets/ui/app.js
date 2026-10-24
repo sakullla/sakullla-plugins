@@ -1433,6 +1433,10 @@ const mountAppFiles = () => {
   let selectedPath = "";
   let selectedName = "";
   let selectedDir = false;
+  // R6: the editor owns the path it loaded. Row selection and the save target
+  // both read from here, so a draft can never be written to another file.
+  let editorPath = "";
+  let editorLabel = "";
   let fileReadSequence = 0;
   let fileListSequence = 0;
   let boundOwner = "";
@@ -1477,6 +1481,8 @@ const mountAppFiles = () => {
     const focusInside = Boolean(editor && editor.contains(document.activeElement));
     fileDraft?.touch();
     filesEditorOpen = false;
+    editorPath = "";
+    editorLabel = "";
     setDirty(false);
     if (editor) editor.hidden = true;
     if (editorInput) editorInput.value = "";
@@ -1519,6 +1525,8 @@ const mountAppFiles = () => {
     filesEditorOpen = true;
     fileDraft.capture(content);
     setDirty(false);
+    editorPath = path;
+    editorLabel = name;
     selectEntry(path, name, false);
     // R6: the list and the editor stay two panes on wide screens; narrow
     // screens stack them, so bring the editor into view there.
@@ -1574,16 +1582,16 @@ const mountAppFiles = () => {
   };
 
   const openFile = async (path, name) => {
-    if (!bindingCurrent() || !selectionCurrent()) return;
+    if (!bindingCurrent() || !selectionCurrent()) return false;
     const owner = boundOwner;
     const binding = bindingVersion;
-    if (filesEditorOpen && filesDirty && selectedPath === path) return;
-    if (!(await confirmLeave())) return;
-    if (!bindingCurrent(owner, binding)) return;
+    if (filesEditorOpen && editorPath === path) return true;
+    if (!(await confirmLeave())) return false;
+    if (!bindingCurrent(owner, binding)) return false;
     const relative = relativeWorkspacePath(path);
     if (!relative) {
       fileError(workspacePathError);
-      return;
+      return false;
     }
     const target = app;
     const navigation = navigationSnapshot();
@@ -1594,24 +1602,44 @@ const mountAppFiles = () => {
     setFilesStatus(`正在读取文件 ${relative}…`, "loading");
     try {
       const payload = await postAppFiles(target, { action: "read", path: relative });
-      if (!current()) return;
+      if (!current()) return false;
       const content = typeof payload.content === "string" ? payload.content : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
         fileError("文件超过 1MiB 上限");
-        return;
+        return false;
       }
       if (!looksLikeText(content)) {
         fileError("该文件不适合文本编辑，请下载或重新上传。");
         if (binaryHint) binaryHint.hidden = false;
-        return;
+        return false;
       }
       showEditor(relative, name || relative.split("/").pop(), content);
       setFilesStatus(`已打开 ${relative}`);
       showStatus("已打开工作区文件。", false);
+      return true;
     } catch (error) {
-      if (!current()) return;
+      if (!current()) return false;
       fileError(`读取文件失败：${error.message}`);
+      return false;
     }
+  };
+
+  // R6: the browser and the editor share one current file. Picking another
+  // file while an editor session is open loads it into the editor, but only
+  // after the shared draft guard has handled unsaved input; cancelling leaves
+  // both the editor and the row selection on the file that is still being
+  // edited, so the next save still targets that file.
+  const openEntry = async (path, name, owner, binding) => {
+    if (busy || !bindingCurrent(owner, binding)) return;
+    if (!filesEditorOpen || editorPath === path) {
+      selectEntry(path, name, false, owner, binding);
+      return;
+    }
+    const previous = {path:selectedPath,name:selectedName,dir:selectedDir,owner:selectedOwner,binding:selectedBinding};
+    selectEntry(path, name, false, owner, binding);
+    if (await openFile(path, name)) return;
+    if (filesEditorOpen && editorPath) selectEntry(editorPath, editorLabel, false, owner, binding);
+    else selectEntry(previous.path, previous.name, previous.dir, previous.owner, previous.binding);
   };
 
   const openNewFile = async (path, name, target) => {
@@ -1675,7 +1703,7 @@ const mountAppFiles = () => {
           event.stopPropagation();
           if (!snapshotCurrent(snapshot)) return;
           if (entry.dir) requestList(entryPath);
-          else selectEntry(entryPath, entry.name || entryPath, false, snapshot.owner, snapshot.binding);
+          else openEntry(entryPath, entry.name || entryPath, snapshot.owner, snapshot.binding);
         });
         nameWrap.append(kind, open);
         item.append(nameWrap);
@@ -1686,7 +1714,9 @@ const mountAppFiles = () => {
           item.append(size);
         }
         item.addEventListener("click", () => {
-          if (snapshotCurrent(snapshot)) selectEntry(entryPath, entry.name || entryPath, Boolean(entry.dir), snapshot.owner, snapshot.binding);
+          if (!snapshotCurrent(snapshot)) return;
+          if (entry.dir) selectEntry(entryPath, entry.name || entryPath, true, snapshot.owner, snapshot.binding);
+          else openEntry(entryPath, entry.name || entryPath, snapshot.owner, snapshot.binding);
         });
         if (listEl) listEl.append(item);
       });
@@ -1729,7 +1759,7 @@ const mountAppFiles = () => {
         confirm: "删除", cancel: "取消", danger: true,
       }))) { showStatus("已取消，工作区未更改。", false); return; }
       await postAppFiles(target, {action:"delete",path:relative});
-      if (selectedPath === relative) hideEditor();
+      if (selectedPath === relative || editorPath === relative) hideEditor();
       showStatus("已删除工作区文件。", false);
       if (await loadList(currentPath) === false) showStatus("文件已删除，但目录刷新失败。", true, "partial");
     } catch (error) { fileError(error.message); }
@@ -1899,9 +1929,9 @@ const mountAppFiles = () => {
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
-      if (busy || !selectionCurrent() || !selectedPath || selectedDir) return;
+      if (busy || !selectionCurrent() || !filesEditorOpen || !editorPath) return;
       const target = app;
-      const path = selectedPath;
+      const path = editorPath;
       const content = editorInput ? editorInput.value : "";
       if (new TextEncoder().encode(content).length > MAX_WORKSPACE_FILE_BYTES) {
         fileError("文件超过 1MiB 上限");
@@ -3708,7 +3738,16 @@ const scrollLogsToEnd = ({ smooth = false } = {}) => {
   else logsShell.scrollTop = logsShell.scrollHeight;
 };
 
-const logsSnapshotText = () => (logsView ? logsView.textContent || "" : "");
+// R7: the terminal paints one block-level row per line, so the painted DOM has
+// no line breaks of its own. Copy and download rebuild the snapshot row by row,
+// which keeps the line breaks and timestamps the reader sees and never carries
+// terminal styling into the clipboard or the downloaded log file.
+const logsSnapshotText = () => {
+  if (!logsView) return "";
+  const rows = Array.from(logsView.querySelectorAll(".log-line"));
+  if (!rows.length) return "";
+  return rows.map((row) => (row.textContent === " " ? "" : row.textContent)).join("\n");
+};
 
 const logsFileName = () => {
   const app = detailApp ? detailApp.id : "app";

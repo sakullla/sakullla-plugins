@@ -4075,6 +4075,33 @@ func assertFilesManagerPage(t *testing.T) {
 	if !strings.Contains(loadFn, "if (entry.dir) requestList(entryPath)") {
 		t.Fatal("directories cannot be opened from the current listing")
 	}
+	if !strings.Contains(loadFn, "openEntry(entryPath") {
+		t.Fatal("file rows do not route a picked file through the editor guard")
+	}
+
+	// R6: the editor owns the path it opened, so switching files while editing
+	// never writes one file's draft into another path.
+	if !strings.Contains(js, `let editorPath = "";`) {
+		t.Fatal("the files editor does not record the path it opened")
+	}
+	entryStart := strings.Index(js, "const openEntry = async (path, name, owner, binding) => {")
+	entryEnd := strings.Index(js, "const openNewFile = async (path, name, target) => {")
+	if entryStart < 0 || entryEnd <= entryStart {
+		t.Fatal("openEntry is missing")
+	}
+	entryFn := js[entryStart:entryEnd]
+	if !strings.Contains(entryFn, "if (await openFile(path, name)) return;") || !strings.Contains(entryFn, "selectEntry(editorPath, editorLabel, false, owner, binding)") {
+		t.Fatal("picking another file does not keep the editor and the row selection on one path")
+	}
+	saveStart := strings.Index(js, "if (saveBtn) {")
+	saveEnd := strings.Index(js, "if (upBtn) {")
+	if saveStart < 0 || saveEnd <= saveStart {
+		t.Fatal("files save handler is missing")
+	}
+	saveFn := js[saveStart:saveEnd]
+	if !strings.Contains(saveFn, "const path = editorPath;") || strings.Contains(saveFn, "const path = selectedPath;") {
+		t.Fatal("the file save does not write the path the editor opened")
+	}
 
 	hideStart := strings.Index(js, "const hideEditor = () => {")
 	hideEnd := strings.Index(js, "fileDraft = makeDraft")
