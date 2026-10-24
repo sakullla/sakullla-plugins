@@ -7,7 +7,9 @@ export async function runCompose({ page, test, navigate, hold, requests, state, 
   const value = (selector) => page.evaluate(`document.querySelector(${JSON.stringify(selector)}).value`);
   const text = (selector) => page.evaluate(`document.querySelector(${JSON.stringify(selector)}).textContent`);
   const fill = async (selector, content) => {
+    await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: "center" })`);
     await page.click(selector);
+    await page.evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)}); if (document.activeElement !== el) el.focus();})()`);
     await page.evaluate("document.activeElement.select()");
     await page.send("Input.insertText", { text: content });
   };

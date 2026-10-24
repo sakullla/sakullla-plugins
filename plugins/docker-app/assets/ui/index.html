@@ -165,10 +165,24 @@
   <main class="ui-page deck">
     <div id="app-loading" class="ui-loading deck-loading" role="status" aria-live="polite">
       <div class="deck-loading__status"><span class="ui-spinner" aria-hidden="true"></span><span>正在连接节点并读取应用…</span></div>
-      <div class="deck-loading__skeleton" aria-hidden="true">
-        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
-        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
-        <span class="skeleton-card"><span class="ui-skeleton"></span><span class="ui-skeleton"></span><span class="ui-skeleton"></span></span>
+      <div class="deck-skeleton" aria-hidden="true">
+        <div class="deck-skeleton__head">
+          <span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span>
+        </div>
+        <div class="deck-skeleton__layout">
+          <div class="deck-skeleton__panel">
+            <span class="ui-skeleton ui-skeleton--field"></span>
+            <span class="ui-skeleton ui-skeleton--meta"></span>
+            <span class="deck-skeleton__row"><span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span></span>
+            <span class="deck-skeleton__row"><span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span></span>
+            <span class="deck-skeleton__row"><span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span></span>
+          </div>
+          <div class="deck-skeleton__stage">
+            <span class="ui-skeleton ui-skeleton--lead"></span>
+            <span class="deck-skeleton__block"><span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span></span>
+            <span class="deck-skeleton__block"><span class="ui-skeleton"></span><span class="ui-skeleton ui-skeleton--short"></span></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -184,6 +198,14 @@
     </section>
 
     <p id="app-status" class="app-status" role="status" aria-live="polite" hidden></p>
+
+    <div id="app-stale" class="stale-banner" role="status" hidden>
+      <svg class="ui-icon" aria-hidden="true"><use href="#i-alert"></use></svg>
+      <p id="app-stale-copy" class="stale-banner__copy"></p>
+      <button id="app-stale-retry" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">
+        <svg class="ui-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>重试
+      </button>
+    </div>
 
     <section id="app-context" class="context-region" hidden>
       <section class="state-panel ui-empty" id="app-detection-failed" hidden>
@@ -365,17 +387,17 @@
               </div>
             </header>
             <nav id="detail-nav" class="ui-tabs detail-nav" role="tablist" data-ui-tabs aria-label="应用分区">
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="overview" aria-selected="true"><svg class="ui-icon" aria-hidden="true"><use href="#i-layers"></use></svg><span>概览</span></button>
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="compose" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg><span>Compose</span></button>
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="files" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件</span></button>
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="logs" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-terminal"></use></svg><span>日志</span></button>
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="http" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-globe"></use></svg><span>HTTP 入口</span></button>
-              <button type="button" class="ui-tab detail-nav-item" role="tab" data-section="backup" aria-selected="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-database"></use></svg><span>备份</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-overview" data-section="overview" aria-selected="true" aria-controls="detail-overview"><svg class="ui-icon" aria-hidden="true"><use href="#i-layers"></use></svg><span>概览</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-compose" data-section="compose" aria-selected="false" aria-controls="detail-compose"><svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg><span>Compose</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-files" data-section="files" aria-selected="false" aria-controls="detail-files"><svg class="ui-icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-logs" data-section="logs" aria-selected="false" aria-controls="detail-logs"><svg class="ui-icon" aria-hidden="true"><use href="#i-terminal"></use></svg><span>日志</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-http" data-section="http" aria-selected="false" aria-controls="detail-http"><svg class="ui-icon" aria-hidden="true"><use href="#i-globe"></use></svg><span>HTTP 入口</span></button>
+              <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-backup" data-section="backup" aria-selected="false" aria-controls="detail-backup"><svg class="ui-icon" aria-hidden="true"><use href="#i-database"></use></svg><span>备份</span></button>
             </nav>
 
-            <section id="detail-overview" class="detail-section" data-section-panel="overview" role="tabpanel"></section>
+            <section id="detail-overview" class="detail-section" data-section-panel="overview" role="tabpanel" aria-labelledby="tab-overview"></section>
 
-            <section id="detail-compose" class="detail-section" data-section-panel="compose" role="tabpanel" hidden>
+            <section id="detail-compose" class="detail-section" data-section-panel="compose" role="tabpanel" aria-labelledby="tab-compose" hidden>
               <div class="section-head">
                 <div>
                   <p class="section-kicker">DEPLOYMENT SOURCE</p>
@@ -412,9 +434,9 @@
               </form>
             </section>
 
-            <section id="detail-files" class="detail-section" data-section-panel="files" role="tabpanel" hidden></section>
+            <section id="detail-files" class="detail-section" data-section-panel="files" role="tabpanel" aria-labelledby="tab-files" hidden></section>
 
-            <section id="detail-logs" class="detail-section" data-section-panel="logs" role="tabpanel" hidden>
+            <section id="detail-logs" class="detail-section" data-section-panel="logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
               <div class="section-head">
                 <div>
                   <p class="section-kicker">RUNTIME OUTPUT</p>
@@ -423,15 +445,19 @@
                 <p id="logs-context" class="resource-context"></p>
               </div>
               <div class="logs-panel">
-                <div class="logs-chrome" aria-hidden="true">
-                  <span class="logs-chrome__dots"><i></i><i></i><i></i></span>
-                  <span class="logs-chrome__title">container logs</span>
-                  <span class="logs-chrome__live"><i></i>LIVE</span>
+                <div class="logs-chrome">
+                  <span class="logs-chrome__title">容器日志</span>
+                  <span class="logs-chrome__live"><i></i>实时</span>
+                  <div class="logs-chrome__actions">
+                    <button id="logs-copy" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">复制</button>
+                    <button id="logs-download" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">下载</button>
+                  </div>
                 </div>
                 <div class="logs-toolbar">
                   <label>服务 <select id="logs-service" class="ui-select" name="service"></select></label>
                   <button id="logs-refresh" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">刷新快照</button>
                   <button id="logs-pause" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">暂停</button>
+                  <button id="logs-follow" class="ui-btn ui-btn--secondary ui-btn--sm" type="button" aria-pressed="true">跟随最新</button>
                   <p id="logs-status" class="hint">自动刷新</p>
                 </div>
                 <p id="logs-empty" class="logs-empty" hidden>当前服务的快照没有日志。</p>
@@ -439,10 +465,10 @@
               </div>
             </section>
 
-            <section id="detail-http" class="detail-section" data-section-panel="http" role="tabpanel" hidden>
+            <section id="detail-http" class="detail-section" data-section-panel="http" role="tabpanel" aria-labelledby="tab-http" hidden>
               <p class="ui-sr-only">入口域名</p>
             </section>
-            <section id="detail-backup" class="detail-section" data-section-panel="backup" role="tabpanel" hidden></section>
+            <section id="detail-backup" class="detail-section" data-section-panel="backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
           </section>
         </div>
       </div>

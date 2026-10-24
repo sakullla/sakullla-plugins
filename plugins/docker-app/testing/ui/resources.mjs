@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -12,7 +12,13 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
   const value = (selector) => page.evaluate(`document.querySelector(${JSON.stringify(selector)}).value`);
   const idle = () => eventually(() => page.evaluate(`!document.querySelector('.agent-search-select__trigger').disabled`),"controls restored");
   const status = (kind) => eventually(() => page.evaluate(`document.querySelector('#app-status').dataset.state === ${JSON.stringify(kind)}`),`${kind} feedback`);
-  const fill = async (selector,content) => { await page.click(selector); await page.evaluate("document.activeElement.select()"); await page.send("Input.insertText",{text:content}); };
+  const fill = async (selector,content) => {
+    await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: "center" })`);
+    await page.click(selector);
+    await page.evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)}); if (document.activeElement !== el) el.focus();})()`);
+    await page.evaluate("document.activeElement.select()");
+    await page.send("Input.insertText",{text:content});
+  };
   const choose = (selector,selected) => page.evaluate(`(() => {const input=document.querySelector(${JSON.stringify(selector)});input.value=${JSON.stringify(selected)};input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   const close = async (yes) => {
     await page.waitVisible("#confirm-dialog"); await page.click(yes ? "#confirm-ok" : "#confirm-cancel");
@@ -44,6 +50,18 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     await page.click(file("docs/config.txt"));
     assert.equal(state.calls.filter((call) => call.body.action === "read").length,reads,"selection alone never reads");
     await page.click("#files-edit"); await page.waitVisible("#files-editor");
+    const panes = await page.evaluate(`(() => {
+      const browser = document.querySelector('#files-browser');
+      const editor = document.querySelector('#files-editor');
+      const box = (node) => node.getBoundingClientRect();
+      return {
+        browserVisible: Boolean(browser.getClientRects().length),
+        browser: [Math.round(box(browser).left), Math.round(box(browser).right)],
+        editor: [Math.round(box(editor).left), Math.round(box(editor).right)],
+      };
+    })()`);
+    assert.equal(panes.browserVisible, true, "the directory pane stays visible while editing");
+    assert.ok(panes.editor[0] >= panes.browser[1] - 1, `the editor sits beside the directory pane: ${JSON.stringify(panes)}`);
     await fill("#files-editor textarea","changed text\n");
     await page.click("#files-editor-close"); await close(false);
     assert.equal(await value("#files-editor textarea"),"changed text\n");
@@ -311,6 +329,36 @@ export async function runResources({page,test,navigate,hold,state,capture,eventu
     const hiddenCount = state.logsCalls.length; await delay(4300); assert.equal(state.logsCalls.length,hiddenCount);
     await page.send("Target.closeTarget",{targetId:other.targetId}); await page.send("Target.activateTarget",{targetId:targetInfo.targetId});
     await eventually(() => state.logsCalls.length > hiddenCount,"visible tab resumes snapshot");
+  });
+
+  await test("log snapshots copy, download and follow the newest line", async () => {
+    await reset("logs", "alpha", () => {
+      state.logs.web = Array.from({ length: 120 }, (_, index) => `line ${index} ready`).join("\n") + "\n";
+    });
+    await eventually(() => text("#logs-view").then((value) => value.includes("line 119 ready")), "long snapshot");
+    const following = () => page.evaluate(`document.querySelector('#logs-follow').getAttribute('aria-pressed')`);
+    assert.equal(await following(), "true", "following starts on");
+    await page.evaluate(`(() => {
+      const shell = document.querySelector('.logs-terminal-shell');
+      const gesture = () => { shell.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 })); shell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); };
+      gesture();
+      shell.scrollTop = 0;
+      shell.dispatchEvent(new Event('scroll', { bubbles: false }));
+    })()`);
+    await eventually(async () => (await following()) === "false", "scrolling up pauses following");
+    await page.click("#logs-follow");
+    await eventually(async () => (await following()) === "true", "the toggle resumes following");
+    await page.evaluate(`Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async(t)=>{window.__copiedLog=t;}}})`);
+    await page.click("#logs-copy");
+    await eventually(() => page.evaluate(`(window.__copiedLog||'').includes('line 119 ready')`), "copied snapshot");
+    assert.equal(await page.evaluate(`(window.__copiedLog||'').includes('line 0 ready')`), true, "copy keeps the whole snapshot");
+    const before = await readdir(downloads);
+    await page.click("#logs-download");
+    await eventually(async () => (await readdir(downloads)).length > before.length, "downloaded log file");
+    const added = (await readdir(downloads)).filter((name) => !before.includes(name));
+    const content = await readFile(join(downloads, added[0]), "utf8");
+    assert.match(content, /line 119 ready/, "download matches the visible snapshot");
+    await page.click("#logs-pause");
   });
 
   await test("HTTP entries identify domains, ports, enabled state and actual visit URLs", async () => {

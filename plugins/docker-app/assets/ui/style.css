@@ -720,7 +720,9 @@ main.deck {
 .deck-loading {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 1rem;
+  width: 100%;
   padding: 0.5rem 0 2rem;
 }
 
@@ -732,17 +734,72 @@ main.deck {
   font-size: 0.875rem;
 }
 
-.deck-loading__skeleton {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-}
-
-.skeleton-card {
+/* R10: the loading placeholder repeats the workspace grid, so the first paint
+   already reserves the panels, rows and detail stage that replace it. */
+.deck-skeleton {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  min-height: 9rem;
+  gap: 0.9rem;
+}
+
+.deck-skeleton__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.deck-skeleton__head .ui-skeleton:first-child {
+  flex: 0 0 auto;
+  width: min(11rem, 42%);
+  height: 1.5rem;
+}
+
+.deck-skeleton__head .ui-skeleton--short {
+  flex: 0 0 auto;
+  width: 6.5rem;
+  height: 1.5rem;
+  border-radius: var(--ui-radius-full);
+}
+
+.deck-skeleton__layout {
+  display: grid;
+  grid-template-columns: var(--app-list-width) minmax(0, 1fr);
+  align-items: start;
+  gap: 1.25rem;
+}
+
+.deck-skeleton__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-height: 26rem;
+  padding: 0.8rem;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-lg);
+  background: var(--ui-surface);
+}
+
+.deck-skeleton__stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.deck-skeleton__row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.65rem 0.6rem;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  background: color-mix(in srgb, var(--ui-surface) 55%, var(--ui-sunken));
+}
+
+.deck-skeleton__block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
   padding: 1rem;
   border: 1px solid var(--app-border);
   border-radius: var(--app-radius-lg);
@@ -758,8 +815,10 @@ main.deck {
   animation: deck-shimmer 1.5s linear infinite;
 }
 
-.ui-skeleton:nth-child(2) { width: 72%; }
-.ui-skeleton:nth-child(3) { width: 45%; }
+.ui-skeleton--short { width: 62%; }
+.ui-skeleton--meta { width: 55%; height: 0.6rem; }
+.ui-skeleton--field { height: 2.1rem; border-radius: var(--app-radius); }
+.ui-skeleton--lead { width: min(16rem, 60%); height: 1.3rem; }
 
 .app-status {
   position: fixed;
@@ -2432,30 +2491,24 @@ main.deck {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  min-height: 2rem;
-  padding: 0 0.75rem;
+  min-height: 2.6rem;
+  padding: 0.2rem 0.65rem;
   border-bottom: 1px solid var(--app-border);
-  background: var(--ui-sunken);
-  color: var(--ui-text-tertiary);
-  font-family: var(--app-mono);
-  font-size: 0.6563rem;
+  background: var(--ui-surface);
+  color: var(--ui-text-secondary);
+  font-size: 0.72rem;
 }
-
-.logs-chrome__dots { display: inline-flex; gap: 0.25rem; }
-
-.logs-chrome__dots i {
-  width: 0.4rem;
-  height: 0.4rem;
-  border-radius: 50%;
-  background: var(--ui-text-tertiary);
-  opacity: 0.5;
-}
-
-.logs-chrome__dots i:first-child { background: var(--ui-danger); opacity: 0.75; }
-.logs-chrome__dots i:nth-child(2) { background: var(--ui-warning); opacity: 0.75; }
-.logs-chrome__dots i:last-child { background: var(--ui-success); opacity: 0.75; }
 
 .logs-chrome__title { font-weight: 650; }
+
+.logs-chrome__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.logs-chrome__actions .ui-btn { color: var(--ui-text-secondary); }
 
 .logs-chrome__live {
   display: inline-flex;
@@ -2516,19 +2569,22 @@ main.deck {
 
 .logs-toolbar .hint[data-error="true"] { color: var(--ui-danger-text); }
 
+/* R7: the terminal keeps its dark reading surface through page tokens, so a
+   host theme can move it without scattering literal colours in the rules. */
 .logs-empty {
   margin: 0;
   padding: 1.5rem 1rem;
-  color: #cbd5e1;
+  color: var(--app-terminal-muted);
   font-size: 0.8125rem;
   text-align: center;
-  background: #0b1221;
+  background: var(--app-terminal-bg);
 }
 
 .logs-terminal-shell {
   max-height: 28rem;
   overflow: auto;
-  background: #0b1221;
+  background: var(--app-terminal-bg);
+  border-top: 1px solid var(--app-terminal-border);
   scrollbar-width: thin;
 }
 
@@ -2536,7 +2592,7 @@ main.deck {
   min-height: 16rem;
   margin: 0;
   padding: 0.85rem 1rem;
-  color: #d8e1ef;
+  color: var(--app-terminal-text);
   font-family: var(--app-mono);
   font-size: 0.75rem;
   line-height: 1.7;
@@ -2545,11 +2601,11 @@ main.deck {
 }
 
 .log-line { display: block; }
-.log-line[data-level="error"] { color: #fca5a5; }
-.log-line[data-level="warn"] { color: #fcd34d; }
-.log-line[data-level="ok"] { color: #86efac; }
-.log-time { color: #7c8aa5; }
-.logs-terminal[data-error="true"] { color: #fca5a5; }
+.log-line[data-level="error"] { color: var(--app-terminal-error); }
+.log-line[data-level="warn"] { color: var(--app-terminal-warn); }
+.log-line[data-level="ok"] { color: var(--app-terminal-ok); }
+.log-time { color: var(--app-terminal-muted); }
+.logs-terminal[data-error="true"] { color: var(--app-terminal-error); }
 
 /* ── HTTP ingress ────────────────────────────────────────────────────── */
 
@@ -2954,6 +3010,14 @@ dialog.ui-dialog {
 dialog.ui-dialog::backdrop {
   background: var(--ui-overlay);
   backdrop-filter: blur(3px);
+}
+
+/* R5: the deployment drawer dims the page with a light mask instead of a heavy
+   blur, so the workspace behind it stays readable. */
+dialog.ui-dialog--drawer::backdrop {
+  background: color-mix(in srgb, var(--ui-overlay) 55%, transparent);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 dialog.ui-dialog[open] { animation: deck-dialog-in 180ms var(--ui-ease-out); }
@@ -4062,4 +4126,202 @@ body {
   .overview-danger .app-actions { width: 100%; }
   .overview-danger .ui-btn { flex: 1 1 auto; }
   .http-form-fields .ui-field { width: 100%; }
+}
+
+
+/* ── T3 editors, feedback, responsive, theme and a11y ─────────────────── */
+
+/* Page-level colours for the terminal and the touch targets resolve from the
+   kit theme, so every host theme and light/dark move them together. */
+:root {
+  --app-touch: 2.75rem;
+  --app-terminal-bg: #0b1221;
+  --app-terminal-text: #d8e1ef;
+  --app-terminal-muted: #93a3bb;
+  --app-terminal-error: #fca5a5;
+  --app-terminal-warn: #fcd34d;
+  --app-terminal-ok: #86efac;
+  --app-terminal-border: color-mix(in srgb, #93a3bb 24%, transparent);
+}
+
+[data-theme-family="dark"] {
+  --app-terminal-bg: #060b14;
+  --app-terminal-text: #dfe7f3;
+  --app-terminal-muted: #9aa9c0;
+  --app-terminal-border: color-mix(in srgb, #9aa9c0 22%, transparent);
+}
+
+/* R5: the YAML and .env windows keep their readable height inside the
+   scrolling drawer body instead of shrinking to a strip. */
+.editor-card { flex: 0 0 auto; }
+
+/* R10: a failed refresh keeps the last list and states plainly that it is old. */
+.stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 0.85rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--ui-warning) 40%, transparent);
+  border-radius: var(--app-radius);
+  background: color-mix(in srgb, var(--ui-warning-soft) 70%, var(--ui-surface));
+  color: var(--ui-warning-text);
+  font-size: 0.78rem;
+}
+
+.stale-banner > .ui-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
+}
+
+.stale-banner__copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.stale-banner .ui-btn {
+  flex: 0 0 auto;
+  color: var(--ui-text);
+}
+
+/* The banner and the dashed rows mark old data without lowering text contrast. */
+#app-list[data-stale="true"] .app-card { border-style: dashed; }
+
+/* R12: the tab strip and its panels keep a visible, keyboard-reachable focus
+   ring for every host theme. */
+.detail-nav .ui-tab:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+}
+
+[data-section-panel]:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+}
+
+/* R7: following the newest line is a toggle, not a hidden side effect. */
+#logs-follow[aria-pressed="false"] {
+  color: var(--ui-text-secondary);
+  border-style: dashed;
+}
+
+#logs-follow[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--ui-primary) 45%, transparent);
+  color: var(--ui-primary);
+}
+
+.logs-terminal-shell { scroll-behavior: smooth; }
+
+/* The live chip sits beside the terminal title; the actions keep the right edge. */
+.logs-chrome__live { margin-left: 0.4rem; }
+
+/* R11: the tab strip scrolls on narrow screens instead of clipping entries,
+   and every control keeps a 44px touch target. */
+@media (max-width: 1024px) {
+  .deck-skeleton__layout { grid-template-columns: minmax(0, 1fr); }
+  .deck-skeleton__stage { display: none; }
+}
+
+@media (max-width: 720px) {
+  .deck-skeleton__panel { min-height: 17rem; }
+}
+
+/* R11: the kit stacks the page head below 768px; keep that stack but let the
+   brand and the node controls own their full row instead of floating centred. */
+@media (max-width: 768px) {
+  .page-head.ui-page-head { align-items: stretch; }
+}
+
+@media (max-width: 720px) {
+  .detail-nav.ui-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: 0.5rem;
+  }
+
+  .detail-nav.ui-tabs::-webkit-scrollbar { display: none; }
+
+  .detail-nav .ui-tab {
+    flex: 0 0 auto;
+    min-width: var(--app-touch);
+    min-height: var(--app-touch);
+    scroll-snap-align: center;
+  }
+
+  .logs-chrome { flex-wrap: wrap; }
+  .stale-banner { flex-wrap: wrap; }
+  .stale-banner .ui-btn { width: 100%; }
+}
+
+/* R11/R12: every control a finger has to hit keeps a 44px box, on narrow
+   screens and on wide coarse-pointer screens alike. */
+@media (max-width: 720px), (pointer: coarse) {
+  .ui-btn,
+  .ui-btn--sm,
+  .ui-input,
+  .ui-select,
+  .inventory-chip,
+  .agent-search-select__trigger,
+  .files-list li,
+  .detail-nav .ui-tab { min-height: var(--app-touch); }
+
+  .ui-btn--icon,
+  .ui-btn--icon.ui-btn--sm,
+  .topbar__deploy,
+  #workspace-refresh,
+  .node-refresh,
+  .back-link,
+  .detail-head-actions .ui-btn,
+  .app-actions .ui-btn,
+  .app-card-actions .ui-btn,
+  .workspace-head-actions .ui-btn,
+  .files-breadcrumb .ui-btn,
+  .files-selection .ui-btn,
+  .http-rule-actions .ui-btn,
+  .overview-service-copy,
+  .files-name {
+    min-width: var(--app-touch);
+    min-height: var(--app-touch);
+  }
+
+  .http-rule-open {
+    display: inline-flex;
+    align-items: center;
+    min-width: var(--app-touch);
+    min-height: var(--app-touch);
+  }
+
+  .inventory-filter .ui-select,
+  .http-form input,
+  .http-form select,
+  .backup-run-fields select,
+  .logs-toolbar select { min-height: var(--app-touch); }
+
+  .detail-domain {
+    min-height: var(--app-touch);
+    padding-inline: 0.6rem;
+  }
+}
+
+/* R12: reduced motion removes movement entirely instead of shortening it. */
+@media (prefers-reduced-motion: reduce) {
+  .app-status,
+  dialog.ui-dialog[open],
+  dialog.ui-dialog--drawer[open],
+  .ui-skeleton,
+  .logs-chrome__live i {
+    animation: none !important;
+  }
+
+  .ui-btn:hover:not(:disabled),
+  .ui-btn:active:not(:disabled) { transform: none; }
+
+  .ui-skeleton { background-position: 0 0; }
+  .logs-terminal-shell { scroll-behavior: auto; }
 }

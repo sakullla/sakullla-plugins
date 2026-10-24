@@ -61,6 +61,10 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
     await navigate("?agent_id=node-a");
     const tab = await page.send("Target.createTarget",{url:origin+"/theme-writer.html"});
     const {sessionId} = await page.send("Target.attachToTarget",{targetId:tab.targetId,flatten:true});
+    await eventually(async () => {
+      const probe = await page.send("Runtime.evaluate", { expression: "location.origin", returnByValue: true }, sessionId);
+      return probe.result?.value === origin;
+    }, "theme writer tab committed");
     try {
       for (const [stored,expected] of [["sakura-night","sakura-night"],["business","business"]]) {
         const result = await page.send("Runtime.evaluate",{expression:`localStorage.setItem('theme',${JSON.stringify(stored)})`},sessionId);
@@ -135,6 +139,123 @@ export async function runExperience({page,test,navigate,capture,eventually,origi
         assert.equal((await capture(`deployment-${theme}`,width)).theme,theme);
         await page.click("#create-cancel"); await page.waitVisible("#app-list");
       }
+    }
+  });
+
+  await test("every control keeps a 44px target at 390 and each tab stays reachable", async () => {
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    try {
+      await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+      const wiring = await page.evaluate(`(() => [...document.querySelectorAll('#detail-nav [role="tab"]')].every((tab) => {
+        const panel = document.getElementById(tab.getAttribute('aria-controls'));
+        return tab.id && panel && panel.getAttribute('role') === 'tabpanel' && panel.getAttribute('aria-labelledby') === tab.id;
+      }))()`);
+      assert.equal(wiring, true, "each tab controls a panel that points back at it");
+      for (const section of ["overview", "compose", "files", "logs", "http", "backup"]) {
+        await page.evaluate(`document.querySelector('#detail-nav [data-section="${section}"]').scrollIntoView({ block: 'nearest', inline: 'center' })`);
+        await page.click(`#detail-nav [data-section="${section}"]`);
+        await eventually(() => page.evaluate(`document.querySelector('#detail-nav [aria-selected="true"]')?.dataset.section === ${JSON.stringify(section)}`), `section ${section} active`);
+        const state = await page.evaluate(`(() => {
+          const small = [];
+          for (const el of document.querySelectorAll('#app-workspace button, #app-workspace a[href], #app-workspace select, #app-workspace [role="tab"], .page-head button, .page-head .agent-search-select__trigger')) {
+            const rect = el.getBoundingClientRect();
+            if (!rect.width || !rect.height) continue;
+            if (el.closest('[hidden]') || el.classList.contains('ui-sr-only') || el.type === 'checkbox' || el.type === 'radio') continue;
+            if (rect.width < 43.5 || rect.height < 43.5) small.push({id: el.id || el.className.toString().slice(0, 40), w: Math.round(rect.width), h: Math.round(rect.height)});
+          }
+          const active = document.querySelector('#detail-nav [aria-selected="true"]');
+          const tab = active.getBoundingClientRect(), nav = document.querySelector('#detail-nav').getBoundingClientRect();
+          return {small, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            inside: tab.left >= nav.left - 1 && tab.right <= nav.right + 1, tabIndex: active.tabIndex};
+        })()`);
+        assert.deepEqual(state.small, [], `44px targets in ${section}: ${JSON.stringify(state.small)}`);
+        assert.equal(state.overflow, 0, `no horizontal overflow in ${section}`);
+        assert.ok(state.inside, `the active tab is scrolled into view in ${section}`);
+        assert.equal(state.tabIndex, 0, `only the active tab is in the tab order for ${section}`);
+      }
+      const origins = await page.evaluate(`[...new Set(performance.getEntriesByType('resource').map((entry) => new URL(entry.name).origin))]`);
+      assert.deepEqual(origins, [await page.evaluate("location.origin")], `only same-origin resources load: ${JSON.stringify(origins)}`);
+      await capture("touch-targets", 390);
+
+      // R11: the tablet width keeps the same sections without sideways scroll.
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 768, height: 900, deviceScaleFactor: 1, mobile: false });
+      for (const section of ["overview", "compose", "files", "logs", "http", "backup"]) {
+        await page.evaluate(`document.querySelector('#detail-nav [data-section="${section}"]').scrollIntoView({ block: 'nearest', inline: 'center' })`);
+        await page.click(`#detail-nav [data-section="${section}"]`);
+        await eventually(() => page.evaluate(`document.querySelector('#detail-nav [aria-selected="true"]')?.dataset.section === ${JSON.stringify(section)}`), `section ${section} active at 768`);
+        const tablet = await page.evaluate(`(() => {
+          const active = document.querySelector('#detail-nav [aria-selected="true"]');
+          const tab = active.getBoundingClientRect(), nav = document.querySelector('#detail-nav').getBoundingClientRect();
+          return {
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            inside: tab.left >= nav.left - 1 && tab.right <= nav.right + 1,
+          };
+        })()`);
+        assert.equal(tablet.overflow, 0, `no horizontal overflow at 768 in ${section}`);
+        assert.ok(tablet.inside, `the active tab stays inside the strip at 768 in ${section}`);
+      }
+      await capture("tablet-layout", 768);
+    } finally {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    }
+  });
+
+  await test("page tokens resolve with the kit tokens under every host theme", async () => {
+    await navigate("?agent_id=node-a"); await page.waitVisible('.app-card');
+    const tab = await page.send("Target.createTarget", { url: origin + "/theme-writer.html" });
+    const { sessionId } = await page.send("Target.attachToTarget", { targetId: tab.targetId, flatten: true });
+    await eventually(async () => {
+      const probe = await page.send("Runtime.evaluate", { expression: "location.origin", returnByValue: true }, sessionId);
+      return probe.result?.value === origin;
+    }, "theme writer tab committed");
+    const seen = [];
+    try {
+      for (const host of ["fresh-green", "sakura-day", "sakura-night", "neko-dark", "business"]) {
+        await page.send("Runtime.evaluate", { expression: `localStorage.setItem('theme',${JSON.stringify(host)})` }, sessionId);
+        await eventually(() => page.evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(host)}`), `host theme ${host}`);
+        const tokens = await page.evaluate(`(() => {
+          const card = document.querySelector('#app-list .app-card');
+          const read = (node, prop) => getComputedStyle(node)[prop];
+          return {
+            theme: document.documentElement.dataset.theme,
+            cardBorder: read(card, 'borderTopColor'),
+            cardSurface: read(card, 'backgroundColor'),
+            body: read(document.body, 'backgroundColor'),
+            text: read(document.body, 'color'),
+          };
+        })()`);
+        assert.equal(tokens.theme, host);
+        assert.match(tokens.cardBorder, /^(?:rgba?|oklab|oklch|lab|lch|color)\(/, `page border token resolves under ${host}: ${JSON.stringify(tokens)}`);
+        assert.ok(!/^rgba\(0, 0, 0, 0\)$/.test(tokens.cardBorder), `the page border never degrades to transparent under ${host}`);
+        assert.match(tokens.cardSurface, /^(?:rgba?|oklab|oklch|lab|lch|color)\(/, `page surface token resolves under ${host}: ${JSON.stringify(tokens)}`);
+        assert.match(tokens.body, /^(?:rgba?|oklab|oklch|lab|lch|color)\(/, `kit canvas token resolves under ${host}: ${JSON.stringify(tokens)}`);
+        assert.ok(contrast(tokens.text, tokens.body) >= 4.5, `body contrast under ${host}: ${JSON.stringify(tokens)}`);
+        seen.push(tokens);
+      }
+      assert.ok(new Set(seen.map((token) => token.body)).size > 1, "the kit canvas follows the host theme");
+      assert.ok(new Set(seen.map((token) => token.text)).size > 1, "kit text colours follow the host theme");
+    } finally {
+      await page.send("Target.closeTarget", { targetId: tab.targetId });
+      await page.evaluate(`localStorage.removeItem('theme'); document.documentElement.dataset.theme = 'light'`);
+    }
+  });
+
+  await test("reduced motion removes drawer and dialog movement", async () => {
+    await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+      await page.click("#deploy-toggle"); await page.waitVisible("#create-form");
+      const motion = await page.evaluate(`(() => {
+        const moving = document.getAnimations().filter((animation) => (animation.effect?.getKeyframes?.() || []).some((frame) => /translate|scale|matrix/.test(String(frame.transform || ''))));
+        return {moving: moving.length, drawer: getComputedStyle(document.querySelector('#app-create')).animationName, reduced: matchMedia('(prefers-reduced-motion: reduce)').matches};
+      })()`);
+      assert.equal(motion.reduced, true, "the reduced-motion preference is visible to the page");
+      assert.equal(motion.moving, 0, `no translation or scale animation runs: ${JSON.stringify(motion)}`);
+      assert.equal(motion.drawer, "none", "the drawer opens without an entrance animation");
+      await page.click("#create-cancel"); await page.waitVisible("#app-list");
+    } finally {
+      await page.send("Emulation.setEmulatedMedia", { features: [] });
     }
   });
 }

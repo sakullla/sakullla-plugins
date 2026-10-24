@@ -38,6 +38,10 @@ const composeSubmit = document.querySelector("#compose-submit");
 const logsService = document.querySelector("#logs-service");
 const logsRefresh = document.querySelector("#logs-refresh");
 const logsPause = document.querySelector("#logs-pause");
+const logsFollow = document.querySelector("#logs-follow");
+const logsCopy = document.querySelector("#logs-copy");
+const logsDownload = document.querySelector("#logs-download");
+const logsShell = document.querySelector(".logs-terminal-shell");
 const logsStatus = document.querySelector("#logs-status");
 const logsView = document.querySelector("#logs-view");
 const logsEmpty = document.querySelector("#logs-empty");
@@ -187,6 +191,8 @@ const navigationCurrent = (snapshot) => contextCurrent(snapshot)
   && snapshot.app === selectedAppID && snapshot.section === detailSection
   && snapshot.create === !createPanel.hidden;
 let logsPaused = false;
+let logsFollowing = true;
+let logsScrollingByReader = false;
 let logsTimer = null;
 let logsLoaded = false;
 let logsSnapshotKey = "";
@@ -1468,6 +1474,7 @@ const mountAppFiles = () => {
   };
 
   const hideEditor = () => {
+    const focusInside = Boolean(editor && editor.contains(document.activeElement));
     fileDraft?.touch();
     filesEditorOpen = false;
     setDirty(false);
@@ -1477,6 +1484,7 @@ const mountAppFiles = () => {
     if (browser) browser.hidden = false;
     if (editorName) editorName.textContent = "";
     syncSelectionActions();
+    if (focusInside) (editBtn || browser)?.focus?.();
   };
 
 
@@ -1512,7 +1520,9 @@ const mountAppFiles = () => {
     fileDraft.capture(content);
     setDirty(false);
     selectEntry(path, name, false);
-    if (browser) browser.hidden = true;
+    // R6: the list and the editor stay two panes on wide screens; narrow
+    // screens stack them, so bring the editor into view there.
+    if (browser) browser.hidden = false;
     if (editor) editor.hidden = false;
     if (editorName) editorName.textContent = path;
     if (binaryHint) binaryHint.hidden = true;
@@ -1524,6 +1534,9 @@ const mountAppFiles = () => {
       editorInput.focus();
     }
     if (saveBtn) saveBtn.hidden = false;
+    if (editor && window.matchMedia("(max-width: 1024px)").matches && typeof editor.scrollIntoView === "function") {
+      editor.scrollIntoView({ block: "nearest" });
+    }
   };
 
   const renderBreadcrumb = () => {
@@ -3680,6 +3693,29 @@ const setLogsState = (text, isError) => {
   logsStatus.dataset.error = isError ? "true" : "false";
 };
 
+// R7: following the newest line is explicit. The toggle and the scroll
+// position agree, so reading back through the buffer never jumps.
+const syncLogsFollow = () => {
+  if (!logsFollow) return;
+  logsFollow.setAttribute("aria-pressed", String(logsFollowing));
+  logsFollow.textContent = logsFollowing ? "跟随最新" : "已暂停跟随";
+};
+
+const scrollLogsToEnd = ({ smooth = false } = {}) => {
+  if (!logsShell) return;
+  const behavior = smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto";
+  if (typeof logsShell.scrollTo === "function") logsShell.scrollTo({ top: logsShell.scrollHeight, behavior });
+  else logsShell.scrollTop = logsShell.scrollHeight;
+};
+
+const logsSnapshotText = () => (logsView ? logsView.textContent || "" : "");
+
+const logsFileName = () => {
+  const app = detailApp ? detailApp.id : "app";
+  const service = logsService && logsService.value ? logsService.value : "logs";
+  return `${app}-${service}.log`;
+};
+
 const logPalette = ["#1e293b", "#f87171", "#4ade80", "#facc15", "#60a5fa", "#e879f9", "#22d3ee", "#e2e8f0", "#94a3b8", "#fca5a5", "#86efac", "#fde68a", "#93c5fd", "#f0abfc", "#67e8f9", "#ffffff"];
 const logIndexedColor = (index) => {
   if (index < 16) return logPalette[index];
@@ -3776,8 +3812,11 @@ const resetLogsTerminal = () => {
   logsSeq += 1;
   logsLoaded = false;
   logsSnapshotKey = "";
+  logsFollowing = true;
+  syncLogsFollow();
   if (logsView) { logsView.textContent = ""; logsView.dataset.error = "false"; }
   if (logsEmpty) logsEmpty.hidden = true;
+  if (logsShell) logsShell.scrollTop = 0;
   setLogsState("", false);
 };
 const logsContextCurrent = () => detailApp && view === "detail" && detailSection === "logs";
@@ -3806,6 +3845,8 @@ const fetchLogs = async () => {
     paintLogsView();
     logsLoaded = true;
     logsEmpty.hidden = !!payload.logs;
+    // A fresh snapshot keeps following the reader who was at the end.
+    if (logsFollowing) scrollLogsToEnd();
     setLogsState(`${logsPaused ? "已暂停自动刷新" : "自动刷新"} · 最近读取 ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
     if (!current()) return;
@@ -3929,6 +3970,13 @@ const setDetailSection = async (section) => {
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
     });
+    // R11: a scrolling tab strip keeps the active entry in view, including
+    // when a section is restored from the URL or moved to with the keyboard.
+    const activeTab = detailNav.querySelector(`[data-section="${next}"]`);
+    if (activeTab && detailNav.scrollWidth > detailNav.clientWidth + 1
+      && typeof activeTab.scrollIntoView === "function") {
+      activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
   }
   if (next === "files" && detailApp) filesWorkspace.bind(detailApp);
   if (next === "compose") {
@@ -4455,7 +4503,35 @@ const renderEngineBadge = (engine) => {
   engineStatus.textContent = "尚未安装 Docker";
 };
 
+// R10: a failed read keeps the rows that were already on screen and says so.
+// A different node never reuses them, so the old node cannot look new.
+const workspaceStaleNode = document.querySelector("#app-stale");
+const workspaceStaleCopy = document.querySelector("#app-stale-copy");
+const workspaceStaleRetry = document.querySelector("#app-stale-retry");
+
+const clearWorkspaceStale = () => {
+  if (workspaceStaleNode) workspaceStaleNode.hidden = true;
+  delete listNode.dataset.stale;
+};
+
+const showWorkspaceStale = (message) => {
+  if (!workspaceStaleNode || !workspaceStaleCopy) return;
+  workspaceStaleCopy.textContent = message;
+  workspaceStaleNode.hidden = false;
+  listNode.dataset.stale = "true";
+};
+
+const retainWorkspaceAfterFailure = (error, previous) => {
+  const retained = Array.isArray(previous) ? previous : [];
+  if (!selectedAgentID || !agentOnline || !engineReady || !retained.length) return false;
+  workspaceNode.hidden = false;
+  renderApps(retained);
+  showWorkspaceStale(`刷新失败，显示上次读取的 ${retained.length} 个应用。${error?.message || ""}`);
+  return true;
+};
+
 const renderWorkspace = async () => {
+  clearWorkspaceStale();
   const seq = ++workspaceSeq;
   const snapshot = contextSnapshot();
   const pendingRestore = restoreTarget;
@@ -4591,11 +4667,23 @@ agentPicker.onChange = async (value) => {
   }
 };
 
-document.querySelector("#workspace-refresh")?.addEventListener("click", async () => {
+const refreshWorkspace = async () => {
   if (busy || !(await confirmLeaveEditor())) return;
   composeFilledFor = "";
-  try { await renderWorkspace(); } catch (error) { showStatus(error.message, true); }
-});
+  // The refresh clears the list before it reads, so the rows to fall back to
+  // have to be captured first.
+  const previous = lastApps.slice();
+  try {
+    await renderWorkspace();
+  } catch (error) {
+    // The retained list already carries its own stale banner, so the toast is
+    // reserved for the case where there is nothing left to show.
+    if (!retainWorkspaceAfterFailure(error, previous)) showStatus(error.message, true);
+  }
+};
+
+document.querySelector("#workspace-refresh")?.addEventListener("click", refreshWorkspace);
+if (workspaceStaleRetry) workspaceStaleRetry.addEventListener("click", refreshWorkspace);
 
 if (deployToggle) {
   deployToggle.addEventListener("click", () => {
@@ -4826,6 +4914,71 @@ if (logsPause) {
     } else {
       startLogPolling();
     }
+  });
+}
+
+if (logsFollow) {
+  syncLogsFollow();
+  logsFollow.addEventListener("click", () => {
+    if (view !== "detail" || detailSection !== "logs") return;
+    // The resulting scroll is ours, not the reader's.
+    logsScrollingByReader = false;
+    logsFollowing = !logsFollowing;
+    syncLogsFollow();
+    if (logsFollowing) scrollLogsToEnd({ smooth: true });
+    setLogsState(logsFollowing ? "正在跟随最新日志" : "已暂停跟随，滚动到底部可恢复", false);
+  });
+}
+
+let logsUserScrollTimer = null;
+const markLogsUserScroll = () => {
+  logsScrollingByReader = true;
+  clearTimeout(logsUserScrollTimer);
+  logsUserScrollTimer = setTimeout(() => { logsScrollingByReader = false; }, 600);
+};
+if (logsShell) {
+  logsShell.addEventListener("wheel", markLogsUserScroll, { passive: true });
+  logsShell.addEventListener("touchmove", markLogsUserScroll, { passive: true });
+  logsShell.addEventListener("pointerdown", markLogsUserScroll);
+  logsShell.addEventListener("keydown", (event) => {
+    if (["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"].includes(event.key)) markLogsUserScroll();
+  });
+  logsShell.addEventListener("scroll", () => {
+    if (view !== "detail" || detailSection !== "logs") return;
+    // A new snapshot also moves the scroll position; only a reader gesture is
+    // allowed to pause or resume following.
+    if (!logsScrollingByReader) return;
+    const nearEnd = logsShell.scrollHeight - logsShell.scrollTop - logsShell.clientHeight <= 48;
+    if (nearEnd === logsFollowing) return;
+    logsFollowing = nearEnd;
+    syncLogsFollow();
+  });
+}
+
+if (logsCopy) {
+  logsCopy.addEventListener("click", async () => {
+    const text = logsSnapshotText();
+    if (!text) {
+      showStatus("当前没有可复制的日志。", true);
+      return;
+    }
+    try {
+      await copyText(text);
+    } catch (error) {
+      showStatus(error.message, true);
+    }
+  });
+}
+
+if (logsDownload) {
+  logsDownload.addEventListener("click", () => {
+    const text = logsSnapshotText();
+    if (!text) {
+      showStatus("当前没有可下载的日志。", true);
+      return;
+    }
+    downloadTextFile(logsFileName(), text);
+    showStatus("已下载当前日志快照。", false);
   });
 }
 

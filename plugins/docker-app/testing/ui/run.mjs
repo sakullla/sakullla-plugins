@@ -134,6 +134,9 @@ const operationsState = createOperationsState();
 const resourcesState = createResourcesState();
 const composeState = { previewError: "", saveError: "", listError: false, risk: false, previewCount: 0, saveCount: 0, lastSave: null, file: "original\n", fileError: false, fileListError: false };
 const gates = new Map();
+// The workspace suite uses this to prove a failed refresh keeps the rows that
+// were already on screen instead of clearing the list.
+let workspaceListError = false;
 let apps = [makeApp("alpha"), makeApp("beta"), longApp, makeApp("bravo", "node-b")];
 const appSummary = ({compose: _compose, env: _env, ...summary}) => summary;
 const server = createServer(async (request, response) => {
@@ -187,6 +190,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/api/apps") {
       if (suite === "compose" && composeState.listError) return json({error:"列表读取失败。"}, 500);
+      if (suite === "workspace" && workspaceListError) return json({error:"列表读取失败。"}, 500);
       return json({ apps: apps.filter((app) => app.agent_id === record.agent).map(appSummary) });
     }
     if (url.pathname === "/api/disk-cleanup") return json({ cleanup: { steps: [] } });
@@ -832,6 +836,69 @@ try {
     assert.equal(posts(), before, "invalid forms never reach the host");
     assert.equal(await page.evaluate(`document.querySelector('.http-form input[name="domain"]').value`), "app.example.test", "the typed domain survives the failed validation");
     } finally { apps = original; }
+  });
+
+  await test("the loading skeleton repeats the workspace layout", async () => {
+    const pending = hold("/panel-api/agents");
+    try {
+      await page.send("Page.navigate", { url: origin + "/?agent_id=node-a" });
+      await eventually(() => page.evaluate(`document.querySelector('#app-loading')?.hidden === false`), "loading state visible");
+      const layout = await page.evaluate(`(() => {
+        const loading = document.querySelector('#app-loading');
+        const panel = loading.querySelector('.deck-skeleton__panel');
+        const stage = loading.querySelector('.deck-skeleton__stage');
+        return {
+          width: Math.round(loading.getBoundingClientRect().width),
+          panel: Math.round(panel.getBoundingClientRect().width),
+          stage: Math.round(stage.getBoundingClientRect().width),
+          rows: loading.querySelectorAll('.deck-skeleton__row').length,
+          head: Boolean(loading.querySelector('.deck-skeleton__head')),
+        };
+      })()`);
+      assert.ok(layout.head, "the skeleton reserves the workspace head");
+      assert.ok(layout.rows >= 3, `the skeleton reserves at least three application rows: ${JSON.stringify(layout)}`);
+      assert.ok(layout.panel > 0 && layout.stage > 0, `the skeleton keeps a list column and a detail stage: ${JSON.stringify(layout)}`);
+      assert.ok(layout.panel < layout.stage, `the detail stage stays the wider column: ${JSON.stringify(layout)}`);
+      assert.ok(layout.panel <= layout.width, "the skeleton never overflows the page");
+      await capture("loading-skeleton", 1440);
+    } finally {
+      pending.release();
+    }
+    await eventually(() => page.evaluate(`document.querySelector('#app-loading')?.hidden === true`), "workspace replaces the skeleton");
+  });
+
+  await test("failed refresh keeps the last rows and marks them stale", async () => {
+    const original = apps;
+    apps = [makeApp("stale-a", "node-a"), makeApp("stale-b", "node-a"), makeApp("stale-c", "node-a")];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="stale-a"]');
+      workspaceListError = true;
+      try {
+        await page.click("#workspace-refresh");
+        await eventually(() => page.evaluate(`document.querySelector('#app-stale')?.hidden === false`), "stale banner shown");
+        const state = await page.evaluate(`(() => ({
+          rows: document.querySelectorAll('#app-list .app-card').length,
+          stale: document.querySelector('#app-list').dataset.stale,
+          copy: document.querySelector('#app-stale-copy').textContent,
+          toast: document.querySelector('#app-status').hidden,
+          retry: document.querySelector('#app-stale-retry').getBoundingClientRect().height,
+        }))()`);
+        assert.equal(state.rows, 3, `previous rows stay on screen: ${JSON.stringify(state)}`);
+        assert.equal(state.stale, "true", "the list is marked as old data");
+        assert.match(state.copy, /刷新失败/);
+        assert.ok(state.retry > 0, "the stale banner offers a retry control");
+        assert.equal(state.toast, true, "the banner carries the message without a duplicate toast");
+        await capture("stale-refresh", 1440);
+      } finally {
+        workspaceListError = false;
+      }
+      await page.click("#app-stale-retry");
+      await page.waitVisible('[data-id="stale-a"]');
+      await eventually(() => page.evaluate(`document.querySelector('#app-stale').hidden === true && document.querySelector('#app-list').dataset.stale !== 'true'`), "retry clears the stale marker");
+      assert.equal(await page.evaluate(`document.querySelectorAll('#app-list .app-card').length`), 3, "retry restores live rows");
+    } finally {
+      apps = original;
+    }
   });
   } else if (suite === "compose") {
     await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
