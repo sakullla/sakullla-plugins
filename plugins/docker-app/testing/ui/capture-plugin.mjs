@@ -33,6 +33,7 @@ export const scenes = [
     name: "deploy",
     title: "部署应用",
     run: async (ui) => {
+      await ui.waitFor("#app-list .app-card");
       await ui.waitFor("#deploy-toggle");
       await ui.click("#deploy-toggle");
       await ui.waitFor("#create-form");
@@ -75,6 +76,15 @@ export const scenes = [
     run: async (ui) => {
       await openDetail(ui, "http");
       await ui.waitFor("#detail-http .http-rule-main");
+    },
+  },
+  {
+    name: "backup",
+    title: "备份",
+    run: async (ui) => {
+      await openDetail(ui, "backup");
+      await ui.waitFor("#backup-run-form");
+      await ui.waitFor(".backup-list tbody tr");
     },
   },
 ];

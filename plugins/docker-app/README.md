@@ -115,18 +115,22 @@ checks continue. The page refreshes pending image results without discarding an
 open editor. Agent Docker proxy support for `docker info` and formatted
 `docker image inspect` is required; update the Agent alongside this plugin.
 
-The management page reads as one console. A container-deck header carries the
-node picker and live engine badge, a fleet strip counts running, updatable,
-and stopped applications, and every application is a card with a status rail,
-monogram, published ports, service images, ingress link, and a compact action
-footer. The detail page keeps a sticky header with the monogram, title, status,
-domain, and lifecycle actions, followed by a segmented section bar. Its
-overview pairs a status metric row with service-image cards, run parameters,
-and ingress and storage rails, then closes with an action deck. Compose and
-workspace files use titled editor windows, while logs use a dedicated terminal
-window with a light toolbar. Operation feedback floats above the page rather
-than pushing it: a status toast appears and disappears without reflowing the
-content and without intercepting a click.
+The management page is a two-pane compose console. A compact sticky top bar
+carries the node picker, live engine badge, refresh and deployment entry. The
+fleet strip counts all, running, updatable and stopped applications and doubles
+as a filter; the inventory column below keeps search, status filtering and the
+application rows visible while a detail is open. Each row shows its status
+inline, monogram, published ports, service images, ingress link and compact
+actions. The work area keeps a sticky identity header with the monogram, title,
+status, domain and lifecycle actions, followed by a section bar. Its overview
+pairs a status metric row with service-image rows, run parameters, ingress and
+storage rails, then closes with an action deck. Compose and workspace files use
+titled editor windows; logs use a dark terminal with a themed toolbar. Image
+names and ingress domains can be copied from the overview and ingress sections.
+Below 1024px the inventory and work area become a single pane: opening an
+application hides the inventory and the back control restores it. Operation
+feedback floats above the page rather than pushing it: a status toast appears
+and disappears without reflowing the content and without intercepting a click.
 
 The detail page also carries a backup section. It lists this application's
 backup records (application, time, size, destination) with per-record restore

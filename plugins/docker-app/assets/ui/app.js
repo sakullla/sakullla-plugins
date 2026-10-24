@@ -16,6 +16,7 @@ const createPanel = document.querySelector("#app-create");
 const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-head");
 const detailPanel = document.querySelector("#app-detail");
+const detailPlaceholder = document.querySelector("#detail-placeholder");
 const detailTitle = document.querySelector("#detail-title");
 const detailStatus = document.querySelector("#detail-status");
 const detailOpen = document.querySelector("#detail-open");
@@ -1114,13 +1115,17 @@ const syncListPanel = () => {
   const hasApps = listNode && listNode.children.length > 0;
   const inDetail = view === "detail";
   if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps;
-  if (listPanel) listPanel.hidden = inDetail;
+  // Desktop keeps the inventory beside the work area; the narrow layout hides
+  // it through [data-view="detail"] so the detail owns the screen.
+  if (listPanel) listPanel.hidden = false;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (workspaceHead) workspaceHead.hidden = inDetail;
-  if (inventoryChipsNode) inventoryChipsNode.hidden = inDetail || !hasApps;
+  if (detailPlaceholder) detailPlaceholder.hidden = inDetail || !hasApps;
+  if (workspaceNode) workspaceNode.dataset.view = inDetail ? "detail" : "list";
+  if (workspaceHead) workspaceHead.hidden = false;
+  if (inventoryChipsNode) inventoryChipsNode.hidden = !hasApps;
   const canOperate = selectedAgentID && engineReady && agentOnline;
-  if (deployToggle) deployToggle.hidden = inDetail || !canOperate;
-  if (diskCleanup) diskCleanup.hidden = inDetail || !canOperate;
+  if (deployToggle) deployToggle.hidden = !canOperate;
+  if (diskCleanup) diskCleanup.hidden = !canOperate;
 };
 
 const parsePublishedPorts = (compose) => {
@@ -1241,6 +1246,20 @@ const copyText = async (text) => {
     throw new Error("当前环境无法复制");
   }
   showStatus("已复制。", false);
+};
+
+const copyIconButton = (value, label, className = "ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm") => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.title = `复制${label}`;
+  button.setAttribute("aria-label", `复制${label}`);
+  button.append(iconNode("copy"));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyText(value).catch((error) => showStatus(error.message, true));
+  });
+  return button;
 };
 
 const postAppAction = async (app, action, body = {}) => {
@@ -2382,6 +2401,16 @@ const displayHost = (url) => {
   }
 };
 
+const markSelectedApp = (appID) => {
+  if (!listNode) return;
+  listNode.querySelectorAll(".app-card").forEach((card) => {
+    const selected = Boolean(appID) && card.dataset.id === appID;
+    card.dataset.selected = String(selected);
+    if (selected) card.setAttribute("aria-current", "true");
+    else card.removeAttribute("aria-current");
+  });
+};
+
 const renderApp = (app) => {
   const source = appCardTemplate && appCardTemplate.content.querySelector(".app-card");
   const card = source ? source.cloneNode(true) : document.createElement("article");
@@ -2682,7 +2711,7 @@ const renderOverview = (app) => {
   imageName.textContent = image.name;
   imageName.title = version;
   imageCopy.append(imageName);
-  imageNode.append(imageMark, imageCopy);
+  imageNode.append(imageMark, imageCopy, copyIconButton(version, "主镜像"));
   if (image.digest) {
     const digest = chip(image.digest.slice(0, 12));
     digest.className = "chip app-version";
@@ -2712,6 +2741,8 @@ const renderOverview = (app) => {
       imageNameNode.textContent = service.image || service.tag || "未解析镜像";
       identity.append(name, imageNameNode);
       head.append(serviceMark, identity);
+      const serviceImage = service.image || service.tag || "";
+      if (serviceImage) head.append(copyIconButton(serviceImage, `镜像 ${service.name}`, "ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm overview-service-copy"));
       const status = serviceImageStatus(service);
       if (status.text) {
         const flag = document.createElement("p");
@@ -2988,13 +3019,17 @@ const renderHTTP = (app) => {
       target.textContent = publicURLFromRule(rule) ? `访问目标：${publicURLFromRule(rule)}` : "已停用，不提供访问链接";
       main.append(target);
       if (publicURLFromRule(rule)) {
+        const linkRow = document.createElement("div");
+        linkRow.className = "http-rule-link";
         const link = document.createElement("a");
         link.className = "http-rule-open";
         link.href = publicURLFromRule(rule);
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.textContent = "访问";
-        main.append(link);
+        linkRow.append(link);
+        if (rule.domain) linkRow.append(copyIconButton(rule.domain, "入口域名"));
+        main.append(linkRow);
       }
       item.append(mark, main);
       if (rule.ref) {
@@ -3374,7 +3409,7 @@ const renderBackup = (app) => {
   backupPanel.append(listHead);
   if (records && records.length) {
     const table = document.createElement("table");
-    table.className = "backup-list";
+    table.className = "ui-table backup-list";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     ["应用", "时间", "大小", "目的地", "操作"].forEach((label) => {
@@ -3391,16 +3426,21 @@ const renderBackup = (app) => {
       row.dataset.record = record.id || "";
       const appCell = document.createElement("td");
       appCell.className = "backup-cell-app";
+      appCell.dataset.label = "应用";
       appCell.textContent = record.app_id || app.id;
       const createdCell = document.createElement("td");
+      createdCell.dataset.label = "时间";
       createdCell.textContent = formatBackupTime(record.created);
       const sizeCell = document.createElement("td");
+      sizeCell.dataset.label = "大小";
       sizeCell.textContent = formatBackupSize(record.size_bytes);
       const destinationCell = document.createElement("td");
       destinationCell.className = "backup-cell-destination";
+      destinationCell.dataset.label = "目的地";
       destinationCell.textContent = record.destination_label || record.destination || "";
       const actionsCell = document.createElement("td");
       actionsCell.className = "backup-cell-actions";
+      actionsCell.dataset.label = "操作";
       const restore = actionButton({ id: "backup-restore" }, "ui-btn ui-btn--secondary ui-btn--sm", "恢复");
       restore.dataset.record = record.id || "";
       restore.addEventListener("click", () => { if (!busy) openRestoreDialog(app, record); });
@@ -3686,6 +3726,7 @@ const paintDetail = (app, composeRevision) => {
   if (appChanged || detailApp?.agent_id !== app.agent_id) filesWorkspace.unbind();
   detailApp = app;
   selectedAppID = app.id;
+  markSelectedApp(app.id);
   if (detailTitle) detailTitle.textContent = app.name || app.id;
   const detailMark = document.querySelector("#detail-mark");
   if (detailMark) {
@@ -3792,6 +3833,7 @@ const leaveDetail = async ({ force } = {}) => {
   logsLoaded = false;
   composeFilledFor = "";
   filesMountedFor = "";
+  markSelectedApp("");
   showStatus("", false);
   syncListPanel();
   if (!force) {
@@ -3965,6 +4007,11 @@ const applyInventoryFilter = () => {
     if (!row.hidden) visible += 1;
   });
   document.querySelector("#app-no-results").hidden = !rows.length || visible > 0;
+  if (inventoryChipsNode) {
+    inventoryChipsNode.querySelectorAll("[data-filter]").forEach((chip) => {
+      chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
+    });
+  }
   const updates = rows.filter((row) => row.dataset.updateAvailable === "true").length;
   document.querySelector("#inventory-summary").textContent = query || filter !== "all" ? `${visible} / ${rows.length} 个应用` : updates ? `${updates} 个应用可更新` : `${rows.length} 个应用`;
 };
@@ -3993,6 +4040,14 @@ document.addEventListener("keydown", (event) => {
   searchInput.focus();
   searchInput.select();
 });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+  if (view !== "detail" || busy || document.querySelector("dialog[open]")) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && (target.matches("input, textarea, select") || target.isContentEditable)) return;
+  event.preventDefault();
+  leaveDetail();
+});
 
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
@@ -4000,6 +4055,7 @@ const renderApps = (apps) => {
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
+  markSelectedApp(view === "detail" ? selectedAppID : "");
   renderInventoryChips(list);
   applyInventoryFilter();
   syncListPanel();
@@ -4017,21 +4073,32 @@ const renderInventoryChips = (apps) => {
   const running = list.filter((app) => app.status === "运行中").length;
   const updates = list.filter((app) => app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update)).length;
   const groups = [
-    ["total", "全部", list.length],
-    ["running", "运行中", running],
-    ["updates", "可更新", updates],
-    ["stopped", "已停止", Math.max(0, list.length - running)],
+    ["total", "all", "全部", list.length],
+    ["running", "running", "运行中", running],
+    ["updates", "updates", "可更新", updates],
+    ["stopped", "stopped", "已停止", Math.max(0, list.length - running)],
   ];
-  inventoryChipsNode.replaceChildren(...groups.map(([tone, label, value]) => {
-    const chip = document.createElement("span");
+  const activeFilter = document.querySelector("#app-filter")?.value || "all";
+  inventoryChipsNode.replaceChildren(...groups.map(([tone, filter, label, value]) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
     chip.className = "inventory-chip";
     chip.dataset.tone = tone;
+    chip.dataset.filter = filter;
+    chip.setAttribute("aria-pressed", String(filter === activeFilter));
+    chip.setAttribute("aria-label", `${label}：${value} 个应用`);
     const count = document.createElement("b");
     count.textContent = String(value);
     const copy = document.createElement("span");
     copy.className = "inventory-chip__label";
     copy.textContent = label;
     chip.append(count, copy);
+    chip.addEventListener("click", () => {
+      const select = document.querySelector("#app-filter");
+      if (!select) return;
+      select.value = filter;
+      applyInventoryFilter();
+    });
     return chip;
   }));
   inventoryChipsNode.hidden = false;

@@ -36,7 +36,7 @@
 | cloudflare-dns | mappings | 徽章 | span.ui-badge.ui-badge--success | 是 | 是 | 已消除 |
 | cloudflare-dns | mappings | 对话框 | dialog#mapping-create.ui-dialog | 是 | 是 | 已消除 |
 | cloudflare-dns | empty | 空状态 | div#mapping-empty.ui-empty | 是 | 是 | 已消除 |
-| docker-app | apps | 主按钮 | button#deploy-toggle.ui-btn | 是 | 是 | 已消除 |
+| docker-app | apps | 主按钮 | button#deploy-toggle.ui-btn.topbar__deploy | 是 | 是 | 已消除（布局类：topbar__deploy） |
 | docker-app | apps | 输入 | input#app-search.ui-input | 是 | 是 | 已消除 |
 | docker-app | apps | 表格 | — | — | — | 不适用（页面主流程没有表格） |
 | docker-app | apps | 徽章 | p.app-card-status.ui-badge | 是 | 是 | 已消除（布局类：app-card-status） |
@@ -81,7 +81,7 @@
 
 ## 跨页差异
 
-- 主按钮：9/9 页存在；类名与 token 检查全部通过；kit 变体：ui-btn--block、ui-btn--lg；页面布局类：doh-copy、ip-rule-submit。
+- 主按钮：9/9 页存在；类名与 token 检查全部通过；kit 变体：ui-btn--block、ui-btn--lg；页面布局类：doh-copy、ip-rule-submit、topbar__deploy。
 - 输入：8/9 页存在；类名与 token 检查全部通过；token 变体：大尺寸变体（--ui-control-height-lg、--ui-text-base）；不适用：doh。
 - 表格：5/9 页存在；类名与 token 检查全部通过；页面布局类：ip-rule-table、listing、routing-table、routing-table--rules、waf-events-table；不适用：accelerator-sources、docker-app、doh、reverse-l4。
 - 徽章：9/9 页存在；类名与 token 检查全部通过；kit 变体：ui-badge--info、ui-badge--plain、ui-badge--success；页面布局类：app-card-status。

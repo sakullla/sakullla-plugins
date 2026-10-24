@@ -3820,14 +3820,18 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form does not offer the full editor width")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "repeat(auto-fill, minmax(") {
-		t.Fatal("wide application list must be a multi-column card grid")
+	if !strings.Contains(appList, "display: flex") || !strings.Contains(appList, "flex-direction: column") {
+		t.Fatal("application inventory must be a vertical master list")
 	}
-	if strings.Contains(appList, "grid-template-columns: minmax(0, 1fr)") {
-		t.Fatal("wide application list is still one scannable column")
+	if !strings.Contains(appList, "overflow-y: auto") {
+		t.Fatal("application inventory must scroll independently when the fleet grows")
 	}
-	if !strings.Contains(stylesheet, ".app-list { grid-template-columns: minmax(0, 1fr); }") {
-		t.Fatal("narrow application list must be a single card column")
+	workspaceLayout := cssRule(stylesheet, ".workspace-layout")
+	if !strings.Contains(workspaceLayout, "grid-template-columns: minmax(") {
+		t.Fatal("workspace must pair the inventory with a detail work area")
+	}
+	if !strings.Contains(stylesheet, ".app-list { max-height: none; }") {
+		t.Fatal("narrow application list must release its bounded scroll height")
 	}
 	refresh := cssRule(stylesheet, "#workspace-refresh")
 	if !strings.Contains(refresh, "justify-self: start") || !strings.Contains(refresh, "width: auto") {
@@ -3841,11 +3845,11 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("selected file row does not check the leading control")
 	}
 	for _, want := range []string{
-		"html { margin: 0; min-height: 100%; font-size: 15px; }",
-		"html { font-size: 16px; }",
-		"html { font-size: 17px; }",
-		"html { font-size: 18px; }",
-		"max-width: 72rem",
+		"font-size: 16px",
+		"font-size: 17px",
+		"font-size: 18px",
+		"font-size: 19px",
+		"max-width: 100rem",
 	} {
 		if !strings.Contains(stylesheet, want) {
 			t.Fatalf("stylesheet missing wide-viewport rule %q", want)
@@ -4885,8 +4889,8 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 		t.Fatal("syncListPanel is missing")
 	}
 	syncFn := js[syncStart:syncEnd]
-	if !strings.Contains(syncFn, "listPanel.hidden = inDetail") {
-		t.Fatal("deploy form still stacks over the card wall as the main operation")
+	if !strings.Contains(syncFn, "listPanel.hidden = false") || !strings.Contains(syncFn, `workspaceNode.dataset.view = inDetail ? "detail" : "list"`) {
+		t.Fatal("master inventory must stay beside the detail on wide screens and switch panes only on narrow layouts")
 	}
 	if !strings.Contains(fetchFn, "logsView.textContent = payload.logs") {
 		t.Fatal("logs section does not display log text")

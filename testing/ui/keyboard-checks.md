@@ -48,9 +48,9 @@
 | cloudflare-dns | mappings | #mapping-add | Tab | 通过：Tab ×2 → button#mapping-add.ui-btn（:focus-visible=真，outline 2px，box-shadow） |
 | cloudflare-dns | mappings | #mapping-add | Enter | 通过：打开 #mapping-create，焦点进入对话框（input.ui-input（:focus-visible=真，box-shadow）） |
 | cloudflare-dns | mappings | #mapping-add | Esc | 通过：关闭 #mapping-create，焦点回到 button#mapping-add.ui-btn（:focus-visible=真，outline 2px，box-shadow） |
-| docker-app | apps | #deploy-toggle | Tab | 通过：Tab ×4 → button#deploy-toggle.ui-btn（:focus-visible=真，outline 2px，box-shadow） |
+| docker-app | apps | #deploy-toggle | Tab | 通过：Tab ×3 → button#deploy-toggle.ui-btn.topbar__deploy（:focus-visible=真，outline 2px，box-shadow） |
 | docker-app | apps | #deploy-toggle | Enter | 通过：打开 #app-create，焦点进入对话框（input.ui-input（:focus-visible=真，box-shadow）） |
-| docker-app | apps | #deploy-toggle | Esc | 通过：关闭 #app-create，焦点回到 button#deploy-toggle.ui-btn（:focus-visible=真，outline 2px，box-shadow） |
+| docker-app | apps | #deploy-toggle | Esc | 通过：关闭 #app-create，焦点回到 button#deploy-toggle.ui-btn.topbar__deploy（:focus-visible=真，outline 2px，box-shadow） |
 | doh | endpoint | #copy-doh-url | Tab | 通过：Tab ×1 → button#copy-doh-url.ui-btn.ui-btn--lg.doh-copy（:focus-visible=真，outline 2px，box-shadow） |
 | doh | endpoint | #copy-doh-url | Enter | 通过：复制状态已显示（成功或失败提示均已触发） |
 | doh | endpoint | #copy-doh-url | Esc | 通过：页面无对话框；Esc 后未出现模态层，焦点仍在 button#copy-doh-url.ui-btn.ui-btn--lg.doh-copy（:focus-visible=真，outline 2px，box-shadow） |
