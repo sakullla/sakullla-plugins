@@ -1682,75 +1682,6 @@ main.deck {
 
 /* ── Overview ────────────────────────────────────────────────────────── */
 
-.overview-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.5rem;
-  margin-bottom: 0.875rem;
-}
-
-.overview-stat {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  min-width: 0;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid var(--app-border);
-  border-radius: var(--app-radius);
-  background: var(--app-surface-soft);
-}
-
-.overview-stat__icon {
-  display: grid;
-  place-items: center;
-  width: 1.9rem;
-  height: 1.9rem;
-  flex: 0 0 auto;
-  border-radius: 0.55rem;
-  background: var(--stat-soft, var(--ui-subtle));
-  color: var(--stat-tone, var(--ui-text-secondary));
-}
-
-.overview-stat[data-tone="success"] { --stat-tone: var(--ui-success-text); --stat-soft: var(--ui-success-soft); }
-.overview-stat[data-tone="primary"] { --stat-tone: var(--ui-primary); --stat-soft: var(--ui-primary-soft); }
-.overview-stat[data-tone="accent"] { --stat-tone: var(--ui-accent); --stat-soft: color-mix(in srgb, var(--ui-accent) 14%, transparent); }
-.overview-stat[data-tone="info"] { --stat-tone: var(--ui-primary); --stat-soft: var(--ui-primary-soft); }
-.overview-stat[data-tone="warning"] { --stat-tone: var(--ui-warning-text); --stat-soft: var(--ui-warning-soft); }
-.overview-stat[data-tone="danger"] { --stat-tone: var(--ui-danger-text); --stat-soft: var(--ui-danger-soft); }
-.overview-stat[data-tone="muted"] { --stat-tone: var(--ui-text-secondary); --stat-soft: var(--ui-subtle); }
-
-.overview-stat__copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.05rem;
-  min-width: 0;
-}
-
-.overview-stat__label {
-  overflow: hidden;
-  color: var(--ui-text-tertiary);
-  font-size: 0.6875rem;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.overview-stat strong {
-  overflow: hidden;
-  color: var(--ui-text);
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.overview-stat[data-status="运行中"] strong { color: var(--ui-success-text); }
-.overview-stat[data-status="异常"] strong { color: var(--ui-danger-text); }
-.overview-stat[data-status="有新版本"] strong { color: var(--ui-warning-text); }
-.overview-stat[data-status="已停止"] strong { color: var(--ui-text-secondary); }
-
 .overview-sheet {
   display: grid;
   grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
@@ -2048,22 +1979,6 @@ main.deck {
 
 .overview-arrow { color: var(--ui-text-tertiary); font-size: 0.7rem; }
 
-.overview-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-top: 0.875rem;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--app-border);
-  border-radius: var(--app-radius-lg);
-  background: var(--ui-surface);
-}
-
-.overview-actions__head { flex: 1 1 14rem; min-width: 0; }
-.overview-actions__head h3 { margin: 0 0 0.15rem; font-size: 0.8125rem; }
-.overview-actions__head p { margin: 0; color: var(--ui-text-tertiary); font-size: 0.6875rem; }
-
 .app-actions {
   display: flex;
   align-items: center;
@@ -2071,14 +1986,6 @@ main.deck {
   flex-wrap: wrap;
 }
 
-.overview-actions .app-actions-danger { margin-left: auto; }
-
-.overview-danger-copy {
-  margin: 0 0.35rem 0 0;
-  color: var(--ui-text-tertiary);
-  font-size: 0.6875rem;
-  max-width: 18rem;
-}
 
 .rollback-unavailable { margin-top: 0.5rem; }
 
@@ -3451,7 +3358,6 @@ dialog.ui-dialog--drawer > form { max-height: 100%; height: 100%; }
 }
 
 @media (max-width: 860px) {
-  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-chips { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .backup-settings-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .backup-settings-fields > label:nth-child(3) { grid-column: 1 / -1; }
@@ -3504,7 +3410,6 @@ dialog.ui-dialog--drawer > form { max-height: 100%; height: 100%; }
   .detail-head h2 { font-size: 1.05rem; }
   .detail-mark { width: 2.3rem; height: 2.3rem; font-size: 0.75rem; }
   .detail-head-actions .ui-btn { min-height: 2rem; padding: 0 0.55rem; font-size: 0.72rem; }
-  .overview-actions .app-actions-danger { margin-left: 0; }
   .overview-danger-copy { max-width: none; }
   .http-form-fields { grid-template-columns: minmax(0, 1fr); }
   .http-form label { width: 100%; }
@@ -3551,13 +3456,9 @@ dialog.ui-dialog--drawer > form { max-height: 100%; height: 100%; }
   .deck-brand__mark { width: 2.25rem; height: 2.25rem; border-radius: 0.7rem; }
   .topbar__deploy span { display: none; }
   .topbar__deploy { width: 2.375rem; min-width: 2.375rem; padding: 0; }
-  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-chips { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-chip { min-height: 3rem; }
   .inventory-chip b { font-size: 1.2rem; }
-  .overview-actions { align-items: flex-start; }
-  .overview-actions .app-actions { width: 100%; }
-  .overview-actions .app-actions .ui-btn { flex: 1 1 auto; }
   .app-card-image-row { grid-template-columns: 0.85rem minmax(0, 0.7fr) minmax(0, 1fr); }
   .app-card-version { display: none; }
   .detail-head-actions { gap: 0.3rem; }
@@ -4032,4 +3933,205 @@ body {
   }
   .inventory-chip { flex: 0 0 auto; }
   .workspace-head-actions { grid-column: 2; grid-row: 1; }
+}
+/* ── T2 detail, ingress and backup ───────────────────────────────────── */
+
+/* R4: one fact band replaces the statistic cards and stays a single row on
+   desktop, two columns when the detail column narrows. */
+.overview-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 0 0 0.85rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius-lg);
+  background: var(--ui-surface);
+}
+
+.overview-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0 0.55rem;
+  border-left: 1px solid var(--app-line);
+}
+
+.overview-fact:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.overview-fact dt {
+  overflow: hidden;
+  color: var(--ui-text-tertiary);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-fact dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-fact dd[data-tone="success"] { color: var(--ui-success-text); }
+.overview-fact dd[data-tone="warning"] { color: var(--ui-warning-text); }
+.overview-fact dd[data-tone="danger"] { color: var(--ui-danger-text); }
+.overview-fact dd[data-tone="primary"] { color: var(--ui-primary); }
+.overview-fact dd[data-tone="muted"] { color: var(--ui-text-secondary); }
+
+.overview-block__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.overview-block__head h3 { margin: 0; }
+
+.overview-services-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.overview-services-tools .ui-btn {
+  min-height: 2rem;
+  font-size: 0.75rem;
+}
+
+.overview-services { margin-top: 0.55rem; }
+
+.overview-backup-link { margin-top: 0.6rem; }
+
+/* R4: destructive work keeps its own surface away from the everyday actions. */
+.overview-danger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--ui-danger) 28%, transparent);
+  border-radius: var(--app-radius-lg);
+  background: color-mix(in srgb, var(--ui-danger-soft) 55%, transparent);
+}
+
+.overview-danger__copy {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.overview-danger h3 {
+  margin: 0 0 0.15rem;
+  color: var(--ui-danger-text);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.overview-danger-copy {
+  margin: 0;
+  max-width: 32rem;
+  color: var(--ui-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+/* R8: rule rows read status, domain, port, then open / copy / delete. */
+.http-rules li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem 0.65rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.http-rule-identity {
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.http-rule-identity .chip[data-state="on"] {
+  background: var(--ui-success-soft);
+  color: var(--ui-success-text);
+}
+
+.http-rule-identity .chip[data-state="off"] {
+  background: var(--ui-subtle);
+  color: var(--ui-text-secondary);
+}
+
+.http-rule-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.http-rule-target { margin-top: 0.1rem; }
+
+.http-form-fields .ui-field > label {
+  color: var(--ui-text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+/* A field error reads on its own line under the fields it belongs to. */
+.http-form-fields .ui-error-text {
+  grid-column: 1 / -1;
+  margin: -0.1rem 0 0;
+}
+
+/* R9: records read first, then the run form, then the destination settings. */
+.backup-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.2rem 0 0.45rem;
+}
+
+.backup-list-head .hint { margin: 0; }
+
+.backup-list { margin-bottom: 0.9rem; }
+
+.backup-run-form { margin-bottom: 0.75rem; }
+
+@media (max-width: 900px) {
+  .overview-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-fact:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .http-rules li { grid-template-columns: 2rem minmax(0, 1fr); }
+  .http-rule-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .overview-services-tools { width: 100%; }
+  .overview-services-tools .app-actions { width: 100%; }
+  .overview-services-tools .ui-btn { flex: 1 1 auto; }
+  .overview-danger { align-items: flex-start; }
+  .overview-danger .app-actions { width: 100%; }
+  .overview-danger .ui-btn { flex: 1 1 auto; }
+  .http-form-fields .ui-field { width: 100%; }
 }

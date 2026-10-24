@@ -737,6 +737,76 @@ try {
     assert.match(await page.evaluate(`document.querySelector('#app-status').textContent`), /删除失败/);
     assert.equal(requests.filter((r) => r.method === "POST").length, 2);
   });
+  await test("detail keeps one primary, one danger area and the image update entry", async () => {
+    const original = apps;
+    apps = [makeApp("detail-shell", "node-a", {
+      service_images:[{name:"web",image:"nginx:1.27",tag:"1.27",update:true,default_tag:"1.28",candidates:[{tag:"1.28"}],ignored:[]}],
+      actions:[{id:"update",label:"更新"},{id:"stop",label:"停止"},{id:"restart",label:"重启"},{id:"rollback",label:"回滚"},{id:"delete",label:"删除"}],
+      rules:[{ref:"entry",enabled:true,domain:"detail.example.test",port:8080}],
+    })];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="detail-shell"]');
+      await page.click('[data-id="detail-shell"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+      assert.equal(await page.evaluate(`document.activeElement.id`), "detail-title", "opening the detail moves focus to its heading");
+      const shell = await page.evaluate(`(() => {
+        const head = document.querySelector('.detail-head-actions');
+        const filled = (node) => !(node.classList.contains('ui-btn--secondary') || node.classList.contains('ui-btn--ghost') || node.classList.contains('ui-btn--danger-soft') || node.classList.contains('ui-btn--danger'));
+        const visible = (node) => node.getClientRects().length > 0;
+        const detail = document.querySelector('#app-detail');
+        const deletes = [...detail.querySelectorAll('[data-action="delete"]')];
+        const updates = [...detail.querySelectorAll('[data-action="update"]')];
+        return {
+          headPrimaries:[...head.querySelectorAll('.ui-btn')].filter((node) => visible(node) && filled(node)).map((node) => node.textContent.trim()),
+          stopClass:document.querySelector('#detail-stop').className,
+          deleteCount:deletes.length,
+          deleteInDanger:deletes.length > 0 && deletes.every((node) => Boolean(node.closest('.overview-danger'))),
+          updateInServices:updates.length > 0 && updates.every((node) => Boolean(node.closest('.overview-block--services')) && !node.classList.contains('ui-btn--secondary')),
+          rollbackInServices:[...detail.querySelectorAll('[data-action="rollback"]')].every((node) => Boolean(node.closest('.overview-block--services'))),
+          facts:detail.querySelectorAll('#detail-overview .overview-facts .overview-fact').length,
+          serviceRows:detail.querySelectorAll('#detail-overview .overview-service').length,
+        };
+      })()`);
+      assert.deepEqual(shell.headPrimaries, ["打开"], `the detail header keeps exactly one filled primary: ${JSON.stringify(shell)}`);
+      assert.match(shell.stopClass, /ui-btn--danger-soft/, "stop stays a secondary danger action");
+      assert.equal(shell.deleteCount, 1, `delete appears once: ${JSON.stringify(shell)}`);
+      assert.equal(shell.deleteInDanger, true, "delete lives in the danger area");
+      assert.equal(shell.updateInServices, true, "the service image block is the only image update entry");
+      assert.equal(shell.rollbackInServices, true, "rollback stays with the service images");
+      assert.equal(shell.facts, 4, "the fact band replaces the statistic cards");
+      assert.equal(shell.serviceRows, 1);
+      assert.equal(await page.evaluate(`document.querySelectorAll('#detail-overview .overview-stats').length`), 0, "no statistic cards remain");
+      await page.click("#detail-back"); await page.waitVisible("#app-list");
+      assert.equal(await page.evaluate(`document.activeElement.closest("[data-id]")?.dataset.id`), "detail-shell", "returning restores focus on the application row");
+    } finally { apps = original; }
+  });
+
+  await test("HTTP ingress reports invalid domains and ports beside their fields without a request", async () => {
+    const original = apps;
+    apps = [makeApp("http-target", "node-a", { ports:[8080], rules:[], actions:[{id:"stop",label:"停止"},{id:"delete",label:"删除"}] })];
+    try {
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="http-target"]');
+    await page.click('[data-id="http-target"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    await page.click('#detail-nav [data-section="http"]'); await page.waitVisible(".http-form");
+    const posts = () => requests.filter((r) => r.method === "POST").length;
+    const before = posts();
+    const typeDomain = (value) => page.evaluate(`(() => {const field=document.querySelector('.http-form input[name="domain"]'); field.value=${JSON.stringify(value)}; field.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    const submit = () => page.click('.http-form button[type="submit"]');
+    const fieldError = () => page.evaluate(`document.querySelector('#http-rule-form .ui-error-text')?.textContent || ''`);
+    for (const [value, expected] of [["", /请填写入口域名/], ["bad domain.test", /不能包含空格/], ["http://bad_host.test", /格式不正确/], ["ftp://app.example.test", /只支持 http/]]) {
+      await typeDomain(value);
+      await submit();
+      await eventually(async () => expected.test(await fieldError()), `field error for ${JSON.stringify(value)}`);
+      assert.equal(await page.evaluate(`document.querySelector('.http-form input[name="domain"]').getAttribute('aria-invalid')`), "true", `domain is marked invalid for ${JSON.stringify(value)}`);
+      assert.equal(await page.evaluate(`document.querySelector('#confirm-dialog').open`), false, "nothing is confirmed for an invalid domain");
+    }
+    await typeDomain("app.example.test");
+    await page.evaluate(`(() => {const field=document.querySelector('.http-form select[name="port"]'); field.value=''; field.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await submit();
+    await eventually(async () => /已发布的端口/.test(await fieldError()), "port error beside the port field");
+    assert.equal(posts(), before, "invalid forms never reach the host");
+    assert.equal(await page.evaluate(`document.querySelector('.http-form input[name="domain"]').value`), "app.example.test", "the typed domain survives the failed validation");
+    } finally { apps = original; }
+  });
   } else if (suite === "compose") {
     await runCompose({page, test, navigate, hold, requests, state:composeState, capture, eventually});
   } else if (suite === "operations") {

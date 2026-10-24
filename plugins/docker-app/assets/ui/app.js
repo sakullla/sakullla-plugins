@@ -2581,6 +2581,9 @@ const fillCompose = (app, revision = composeDraft.revision) => {
   updateDraftIndicators();
 };
 
+// R4: the overview is a fact band, the service images (the only place image
+// updates and version policies live), compact entry/storage/backup blocks and a
+// separate danger area. Destructive operations never sit beside the everyday ones.
 const renderOverview = (app) => {
   if (!overviewPanel) return;
   overviewPanel.replaceChildren();
@@ -2599,34 +2602,33 @@ const renderOverview = (app) => {
   const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
   const statusValue = app.status && app.status !== "有新版本" ? app.status : (hasUpdate ? "有新版本" : "已停止");
   const statusTone = statusValue === "运行中" ? "success" : statusValue === "异常" ? "danger" : statusValue === "有新版本" ? "warning" : statusValue === "发布中" ? "primary" : "muted";
+  const actions = Array.isArray(app.actions) ? app.actions : [];
+  const actionFor = (id) => actions.find((action) => action.id === id) || null;
 
-  const stats = document.createElement("div");
-  stats.className = "overview-stats";
-  [
-    { value: statusValue, label: "当前状态", tone: statusTone, icon: "pulse", status: statusValue },
-    { value: String(services.length || 1), label: "服务", tone: "primary", icon: "layers" },
-    { value: String(ports.length), label: "发布端口", tone: "accent", icon: "globe" },
-    { value: app.rules_error ? "未知" : String(rules.length), label: "HTTP 入口", tone: "info", icon: "globe" },
-  ].forEach(({ value, label, tone, icon, status }) => {
-    const item = document.createElement("div");
-    item.className = "overview-stat";
-    item.dataset.tone = tone;
-    if (status) item.dataset.status = status;
-    const mark = document.createElement("span");
-    mark.className = "overview-stat__icon";
-    mark.append(iconNode(icon));
-    const copy = document.createElement("span");
-    copy.className = "overview-stat__copy";
-    const small = document.createElement("span");
-    small.className = "overview-stat__label";
-    small.textContent = label;
-    const strong = document.createElement("strong");
-    strong.textContent = value;
-    copy.append(small, strong);
-    item.append(mark, copy);
-    stats.append(item);
-  });
-  overviewPanel.append(stats);
+  // A single fact band replaces the four statistic cards that used to push the
+  // service list below the fold.
+  const facts = document.createElement("dl");
+  facts.className = "overview-facts";
+  const addFact = (label, value, options = {}) => {
+    const fact = document.createElement("div");
+    fact.className = "overview-fact";
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    if (options.node) detail.append(options.node);
+    else detail.textContent = value;
+    if (options.status) {
+      fact.dataset.status = options.status;
+      detail.dataset.tone = options.tone || "muted";
+    }
+    fact.append(term, detail);
+    facts.append(fact);
+  };
+  addFact("状态", statusValue, { status: statusValue, tone: statusTone });
+  addFact("服务", String(services.length || 1));
+  addFact("发布端口", ports.length ? ports.map((port) => `:${port}`).join(" ") : "无");
+  addFact("HTTP 入口", app.rules_error ? "读取失败" : String(rules.length));
+  overviewPanel.append(facts);
 
   const sheet = document.createElement("div");
   sheet.className = "overview-sheet";
@@ -2650,8 +2652,9 @@ const renderOverview = (app) => {
     grid.className = "overview-grid";
     block.append(heading, grid);
     column.append(block);
-    return grid;
+    return block;
   };
+  const rows = (block) => block.querySelector(".overview-grid");
   const addRow = (grid, label, value, options = {}) => {
     const dt = document.createElement("dt");
     dt.textContent = label;
@@ -2669,6 +2672,8 @@ const renderOverview = (app) => {
 
   const servicesBlock = document.createElement("section");
   servicesBlock.className = "overview-block overview-block--services";
+  const servicesHeadRow = document.createElement("div");
+  servicesHeadRow.className = "overview-block__head";
   const servicesHeading = document.createElement("h3");
   const servicesHeadingIcon = document.createElement("span");
   servicesHeadingIcon.className = "overview-block__icon";
@@ -2679,7 +2684,29 @@ const renderOverview = (app) => {
   servicesHeadingCount.className = "overview-block__count";
   servicesHeadingCount.textContent = String(serviceViews.length || services.length || 1);
   servicesHeading.append(servicesHeadingIcon, servicesHeadingText, servicesHeadingCount);
-  servicesBlock.append(servicesHeading);
+  // Image updates and version policies stay inside this block: the service rows
+  // are the only image entry, so the detail header and the page bottom never
+  // repeat them as a second primary action.
+  const groups = actionGroups(app, { overview: true });
+  const groupByClass = (name) => groups.find((group) => group.classList.contains(name)) || null;
+  const updateGroup = groupByClass("app-actions-primary");
+  const secondaryGroup = groupByClass("app-actions-secondary");
+  const dangerGroup = groupByClass("app-actions-danger");
+  const servicesTools = document.createElement("div");
+  servicesTools.className = "overview-services-tools";
+  if (updateGroup) {
+    updateGroup.classList.add("overview-services-update");
+    const updateButton = updateGroup.querySelector('[data-action="update"]');
+    if (updateButton) updateButton.textContent = "更新镜像";
+    servicesTools.append(updateGroup);
+  }
+  if (secondaryGroup) {
+    secondaryGroup.classList.add("overview-services-secondary");
+    servicesTools.append(secondaryGroup);
+  }
+  if (servicesTools.childNodes.length) servicesHeadRow.append(servicesHeading, servicesTools);
+  else servicesHeadRow.append(servicesHeading);
+  servicesBlock.append(servicesHeadRow);
 
   const imageNode = document.createElement("div");
   imageNode.className = "overview-image";
@@ -2743,13 +2770,13 @@ const renderOverview = (app) => {
         release.textContent = `仓库最新：${latest}`;
         tools.append(release);
       }
-      const ignored = persistedIgnoredTags(service);
       if (service.lock) {
         const currentPolicy = document.createElement("p");
         currentPolicy.className = "service-policy-summary";
         currentPolicy.textContent = `锁定：${service.lock}`;
         tools.append(currentPolicy);
       }
+      const ignored = persistedIgnoredTags(service);
       if (ignored.length) {
         const ignoreLine = document.createElement("p");
         ignoreLine.className = "service-policy-summary";
@@ -2770,20 +2797,20 @@ const renderOverview = (app) => {
         });
         tools.append(candidates);
       }
-      const actions = document.createElement("div");
-      actions.className = "overview-service-actions";
+      const serviceActions = document.createElement("div");
+      serviceActions.className = "overview-service-actions";
       const manage = actionButton({ id: "service-policy" }, "ui-btn ui-btn--secondary ui-btn--sm", "管理版本策略");
       manage.dataset.service = service.name;
       manage.addEventListener("click", () => saveServicePolicy(app, service.name));
-      actions.append(manage);
+      serviceActions.append(manage);
       if (service.update && (service.candidates || []).length && (app.actions || []).some((action) => action.id === "update")) {
-        const update = actionButton({id:"service-update"}, "ui-btn ui-btn--sm", "更新镜像");
+        const update = actionButton({id:"service-update"}, "ui-btn ui-btn--secondary ui-btn--sm", "更新此服务");
         update.dataset.service = service.name;
         update.addEventListener("click", () => runAppAction(app, {id:"update", service:service.name}));
-        actions.append(update);
+        serviceActions.append(update);
       }
       if (tools.childNodes.length) item.append(tools);
-      item.append(actions);
+      item.append(serviceActions);
       list.append(item);
     });
     servicesBlock.append(list);
@@ -2797,13 +2824,16 @@ const renderOverview = (app) => {
     imageCard.append(serviceCopy);
     servicesBlock.append(imageCard);
   }
+  if (!actionFor("rollback")) {
+    const history = document.createElement("p");
+    history.className = "hint rollback-unavailable";
+    history.textContent = "当前没有可用的回滚操作；有上一部署记录且节点可执行时才能回滚。";
+    servicesBlock.append(history);
+  }
   mainColumn.append(servicesBlock);
 
   const run = addBlock("运行参数", mainColumn, "pulse");
-  addRow(run, "节点", agentDisplayName(agent) || app.agent_id || "未绑定节点");
-  if (serviceViews.length) {
-    addRow(run, "主镜像", "", { node: imageNode, wide: true });
-  }
+  addRow(rows(run), "节点", agentDisplayName(agent) || app.agent_id || "未绑定节点");
   if (ports.length) {
     const list = document.createElement("div");
     list.className = "overview-chips";
@@ -2812,17 +2842,17 @@ const renderOverview = (app) => {
       bit.className = "app-port";
       list.append(bit);
     });
-    addRow(run, "端口", "", { node: list });
+    addRow(rows(run), "端口", "", { node: list });
   } else {
-    addRow(run, "端口", "无发布端口");
+    addRow(rows(run), "端口", "无发布端口");
   }
-  if (restart) addRow(run, "重启策略", restart);
-  if (user) addRow(run, "容器用户", user);
-  addRow(run, "自动更新", app.auto_update === true ? "已开启" : "默认关闭");
-  if (hasUpdate) addRow(run, "更新", "镜像有新版本");
+  if (restart) addRow(rows(run), "重启策略", restart);
+  if (user) addRow(rows(run), "容器用户", user);
+  addRow(rows(run), "自动更新", app.auto_update === true ? "已开启" : "默认关闭");
+  if (hasUpdate) addRow(rows(run), "更新", "镜像有新版本");
 
   const net = addBlock("HTTP 入口", railColumn, "globe");
-  if (app.rules_error) addRow(net, "读取状态", app.rules_error);
+  if (app.rules_error) addRow(rows(net), "读取状态", app.rules_error);
   if (rules.length) {
     const list = document.createElement("div");
     list.className = "overview-links";
@@ -2852,9 +2882,9 @@ const renderOverview = (app) => {
       }
       list.append(entry);
     });
-    addRow(net, "域名", "", { node: list, wide: true });
+    addRow(rows(net), "域名", "", { node: list, wide: true });
   } else if (!app.rules_error) {
-    addRow(net, "域名", "未配置 HTTP 入口");
+    addRow(rows(net), "域名", "未配置 HTTP 入口");
   }
 
   const store = addBlock("存储", railColumn, "database");
@@ -2875,39 +2905,53 @@ const renderOverview = (app) => {
       item.append(src, arrow, dst);
       list.append(item);
     });
-    addRow(store, "数据卷", "", { node: list, wide: true });
+    addRow(rows(store), "数据卷", "", { node: list, wide: true });
   } else {
-    addRow(store, "数据卷", "无数据卷");
+    addRow(rows(store), "数据卷", "无数据卷");
   }
-  if (!(app.actions || []).some((action) => action.id === "rollback")) {
-    const history = document.createElement("p");
-    history.className = "hint rollback-unavailable";
-    history.textContent = "当前没有可用的回滚操作；有上一部署记录且节点可执行时才能回滚。";
-    overviewPanel.append(history);
-  }
-  overviewPanel.append(sheet);
-  const actionsWrap = document.createElement("div");
-  actionsWrap.className = "overview-actions";
-  const actionsHead = document.createElement("div");
-  actionsHead.className = "overview-actions__head";
-  const actionsTitle = document.createElement("h3");
-  actionsTitle.textContent = "操作";
-  const actionsHint = document.createElement("p");
-  actionsHint.textContent = "生命周期与镜像操作都会在确认后执行。";
-  actionsHead.append(actionsTitle, actionsHint);
-  actionsWrap.append(actionsHead);
-  actionGroups(app, { overview: true }).forEach((group) => {
-    if (group.classList.contains("app-actions-danger")) {
-      const copy = document.createElement("p");
-      copy.className = "overview-danger-copy";
-      copy.textContent = "删除会先处理关联 HTTP 入口，再停止容器并清掉应用工作区。";
-      group.prepend(copy);
-    }
-    actionsWrap.append(group);
-  });
-  overviewPanel.append(actionsWrap);
-};
 
+  const backup = app.backup || null;
+  const records = Array.isArray(app.backups) ? app.backups : [];
+  // R9: a disabled node destination hides its records here as well, while the
+  // server keeps the authoritative gate.
+  const visibleRecords = backup && backup.node_enabled === false
+    ? records.filter((record) => record.destination !== "node")
+    : records;
+  const backupBlock = addBlock("备份摘要", railColumn, "database");
+  const destinations = backup
+    ? `${backup.s3_configured ? `S3（${backup.bucket || "已配置"}）` : "S3 未配置"} · ${backup.node_enabled ? "节点已开启" : "节点已关闭"}`
+    : "备份服务不可用";
+  addRow(rows(backupBlock), "目的地", destinations);
+  addRow(rows(backupBlock), "记录", app.backups_error ? "读取失败" : `${visibleRecords.length} 条`);
+  const latestBackup = visibleRecords[0] || null;
+  addRow(rows(backupBlock), "最近", latestBackup
+    ? `${formatBackupTime(latestBackup.created)} · ${formatBackupSize(latestBackup.size_bytes)}`
+    : app.backups_error ? "读取失败" : "还没有备份记录");
+  const manageBackups = document.createElement("button");
+  manageBackups.type = "button";
+  manageBackups.className = "ui-btn ui-btn--secondary ui-btn--sm overview-backup-link";
+  manageBackups.textContent = "管理备份";
+  manageBackups.addEventListener("click", () => { if (!busy) setDetailSection("backup"); });
+  backupBlock.append(manageBackups);
+
+  overviewPanel.append(sheet);
+
+  if (dangerGroup) {
+    const danger = document.createElement("section");
+    danger.className = "overview-danger";
+    danger.setAttribute("aria-label", "危险区");
+    const dangerCopy = document.createElement("div");
+    dangerCopy.className = "overview-danger__copy";
+    const dangerTitle = document.createElement("h3");
+    dangerTitle.textContent = "危险区";
+    const dangerText = document.createElement("p");
+    dangerText.className = "overview-danger-copy";
+    dangerText.textContent = "删除会先清理关联 HTTP 入口，再停止容器并删除应用工作区，且无法撤销。";
+    dangerCopy.append(dangerTitle, dangerText);
+    danger.append(dangerCopy, dangerGroup);
+    overviewPanel.append(danger);
+  }
+};
 const runHTTPAction = async (app, action, body, form) => {
   if (busy || selectedAgentID !== app.agent_id) return;
   const deleting = action === "http-rule-delete";
@@ -2937,6 +2981,29 @@ const runHTTPAction = async (app, action, body, form) => {
   } finally { setBusy(false); }
 };
 
+// R8: the domain and port are checked next to their own fields, so an invalid
+// entry never reaches the host and a host failure keeps the typed values.
+const ingressDomainProblem = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "请填写入口域名，例如 app.example.com。";
+  if (/\s/.test(raw)) return "入口域名不能包含空格。";
+  const lower = raw.toLocaleLowerCase();
+  let host = raw;
+  if (lower.startsWith("https://")) host = raw.slice(8);
+  else if (lower.startsWith("http://")) host = raw.slice(7);
+  else if (raw.includes("://")) return "入口域名只支持 http:// 或 https:// 前缀。";
+  host = host.split(/[/?#]/, 1)[0];
+  if (!host) return "请填写入口域名，例如 app.example.com。";
+  if (host.includes("@")) return "入口域名不能包含账号信息。";
+  if (host.length > 253) return "入口域名过长，最多 253 个字符。";
+  if (/^\[[0-9a-fA-F:.]+\](?::\d+)?$/.test(host)) return "";
+  const hostName = host.split(":")[0];
+  const labels = hostName.split(".");
+  const valid = hostName.length > 0 && hostName.length <= 253 && labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+  if (!valid) return "入口域名格式不正确，例如 app.example.com。";
+  return "";
+};
+
 const renderHTTP = (app) => {
   if (!httpPanel) return;
   const owner = `${app.agent_id}/${app.id}`;
@@ -2957,7 +3024,10 @@ const renderHTTP = (app) => {
   kicker.textContent = "INGRESS";
   const title = document.createElement("h3");
   title.textContent = "HTTP 入口";
-  headCopy.append(kicker, title);
+  const headCopyLine = document.createElement("p");
+  headCopyLine.className = "section-copy";
+  headCopyLine.textContent = "每个域名绑定一个已发布端口，规则可以单独打开、复制或删除。";
+  headCopy.append(kicker, title, headCopyLine);
   const retry = actionButton({id:"refresh-http"}, "ui-btn ui-btn--secondary ui-btn--sm", "刷新入口");
   retry.prepend(iconNode("refresh"));
   retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "http"); });
@@ -2989,36 +3059,35 @@ const renderHTTP = (app) => {
       const label = document.createElement("strong");
       label.textContent = rule.domain || "未命名入口";
       identity.append(label);
-      main.append(identity);
-      const tools = document.createElement("div");
-      tools.className = "http-rule-tools";
-      tools.append(chip(rule.enabled === false ? "已停用" : "已启用"));
       const backendPort = backendPortFromRule(rule);
-      if (backendPort) tools.append(chip(`发布端口 ${backendPort}`));
-      main.append(tools);
+      if (backendPort) identity.append(chip(`发布端口 ${backendPort}`));
+      const state = chip(rule.enabled === false ? "已停用" : "已启用");
+      state.dataset.state = rule.enabled === false ? "off" : "on";
+      identity.append(state);
+      main.append(identity);
+      const openURL = publicURLFromRule(rule);
       const target = document.createElement("p");
       target.className = "http-rule-target";
-      target.textContent = publicURLFromRule(rule) ? `访问目标：${publicURLFromRule(rule)}` : "已停用，不提供访问链接";
+      target.textContent = openURL ? `访问目标：${openURL}` : "已停用，不提供访问链接";
       main.append(target);
-      if (publicURLFromRule(rule)) {
-        const linkRow = document.createElement("div");
-        linkRow.className = "http-rule-link";
+      const actions = document.createElement("div");
+      actions.className = "http-rule-actions";
+      if (openURL) {
         const link = document.createElement("a");
         link.className = "http-rule-open";
-        link.href = publicURLFromRule(rule);
+        link.href = openURL;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = "访问";
-        linkRow.append(link);
-        if (rule.domain) linkRow.append(copyIconButton(rule.domain, "入口域名"));
-        main.append(linkRow);
+        link.textContent = "打开";
+        actions.append(link);
       }
-      item.append(mark, main);
+      if (rule.domain) actions.append(copyIconButton(rule.domain, "入口域名"));
       if (rule.ref) {
         const deleteRule = actionButton({id:"delete-http"}, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
         deleteRule.addEventListener("click", () => runHTTPAction(app, "http-rule-delete", {rule_ref:rule.ref,domain:rule.domain || rule.ref}));
-        item.append(deleteRule);
+        actions.append(deleteRule);
       }
+      item.append(mark, main, actions);
       ruleList.append(item);
     });
     httpPanel.append(ruleList);
@@ -3033,18 +3102,27 @@ const renderHTTP = (app) => {
   if (ports.length) {
     const form = document.createElement("form");
     form.className = "http-form";
-    const copy = document.createElement("div");
-    copy.className = "http-form-copy";
+    form.id = "http-rule-form";
+    // Field-level messages replace the browser bubble so the reason stays next
+    // to the control it belongs to.
+    form.noValidate = true;
+    const formCopy = document.createElement("div");
+    formCopy.className = "http-form-copy";
     const formTitle = document.createElement("p");
     formTitle.className = "http-form-title";
     formTitle.textContent = "添加入口";
     const formHint = document.createElement("p");
     formHint.className = "hint";
     formHint.textContent = "把域名绑定到一个已发布端口。保存后会创建宿主 HTTP 规则。";
-    copy.append(formTitle, formHint);
+    formCopy.append(formTitle, formHint);
+    const portField = document.createElement("div");
+    portField.className = "ui-field";
     const portLabel = document.createElement("label");
-    portLabel.append("发布端口");
+    portLabel.textContent = "发布端口";
+    portLabel.htmlFor = "http-rule-port";
     const portSelect = document.createElement("select");
+    portSelect.className = "ui-select";
+    portSelect.id = "http-rule-port";
     portSelect.name = "port";
     ports.forEach((port) => {
       const option = document.createElement("option");
@@ -3052,25 +3130,49 @@ const renderHTTP = (app) => {
       portSelect.append(option);
     });
     if (draft && ports.some((port) => String(port) === draft.port)) portSelect.value = draft.port;
-    portLabel.append(portSelect);
+    portField.append(portLabel, portSelect);
+    const domainField = document.createElement("div");
+    domainField.className = "ui-field";
     const domainLabel = document.createElement("label");
-    domainLabel.append("入口域名");
+    domainLabel.textContent = "入口域名";
+    domainLabel.htmlFor = "http-rule-domain";
     const domain = document.createElement("input");
-    domain.name = "domain"; domain.required = true; domain.autocomplete = "off"; domain.spellcheck = false;
+    domain.className = "ui-input";
+    domain.id = "http-rule-domain";
+    domain.name = "domain";
+    domain.required = true;
+    domain.autocomplete = "off";
+    domain.spellcheck = false;
     domain.placeholder = "app.example.com";
     domain.value = draft?.domain || "";
-    domainLabel.append(domain);
+    domainField.append(domainLabel, domain);
     const submit = document.createElement("button");
-    submit.type = "submit"; submit.className = "ui-btn ui-btn--sm"; submit.textContent = "添加入口";
+    submit.type = "submit";
+    submit.className = "ui-btn ui-btn--sm";
+    submit.textContent = "添加入口";
     submit.prepend(iconNode("plus"));
     const fields = document.createElement("div");
     fields.className = "http-form-fields";
-    fields.append(portLabel, domainLabel, submit);
-    form.append(copy, fields);
+    fields.append(portField, domainField, submit);
+    form.append(formCopy, fields);
+    domain.addEventListener("input", () => clearFieldFeedback(domain));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      if (!domain.value.trim()) { domain.focus(); return; }
-      runHTTPAction(app, "http-rule", {domain:domain.value.trim(),port:Number(portSelect.value)}, form);
+      if (busy) return;
+      clearFormFieldFeedback(form);
+      const problem = ingressDomainProblem(domain.value);
+      if (problem) {
+        showFieldFeedback(domain, problem);
+        domain.focus();
+        return;
+      }
+      const chosen = String(portSelect.value || "");
+      if (!ports.some((port) => String(port) === chosen)) {
+        showFieldFeedback(portSelect, "请选择一个已发布的端口。");
+        portSelect.focus();
+        return;
+      }
+      runHTTPAction(app, "http-rule", {domain:domain.value.trim(),port:Number(chosen)}, form);
     });
     httpPanel.append(form);
   } else {
@@ -3080,7 +3182,6 @@ const renderHTTP = (app) => {
     httpPanel.append(hint);
   }
 };
-
 const formatBackupSize = (size) => {
   const value = Number(size);
   if (!Number.isFinite(value) || value < 0) return "";
@@ -3265,6 +3366,9 @@ const saveBackupSettings = async (app, form) => {
   }
 };
 
+// R9: records first, then running a backup, then the host-injected destination
+// settings. A disabled node destination hides its records and entries; restore
+// and delete keep the server confirm token and credentials stay write-only.
 const renderBackup = (app) => {
   if (!backupPanel) return;
   const owner = `${app.agent_id}/${app.id}`;
@@ -3272,6 +3376,9 @@ const renderBackup = (app) => {
   backupPanel.dataset.owner = owner;
   const settings = app.backup || null;
   const records = Array.isArray(app.backups) ? app.backups : null;
+  const visibleRecords = records && settings && settings.node_enabled === false
+    ? records.filter((record) => record.destination !== "node")
+    : records;
 
   const head = document.createElement("div");
   head.className = "section-head";
@@ -3281,7 +3388,10 @@ const renderBackup = (app) => {
   kicker.textContent = "BACKUP";
   const title = document.createElement("h3");
   title.textContent = "应用备份";
-  headCopy.append(kicker, title);
+  const headCopyLine = document.createElement("p");
+  headCopyLine.className = "section-copy";
+  headCopyLine.textContent = "备份包含工作区、Compose 与数据卷；恢复与删除都需要确认。";
+  headCopy.append(kicker, title, headCopyLine);
   const retry = actionButton({ id: "refresh-backup" }, "ui-btn ui-btn--secondary ui-btn--sm", "刷新备份");
   retry.prepend(iconNode("refresh"));
   retry.addEventListener("click", () => { if (!busy) showDetail(app.id, "backup"); });
@@ -3306,6 +3416,69 @@ const renderBackup = (app) => {
   const destinations = [];
   if (settings.s3_configured) destinations.push(["s3", `S3（${settings.bucket || "已配置"}）`]);
   if (settings.node_enabled) destinations.push(["node", "节点"]);
+
+  const listHead = document.createElement("div");
+  listHead.className = "backup-list-head";
+  const listTitle = document.createElement("p");
+  listTitle.className = "backup-form-title";
+  listTitle.textContent = "备份记录";
+  const listMeta = document.createElement("p");
+  listMeta.className = "hint backup-destination-summary";
+  listMeta.textContent = destinations.length
+    ? `可用目的地：${destinations.map((entry) => entry[1]).join(" · ")}`
+    : "还没有可用的备份目的地。";
+  listHead.append(listTitle, listMeta);
+  backupPanel.append(listHead);
+
+  if (visibleRecords && visibleRecords.length) {
+    const table = document.createElement("table");
+    table.className = "ui-table backup-list";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["时间", "大小", "目标", "操作"].forEach((label) => {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = label;
+      headRow.append(th);
+    });
+    thead.append(headRow);
+    table.append(thead);
+    const tbody = document.createElement("tbody");
+    visibleRecords.forEach((record) => {
+      const row = document.createElement("tr");
+      row.dataset.record = record.id || "";
+      const createdCell = document.createElement("td");
+      createdCell.dataset.label = "时间";
+      createdCell.textContent = formatBackupTime(record.created);
+      const sizeCell = document.createElement("td");
+      sizeCell.dataset.label = "大小";
+      sizeCell.textContent = formatBackupSize(record.size_bytes);
+      const destinationCell = document.createElement("td");
+      destinationCell.className = "backup-cell-destination";
+      destinationCell.dataset.label = "目标";
+      destinationCell.textContent = record.destination_label || record.destination || "";
+      const actionsCell = document.createElement("td");
+      actionsCell.className = "backup-cell-actions";
+      actionsCell.dataset.label = "操作";
+      const restore = actionButton({ id: "backup-restore" }, "ui-btn ui-btn--secondary ui-btn--sm", "恢复");
+      restore.dataset.record = record.id || "";
+      restore.addEventListener("click", () => { if (!busy) openRestoreDialog(app, record); });
+      const remove = actionButton({ id: "backup-delete" }, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
+      remove.dataset.record = record.id || "";
+      remove.addEventListener("click", () => { if (!busy) runBackupDelete(app, record); });
+      actionsCell.append(restore, remove);
+      row.append(createdCell, sizeCell, destinationCell, actionsCell);
+      tbody.append(row);
+    });
+    table.append(tbody);
+    backupPanel.append(table);
+  } else if (visibleRecords) {
+    const empty = document.createElement("p");
+    empty.className = "hint backup-empty";
+    empty.textContent = "还没有这个应用的备份记录。";
+    backupPanel.append(empty);
+  }
+
   const runForm = document.createElement("form");
   runForm.className = "backup-run-form";
   runForm.id = "backup-run-form";
@@ -3313,7 +3486,7 @@ const renderBackup = (app) => {
   runCopy.className = "backup-run-copy";
   const runTitle = document.createElement("p");
   runTitle.className = "backup-form-title";
-  runTitle.textContent = "发起备份";
+  runTitle.textContent = "立即备份";
   const runHint = document.createElement("p");
   runHint.className = "hint";
   runHint.textContent = "打包工作区、Compose 与数据卷；运行中的应用不会停止。";
@@ -3329,6 +3502,7 @@ const renderBackup = (app) => {
     const destinationLabel = document.createElement("label");
     destinationLabel.append("备份到");
     const destination = document.createElement("select");
+    destination.className = "ui-select";
     destination.id = "backup-destination";
     destination.name = "destination";
     destinations.forEach(([value, label]) => {
@@ -3346,6 +3520,7 @@ const renderBackup = (app) => {
       targetLabel.className = "backup-target-field";
       targetLabel.append("目标 Agent");
       const target = document.createElement("select");
+      target.className = "ui-select";
       target.id = "backup-target";
       target.name = "target_agent";
       const agents = Array.isArray(settings.managed_agents) && settings.managed_agents.length
@@ -3371,7 +3546,7 @@ const renderBackup = (app) => {
     submit.className = "ui-btn ui-btn--sm";
     submit.id = "backup-run";
     submit.dataset.action = "backup-run";
-    submit.textContent = "发起备份";
+    submit.textContent = "立即备份";
     submit.prepend(iconNode("database"));
     fields.append(submit);
   }
@@ -3381,66 +3556,6 @@ const renderBackup = (app) => {
     if (!busy) runBackup(app, runForm);
   });
   backupPanel.append(runForm);
-
-  const listHead = document.createElement("div");
-  listHead.className = "backup-list-head";
-  const listTitle = document.createElement("p");
-  listTitle.className = "backup-form-title";
-  listTitle.textContent = "备份记录";
-  listHead.append(listTitle);
-  backupPanel.append(listHead);
-  if (records && records.length) {
-    const table = document.createElement("table");
-    table.className = "ui-table backup-list";
-    const thead = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    ["应用", "时间", "大小", "目的地", "操作"].forEach((label) => {
-      const th = document.createElement("th");
-      th.scope = "col";
-      th.textContent = label;
-      headRow.append(th);
-    });
-    thead.append(headRow);
-    table.append(thead);
-    const tbody = document.createElement("tbody");
-    records.forEach((record) => {
-      const row = document.createElement("tr");
-      row.dataset.record = record.id || "";
-      const appCell = document.createElement("td");
-      appCell.className = "backup-cell-app";
-      appCell.dataset.label = "应用";
-      appCell.textContent = record.app_id || app.id;
-      const createdCell = document.createElement("td");
-      createdCell.dataset.label = "时间";
-      createdCell.textContent = formatBackupTime(record.created);
-      const sizeCell = document.createElement("td");
-      sizeCell.dataset.label = "大小";
-      sizeCell.textContent = formatBackupSize(record.size_bytes);
-      const destinationCell = document.createElement("td");
-      destinationCell.className = "backup-cell-destination";
-      destinationCell.dataset.label = "目的地";
-      destinationCell.textContent = record.destination_label || record.destination || "";
-      const actionsCell = document.createElement("td");
-      actionsCell.className = "backup-cell-actions";
-      actionsCell.dataset.label = "操作";
-      const restore = actionButton({ id: "backup-restore" }, "ui-btn ui-btn--secondary ui-btn--sm", "恢复");
-      restore.dataset.record = record.id || "";
-      restore.addEventListener("click", () => { if (!busy) openRestoreDialog(app, record); });
-      const remove = actionButton({ id: "backup-delete" }, "ui-btn ui-btn--danger-soft ui-btn--sm", "删除");
-      remove.dataset.record = record.id || "";
-      remove.addEventListener("click", () => { if (!busy) runBackupDelete(app, record); });
-      actionsCell.append(restore, remove);
-      row.append(appCell, createdCell, sizeCell, destinationCell, actionsCell);
-      tbody.append(row);
-    });
-    table.append(tbody);
-    backupPanel.append(table);
-  } else if (records) {
-    const empty = document.createElement("p");
-    empty.className = "hint backup-empty";
-    empty.textContent = "还没有这个应用的备份记录。";
-    backupPanel.append(empty);
-  }
 
   const settingsForm = document.createElement("form");
   settingsForm.className = "backup-settings-form";
@@ -3532,7 +3647,6 @@ const renderBackup = (app) => {
   });
   backupPanel.append(settingsForm);
 };
-
 const fillLogServices = (app) => {
   const services = Array.isArray(app.services) ? app.services : [];
   const previous = logsService ? logsService.value : "";
@@ -3703,6 +3817,23 @@ const startLogPolling = () => {
   logsTimer = setInterval(fetchLogs, LOG_REFRESH_MS);
 };
 
+// R4: one visual primary in the detail header; stopping stays a soft danger
+// action and the remaining lifecycle actions read as secondaries.
+const setDetailPrimary = (primary) => {
+  [
+    ["open", detailOpen],
+    ["start", detailStart],
+    ["restart", detailRestart],
+    ["stop", detailStop],
+  ].forEach(([id, node]) => {
+    if (!node) return;
+    const filled = id === primary;
+    node.classList.toggle("ui-btn", filled);
+    if (id !== "stop") node.classList.toggle("ui-btn--secondary", !filled);
+    node.dataset.primary = String(filled);
+  });
+};
+
 const paintDetail = (app, composeRevision) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
   if (appChanged || detailApp?.agent_id !== app.agent_id) filesWorkspace.unbind();
@@ -3728,7 +3859,9 @@ const paintDetail = (app, composeRevision) => {
   const openURL = firstEnabledRuleURL(app);
   if (detailOpen) {
     detailOpen.hidden = !openURL;
-    detailOpen.textContent = "打开";
+    const openLabel = detailOpen.querySelector("span");
+    if (openLabel) openLabel.textContent = "打开";
+    else detailOpen.textContent = "打开";
     if (openURL) detailOpen.setAttribute("href", openURL);
     else detailOpen.removeAttribute("href");
   }
@@ -3750,8 +3883,15 @@ const paintDetail = (app, composeRevision) => {
     if (!button) return;
     const action = actionsByID.get(id);
     button.hidden = !action;
-    if (action) button.textContent = action.label || id;
+    if (!action) return;
+    const label = action.label || id;
+    const span = button.querySelector("span");
+    if (span) span.textContent = label;
+    else button.textContent = label;
   });
+  // R4: the header keeps a single filled primary — open when the app has an
+  // entry, otherwise the lifecycle action the API actually allows.
+  setDetailPrimary(openURL ? "open" : actionsByID.has("restart") ? "restart" : actionsByID.has("start") ? "start" : "");
   renderOverview(app);
   if (composeFilledFor !== app.id) fillCompose(app, composeRevision);
   renderHTTP(app);

@@ -14,7 +14,7 @@ const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..
 const openDetail = async (ui, section) => {
   await ui.waitFor("#app-list .app-card");
   await ui.click("#app-list .app-card");
-  await ui.waitFor("#detail-overview .overview-stats");
+  await ui.waitFor("#detail-overview .overview-facts");
   if (section && section !== "overview") await ui.click(`#detail-nav [data-section="${section}"]`);
 };
 

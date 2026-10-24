@@ -3545,7 +3545,7 @@ func TestAppUIPageSeparatesEngineStatusFromAppVersion(t *testing.T) {
 		"privileged",
 		"host-mount",
 		"capability",
-		`["update"]`,
+		"dataset.updateHint",
 		"askServiceUpdate",
 	} {
 		if !strings.Contains(script, token) {
@@ -3588,12 +3588,14 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	}
 	cardTemplate := page[templateStart:templateEnd]
 	for _, want := range []string{
-		`data-app-name`, `data-app-status`, `data-action="open"`,
-		`data-action="update"`, `data-action="detail"`, "打开", "详情", "更新",
+		`data-app-name`, `data-app-status`, `data-action="detail"`, "详情",
 	} {
 		if !strings.Contains(cardTemplate, want) {
 			t.Fatalf("card template missing hook %q", want)
 		}
+	}
+	if !strings.Contains(page, `id="detail-open"`) || !strings.Contains(js, "dataset.updateHint") {
+		t.Fatal("open and update entries must stay reachable from the detail header and the row update hint")
 	}
 	for _, forbidden := range []string{"删除", "日志", "files-list", "compose-form", "http-form", "logs-view", `data-action="start"`, `data-action="stop"`, `data-action="restart"`} {
 		if strings.Contains(cardTemplate, forbidden) {
@@ -3632,11 +3634,11 @@ func TestAppUIPageLabelsManagementAndAgentExecutionFaces(t *testing.T) {
 	if !strings.Contains(listRender, `textContent = "详情"`) || !strings.Contains(listRender, `[data-action="detail"]`) || !strings.Contains(listRender, "showDetail(app.id") {
 		t.Fatal("cards do not open detail from 详情 or click")
 	}
-	if !strings.Contains(listRender, "window.open") || !strings.Contains(listRender, `textContent = "打开"`) || !strings.Contains(listRender, `[data-action="open"]`) {
-		t.Fatal("cards cannot open an enabled HTTP entry")
+	if !strings.Contains(listRender, "dataset.updateHint") || !strings.Contains(listRender, "dataset.updateAvailable") || !strings.Contains(listRender, "appHasUpdate(app)") {
+		t.Fatal("card renderer does not fill the update hint")
 	}
-	if !strings.Contains(listRender, `[data-action="${id}"]`) && !strings.Contains(listRender, `[data-action="update"]`) {
-		t.Fatal("card renderer does not fill update hook")
+	if !strings.Contains(js, `detailOpen.setAttribute("href", openURL)`) {
+		t.Fatal("detail header cannot open an enabled HTTP entry")
 	}
 	if strings.Contains(listRender, `["start", "stop", "restart", "update"]`) {
 		t.Fatal("card wall still exposes start/stop/restart as list primaries")
@@ -3745,7 +3747,7 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 	if !strings.Contains(stylesheet, "max-height: 22rem") || !strings.Contains(stylesheet, "max-height: 14rem") || !strings.Contains(stylesheet, "field-sizing: fixed") {
 		t.Fatal("YAML/.env editors can still grow with content instead of scrolling")
 	}
-	headStart := strings.Index(page, `class="page-head ui-page-head"`)
+	headStart := strings.Index(page, `class="page-head ui-page-head app-commandbar"`)
 	headEnd := strings.Index(page, `id="app-loading"`)
 	if headStart < 0 || headEnd < 0 || headEnd < headStart {
 		t.Fatal("page is missing page-head / loading regions")
@@ -4546,7 +4548,7 @@ func TestAppUIListDetailFilesLogsAndConfirm(t *testing.T) {
 	}
 	for _, want := range []string{
 		`id="app-card-template"`, `data-app-name`, `data-app-status`,
-		`data-action="open"`, `data-action="update"`, `data-action="detail"`, "详情",
+		`data-action="open"`, `data-action="detail"`, "详情",
 		`id="update-dialog"`, `id="update-cancel"`,
 	} {
 		if !strings.Contains(html, want) {
@@ -5772,7 +5774,7 @@ func TestAppUIPageUsesSharedKitHostThemeAndDeployDrawer(t *testing.T) {
 		`data-theme-mode="host"`,
 		`src="ui-kit.js"`,
 		`href="ui-kit.css"`,
-		`class="page-head ui-page-head"`,
+		`class="page-head ui-page-head app-commandbar"`,
 		`class="ui-dialog ui-dialog--drawer"`,
 		`id="app-create"`,
 		`id="detail-domain"`,
