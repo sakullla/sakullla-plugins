@@ -172,6 +172,8 @@ const contextCurrent = (snapshot) => snapshot.version === contextVersion && snap
 let view = "list";
 let lastApps = [];
 let selectedAppID = "";
+let listSelectionID = "";
+let restoreTarget = null;
 let detailSection = "overview";
 let detailApp = null;
 let navigationVersion = 0;
@@ -1120,7 +1122,7 @@ const syncListPanel = () => {
   // it through [data-view="detail"] so the detail owns the screen.
   if (listPanel) listPanel.hidden = false;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (detailIdle) detailIdle.hidden = inDetail || !hasApps;
+  if (detailIdle) detailIdle.hidden = inDetail || !selectedAgentID;
   if (workspaceNode) workspaceNode.dataset.view = inDetail ? "detail" : "list";
   if (workspaceHead) workspaceHead.hidden = false;
   if (inventoryChipsNode) inventoryChipsNode.hidden = !hasApps;
@@ -2418,8 +2420,10 @@ const renderApp = (app) => {
   card.className = "ui-card app-card";
   card.dataset.id = app.id;
   card.dataset.status = app.status || "已停止";
-  card.dataset.search = [app.name, app.id, ...serviceImages(app).flatMap((service) => [service.name, service.image]), app.version].filter(Boolean).join(" ").toLocaleLowerCase();
-  card.dataset.updateAvailable = String(app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update));
+  const ruleDomains = (Array.isArray(app.rules) ? app.rules : []).flatMap((rule) => [rule && rule.domain, rule && rule.host, publicURLFromRule(rule)]).filter(Boolean);
+  card.dataset.search = [app.name, app.id, ...serviceImages(app).flatMap((service) => [service.name, service.image]), ...ruleDomains, app.version].filter(Boolean).join(" ").toLocaleLowerCase();
+  card.dataset.updateAvailable = String(appHasUpdate(app));
+  card.dataset.bucket = appBucket(app);
   card.tabIndex = 0;
   const nameNode = card.querySelector("[data-app-name]");
   if (nameNode) nameNode.textContent = app.name || app.id;
@@ -2432,7 +2436,7 @@ const renderApp = (app) => {
   const statusHook = card.querySelector("[data-app-status]");
   if (statusHook) {
     const status = app.status && app.status !== "有新版本" ? app.status : "";
-    const hasUpdate = app.notice === "有新版本" || app.status === "有新版本";
+    const hasUpdate = appHasUpdate(app);
     statusHook.textContent = status;
     statusHook.hidden = !status;
     if (status) statusHook.dataset.status = status;
@@ -2441,7 +2445,8 @@ const renderApp = (app) => {
       const notice = document.createElement("span");
       notice.className = "app-card-status ui-badge";
       notice.dataset.status = "有新版本";
-      notice.textContent = "有新版本";
+      notice.dataset.updateHint = "";
+      notice.textContent = "可更新";
       statusHook.parentNode.append(notice);
     }
   }
@@ -2529,30 +2534,6 @@ const renderApp = (app) => {
     urlNode.textContent = app.rules_error ? "入口读取失败" : openURL ? displayHost(openURL) : "";
     urlNode.title = openURL;
   }
-  const openButton = card.querySelector('[data-action="open"]');
-  if (openButton) {
-    openButton.hidden = !openURL;
-    openButton.textContent = "打开";
-    if (openURL) {
-      openButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        window.open(openURL, "_blank", "noopener,noreferrer");
-      });
-    }
-  }
-  const actionsByID = new Map((Array.isArray(app.actions) ? app.actions : []).map((action) => [action.id, action]));
-  ["update"].forEach((id) => {
-    const button = card.querySelector(`[data-action="${id}"]`);
-    const action = actionsByID.get(id);
-    if (!button) return;
-    button.hidden = !action;
-    if (!action) return;
-    button.textContent = action.label || id;
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      runAppAction(app, action);
-    });
-  });
   const detailButton = card.querySelector('[data-action="detail"]');
   const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, "overview"); };
   if (detailButton) {
@@ -3789,6 +3770,7 @@ const setDetailSection = async (section) => {
   if (next !== detailSection) advanceNavigation();
   if (detailSection === "logs" && next !== "logs") stopLogPolling();
   detailSection = next;
+  if (view === "detail") syncLocation();
   document.querySelectorAll("[data-section-panel]").forEach((panel) => {
     panel.hidden = panel.getAttribute("data-section-panel") !== next;
   });
@@ -3817,6 +3799,21 @@ const setDetailSection = async (section) => {
   return true;
 };
 
+// R2: the current application and section stay addressable so a reload returns to them.
+const syncLocation = () => {
+  const url = new URL(window.location.href);
+  if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
+  else url.searchParams.delete("agent_id");
+  if (view === "detail" && selectedAppID) {
+    url.searchParams.set("app", selectedAppID);
+    url.searchParams.set("section", detailSection || "overview");
+  } else {
+    url.searchParams.delete("app");
+    url.searchParams.delete("section");
+  }
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+};
+
 const leaveDetail = async ({ force } = {}) => {
   const navigation = navigationSnapshot();
   const leavingAppID = selectedAppID;
@@ -3834,7 +3831,8 @@ const leaveDetail = async ({ force } = {}) => {
   logsLoaded = false;
   composeFilledFor = "";
   filesMountedFor = "";
-  markSelectedApp("");
+  markSelectedApp(listSelectionID);
+  syncLocation();
   showStatus("", false);
   renderIdleOverview(lastApps);
   syncListPanel();
@@ -3873,6 +3871,8 @@ const showDetail = async (appID, section, composeRevision = composeDraft.revisio
     if (!app) throw Object.assign(new Error("应用已不存在。"), { status: 404 });
     if (app.id !== appID || app.agent_id !== snapshot.agent) throw new Error("应用与当前节点不匹配，请刷新列表。");
     view = "detail";
+    listSelectionID = appID;
+    syncLocation();
     closeCreate();
     paintDetail(app, composeRevision);
     if (!(await setDetailSection(section || detailSection || "overview"))) return;
@@ -4003,8 +4003,11 @@ const applyInventoryFilter = () => {
   const rows = Array.from(listNode.children);
   let visible = 0;
   rows.forEach((row) => {
-    const matches = filter === "all" || filter === "running" && row.dataset.status === "运行中"
-      || filter === "updates" && row.dataset.updateAvailable === "true" || filter === "stopped" && row.dataset.status === "已停止";
+    const bucket = row.dataset.bucket || "stopped";
+    const matches = filter === "all"
+      || filter === "running" && bucket === "running"
+      || filter === "updates" && row.dataset.updateAvailable === "true"
+      || filter === "stopped" && bucket === "stopped";
     row.hidden = !matches || !row.dataset.search.includes(query);
     if (!row.hidden) visible += 1;
   });
@@ -4052,9 +4055,20 @@ document.addEventListener("keydown", (event) => {
 });
 
 // T1: actionable idle overview for the list view.
+const appBucket = (app) => {
+  const status = String(app && app.status ? app.status : "").trim();
+  if (status === "运行中") return "running";
+  if (status === "发布中") return "publishing";
+  return "stopped";
+};
+const appHasUpdate = (app) => Boolean(app) && (
+  app.notice === "有新版本"
+  || app.status === "有新版本"
+  || serviceImages(app).some((service) => service.update)
+);
 const attentionApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
-  const updates = list.filter((app) => app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update));
+  const updates = list.filter((app) => appHasUpdate(app));
   const stopped = list.filter((app) => app.status !== "运行中" && app.status !== "发布中" && !updates.includes(app));
   return [...updates, ...stopped];
 };
@@ -4112,7 +4126,7 @@ const renderIdleOverview = (apps) => {
       name.textContent = app.name || app.id;
       const meta = document.createElement("span");
       meta.className = "idle-app__meta";
-      const update = app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update);
+      const update = appHasUpdate(app);
       const facts = [update ? "有新版本" : (app.status || "已停止")];
       const ports = appPorts(app);
       if (ports.length) facts.push(`${ports.length} 个端口`);
@@ -4170,19 +4184,27 @@ const renderIdleOverview = (apps) => {
   const quickCopy = document.createElement("p");
   quickCopy.className = "idle-desc";
   quickCopy.textContent = "部署新的 Compose 应用，或清理节点上不再使用的镜像。";
+  const canOperate = Boolean(selectedAgentID && engineReady && agentOnline);
   const quickActions = document.createElement("div");
   quickActions.className = "idle-actions";
-  const deploy = document.createElement("button");
-  deploy.type = "button";
-  deploy.className = "ui-btn";
-  deploy.textContent = "部署应用";
-  deploy.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
-  const cleanup = document.createElement("button");
-  cleanup.type = "button";
-  cleanup.className = "ui-btn ui-btn--secondary";
-  cleanup.textContent = "清理磁盘";
-  cleanup.addEventListener("click", () => { if (!busy) diskCleanup?.click(); });
-  quickActions.append(deploy, cleanup);
+  if (canOperate) {
+    const deploy = document.createElement("button");
+    deploy.type = "button";
+    deploy.className = "ui-btn ui-btn--secondary";
+    deploy.textContent = "部署应用";
+    deploy.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
+    const cleanup = document.createElement("button");
+    cleanup.type = "button";
+    cleanup.className = "ui-btn ui-btn--secondary";
+    cleanup.textContent = "清理磁盘";
+    cleanup.addEventListener("click", () => { if (!busy) diskCleanup?.click(); });
+    quickActions.append(deploy, cleanup);
+  } else {
+    const note = document.createElement("p");
+    note.className = "idle-desc";
+    note.textContent = "当前节点尚不可操作：请选择节点，并确认 Docker 引擎已就绪、节点在线后再部署应用或清理磁盘。";
+    quickActions.append(note);
+  }
   quickPanel.append(quickTitle, quickCopy, quickActions);
 
   grid.append(nodePanel, quickPanel);
@@ -4196,7 +4218,7 @@ const renderApps = (apps) => {
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
-  markSelectedApp(view === "detail" ? selectedAppID : "");
+  markSelectedApp(view === "detail" ? selectedAppID : listSelectionID);
   renderInventoryChips(list);
   renderIdleOverview(list);
   applyInventoryFilter();
@@ -4212,13 +4234,14 @@ const renderInventoryChips = (apps) => {
     inventoryChipsNode.replaceChildren();
     return;
   }
-  const running = list.filter((app) => app.status === "运行中").length;
-  const updates = list.filter((app) => app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update)).length;
+  const running = list.filter((app) => appBucket(app) === "running").length;
+  const updates = list.filter((app) => appHasUpdate(app)).length;
+  const stopped = list.filter((app) => appBucket(app) === "stopped").length;
   const groups = [
     ["total", "all", "全部", list.length],
     ["running", "running", "运行中", running],
     ["updates", "updates", "可更新", updates],
-    ["stopped", "stopped", "已停止", Math.max(0, list.length - running)],
+    ["stopped", "stopped", "已停止", stopped],
   ];
   const activeFilter = document.querySelector("#app-filter")?.value || "all";
   inventoryChipsNode.replaceChildren(...groups.map(([tone, filter, label, value]) => {
@@ -4287,10 +4310,12 @@ const renderEngineBadge = (engine) => {
 const renderWorkspace = async () => {
   const seq = ++workspaceSeq;
   const snapshot = contextSnapshot();
-  const keepDetailID = view === "detail" ? selectedAppID : "";
+  const pendingRestore = restoreTarget;
+  restoreTarget = null;
+  const keepDetailID = view === "detail" ? selectedAppID : (pendingRestore ? pendingRestore.app : "");
   const keepDetailApp = detailApp;
   const composeRevision = composeDraft.revision;
-  const keepSection = detailSection;
+  const keepSection = view === "detail" ? detailSection : (pendingRestore ? pendingRestore.section : "overview");
   const agent = selectedAgent();
   agentOnline = isAgentOnline(agent);
   engineReady = false;
@@ -4392,6 +4417,9 @@ const loadAgents = async () => {
     ? requested
     : (agentsCache.length === 1 ? agentsCache[0].id : "");
   agentPicker.refresh(selectedAgentID);
+  const requestedApp = new URLSearchParams(window.location.search).get("app") || "";
+  const requestedSection = new URLSearchParams(window.location.search).get("section") || "overview";
+  restoreTarget = requestedApp && selectedAgentID ? { app: requestedApp, section: requestedSection } : null;
 };
 
 agentPicker.onChange = async (value) => {
@@ -4403,12 +4431,10 @@ agentPicker.onChange = async (value) => {
   leaveDetail({ force: true });
   contextVersion += 1;
   selectedAgentID = String(value || "");
+  listSelectionID = "";
   document.querySelector("#app-search").value = "";
   document.querySelector("#app-filter").value = "all";
-  const url = new URL(window.location.href);
-  if (selectedAgentID) url.searchParams.set("agent_id", selectedAgentID);
-  else url.searchParams.delete("agent_id");
-  window.history.replaceState({}, "", url);
+  syncLocation();
   closeCreate();
   try {
     await renderWorkspace();

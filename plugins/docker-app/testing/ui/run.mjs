@@ -327,7 +327,149 @@ try {
     } finally { apps = original; }
   });
 
-  await test("node menu reserves readable names and stays inside the viewport", async () => {
+  await test("every application row keeps one structure and no inline primary action", async () => {
+    const original = apps;
+    apps = [
+      makeApp("row-running", "node-a", { rules:[{id:"run-entry",enabled:true,domain:"run.example.test",port:8080}] }),
+      makeApp("row-stopped", "node-a", { status:"已停止", rules:[{id:"stop-entry",enabled:true,domain:"stop.example.test",port:8080}], actions:[{id:"start",label:"启动"},{id:"delete",label:"删除"}] }),
+      makeApp("row-updatable", "node-a", { notice:"有新版本", actions:[{id:"update",label:"更新"},{id:"stop",label:"停止"}] }),
+    ];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="row-running"]');
+      const snapshot = await page.evaluate(`(() => {
+        const brand = (node) => !(node.classList.contains('ui-btn--secondary') || node.classList.contains('ui-btn--ghost') || node.classList.contains('ui-btn--danger'));
+        const rows = [...document.querySelectorAll('#app-list .app-card')];
+        return {
+          rows: rows.map((row) => ({id:row.dataset.id, status:row.dataset.status, bucket:row.dataset.bucket,
+            actions:[...row.querySelectorAll('.app-card-actions button')].filter((node) => node.getClientRects().length).map((node) => node.textContent.trim()),
+            primaries:[...row.querySelectorAll('.app-card-actions button')].filter((node) => node.getClientRects().length && brand(node)).length,
+            updateHint:Boolean(row.querySelector('[data-update-hint]'))})),
+          primaries:[...document.querySelectorAll('.ui-btn')].filter((node) => node.getClientRects().length && brand(node)).map((node) => node.textContent.trim()),
+        };
+      })()`);
+      assert.deepEqual(snapshot.rows.map((row) => row.actions), [["详情"],["详情"],["详情"]], `running, stopped and updatable rows share one action set: ${JSON.stringify(snapshot.rows)}`);
+      assert.deepEqual(snapshot.rows.map((row) => row.primaries), [0,0,0], `rows never carry a filled primary: ${JSON.stringify(snapshot.rows)}`);
+      assert.deepEqual(snapshot.rows.map((row) => row.bucket), ["running","stopped","running"]);
+      assert.equal(snapshot.rows.find((row) => row.id === "row-stopped").updateHint, false, "a stopped app without candidates shows no update hint");
+      assert.equal(snapshot.rows.find((row) => row.id === "row-updatable").updateHint, true, "only an available candidate produces the update hint");
+      assert.deepEqual(snapshot.primaries, ["部署应用"], `the list view keeps exactly one filled primary: ${JSON.stringify(snapshot.primaries)}`);
+    } finally { apps = original; }
+  });
+
+  await test("inventory chips count exactly the rows each filter shows", async () => {
+    const original = apps;
+    apps = [
+      makeApp("state-running", "node-a"),
+      makeApp("state-publishing", "node-a", { status:"发布中", actions:[{id:"delete",label:"删除"}] }),
+      makeApp("state-stopped", "node-a", { status:"已停止", actions:[{id:"start",label:"启动"}] }),
+      makeApp("state-updatable", "node-a", { notice:"有新版本", actions:[{id:"update",label:"更新"}] }),
+      makeApp("state-anomaly", "node-a", { status:"异常" }),
+    ];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="state-running"]');
+      const read = () => page.evaluate(`(() => ({
+        chips:Object.fromEntries([...document.querySelectorAll('#inventory-chips .inventory-chip')].map((chip) => [chip.dataset.filter, Number(chip.querySelector('b').textContent)])),
+        rows:[...document.querySelectorAll('#app-list .app-card')].map((row) => ({id:row.dataset.id, bucket:row.dataset.bucket, visible:row.getClientRects().length > 0})),
+      }))()`);
+      const pick = async (filter) => {
+        await page.evaluate(`(() => { const select = document.querySelector('#app-filter'); select.value = ${JSON.stringify(filter)}; select.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+        return read();
+      };
+      const all = await read();
+      assert.deepEqual(all.chips, {all:5, running:2, updates:1, stopped:2}, `counts cover the applications without filing publishing as stopped: ${JSON.stringify(all.chips)}`);
+      assert.deepEqual(all.rows.filter((row) => row.bucket === "publishing").map((row) => row.id), ["state-publishing"], "a publishing app gets its own bucket");
+      for (const filter of ["running","updates","stopped"]) {
+        const state = await pick(filter);
+        const shown = state.rows.filter((row) => row.visible).map((row) => row.id);
+        assert.equal(shown.length, state.chips[filter], `the ${filter} chip (${state.chips[filter]}) matches ${shown.length} filtered rows`);
+      }
+      await pick("all");
+    } finally { apps = original; }
+  });
+
+  await test("search covers application, service, image and HTTP domain", async () => {
+    const original = apps;
+    apps = [
+      makeApp("domain-alpha", "node-a", { rules:[{id:"alpha-entry",enabled:true,domain:"alpha.example.test",port:8080}] }),
+      makeApp("domain-beta", "node-a", { status:"已停止", rules:[{id:"beta-entry",enabled:false,domain:"beta.example.test",port:8080}], actions:[{id:"start",label:"启动"}] }),
+    ];
+    try {
+      await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="domain-alpha"]');
+      const search = async (query) => {
+        await page.evaluate(`(() => { const input = document.querySelector('#app-search'); input.value = ${JSON.stringify(query)}; input.dispatchEvent(new Event('input', {bubbles:true})); })()`);
+        return page.evaluate(`[...document.querySelectorAll('#app-list .app-card')].filter((row) => row.getClientRects().length).map((row) => row.dataset.id)`);
+      };
+      assert.deepEqual(await search("alpha.example.test"), ["domain-alpha"], "an enabled HTTP domain is searchable");
+      assert.deepEqual(await search("beta.example.test"), ["domain-beta"], "a disabled entry's domain stays searchable");
+      assert.deepEqual(await search("nginx"), ["domain-alpha","domain-beta"], "image text stays searchable");
+      assert.deepEqual(await search("missing-image"), []);
+      await search("");
+    } finally { apps = original; }
+  });
+
+  await test("an empty node keeps an actionable work area instead of a blank column", async () => {
+    const original = apps;
+    apps = [];
+    try {
+      // The idle work area is a desktop surface: below 1024px the list owns the screen.
+      await page.send("Emulation.setDeviceMetricsOverride", {width:1440,height:900,deviceScaleFactor:1,mobile:false});
+      await navigate("?agent_id=node-a"); await page.waitVisible("#app-empty");
+      const workArea = await page.evaluate(`(() => {
+        const panel = document.querySelector('#detail-idle');
+        const brand = (node) => !(node.classList.contains('ui-btn--secondary') || node.classList.contains('ui-btn--ghost') || node.classList.contains('ui-btn--danger'));
+        const actions = [...panel.querySelectorAll('.idle-actions button')].filter((node) => node.getClientRects().length);
+        return {
+          visible:Boolean(panel.getClientRects().length),
+          sections:[...panel.querySelectorAll('.idle-panel h3')].map((node) => node.textContent.trim()),
+          actions:actions.map((node) => node.textContent.trim()),
+          primaries:actions.filter(brand).length,
+          emptyGuide:Boolean(document.querySelector('#app-empty').getClientRects().length),
+          chipsHidden:document.querySelector('#inventory-chips').hidden,
+        };
+      })()`);
+      assert.equal(workArea.visible, true, "the idle overview stays visible when the node has no applications");
+      assert.equal(workArea.emptyGuide, true, "the list column still offers the empty-state guide");
+      assert.deepEqual(workArea.sections, ["需要关注","节点","快速开始"], `the work area keeps its three regions: ${JSON.stringify(workArea.sections)}`);
+      assert.deepEqual(workArea.actions, ["部署应用","清理磁盘"], `at least two actionable entries: ${JSON.stringify(workArea.actions)}`);
+      assert.equal(workArea.primaries, 0, "the empty work area adds no second filled primary");
+      assert.equal(workArea.chipsHidden, true, "no status band without applications");
+      await capture("empty-node-work-area", 1440);
+    } finally { apps = original; }
+  });
+
+  await test("returning from detail keeps the list selection and focus", async () => {
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    assert.equal(await page.evaluate(`document.querySelector('[data-id="alpha"]').dataset.selected`), "true", "the opened row is marked selected");
+    await page.click("#detail-back"); await page.waitVisible("#app-list");
+    const restored = await page.evaluate(`({selected:document.querySelector('[data-id="alpha"]').dataset.selected, current:document.querySelector('[data-id="alpha"]').getAttribute('aria-current'), focus:document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.action || "" : ""})`);
+    assert.equal(restored.selected, "true", "the row keeps its selection marker after returning");
+    assert.equal(restored.current, "true", "the selection survives as aria-current");
+    assert.equal(restored.focus, "detail", "focus returns to the row action");
+  });
+
+  await test("a reload restores the current application and section", async () => {
+    await page.send("Emulation.setDeviceMetricsOverride", {width:1440,height:900,deviceScaleFactor:1,mobile:false});
+    await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="alpha"]');
+    await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
+    await page.click('#detail-nav [data-section="compose"]'); await page.waitVisible("#compose-form textarea");
+    const addressed = await page.evaluate(`location.search`);
+    assert.match(addressed, /[?&]app=alpha(&|$)/, `the detail target is addressable: ${addressed}`);
+    assert.match(addressed, /[?&]section=compose(&|$)/, `the open section is addressable: ${addressed}`);
+    const documents = page.navigations;
+    await page.send("Page.reload", {ignoreCache:true});
+    await eventually(() => page.navigations > documents, "the reload commits a new document");
+    await eventually(async () => {
+      try {
+        return await page.evaluate(`document.querySelector('#app-detail')?.getClientRects().length > 0 && document.querySelector('[data-section-panel="compose"]')?.getClientRects().length > 0`);
+      } catch (_error) { return false; }
+    }, "the reload restores the application and its section");
+    assert.equal(await page.evaluate(`document.querySelector('#detail-title').textContent`), "alpha");
+    assert.equal(await page.evaluate(`document.querySelector('[data-id="alpha"]').dataset.selected`), "true", "the restored row is marked selected");
+    await page.click("#detail-back"); await page.waitVisible("#app-list");
+    const cleared = await page.evaluate(`location.search`);
+    assert.ok(!/[?&]app=/.test(cleared), `returning to the list drops the detail target: ${cleared}`);
+  });  await test("node menu reserves readable names and stays inside the viewport", async () => {
     const original = agents.map(agent=>({...agent}));
     Object.assign(agents[0], {name:"debian-jnp12",last_seen_at:new Date().toISOString()});
     Object.assign(agents[1], {name:"zouter-hk",last_seen_at:new Date().toISOString()});
@@ -350,13 +492,14 @@ try {
   });
   await test("background image checks update the card without reloading the page", async () => {
     const original = apps;
+    const writesBefore = requests.filter((request) => request.method !== "GET").length;
     apps = [makeApp("sample", "node-a", {image_checking:true})];
     try {
       await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="sample"]');
       apps = [makeApp("sample", "node-a", {notice:"有新版本",actions:[{id:"update",label:"更新"}]})];
-      await eventually(() => page.visible('[data-id="sample"] [data-action="update"]'), "background result appears on the card");
+      await eventually(() => page.visible('[data-id="sample"] [data-update-hint]'), "background result appears on the card");
       assert.equal(await page.visible("#app-detail"), false);
-      assert.equal(requests.filter(request=>request.method!=="GET").length, 0);
+      assert.equal(requests.filter(request=>request.method!=="GET").length, writesBefore, "a background image check writes nothing");
     } finally { apps = original; }
   });
 
@@ -489,7 +632,7 @@ try {
         });
         return {labels:rects('.app-card-title-row, .app-card-meta, .app-port, .app-card-url'), buttons:rects('.app-card-actions button')};
       })()`);
-      assert.deepEqual(contents.buttons.map((button) => button.text), ["打开", "更新", "详情"]);
+      assert.deepEqual(contents.buttons.map((button) => button.text), ["详情"]);
       const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
       for (const label of contents.labels) {
         for (const button of contents.buttons) assert.equal(overlaps(label, button), false, `label/action overlap at ${width}: ${JSON.stringify({ label, button })}`);
