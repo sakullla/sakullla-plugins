@@ -2697,7 +2697,12 @@ const renderOverview = (app) => {
   if (updateGroup) {
     updateGroup.classList.add("overview-services-update");
     const updateButton = updateGroup.querySelector('[data-action="update"]');
-    if (updateButton) updateButton.textContent = "更新镜像";
+    if (updateButton) {
+      updateButton.textContent = "更新镜像";
+      // R1: the header carries the single filled primary of the detail view, so
+      // the image update stays the emphasised secondary entry of this block.
+      updateButton.classList.add("ui-btn--secondary");
+    }
     servicesTools.append(updateGroup);
   }
   if (secondaryGroup) {
@@ -3818,7 +3823,9 @@ const startLogPolling = () => {
 };
 
 // R4: one visual primary in the detail header; stopping stays a soft danger
-// action and the remaining lifecycle actions read as secondaries.
+// action and the remaining lifecycle actions read as secondaries. The kit's
+// control shape lives on `.ui-btn`, so every header control keeps that base
+// class and only gains or drops a variant.
 const setDetailPrimary = (primary) => {
   [
     ["open", detailOpen],
@@ -3828,8 +3835,9 @@ const setDetailPrimary = (primary) => {
   ].forEach(([id, node]) => {
     if (!node) return;
     const filled = id === primary;
-    node.classList.toggle("ui-btn", filled);
-    if (id !== "stop") node.classList.toggle("ui-btn--secondary", !filled);
+    node.classList.add("ui-btn");
+    if (id === "stop") node.classList.toggle("ui-btn--danger-soft", !filled);
+    else node.classList.toggle("ui-btn--secondary", !filled);
     node.dataset.primary = String(filled);
   });
 };

@@ -1399,73 +1399,6 @@ main.deck {
 
 /* ── Detail shell ────────────────────────────────────────────────────── */
 
-.detail-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 24rem;
-  padding: 3rem 2rem;
-  border: 1px dashed var(--app-border-strong);
-  border-radius: var(--ui-radius-2xl);
-  background: color-mix(in srgb, var(--ui-surface) 62%, transparent);
-  text-align: center;
-}
-
-.detail-placeholder__mark {
-  display: grid;
-  place-items: center;
-  width: 3.5rem;
-  height: 3.5rem;
-  margin-bottom: 0.75rem;
-  border-radius: 1rem;
-  background: var(--ui-primary-soft);
-  color: var(--ui-primary);
-}
-
-.detail-placeholder h2 {
-  margin: 0 0 0.4rem;
-  font-size: 1.125rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.detail-placeholder p {
-  max-width: 30rem;
-  margin: 0;
-  color: var(--ui-text-secondary);
-  font-size: 0.875rem;
-  line-height: 1.6;
-}
-
-.detail-placeholder__hints {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem 1rem;
-  margin: 1.5rem 0 0;
-  padding: 0;
-  list-style: none;
-  color: var(--ui-text-tertiary);
-  font-size: 0.75rem;
-}
-
-.detail-placeholder__hints li { display: inline-flex; align-items: center; gap: 0.35rem; }
-
-.detail-placeholder__hints kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 1.3rem;
-  height: 1.3rem;
-  padding: 0 0.3rem;
-  border: 1px solid var(--app-border);
-  border-radius: 0.3rem;
-  background: var(--ui-surface);
-  color: var(--ui-text-secondary);
-  font-size: 0.625rem;
-  box-shadow: 0 1px 0 var(--app-border);
-}
-
 #app-detail {
   padding: 0;
   overflow: visible;
@@ -2677,12 +2610,9 @@ main.deck {
   overflow-wrap: anywhere;
 }
 
-.http-rule-tools { display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; }
 .http-rule-target { margin: 0; color: var(--ui-text-tertiary); font-size: 0.6875rem; overflow-wrap: anywhere; }
-.http-rule-link { display: flex; align-items: center; gap: 0.25rem; }
 .http-rule-open { font-size: 0.75rem; font-weight: 600; }
 .http-rule-open:hover { text-decoration: underline; }
-.http-rules > li > .ui-btn { flex: 0 0 auto; }
 
 .http-form {
   display: flex;
@@ -2841,7 +2771,6 @@ main.deck {
 
 .backup-list tbody tr:last-child td { border-bottom: 0; }
 .backup-list tbody tr:hover td { background: var(--ui-hover); }
-.backup-cell-app { font-weight: 700; color: var(--ui-text); }
 .backup-cell-destination { color: var(--ui-text-tertiary); font-family: var(--app-mono); font-size: 0.6875rem; }
 .backup-cell-actions { white-space: nowrap; }
 .backup-cell-actions .ui-btn { margin-left: 0.25rem; }
@@ -3348,7 +3277,6 @@ dialog.ui-dialog--drawer > form { max-height: 100%; height: 100%; }
     max-height: none;
   }
   .app-list { max-height: 30rem; }
-  .detail-placeholder { display: none; }
   .workspace-region[data-view="detail"] #app-list-panel,
   .workspace-region[data-view="detail"] .workspace-head,
   .workspace-region[data-view="detail"] .inventory-chips { display: none; }

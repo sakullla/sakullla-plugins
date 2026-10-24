@@ -760,7 +760,17 @@ try {
           stopClass:document.querySelector('#detail-stop').className,
           deleteCount:deletes.length,
           deleteInDanger:deletes.length > 0 && deletes.every((node) => Boolean(node.closest('.overview-danger'))),
-          updateInServices:updates.length > 0 && updates.every((node) => Boolean(node.closest('.overview-block--services')) && !node.classList.contains('ui-btn--secondary')),
+          updateInServices:updates.length === 1 && updates.every((node) => Boolean(node.closest('.overview-block--services'))),
+          overviewPrimaries:[...detail.querySelectorAll('#detail-overview .ui-btn')].filter((node) => visible(node) && filled(node)).map((node) => node.textContent.trim()),
+          stopShape:(() => {
+            const a = getComputedStyle(document.querySelector('#detail-stop'));
+            const b = getComputedStyle(document.querySelector('#detail-restart'));
+            const stop = document.querySelector('#detail-stop');
+            return {
+              base:stop.classList.contains('ui-btn'),
+              same:[a.borderRadius, a.paddingTop, a.paddingLeft, a.fontSize, a.display].join('|') === [b.borderRadius, b.paddingTop, b.paddingLeft, b.fontSize, b.display].join('|'),
+            };
+          })(),
           rollbackInServices:[...detail.querySelectorAll('[data-action="rollback"]')].every((node) => Boolean(node.closest('.overview-block--services'))),
           facts:detail.querySelectorAll('#detail-overview .overview-facts .overview-fact').length,
           serviceRows:detail.querySelectorAll('#detail-overview .overview-service').length,
@@ -771,6 +781,9 @@ try {
       assert.equal(shell.deleteCount, 1, `delete appears once: ${JSON.stringify(shell)}`);
       assert.equal(shell.deleteInDanger, true, "delete lives in the danger area");
       assert.equal(shell.updateInServices, true, "the service image block is the only image update entry");
+      assert.deepEqual(shell.overviewPrimaries, [], `the detail header keeps the only filled primary: ${JSON.stringify(shell)}`);
+      assert.equal(shell.stopShape.base, true, "stop keeps the kit button base class");
+      assert.equal(shell.stopShape.same, true, `stop keeps the header control shape instead of native styling: ${JSON.stringify(shell.stopShape)}`);
       assert.equal(shell.rollbackInServices, true, "rollback stays with the service images");
       assert.equal(shell.facts, 4, "the fact band replaces the statistic cards");
       assert.equal(shell.serviceRows, 1);
@@ -782,11 +795,24 @@ try {
 
   await test("HTTP ingress reports invalid domains and ports beside their fields without a request", async () => {
     const original = apps;
-    apps = [makeApp("http-target", "node-a", { ports:[8080], rules:[], actions:[{id:"stop",label:"停止"},{id:"delete",label:"删除"}] })];
+    apps = [makeApp("http-target", "node-a", { ports:[8080], rules:[{ref:"entry-http",domain:"http.example.test",port:8080,enabled:true}], actions:[{id:"stop",label:"停止"},{id:"delete",label:"删除"}] })];
     try {
     await navigate("?agent_id=node-a"); await page.waitVisible('[data-id="http-target"]');
     await page.click('[data-id="http-target"] [data-action="detail"]'); await page.waitVisible("#app-detail");
     await page.click('#detail-nav [data-section="http"]'); await page.waitVisible(".http-form");
+    const ruleChrome = await page.evaluate(`(() => {
+      const row = document.querySelector('#detail-http .http-rules li');
+      if (!row) return null;
+      const open = row.querySelector('.http-rule-actions a.http-rule-open');
+      return {
+        open:open ? open.getAttribute('href') : "",
+        copy:Boolean(row.querySelector('.http-rule-actions button[aria-label="复制入口域名"]')),
+        remove:Boolean(row.querySelector('.http-rule-actions [data-action="delete-http"]')),
+        enabled:row.dataset.enabled,
+        port:row.textContent.includes('8080'),
+      };
+    })()`);
+    assert.deepEqual([ruleChrome?.open, ruleChrome?.copy, ruleChrome?.remove, ruleChrome?.enabled, ruleChrome?.port], ["https://http.example.test", true, true, "true", true], `the entry row keeps open, copy and delete: ${JSON.stringify(ruleChrome)}`);
     const posts = () => requests.filter((r) => r.method === "POST").length;
     const before = posts();
     const typeDomain = (value) => page.evaluate(`(() => {const field=document.querySelector('.http-form input[name="domain"]'); field.value=${JSON.stringify(value)}; field.dispatchEvent(new Event('input',{bubbles:true}));})()`);
