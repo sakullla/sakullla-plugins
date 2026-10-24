@@ -16,7 +16,7 @@ const createPanel = document.querySelector("#app-create");
 const listPanel = document.querySelector("#app-list-panel");
 const workspaceHead = document.querySelector(".workspace-head");
 const detailPanel = document.querySelector("#app-detail");
-const detailPlaceholder = document.querySelector("#detail-placeholder");
+const detailIdle = document.querySelector("#detail-idle");
 const detailTitle = document.querySelector("#detail-title");
 const detailStatus = document.querySelector("#detail-status");
 const detailOpen = document.querySelector("#detail-open");
@@ -170,6 +170,7 @@ let detailInFlight = "";
 const contextSnapshot = () => ({ version: contextVersion, read: readVersion, agent: selectedAgentID });
 const contextCurrent = (snapshot) => snapshot.version === contextVersion && snapshot.read === readVersion && snapshot.agent === selectedAgentID;
 let view = "list";
+let lastApps = [];
 let selectedAppID = "";
 let detailSection = "overview";
 let detailApp = null;
@@ -1119,7 +1120,7 @@ const syncListPanel = () => {
   // it through [data-view="detail"] so the detail owns the screen.
   if (listPanel) listPanel.hidden = false;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (detailPlaceholder) detailPlaceholder.hidden = inDetail || !hasApps;
+  if (detailIdle) detailIdle.hidden = inDetail || !hasApps;
   if (workspaceNode) workspaceNode.dataset.view = inDetail ? "detail" : "list";
   if (workspaceHead) workspaceHead.hidden = false;
   if (inventoryChipsNode) inventoryChipsNode.hidden = !hasApps;
@@ -3835,6 +3836,7 @@ const leaveDetail = async ({ force } = {}) => {
   filesMountedFor = "";
   markSelectedApp("");
   showStatus("", false);
+  renderIdleOverview(lastApps);
   syncListPanel();
   if (!force) {
     const target = listNode.querySelector(`[data-id="${leavingAppID}"] [data-action="detail"]`) || deployToggle;
@@ -4049,14 +4051,154 @@ document.addEventListener("keydown", (event) => {
   leaveDetail();
 });
 
+// T1: actionable idle overview for the list view.
+const attentionApps = (apps) => {
+  const list = Array.isArray(apps) ? apps : [];
+  const updates = list.filter((app) => app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update));
+  const stopped = list.filter((app) => app.status !== "运行中" && app.status !== "发布中" && !updates.includes(app));
+  return [...updates, ...stopped];
+};
+
+const renderIdleOverview = (apps) => {
+  if (!detailIdle) return;
+  const list = Array.isArray(apps) ? apps : [];
+  const attention = attentionApps(list);
+  const agent = selectedAgent();
+  detailIdle.replaceChildren();
+
+  const head = document.createElement("header");
+  head.className = "idle-head";
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "idle-eyebrow";
+  eyebrow.textContent = "工作台";
+  const title = document.createElement("h2");
+  title.textContent = attention.length
+    ? `${attention.length} 个应用需要处理`
+    : (list.length ? "应用运行平稳" : "从第一份 Compose 开始");
+  const desc = document.createElement("p");
+  desc.className = "idle-desc";
+  desc.textContent = attention.length
+    ? "先处理更新与停止的应用；选中左侧应用也可以查看全部管理项。"
+    : (list.length ? "没有待处理项。需要时从右上角部署新的 Compose 应用。" : "部署一个应用后，这里会汇总需要关注的状态。");
+  head.append(eyebrow, title, desc);
+
+  const attentionSection = document.createElement("section");
+  attentionSection.className = "idle-panel idle-panel--attention";
+  const attentionHead = document.createElement("div");
+  attentionHead.className = "idle-panel-head";
+  const attentionTitle = document.createElement("h3");
+  attentionTitle.textContent = "需要关注";
+  const attentionCount = document.createElement("span");
+  attentionCount.className = "idle-count";
+  attentionCount.textContent = String(attention.length);
+  attentionHead.append(attentionTitle, attentionCount);
+  attentionSection.append(attentionHead);
+
+  if (attention.length) {
+    const rows = document.createElement("div");
+    rows.className = "idle-list";
+    attention.slice(0, 5).forEach((app) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "idle-app";
+      const mark = appMark(app.name || app.id);
+      const markNode = document.createElement("span");
+      markNode.className = "idle-app__mark";
+      markNode.dataset.tone = mark.tone;
+      markNode.textContent = mark.letters;
+      const copy = document.createElement("span");
+      copy.className = "idle-app__copy";
+      const name = document.createElement("strong");
+      name.textContent = app.name || app.id;
+      const meta = document.createElement("span");
+      meta.className = "idle-app__meta";
+      const update = app.notice === "有新版本" || app.status === "有新版本" || serviceImages(app).some((service) => service.update);
+      const facts = [update ? "有新版本" : (app.status || "已停止")];
+      const ports = appPorts(app);
+      if (ports.length) facts.push(`${ports.length} 个端口`);
+      const domain = firstEnabledRuleURL(app);
+      if (domain) facts.push(displayHost(domain));
+      meta.textContent = facts.join(" · ");
+      copy.append(name, meta);
+      const flag = document.createElement("span");
+      flag.className = "idle-app__flag";
+      flag.dataset.tone = update ? "warning" : "muted";
+      flag.textContent = update ? "可更新" : "需处理";
+      button.append(markNode, copy, flag, iconNode("chevron-right", "ui-icon idle-app__chevron"));
+      button.addEventListener("click", () => { if (!busy) showDetail(app.id, "overview"); });
+      rows.append(button);
+    });
+    attentionSection.append(rows);
+    if (attention.length > 5) {
+      const more = document.createElement("p");
+      more.className = "idle-more";
+      more.textContent = `还有 ${attention.length - 5} 个应用，请从左侧清单查看。`;
+      attentionSection.append(more);
+    }
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "idle-empty";
+    empty.textContent = list.length ? "没有需要处理的应用。" : "还没有应用，先部署一个。";
+    attentionSection.append(empty);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "idle-grid";
+
+  const nodePanel = document.createElement("section");
+  nodePanel.className = "idle-panel";
+  const nodeTitle = document.createElement("h3");
+  nodeTitle.textContent = "节点";
+  const facts = document.createElement("dl");
+  facts.className = "idle-facts";
+  const addFact = (label, value) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    facts.append(dt, dd);
+  };
+  addFact("节点", agentDisplayName(agent) || "未选择");
+  addFact("引擎", lastEngine?.version ? `Docker ${lastEngine.version}` : (engineReady ? "Docker 已就绪" : "状态未知"));
+  addFact("应用", `${list.length} 个`);
+  nodePanel.append(nodeTitle, facts);
+
+  const quickPanel = document.createElement("section");
+  quickPanel.className = "idle-panel";
+  const quickTitle = document.createElement("h3");
+  quickTitle.textContent = "快速开始";
+  const quickCopy = document.createElement("p");
+  quickCopy.className = "idle-desc";
+  quickCopy.textContent = "部署新的 Compose 应用，或清理节点上不再使用的镜像。";
+  const quickActions = document.createElement("div");
+  quickActions.className = "idle-actions";
+  const deploy = document.createElement("button");
+  deploy.type = "button";
+  deploy.className = "ui-btn";
+  deploy.textContent = "部署应用";
+  deploy.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
+  const cleanup = document.createElement("button");
+  cleanup.type = "button";
+  cleanup.className = "ui-btn ui-btn--secondary";
+  cleanup.textContent = "清理磁盘";
+  cleanup.addEventListener("click", () => { if (!busy) diskCleanup?.click(); });
+  quickActions.append(deploy, cleanup);
+  quickPanel.append(quickTitle, quickCopy, quickActions);
+
+  grid.append(nodePanel, quickPanel);
+  detailIdle.append(head, attentionSection, grid);
+};
+
 const renderApps = (apps) => {
   const list = Array.isArray(apps) ? apps : [];
+  lastApps = list;
   listNode.replaceChildren(...list.map(renderApp));
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
   markSelectedApp(view === "detail" ? selectedAppID : "");
   renderInventoryChips(list);
+  renderIdleOverview(list);
   applyInventoryFilter();
   syncListPanel();
 };

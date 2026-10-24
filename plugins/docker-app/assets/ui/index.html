@@ -131,7 +131,7 @@
     </symbol>
   </svg>
 
-  <header class="page-head ui-page-head">
+  <header class="page-head ui-page-head app-commandbar">
     <div class="page-head-copy topbar__brand">
       <span class="deck-brand__mark" aria-hidden="true">
         <svg class="ui-icon ui-icon--lg"><use href="#i-container"></use></svg>
@@ -283,20 +283,19 @@
     <section id="app-workspace" class="workspace-region" hidden>
       <div class="workspace-head">
         <div class="workspace-head-copy">
-          <p class="section-kicker"><span class="workspace-pulse" aria-hidden="true"></span>FLEET OVERVIEW</p>
           <div class="workspace-title-line">
             <h2 id="app-list-title">应用</h2>
             <p id="app-count" class="count" hidden></p>
           </div>
+          <p class="workspace-head-note">节点上的 Compose 应用</p>
         </div>
+        <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
         <div class="workspace-head-actions">
           <button id="disk-cleanup" class="ui-btn ui-btn--secondary" type="button">
             <svg class="ui-icon" aria-hidden="true"><use href="#i-trash"></use></svg>清理磁盘
           </button>
         </div>
       </div>
-
-      <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
 
       <div class="workspace-layout">
         <section class="ui-card panel" id="app-list-panel" aria-labelledby="app-list-title">
@@ -328,16 +327,7 @@
         </section>
 
         <div class="detail-stage">
-          <section id="detail-placeholder" class="detail-placeholder" hidden>
-            <span class="detail-placeholder__mark" aria-hidden="true"><svg class="ui-icon ui-icon--lg"><use href="#i-layers"></use></svg></span>
-            <h2>选择一个应用</h2>
-            <p>从左侧列表打开应用，查看概览、Compose、工作区文件、日志与 HTTP 入口。</p>
-            <ul class="detail-placeholder__hints">
-              <li><kbd>Enter</kbd> 打开选中的应用</li>
-              <li><kbd>/</kbd> 搜索应用、服务或镜像</li>
-              <li><kbd>Esc</kbd> 关闭详情</li>
-            </ul>
-          </section>
+          <section id="detail-idle" class="detail-idle" hidden></section>
 
           <section id="app-detail" class="ui-card panel" aria-labelledby="detail-title" hidden>
             <header class="detail-head">
