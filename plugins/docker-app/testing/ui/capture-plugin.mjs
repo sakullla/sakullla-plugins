@@ -11,8 +11,17 @@ import { agents, engineFor } from "./fixtures/workspace.mjs";
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-const openDetail = async (ui, section) => {
+// The workspace is ready once the status band and the rows are both rendered.
+// These fixtures always carry applications, so the band is visible here; an
+// empty node would need its own scene instead of reusing this helper.
+const openWorkspace = async (ui) => {
   await ui.waitFor("#app-list .app-card");
+  await ui.waitFor("#inventory-chips .inventory-chip");
+  await ui.waitFor("#inventory-summary:not(:empty)");
+};
+
+const openDetail = async (ui, section) => {
+  await openWorkspace(ui);
   await ui.click("#app-list .app-card");
   await ui.waitFor("#detail-overview .overview-facts");
   if (section && section !== "overview") await ui.click(`#detail-nav [data-section="${section}"]`);
@@ -25,7 +34,7 @@ export const scenes = [
     name: "apps",
     title: "应用列表",
     run: async (ui) => {
-      await ui.waitFor("#app-list .app-card");
+      await openWorkspace(ui);
       await ui.waitFor("#deploy-toggle");
     },
   },
@@ -33,7 +42,7 @@ export const scenes = [
     name: "deploy",
     title: "部署应用",
     run: async (ui) => {
-      await ui.waitFor("#app-list .app-card");
+      await openWorkspace(ui);
       await ui.waitFor("#deploy-toggle");
       await ui.click("#deploy-toggle");
       await ui.waitFor("#create-form");

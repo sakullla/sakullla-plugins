@@ -61,10 +61,12 @@ Stop the server with Ctrl+C.
 
 The plugin package includes its original AI-generated companion artwork,
 `companion.js`, and neutral/blink/wink WebP frames. Each frame is below the
-1 MiB response budget. The page loads these package-local assets directly;
-there is no dependency on `dist/`, a preview server, a model CDN, or an image
-API. The image CSP permits same-origin assets and validated in-memory blob
-images, so loaded expressions continue working through a connection outage.
+1 MiB response budget. The page loads these package-local assets directly
+and only after the assistant is expanded, so the first screen never requests a
+frame image; there is no dependency on `dist/`, a preview server, a model CDN,
+or an image API. The image CSP permits same-origin assets and validated
+in-memory blob images, so loaded expressions continue working through a
+connection outage.
 The companion uses aligned raster expression frames; it is not a completed
 Cubism mesh model. Full Live2D mesh/deformer binding and `.moc3` export remain
 outstanding. Artwork provenance is recorded in `assets/companion-art.json`.
@@ -115,22 +117,52 @@ checks continue. The page refreshes pending image results without discarding an
 open editor. Agent Docker proxy support for `docker info` and formatted
 `docker image inspect` is required; update the Agent alongside this plugin.
 
-The management page is a two-pane compose console. A compact sticky top bar
-carries the node picker, live engine badge, refresh and deployment entry. The
-fleet strip counts all, running, updatable and stopped applications and doubles
-as a filter; the inventory column below keeps search, status filtering and the
-application rows visible while a detail is open. Each row shows its status
-inline, monogram, published ports, service images, ingress link and compact
-actions. The work area keeps a sticky identity header with the monogram, title,
-status, domain and lifecycle actions, followed by a section bar. Its overview
-pairs a status metric row with service-image rows, run parameters, ingress and
-storage rails, then closes with an action deck. Compose and workspace files use
-titled editor windows; logs use a dark terminal with a themed toolbar. Image
-names and ingress domains can be copied from the overview and ingress sections.
-Below 1024px the inventory and work area become a single pane: opening an
-application hides the inventory and the back control restores it. Operation
-feedback floats above the page rather than pushing it: a status toast appears
-and disappears without reflowing the content and without intercepting a click.
+The management page is a working console rather than a list beside an empty
+column. A sticky command bar carries the brand, the target-node picker with its
+live engine badge and refresh, and the only primary deployment entry. A compact
+status band counts all, running, updatable and stopped applications and doubles
+as the status filter. The inventory column below the band keeps search (the `/`
+shortcut focuses it), the status filter and the application rows visible while
+a detail is open. Every row uses one structure: monogram and name, inline status
+and update badges, published ports with the service count, one line per service
+image, the ingress domain link, and a `详情` link. The whole row opens the
+detail view and is keyboard focusable, and rows carry no inline primary action,
+so running, stopped and updatable applications never show different button
+sets. Selecting nothing leaves an actionable work area instead of blank space:
+it lists the applications that need attention, the node facts (node, engine
+version, application count) and quick starts for deploying or cleaning up.
+Empty inventories, unmatched searches and offline nodes replace the previous
+content instead of leaving stale rows behind.
+
+The work area keeps a sticky identity header with the monogram, title, status,
+node/application context and domain link, followed by a six-tab section bar
+(overview, Compose, files, logs, HTTP ingress, backups). The header holds at
+most one filled primary action (opening the application); stop uses a secondary
+danger style and delete exists only in the closing danger zone. The overview
+pairs a compact fact strip (state, services, published ports, HTTP ingress) with
+service-image rows, the HTTP ingress entry, storage, the backup summary and run
+parameters. A service-image row is the only image-update entry: version policy
+and update live on each service row, the block header offers the image update
+and rollback for the application, and an update still passes the existing risk
+confirmation. Compose and workspace files use titled editor windows; logs use a
+dark terminal with a themed toolbar and keep their four-second polling, pause
+and copy/download controls. Image names and ingress domains can be copied from
+the overview and ingress sections. Below 1024px the inventory and work area
+become a single pane: opening an application hides the inventory, the back
+control restores it together with the selected row and focus, and controls keep
+a 44px target without horizontal overflow. Operation feedback floats above the
+page rather than pushing it: a status toast appears and disappears without
+reflowing the content and without intercepting a click.
+
+Every capability from the earlier layout stays reachable: node selection and
+engine state in the command bar, deployment from the command bar or the empty
+inventory, start/stop/restart in the identity header, image update and rollback
+from the overview's service-image block, version policy from each service row,
+Compose and workspace files from their sections, logs from the log section,
+HTTP ingress from its section, backup records, runs, restore, delete and
+destination settings from the backup section, and disk cleanup from the
+inventory header. Drafts keep their navigation and unload protection, and the
+companion assistant stays on its own floating control.
 
 The detail page also carries a backup section. It lists this application's
 backup records (application, time, size, destination) with per-record restore
@@ -169,13 +201,32 @@ asset fingerprint. Missing browsers, skipped suites, stale evidence, and failed
 assertions result in a nonzero exit. These suites use controlled fixture APIs;
 their screenshots are labelled separately from actual host acceptance.
 
-The page follows the host's supported light/dark theme aliases. In a same-origin
-frame it observes the parent document's `data-theme`; as a standalone hosted
-page it uses the host's `theme` preference and receives cross-tab storage
-changes. Unknown or inaccessible host themes fall back to light. Credentials
-and Compose `.env` contents are not part of theme storage. Drafts remain only
-in the current document; navigation asks before discarding them, and browser
-unload confirmation is used where supported.
+Screenshots come from the shared capture runner:
+
+```sh
+node testing/ui/capture.mjs --plugin docker-app --theme light,dark --size 1440,768,390 --out dist/ui-capture
+node testing/ui/capture.mjs --plugin docker-app --theme host --size 1440,768,390 --out dist/ui-capture-host
+```
+
+Its eight scenes cover the inventory, the deployment drawer, the detail
+overview, Compose, workspace files, logs, HTTP ingress and backups. Each scene
+waits for an anchor of the current interface (the inventory status band, the
+identity header's fact strip, the section panels) before the capture, so a page
+that fails to render records a failing gallery entry instead of a stale image,
+and the requested theme must match the page root or the run fails.
+
+Theme resolution is owned by the shared kit. The page declares host theme mode,
+so it reads the host's `theme` preference (`localStorage.theme`) before the
+first paint and supports the five host themes — fresh-green, sakura-day,
+sakura-night, neko-dark and business — plus the host's light and dark aliases
+and its legacy theme ids. The kit writes `data-theme` and
+`data-theme-family` on the page root, follows cross-tab `storage` changes, and
+falls back to the system light or dark family for unknown or unreadable
+values. The page is served as a top-level route whose CSP keeps
+`frame-ancestors 'none'`, so theme resolution never reads a parent frame.
+Credentials and Compose `.env` contents are not part of theme storage. Drafts
+remain only in the current document; navigation asks before discarding them,
+and browser unload confirmation is used where supported.
 
 ## Actual host acceptance
 
