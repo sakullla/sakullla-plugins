@@ -25,7 +25,8 @@ import (
 )
 
 const (
-	testBackupS3AccessKey = "AKIAEXAMPLEACCESSKEY"
+	// Deliberately not AWS-shaped: the repository secret scan rejects AKIA + 16 capitals.
+	testBackupS3AccessKey = "test-access-key-id"
 	testBackupS3SecretKey = "plaintext-secret-material-5f3a1c"
 	testBackupS3Endpoint  = "https://s3.example.test"
 	testBackupS3Bucket    = "backups"
