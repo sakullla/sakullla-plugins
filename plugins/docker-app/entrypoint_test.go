@@ -36,6 +36,16 @@ func TestDockerHandshakeDoesNotAdvertiseUngrantedCapabilities(t *testing.T) {
 	}
 }
 
+func TestDockerSupportedFeaturesAdvertiseExecutionScope(t *testing.T) {
+	features := supportedFeatures()
+	for _, feature := range features {
+		if feature == pluginsdk.RPCFeatureExecutionScopeV1 {
+			return
+		}
+	}
+	t.Fatalf("docker-app supported features = %v, want %q", features, pluginsdk.RPCFeatureExecutionScopeV1)
+}
+
 func TestRunEntrypointNormalStartupUsesCanonicalSDKServers(t *testing.T) {
 	t.Setenv("NRE_PLUGIN_ENDPOINT", "")
 	t.Setenv("NRE_PLUGIN_COOKIE_FILE", "")

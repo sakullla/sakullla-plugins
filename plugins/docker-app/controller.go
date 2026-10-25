@@ -203,7 +203,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: config.PackageDigest, ArtifactDigest: config.ArtifactDigest,
 		Capabilities:      requiredGrants(),
 		RequiredGrants:    requiredGrants(),
-		SupportedFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
+		SupportedFeatures: supportedFeatures(),
 		Timeouts:          timeouts,
 	}, rpcplugin.HookFuncs{PrepareFunc: controller.prepare, ActivateFunc: controller.activate, StopFunc: controller.stop})
 	if err != nil {

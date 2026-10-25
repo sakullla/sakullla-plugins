@@ -33,11 +33,15 @@ func agentExecutionFace() bool {
 	return pluginsdk.AgentExecutionFace()
 }
 
+func supportedFeatures() []string {
+	return pluginsdk.RPCFeaturesWithExecutionScope([]string{pluginsdk.RPCFeatureDurableActionsV1})
+}
+
 func RunEntrypoint(ctx context.Context, args []string, output io.Writer) error {
 	declaration := pluginsdk.RPCPluginDeclaration{
 		PluginID: PluginID, PluginVersion: PluginVersion,
 		RequiredCapabilities: requiredGrants(),
-		SupportedFeatures:    []string{pluginsdk.RPCFeatureDurableActionsV1},
+		SupportedFeatures:    supportedFeatures(),
 	}
 	return pluginsdk.RunRPCEntrypoint(ctx, args, output, pluginsdk.RPCEntrypointConfig{
 		Declaration: declaration,
