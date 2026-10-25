@@ -64,7 +64,7 @@ func TestAgentExecutionFacePreparesWithoutServingUI(t *testing.T) {
 		GrantedScopes: []string{
 			"event.emit", "http.outbound", "http.rule", "service.revocable-resource-handle",
 			"storage.read", "storage.write", "ui.dynamic",
-			"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
+			"secret.scoped.read", "secret.scoped.write",
 		},
 		Generation: "generation-463-32417e6a4a9bc886", RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}
@@ -190,7 +190,7 @@ func TestAgentExecutionFacePluginCallVolumeOps(t *testing.T) {
 		GrantedScopes: []string{
 			"event.emit", "http.outbound", "http.rule", "service.revocable-resource-handle",
 			"storage.read", "storage.write", "ui.dynamic",
-			"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
+			"secret.scoped.read", "secret.scoped.write",
 		},
 		Generation: generation, RequiredFeatures: []string{pluginsdk.RPCFeatureDurableActionsV1},
 	}

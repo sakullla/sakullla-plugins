@@ -1284,11 +1284,11 @@ func configWire(t *testing.T, count int) []byte {
 // requiredGrants mirrors the production requiredGrants() in the plugin
 // package (unexported there): http.rule, ui.dynamic,
 // service.revocable-resource-handle, storage.read, storage.write,
-// channel.node-transfer, secret.scoped.read, secret.scoped.write.
+// secret.scoped.read, secret.scoped.write.
 func requiredGrants() []string {
 	return []string{
 		"http.rule", "ui.dynamic", "service.revocable-resource-handle", "storage.read", "storage.write",
-		"channel.node-transfer", "secret.scoped.read", "secret.scoped.write",
+		"secret.scoped.read", "secret.scoped.write",
 	}
 }
 
