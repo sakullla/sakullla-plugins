@@ -306,7 +306,7 @@ try {
     } finally { apps = original; missing.release(); }
   });
 
-  await test("multi-service cards separate images from identity and keep actions compact", async () => {
+  await test("multi-service rows stay one line and keep images searchable", async () => {
     const original = apps;
     apps = [makeApp("sample", "node-a", {
       version:"example/gateway:v1.2.3", services:["gateway", "worker"], ports:[8765],
@@ -318,14 +318,17 @@ try {
         await page.send("Emulation.setDeviceMetricsOverride", {width,height:1000,deviceScaleFactor:1,mobile:false});
         const layout = await page.evaluate(`(() => {
           const card = document.querySelector('.app-card');
-          const image = card.querySelector('[data-app-image]');
-          const r = image.getBoundingClientRect(), h = card.querySelector('.app-card-head').getBoundingClientRect();
-          return {images:[...image.querySelectorAll('.app-card-image')].map(n=>n.textContent), imageLeft:r.left, headRight:h.right, imageTop:r.top, headBottom:h.bottom, imageWidth:r.width, headWidth:h.width,
-            actions:[...card.querySelectorAll('.app-card-actions button')].filter(n=>n.getClientRects().length).map(n=>n.textContent)};
+          const r = card.getBoundingClientRect();
+          return {search:card.dataset.search, images:card.querySelectorAll('.app-card-image').length, height:r.height, rem:parseFloat(getComputedStyle(document.documentElement).fontSize),
+            actions:[...card.querySelectorAll('.app-card-actions button')].filter(n=>n.getClientRects().length).map(n=>n.textContent),
+            overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth};
         })()`);
-        assert.deepEqual(layout.images, ["example/gateway:v1.2.3", "example/worker:latest"]);
-        assert.ok(layout.imageTop >= layout.headBottom, "identity and service images occupy separate regions");
-        assert.deepEqual(layout.actions, ["详情"]);
+        assert.match(layout.search, /example\/gateway:v1\.2\.3/, "gateway image stays searchable from the row");
+        assert.match(layout.search, /example\/worker:latest/, "worker image stays searchable from the row");
+        assert.equal(layout.images, 0, "service images stay out of the scan row");
+        assert.ok(layout.height < layout.rem * 8, `a multi-service app stays one card: ${layout.height}`);
+        assert.equal(layout.overflow, false);
+        assert.deepEqual(layout.actions, ["重启", "停止", "详情"]);
         await capture("multi-service-card", width);
       }
     } finally { apps = original; }
@@ -345,13 +348,13 @@ try {
         const rows = [...document.querySelectorAll('#app-list .app-card')];
         return {
           rows: rows.map((row) => ({id:row.dataset.id, status:row.dataset.status, bucket:row.dataset.bucket,
-            actions:[...row.querySelectorAll('.app-card-actions button')].filter((node) => node.getClientRects().length).map((node) => node.textContent.trim()),
+            actions:[...row.querySelectorAll('.app-card-actions button, .app-card-actions a')].filter((node) => node.getClientRects().length).map((node) => node.textContent.trim()),
             primaries:[...row.querySelectorAll('.app-card-actions button')].filter((node) => node.getClientRects().length && brand(node)).length,
             updateHint:Boolean(row.querySelector('[data-update-hint]'))})),
           primaries:[...document.querySelectorAll('.ui-btn')].filter((node) => node.getClientRects().length && brand(node)).map((node) => node.textContent.trim()),
         };
       })()`);
-      assert.deepEqual(snapshot.rows.map((row) => row.actions), [["详情"],["详情"],["详情"]], `running, stopped and updatable rows share one action set: ${JSON.stringify(snapshot.rows)}`);
+      assert.deepEqual(snapshot.rows.map((row) => row.actions), [["更新","停止","详情"],["打开","启动","详情"],["打开","重启","停止","详情"]], `cards keep the shortcut for the state they are in: ${JSON.stringify(snapshot.rows)}`);
       assert.deepEqual(snapshot.rows.map((row) => row.primaries), [0,0,0], `rows never carry a filled primary: ${JSON.stringify(snapshot.rows)}`);
       assert.deepEqual(snapshot.rows.map((row) => row.bucket), ["running","stopped","running"]);
       assert.equal(snapshot.rows.find((row) => row.id === "row-stopped").updateHint, false, "a stopped app without candidates shows no update hint");
@@ -405,7 +408,7 @@ try {
       };
       assert.deepEqual(await search("alpha.example.test"), ["domain-alpha"], "an enabled HTTP domain is searchable");
       assert.deepEqual(await search("beta.example.test"), ["domain-beta"], "a disabled entry's domain stays searchable");
-      assert.deepEqual(await search("nginx"), ["domain-alpha","domain-beta"], "image text stays searchable");
+      assert.deepEqual(await search("nginx"), ["domain-beta","domain-alpha"], "image text stays searchable, with the app that needs attention first");
       assert.deepEqual(await search("missing-image"), []);
       await search("");
     } finally { apps = original; }
@@ -634,9 +637,9 @@ try {
           const r = n.getBoundingClientRect();
           return {text:n.textContent, left:r.left, right:r.right, top:r.top, bottom:r.bottom};
         });
-        return {labels:rects('.app-card-title-row, .app-card-meta, .app-port, .app-card-url'), buttons:rects('.app-card-actions button')};
+        return {labels:rects('.app-card-title-row, .app-card-meta, .app-port, .app-card-url'), buttons:rects('.app-card-actions button, .app-card-actions a')};
       })()`);
-      assert.deepEqual(contents.buttons.map((button) => button.text), ["详情"]);
+      assert.deepEqual(contents.buttons.map((button) => button.text), ["打开", "停止", "详情"]);
       const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
       for (const label of contents.labels) {
         for (const button of contents.buttons) assert.equal(overlaps(label, button), false, `label/action overlap at ${width}: ${JSON.stringify({ label, button })}`);
@@ -857,9 +860,7 @@ try {
       })()`);
       assert.ok(layout.head, "the skeleton reserves the workspace head");
       assert.ok(layout.rows >= 3, `the skeleton reserves at least three application rows: ${JSON.stringify(layout)}`);
-      assert.ok(layout.panel > 0 && layout.stage > 0, `the skeleton keeps a list column and a detail stage: ${JSON.stringify(layout)}`);
-      assert.ok(layout.panel < layout.stage, `the detail stage stays the wider column: ${JSON.stringify(layout)}`);
-      assert.ok(layout.panel <= layout.width, "the skeleton never overflows the page");
+      assert.ok(layout.panel > 0 && layout.panel <= layout.width, `the catalog skeleton fills the page without overflowing: ${JSON.stringify(layout)}`);
       await capture("loading-skeleton", 1440);
     } finally {
       pending.release();

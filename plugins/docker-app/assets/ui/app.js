@@ -1124,11 +1124,11 @@ const syncListPanel = () => {
   const hasApps = listNode && listNode.children.length > 0;
   const inDetail = view === "detail";
   if (emptyNode) emptyNode.hidden = inDetail || !selectedAgentID || !engineReady || hasApps;
-  // Desktop keeps the inventory beside the work area; the narrow layout hides
-  // it through [data-view="detail"] so the detail owns the screen.
+  // The home page is the card list. The idle board only covers an empty node,
+  // and opening an application replaces the cards instead of sitting beside them.
   if (listPanel) listPanel.hidden = false;
   if (detailPanel) detailPanel.hidden = !inDetail;
-  if (detailIdle) detailIdle.hidden = inDetail || !selectedAgentID;
+  if (detailIdle) detailIdle.hidden = inDetail || !selectedAgentID || hasApps;
   if (workspaceNode) workspaceNode.dataset.view = inDetail ? "detail" : "list";
   if (workspaceHead) workspaceHead.hidden = false;
   if (inventoryChipsNode) inventoryChipsNode.hidden = !hasApps;
@@ -2467,118 +2467,81 @@ const renderApp = (app) => {
   card.dataset.search = [app.name, app.id, ...serviceImages(app).flatMap((service) => [service.name, service.image]), ...ruleDomains, app.version].filter(Boolean).join(" ").toLocaleLowerCase();
   card.dataset.updateAvailable = String(appHasUpdate(app));
   card.dataset.bucket = appBucket(app);
+  card.dataset.fleetRank = fleetRank(app) < 3 ? "attention" : "running";
   card.tabIndex = 0;
   const nameNode = card.querySelector("[data-app-name]");
   if (nameNode) nameNode.textContent = app.name || app.id;
-  const markNode = card.querySelector("[data-app-mark]");
-  if (markNode) {
-    const mark = appMark(app.name || app.id);
-    markNode.textContent = mark.letters;
-    markNode.dataset.tone = mark.tone;
-  }
+  const hasUpdate = appHasUpdate(app);
   const statusHook = card.querySelector("[data-app-status]");
   if (statusHook) {
     const status = app.status && app.status !== "有新版本" ? app.status : "";
-    const hasUpdate = appHasUpdate(app);
-    statusHook.textContent = status;
-    statusHook.hidden = !status;
-    if (status) statusHook.dataset.status = status;
-    else delete statusHook.dataset.status;
-    if (hasUpdate && statusHook.parentNode) {
-      const notice = document.createElement("span");
-      notice.className = "app-card-status ui-badge";
-      notice.dataset.status = "有新版本";
-      notice.dataset.updateHint = "";
-      notice.textContent = "可更新";
-      statusHook.parentNode.append(notice);
-    }
-  }
-  const imageNode = card.querySelector("[data-app-image]");
-  if (imageNode) {
-    const version = appVersion(app);
-    const services = serviceImages(app);
-    const images = services.length ? services : [{ image: version }];
-    imageNode.replaceChildren();
-    images.slice(0, 2).forEach((service) => {
-      const shown = service.image || service.current || version;
-      if (!shown) return;
-      const row = document.createElement("div");
-      row.className = "app-card-image-row";
-      const kind = document.createElement("span");
-      kind.className = "app-card-image-icon";
-      kind.append(iconNode("image"));
-      row.append(kind);
-      if (service.name) {
-        const name = document.createElement("span");
-        name.className = "app-card-service";
-        name.textContent = service.name;
-        row.append(name);
-      }
-      const image = document.createElement("span");
-      image.className = "app-card-image";
-      image.textContent = shown;
-      image.title = shown;
-      row.append(image);
-      // The version story of the service, next to the image it runs.
-      const versionState = String(service.version_state || "").trim();
-      const latest = String(service.latest || "").trim();
-      const current = String(service.version || "").trim();
-      if (versionState) {
-        const badge = document.createElement("span");
-        badge.className = "app-card-version";
-        badge.dataset.state = versionState;
-        if (versionState === "outdated" && latest) badge.textContent = `→ ${latest}`;
-        else if (current) badge.textContent = current;
-        else badge.textContent = "版本未知";
-        badge.title = versionState === "outdated" ? `仓库最新：${latest}` : `当前版本：${current}`;
-        row.append(badge);
-      }
-      imageNode.append(row);
-    });
-    if (images.length > 2) {
-      const remaining = document.createElement("span");
-      remaining.className = "app-card-services-more";
-      remaining.textContent = `另有 ${images.length - 2} 个服务，可在详情查看`;
-      imageNode.append(remaining);
-    }
-    imageNode.hidden = !imageNode.children.length;
-  }
-  const portNode = card.querySelector("[data-app-ports]");
-  if (portNode) {
-    portNode.replaceChildren();
-    const ports = appPorts(app);
-    const services = Array.isArray(app.services) ? app.services.filter(Boolean) : [];
-    if (ports.length) {
-      ports.forEach((port) => {
-        const bit = document.createElement("span");
-        bit.className = "app-port";
-        bit.textContent = String(port);
-        bit.title = `已发布端口 ${port}`;
-        portNode.append(bit);
-      });
+    delete statusHook.dataset.updateHint;
+    if (hasUpdate) {
+      statusHook.hidden = false;
+      statusHook.dataset.status = "有新版本";
+      statusHook.dataset.updateHint = "";
+      statusHook.textContent = "可更新";
+    } else if (status && status !== "运行中") {
+      statusHook.hidden = false;
+      statusHook.dataset.status = status;
+      statusHook.textContent = status;
     } else {
-      const empty = document.createElement("span");
-      empty.className = "app-port app-port-empty";
-      empty.textContent = "无发布端口";
-      portNode.append(empty);
+      statusHook.hidden = true;
+      statusHook.textContent = "";
+      delete statusHook.dataset.status;
     }
-    if (services.length > 1) {
-      const extra = document.createElement("span");
-      extra.className = "app-port app-port-empty";
-      extra.textContent = `${services.length} 个服务`;
-      portNode.append(extra);
-    }
-    portNode.hidden = false;
   }
   const openURL = firstEnabledRuleURL(app);
-  const urlNode = card.querySelector("[data-app-url]");
-  if (urlNode) {
-    urlNode.hidden = !openURL && !app.rules_error;
-    urlNode.textContent = app.rules_error ? "入口读取失败" : openURL ? displayHost(openURL) : "";
-    urlNode.title = openURL;
+  const imageNode = card.querySelector("[data-app-image]");
+  if (imageNode) {
+    const services = serviceImages(app);
+    const host = app.rules_error ? "入口读取失败" : (openURL ? displayHost(openURL) : "");
+    const image = services[0]?.image || appVersion(app);
+    const count = services.length || (Array.isArray(app.services) ? app.services.filter(Boolean).length : 0);
+    const parts = [];
+    if (host) parts.push(host);
+    else if (image && image !== "未解析镜像") parts.push(image);
+    if (count > 1) parts.push(`${count} 个服务`);
+    imageNode.textContent = parts.join(" · ");
+    imageNode.title = [host, ...services.map((service) => service.image || service.name)].filter(Boolean).join("\n");
+    imageNode.hidden = !imageNode.textContent;
   }
+  const portNode = card.querySelector("[data-app-ports]");
+  if (portNode) portNode.hidden = true;
+  const urlNode = card.querySelector("[data-app-url]");
+  if (urlNode) urlNode.hidden = true;
   const detailButton = card.querySelector('[data-action="detail"]');
   const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, "overview"); };
+  const actionsHost = card.querySelector(".app-card-actions");
+  const offered = new Map((Array.isArray(app.actions) ? app.actions : []).map((item) => [item.id, item]));
+  const addShortcut = (action) => {
+    if (!actionsHost || !action || !detailButton) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ui-btn ui-btn--secondary ui-btn--sm";
+    button.dataset.action = action.id;
+    button.textContent = action.label || action.id;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      runAppAction(app, action);
+    });
+    actionsHost.insertBefore(button, detailButton);
+  };
+  if (actionsHost && openURL && detailButton) {
+    const link = document.createElement("a");
+    link.className = "ui-btn ui-btn--secondary ui-btn--sm";
+    link.dataset.action = "open";
+    link.href = openURL;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "打开";
+    link.addEventListener("click", (event) => event.stopPropagation());
+    actionsHost.insertBefore(link, detailButton);
+  }
+  addShortcut(offered.get("start"));
+  if (hasUpdate) addShortcut(offered.get("update"));
+  addShortcut(offered.get("restart"));
+  addShortcut(offered.get("stop"));
   if (detailButton) {
     detailButton.textContent = "详情";
     detailButton.addEventListener("click", (event) => {
@@ -2587,7 +2550,7 @@ const renderApp = (app) => {
     });
   }
   card.addEventListener("click", (event) => {
-    if (event.target.closest("button")) return;
+    if (event.target.closest("button, a")) return;
     openDetail();
   });
   card.addEventListener("keydown", (event) => {
@@ -4235,16 +4198,29 @@ const scheduleImageRefresh = (apps) => {
 const applyInventoryFilter = () => {
   const query = (document.querySelector("#app-search")?.value || "").trim().toLocaleLowerCase();
   const filter = document.querySelector("#app-filter")?.value || "all";
-  const rows = Array.from(listNode.children);
+  const rows = Array.from(listNode.querySelectorAll(".app-card"));
   let visible = 0;
+  let visibleAttention = 0;
+  let visibleRunning = 0;
   rows.forEach((row) => {
     const bucket = row.dataset.bucket || "stopped";
     const matches = filter === "all"
       || filter === "running" && bucket === "running"
       || filter === "updates" && row.dataset.updateAvailable === "true"
       || filter === "stopped" && bucket === "stopped";
-    row.hidden = !matches || !row.dataset.search.includes(query);
-    if (!row.hidden) visible += 1;
+    row.hidden = !matches || !(row.dataset.search || "").includes(query);
+    if (!row.hidden) {
+      visible += 1;
+      if (row.dataset.fleetRank === "running") visibleRunning += 1;
+      else visibleAttention += 1;
+    }
+  });
+  const grouped = !query && filter === "all";
+  listNode.querySelectorAll(".fleet-group").forEach((group) => {
+    const count = group.dataset.group === "attention" ? visibleAttention : visibleRunning;
+    group.hidden = !grouped || count === 0;
+    const num = group.querySelector("b");
+    if (num) num.textContent = String(count);
   });
   document.querySelector("#app-no-results").hidden = !rows.length || visible > 0;
   if (inventoryChipsNode) {
@@ -4252,8 +4228,10 @@ const applyInventoryFilter = () => {
       chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
     });
   }
-  const updates = rows.filter((row) => row.dataset.updateAvailable === "true").length;
-  document.querySelector("#inventory-summary").textContent = query || filter !== "all" ? `${visible} / ${rows.length} 个应用` : updates ? `${updates} 个应用可更新` : `${rows.length} 个应用`;
+  const summary = document.querySelector("#inventory-summary");
+  if (query || filter !== "all") summary.textContent = `${visible} / ${rows.length}`;
+  else if (visibleAttention) summary.textContent = `${visibleAttention} 个需要关注`;
+  else summary.textContent = `${rows.length} 个应用`;
 };
 const searchInput = document.querySelector("#app-search");
 const searchClear = document.querySelector("#app-search-clear");
@@ -4270,6 +4248,23 @@ searchClear?.addEventListener("click", () => {
 });
 document.querySelector("#app-filter")?.addEventListener("change", applyInventoryFilter);
 document.querySelector("#empty-deploy")?.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing || view !== "list") return;
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || target.matches("input, textarea, select") || target.isContentEditable) return;
+  const cards = [...listNode.querySelectorAll(".app-card")].filter((row) => !row.hidden);
+  if (!cards.length) return;
+  const owner = target.closest(".app-card");
+  const current = owner ? cards.indexOf(owner) : -1;
+  if (current < 0 && !target.closest("#app-list")) return;
+  event.preventDefault();
+  const next = current < 0
+    ? cards[event.key === "ArrowDown" ? 0 : cards.length - 1]
+    : cards[Math.min(cards.length - 1, Math.max(0, current + (event.key === "ArrowDown" ? 1 : -1)))];
+  next.focus();
+  next.scrollIntoView({ block: "nearest" });
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
   const target = event.target;
@@ -4301,12 +4296,21 @@ const appHasUpdate = (app) => Boolean(app) && (
   || app.status === "有新版本"
   || serviceImages(app).some((service) => service.update)
 );
-const attentionApps = (apps) => {
-  const list = Array.isArray(apps) ? apps : [];
-  const updates = list.filter((app) => appHasUpdate(app));
-  const stopped = list.filter((app) => app.status !== "运行中" && app.status !== "发布中" && !updates.includes(app));
-  return [...updates, ...stopped];
+// 0 updates, 1 stopped or failed, 2 publishing, 3 healthy. The list and the
+// idle stage both use this so the things a person must touch stay together.
+const fleetRank = (app) => {
+  if (appHasUpdate(app)) return 0;
+  const bucket = appBucket(app);
+  if (bucket === "stopped") return 1;
+  if (bucket === "publishing") return 2;
+  return 3;
 };
+const sortFleet = (apps) => [...apps].sort((left, right) => {
+  const byRank = fleetRank(left) - fleetRank(right);
+  if (byRank) return byRank;
+  return String(left.name || left.id).localeCompare(String(right.name || right.id), "zh");
+});
+const attentionApps = (apps) => sortFleet(Array.isArray(apps) ? apps : []).filter((app) => fleetRank(app) < 3);
 
 const renderIdleOverview = (apps) => {
   if (!detailIdle) return;
@@ -4317,19 +4321,25 @@ const renderIdleOverview = (apps) => {
 
   const head = document.createElement("header");
   head.className = "idle-head";
-  const eyebrow = document.createElement("p");
-  eyebrow.className = "idle-eyebrow";
-  eyebrow.textContent = "工作台";
+  head.dataset.tone = attention.length ? "attention" : (list.length ? "calm" : "empty");
   const title = document.createElement("h2");
-  title.textContent = attention.length
-    ? `${attention.length} 个应用需要处理`
-    : (list.length ? "应用运行平稳" : "从第一份 Compose 开始");
+  if (!list.length) {
+    title.textContent = "从第一份 Compose 开始";
+  } else {
+    const figure = document.createElement("span");
+    figure.className = "idle-figure";
+    figure.textContent = String(attention.length || list.length);
+    const label = document.createElement("span");
+    label.className = "idle-figure-label";
+    label.textContent = attention.length ? "个需要处理" : "个运行中";
+    title.append(figure, label);
+  }
   const desc = document.createElement("p");
   desc.className = "idle-desc";
   desc.textContent = attention.length
-    ? "先处理更新与停止的应用；选中左侧应用也可以查看全部管理项。"
-    : (list.length ? "没有待处理项。需要时从右上角部署新的 Compose 应用。" : "部署一个应用后，这里会汇总需要关注的状态。");
-  head.append(eyebrow, title, desc);
+    ? "更新、停止、异常和发布中的应用排在左侧最上面。点一条就开始处理。"
+    : (list.length ? "没有需要处理的应用。从左侧点开任意一个，或部署新的 Compose。" : "部署一个应用后，停止、更新和异常会集中出现在这里。");
+  head.append(title, desc);
 
   const attentionSection = document.createElement("section");
   attentionSection.className = "idle-panel idle-panel--attention";
@@ -4346,42 +4356,38 @@ const renderIdleOverview = (apps) => {
   if (attention.length) {
     const rows = document.createElement("div");
     rows.className = "idle-list";
-    attention.slice(0, 5).forEach((app) => {
+    const shown = attention.slice(0, 8);
+    shown.forEach((app) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "idle-app";
-      const mark = appMark(app.name || app.id);
-      const markNode = document.createElement("span");
-      markNode.className = "idle-app__mark";
-      markNode.dataset.tone = mark.tone;
-      markNode.textContent = mark.letters;
+      const update = appHasUpdate(app);
+      const dot = document.createElement("span");
+      dot.className = "app-signal";
+      const rank = fleetRank(app);
+      dot.dataset.tone = rank === 0 ? "update" : rank === 2 ? "publishing" : "stopped";
       const copy = document.createElement("span");
       copy.className = "idle-app__copy";
       const name = document.createElement("strong");
       name.textContent = app.name || app.id;
       const meta = document.createElement("span");
       meta.className = "idle-app__meta";
-      const update = appHasUpdate(app);
-      const facts = [update ? "有新版本" : (app.status || "已停止")];
-      const ports = appPorts(app);
-      if (ports.length) facts.push(`${ports.length} 个端口`);
       const domain = firstEnabledRuleURL(app);
-      if (domain) facts.push(displayHost(domain));
-      meta.textContent = facts.join(" · ");
+      meta.textContent = domain ? displayHost(domain) : (update ? "有新版本" : (app.status || "已停止"));
       copy.append(name, meta);
       const flag = document.createElement("span");
       flag.className = "idle-app__flag";
-      flag.dataset.tone = update ? "warning" : "muted";
-      flag.textContent = update ? "可更新" : "需处理";
-      button.append(markNode, copy, flag, iconNode("chevron-right", "ui-icon idle-app__chevron"));
+      flag.dataset.tone = update ? "warning" : (app.status === "异常" ? "danger" : "muted");
+      flag.textContent = update ? "可更新" : (app.status || "需处理");
+      button.append(dot, copy, flag);
       button.addEventListener("click", () => { if (!busy) showDetail(app.id, "overview"); });
       rows.append(button);
     });
     attentionSection.append(rows);
-    if (attention.length > 5) {
+    if (attention.length > shown.length) {
       const more = document.createElement("p");
       more.className = "idle-more";
-      more.textContent = `还有 ${attention.length - 5} 个应用，请从左侧清单查看。`;
+      more.textContent = `还有 ${attention.length - shown.length} 个，在左侧「需要关注」里。`;
       attentionSection.append(more);
     }
   } else {
@@ -4446,18 +4452,45 @@ const renderIdleOverview = (apps) => {
   detailIdle.append(head, attentionSection, grid);
 };
 
+const fleetGroup = (id, label, count) => {
+  const group = document.createElement("div");
+  group.className = "fleet-group";
+  group.dataset.group = id;
+  const name = document.createElement("span");
+  name.textContent = label;
+  const num = document.createElement("b");
+  num.textContent = String(count);
+  group.append(name, num);
+  return group;
+};
+
 const renderApps = (apps) => {
-  const list = Array.isArray(apps) ? apps : [];
+  const list = sortFleet(Array.isArray(apps) ? apps : []);
   lastApps = list;
-  listNode.replaceChildren(...list.map(renderApp));
+  const attention = list.filter((app) => fleetRank(app) < 3);
+  const running = list.filter((app) => fleetRank(app) === 3);
+  const nodes = [];
+  if (attention.length && running.length) nodes.push(fleetGroup("attention", "需要关注", attention.length));
+  nodes.push(...attention.map(renderApp));
+  if (attention.length && running.length) nodes.push(fleetGroup("running", "运行中", running.length));
+  nodes.push(...running.map(renderApp));
+  listNode.replaceChildren(...nodes);
   scheduleImageRefresh(list);
   countNode.hidden = list.length === 0;
   countNode.textContent = `${list.length} 个`;
   markSelectedApp(view === "detail" ? selectedAppID : listSelectionID);
   renderInventoryChips(list);
+  renderFleetFocus(list);
   renderIdleOverview(list);
   applyInventoryFilter();
   syncListPanel();
+};
+
+const renderFleetFocus = () => {
+  const node = document.querySelector("#fleet-focus");
+  if (!node) return;
+  node.hidden = true;
+  node.textContent = "";
 };
 
 // A one-line read on the node: how many apps run, how many can be updated.
@@ -4485,6 +4518,7 @@ const renderInventoryChips = (apps) => {
     chip.className = "inventory-chip";
     chip.dataset.tone = tone;
     chip.dataset.filter = filter;
+    chip.dataset.hot = (filter === "updates" || filter === "stopped") && value > 0 ? "true" : "false";
     chip.setAttribute("aria-pressed", String(filter === activeFilter));
     chip.setAttribute("aria-label", `${label}：${value} 个应用`);
     const count = document.createElement("b");

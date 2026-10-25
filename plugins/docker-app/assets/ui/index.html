@@ -138,7 +138,7 @@
       </span>
       <div class="deck-brand__text">
         <h1 class="ui-title">Docker 应用</h1>
-        <p class="topbar__subtitle">Compose 应用控制台<span class="ui-sr-only"> · 应用镜像版本</span></p>
+        <p class="topbar__subtitle">节点上的 Compose 应用<span class="ui-sr-only"> · 应用镜像版本</span></p>
       </div>
     </div>
     <div class="ui-page-actions page-head-agent">
@@ -307,9 +307,10 @@
         <div class="workspace-head-copy">
           <div class="workspace-title-line">
             <h2 id="app-list-title">应用</h2>
+            <p id="fleet-focus" hidden></p>
             <p id="app-count" class="count" hidden></p>
           </div>
-          <p class="workspace-head-note">节点上的 Compose 应用</p>
+          <p class="workspace-head-note">需要关注的排在前面</p>
         </div>
         <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
         <div class="workspace-head-actions">
@@ -330,14 +331,13 @@
                 <svg class="ui-icon" aria-hidden="true"><use href="#i-close"></use></svg>
               </button>
             </div>
-            <label class="inventory-filter">
+            <span id="inventory-summary" class="inventory-summary ui-toolbar__meta" role="status"></span>
+            <label class="inventory-filter ui-sr-only">
               <span class="ui-sr-only">应用状态</span>
-              <select class="ui-select" id="app-filter" aria-label="应用状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="updates">有更新</option><option value="stopped">已停止</option></select>
+              <select class="ui-select" id="app-filter" tabindex="-1" aria-label="应用状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="updates">有更新</option><option value="stopped">已停止</option></select>
             </label>
           </div>
-          <div class="inventory-meta">
-            <span id="inventory-summary" class="inventory-summary ui-toolbar__meta" role="status"></span>
-          </div>
+          <div class="inventory-meta" hidden></div>
           <div id="app-list" class="app-list" data-card-wall="apps"></div>
           <p id="app-no-results" class="inventory-no-results" role="status" hidden>没有匹配的应用，试试其他名称或状态。</p>
           <div id="app-empty" class="ui-empty app-empty" hidden>
@@ -477,23 +477,19 @@
     <template id="app-card-template">
       <article class="ui-card app-card" tabindex="0">
         <div class="app-card-head">
-          <span class="app-card-mark" data-app-mark aria-hidden="true"></span>
           <div class="app-card-identity">
-            <div class="app-card-title-row">
-              <h3 data-app-name></h3>
-              <div class="app-card-badges">
-                <p class="app-card-status ui-badge" data-app-status></p>
-              </div>
+            <h3 data-app-name></h3>
+            <div class="app-card-sub">
+              <p class="app-card-meta" data-app-image></p>
+              <p class="app-card-status ui-badge" data-app-status hidden></p>
             </div>
-            <p class="app-card-ports" data-app-ports></p>
           </div>
-          <span class="app-card-chevron" aria-hidden="true"><svg class="ui-icon"><use href="#i-chevron-right"></use></svg></span>
         </div>
-        <div class="app-card-meta" data-app-image></div>
-        <p class="app-card-url" data-app-url hidden></p>
         <div class="app-card-actions">
           <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
         </div>
+        <p class="app-card-ports" data-app-ports hidden></p>
+        <p class="app-card-url" data-app-url hidden></p>
       </article>
     </template>
 

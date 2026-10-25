@@ -123,16 +123,23 @@ The management page is a working console rather than a list beside an empty
 column. A sticky command bar carries the brand, the target-node picker with its
 live engine badge and refresh, and the only primary deployment entry. A compact
 status band counts all, running, updatable and stopped applications and doubles
-as the status filter. The inventory column below the band keeps search (the `/`
-shortcut focuses it), the status filter and the application rows visible while
-a detail is open. Every row uses one structure: monogram and name, inline status
-and update badges, published ports with the service count, one line per service
-image, the ingress domain link, and a `详情` link. The whole row opens the
-detail view and is keyboard focusable, and rows carry no inline primary action,
-so running, stopped and updatable applications never show different button
-sets. Selecting nothing leaves an actionable work area instead of blank space:
-it lists the applications that need attention, the node facts (node, engine
-version, application count) and quick starts for deploying or cleaning up.
+as the status filter; a non-zero update or stopped count is the only colored
+count. The home page is the card list: search (the `/` shortcut focuses it)
+sits above a full-width card grid, ordered so
+updates, stopped or failed apps, and in-progress publishes come before healthy
+ones, with those two groups labeled when both exist. A card shows the name,
+one secondary fact (domain, otherwise the first image, plus a service count
+when there is more than one), and one status badge. Healthy running cards do
+not carry that badge. The card footer offers the everyday actions the API
+allows — open, start, update, restart, stop — then `详情`. Those controls stay
+secondary or ghost; the only filled primary on the list is `部署应用`. Arrow
+keys move between visible cards. The card body opens the detail view and is
+keyboard focusable. Service images stay searchable and are edited from the
+detail overview. Selecting nothing leaves an actionable work area instead of
+blank space: its figure is the count that needs attention, or the running count
+when nothing does, then the applications that need attention, the node facts
+(node, engine version, application count) and quick starts for deploying or
+cleaning up.
 Empty inventories, unmatched searches and offline nodes replace the previous
 content instead of leaving stale rows behind.
 

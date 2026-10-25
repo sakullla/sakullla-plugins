@@ -40,13 +40,51 @@ function reset() {
 }
 reset();
 
+const fleetNames = ["emby","jellyfin","nginx","frpc","adguard","vaultwarden","immich","nextcloud","gitea","grafana","prometheus","home-assistant","mosquitto","ntfy","paperless","mealie","syncthing","filebrowser","photoprism","uptime-kuma","changedetection","portainer","redis","postgres","mariadb","code-server","node-red","loki","homepage","qbittorrent"];
+
+function loadFleet(count = 240) {
+  const apps = [];
+  for (let i = 0; i < count; i += 1) {
+    const base = fleetNames[i % fleetNames.length];
+    const id = i < fleetNames.length ? base : `${base}-${Math.floor(i / fleetNames.length) + 1}`;
+    const band = i % 17;
+    let status = "运行中";
+    let notice = "";
+    let actions = [{id:"stop",label:"停止"},{id:"restart",label:"重启"},{id:"delete",label:"删除"}];
+    if (band === 0) {
+      status = "已停止";
+      actions = [{id:"start",label:"启动"},{id:"delete",label:"删除"}];
+    } else if (band === 1) {
+      notice = "有新版本";
+      actions = [{id:"update",label:"更新"},{id:"stop",label:"停止"},{id:"delete",label:"删除"}];
+    } else if (band === 2) status = "异常";
+    else if (band === 3) {
+      status = "发布中";
+      actions = [{id:"delete",label:"删除"}];
+    }
+    apps.push(makeApp(id, "node-a", {
+      status, notice, actions,
+      rules: i % 2 === 0 ? [{id:`rule-${id}`, enabled: status !== "已停止", domain:`${id}.home.example`, port:8080}] : [],
+      ports: [20000 + (i % 800)],
+      version: `${base}:1.${i % 40}`,
+      services: ["web"],
+    }));
+  }
+  operations.apps = apps;
+  resources.apps = apps;
+  for (const app of apps) {
+    resources.filesByOwner.set(`${app.agent_id}/${app.id}`, new Map([[".", null], ["compose.yaml", app.compose]]));
+  }
+}
+
 const previewControls = `<details id="local-preview-tools" style="position:fixed;left:12px;bottom:12px;z-index:100;background:var(--color-bg-surface);color:var(--color-text-secondary);border:1px solid var(--color-border-default);border-radius:12px;padding:7px 10px;font:12px system-ui;white-space:nowrap;width:max-content;max-width:calc(100vw - 24px);box-shadow:0 4px 20px #23133712"><summary style="cursor:pointer;min-height:28px;line-height:28px">预览工具</summary><div style="display:flex;align-items:center;gap:8px;padding-top:8px">
-  <span style="white-space:nowrap">模拟预览</span><select aria-label="预览主题" id="preview-theme" style="font:inherit;min-height:28px;padding:4px;width:76px;flex:0 0 76px"><option value="light">浅色</option><option value="dark">夜空</option></select><button type="button" id="preview-reset" style="font:inherit;min-height:28px;padding:4px 8px;width:auto;white-space:nowrap">重置</button>
+  <span style="white-space:nowrap">模拟预览</span><select aria-label="预览主题" id="preview-theme" style="font:inherit;min-height:28px;padding:4px;width:76px;flex:0 0 76px"><option value="light">浅色</option><option value="dark">夜空</option></select><button type="button" id="preview-fleet" style="font:inherit;min-height:28px;padding:4px 8px;width:auto;white-space:nowrap">240 个应用</button><button type="button" id="preview-reset" style="font:inherit;min-height:28px;padding:4px 8px;width:auto;white-space:nowrap">重置</button>
 </div></details><style>@media(max-width:520px){body:has(#local-preview-tools[open]) #companion-assistant{visibility:hidden}}</style><script>
 const themePicker = document.querySelector('#preview-theme');
 themePicker.value = localStorage.getItem('theme') === 'sakura-night' ? 'dark' : 'light';
 themePicker.addEventListener('change', () => {localStorage.setItem('theme', themePicker.value === 'dark' ? 'sakura-night' : 'business'); document.documentElement.dataset.theme = themePicker.value;});
 document.querySelector('#preview-reset').addEventListener('click', async () => {await fetch('/__preview/reset',{method:'POST'}); location.reload();});
+document.querySelector('#preview-fleet').addEventListener('click', async () => {await fetch('/__preview/fleet',{method:'POST'}); location.reload();});
 </script>`;
 
 const server = createServer(async (request, response) => {
@@ -69,6 +107,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(200,{"Content-Type":type,"Cache-Control":"no-store"});return response.end(content);
     }
     if (url.pathname === "/__preview/reset" && request.method === "POST") {reset(); return json({accepted:true});}
+    if (url.pathname === "/__preview/fleet" && request.method === "POST") {loadFleet(240); return json({accepted:true,count:operations.apps.length});}
     if (url.pathname === "/panel-api/agents") return json({agents:agents.map((a,i) => ({...a,name:i===0?"debian-jnp12（预览）":a.name}))});
     if (url.pathname === "/panel-api/plugins/docker-app") return json({instances:[{targets:agents.map(a=>a.id)}]});
     if (url.pathname === "/api/engine") return json({engine:engineFor(url.searchParams.get("agent_id"))});
