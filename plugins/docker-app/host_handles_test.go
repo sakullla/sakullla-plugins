@@ -595,7 +595,7 @@ func TestProductionRuntimeWiresGenericHostHandlesAndOmitsComposeGrant(t *testing
 }
 
 func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
-	t.Parallel()
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeControlPlane)
 	client := hostCallFunc(func(context.Context, pluginsdk.HostRuntimeCall, any) error {
 		t.Fatal("production bind must not call the host while constructing")
 		return nil
@@ -619,6 +619,26 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	store, ok := config.UIDeploymentState.(*persistedDeploymentStore)
 	if !ok || store == nil || store.backend != runtime {
 		t.Fatalf("deployment store = %#v", config.UIDeploymentState)
+	}
+}
+
+func TestAgentExecutionRuntimeDoesNotBindControlPlaneStateHandles(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeAgent)
+	client := hostCallFunc(func(context.Context, pluginsdk.HostRuntimeCall, any) error {
+		t.Fatal("Agent execution prepare must not read control-plane state")
+		return nil
+	})
+	config := bindHostCapabilityClient(ControllerConfig{}, func() (hostRuntimeCaller, error) {
+		return client, nil
+	})
+	if config.UIAppState != nil {
+		t.Fatal("Agent execution face bound the control-plane app state store")
+	}
+	if config.UIDeploymentState != nil {
+		t.Fatal("Agent execution face bound the control-plane deployment state store")
+	}
+	if config.UIApply == nil || config.UIBackup == nil {
+		t.Fatal("Agent execution face lost execution host handles")
 	}
 }
 

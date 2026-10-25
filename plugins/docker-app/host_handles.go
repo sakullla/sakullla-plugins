@@ -714,7 +714,13 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 		config.BackupSecrets = source
 	}
 	config.UIEngineSource = runtime
-	config.UIAppState = runtime
+	// The Agent execution face exposes managed execution and scoped-secret
+	// calls, but it does not expose the control-plane state.get/state.put
+	// namespace. Binding the persistent UI state store here makes every Agent
+	// Prepare call fail before the execution runtime can start.
+	if !agentExecutionFace() {
+		config.UIAppState = runtime
+	}
 	config.UIApply = runtime
 	config.UIStart = runtime
 	config.UIStop = runtime
@@ -729,7 +735,9 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 	config.UIHTTPBackendOffer = runtime
 	config.UIImageObserver = runtime
 	config.UIRolloutExecutor = hostRolloutRuntime{runtime: runtime}
-	config.UIDeploymentState = newPersistedDeploymentStore(runtime)
+	if !agentExecutionFace() {
+		config.UIDeploymentState = newPersistedDeploymentStore(runtime)
+	}
 	config.UIBackup = runtime
 	return config
 }
