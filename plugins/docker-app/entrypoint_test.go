@@ -76,6 +76,9 @@ func TestPluginYAMLDeclaresImplicitRemoteAgentExecution(t *testing.T) {
 	if !pluginsdk.RuntimeImplicitRemoteAgentExecution(manifest.Runtime) {
 		t.Fatalf("docker-app runtime = %+v, want implicit remote Agent execution", manifest.Runtime)
 	}
+	if manifest.Metadata[pluginsdk.RPCFeatureExecutionScopeV1] != pluginsdk.HostScopeAgent {
+		t.Fatalf("docker-app execution scope metadata = %q, want %q", manifest.Metadata[pluginsdk.RPCFeatureExecutionScopeV1], pluginsdk.HostScopeAgent)
+	}
 }
 
 func TestRuntimeServicesSkipUIWithoutHostRuntimeEndpoint(t *testing.T) {
@@ -99,6 +102,16 @@ func TestRuntimeServicesSkipUIWhenDockerProxyIsPresent(t *testing.T) {
 	services := runtimeServices()
 	if services.UI || !services.UIOptional {
 		t.Fatalf("agent docker-proxy face still serves UI: %#v", services)
+	}
+}
+
+func TestRuntimeServicesSkipUIForExplicitAgentExecutionScope(t *testing.T) {
+	t.Setenv(pluginsdk.EnvPluginHostEndpoint, "unix:/run/nre-plugin/host.sock")
+	t.Setenv("NRE_PLUGIN_DOCKER_PROXY_ENDPOINT", "")
+	t.Setenv(pluginsdk.EnvPluginExecutionScope, pluginsdk.HostScopeAgent)
+	services := runtimeServices()
+	if services.UI || !services.UIOptional {
+		t.Fatalf("explicit Agent execution scope still serves UI: %#v", services)
 	}
 }
 

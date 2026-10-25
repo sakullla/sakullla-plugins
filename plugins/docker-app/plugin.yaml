@@ -1,6 +1,6 @@
 schema_version: 1
 id: docker-app
-version: 0.1.56
+version: 0.1.57
 name: Docker 应用
 description: 通过 compose YAML 管理 Agent 上的应用启停、日志、工作区文件、备份恢复与删除
 compatibility:
@@ -26,6 +26,7 @@ extension_points:
 ui_route_id: docker-app
 resource_group_id: docker-app
 metadata:
+  rpc.execution-scope.v1: agent
   ui.nav.group: 基础设施
   ui.nav.label: Docker 应用
   resource.group.ref: resource-group/docker-app

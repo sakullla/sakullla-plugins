@@ -16,6 +16,8 @@ The plugin declares `ui.route` and `resource.group` in `plugin.yaml`, with
 `host_scope: control-plane` for the management face and `host_scopes`
 including `agent` for the execution face. The management face runs on the control plane; Agent execution uses the SDK
 explicit target allowlist. Empty instance targets do not select all remote Agents.
+Signed metadata `rpc.execution-scope.v1: agent` makes the Agent face explicit to
+the Host, so the runtime does not infer it from endpoint presence.
 The UI offers only remote Agents present in deployed instance targets; it does
 not configure itself onto a selected node. The host mounts the page at
 `/panel-api/plugins/<ui_route_id>/` and lists the resource group from
