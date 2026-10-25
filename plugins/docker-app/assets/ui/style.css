@@ -4515,6 +4515,8 @@ main.deck { max-width: 90rem; }
 
 .app-card::before { content: none; }
 
+.app-card[data-status="运行中"] { box-shadow: inset 3px 0 0 var(--ui-success), var(--ui-shadow-sm); }
+.app-card[data-status="已停止"] { box-shadow: inset 3px 0 0 var(--ui-border), var(--ui-shadow-sm); }
 .app-card[data-status="异常"] { box-shadow: inset 3px 0 0 var(--ui-danger), var(--ui-shadow-sm); }
 .app-card[data-status="发布中"] { box-shadow: inset 3px 0 0 var(--ui-primary), var(--ui-shadow-sm); }
 .app-card[data-update-available="true"] { box-shadow: inset 3px 0 0 var(--ui-warning), var(--ui-shadow-sm); }
@@ -4526,6 +4528,8 @@ main.deck { max-width: 90rem; }
   transform: none;
 }
 
+.app-card[data-status="运行中"]:hover { box-shadow: inset 3px 0 0 var(--ui-success), var(--ui-shadow-md); }
+.app-card[data-status="已停止"]:hover { box-shadow: inset 3px 0 0 var(--ui-border), var(--ui-shadow-md); }
 .app-card[data-status="异常"]:hover { box-shadow: inset 3px 0 0 var(--ui-danger), var(--ui-shadow-md); }
 .app-card[data-status="发布中"]:hover { box-shadow: inset 3px 0 0 var(--ui-primary), var(--ui-shadow-md); }
 .app-card[data-update-available="true"]:hover { box-shadow: inset 3px 0 0 var(--ui-warning), var(--ui-shadow-md); }
@@ -4537,14 +4541,16 @@ main.deck { max-width: 90rem; }
 
 .app-card[data-selected="true"] {
   border-color: var(--ui-primary);
-  background: var(--ui-primary-soft);
-  box-shadow: inset 0 0 0 1px var(--ui-primary);
+  background: var(--ui-surface);
+  box-shadow: inset 3px 0 0 var(--ui-primary), inset 0 0 0 1px var(--ui-primary), var(--ui-shadow-sm);
 }
 
 .app-card-head {
-  display: block;
-  flex: 1 1 auto;
-  padding: 0.85rem 1rem 0.7rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  flex: 0 0 auto;
+  padding: 0.85rem 0.95rem 0.45rem;
 }
 
 .app-signal {
@@ -4561,48 +4567,188 @@ main.deck { max-width: 90rem; }
 .app-signal[data-tone="stopped"] { background: var(--ui-danger); }
 .app-signal[data-tone="publishing"] { background: var(--ui-primary); }
 
-.app-card-identity {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "name status"
-    "meta status";
-  column-gap: 0.75rem;
-  row-gap: 0.12rem;
+.app-card-mark {
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 0.7rem;
+  font-size: 0.72rem;
+}
+
+.app-card-identity { display: flex; flex-direction: column; gap: 0.28rem; min-width: 0; }
+
+.app-card-title-row {
+  display: flex;
   align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.45rem;
   min-width: 0;
 }
 
 .app-card h3 {
-  grid-area: name;
+  flex: 1 1 auto;
   min-width: 0;
-  font-size: 0.98rem;
-  font-weight: 650;
+  font-size: 1rem;
+  font-weight: 680;
   letter-spacing: -0.02em;
   line-height: 1.25;
 }
 
-.app-card-sub { display: contents; }
+.app-card-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  gap: 0.25rem;
+  margin-left: auto;
+}
 
-.app-card-meta {
-  display: block;
-  grid-area: meta;
-  min-width: 0;
+.app-card-badges:empty { display: none; }
+
+.app-card-ports {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.28rem;
   margin: 0;
-  padding: 0;
-  border: 0;
+}
+
+.app-port {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.02rem 0.38rem;
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-sunken);
+  color: var(--ui-text-secondary);
+  font-family: var(--app-mono);
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.app-port::before { content: none; }
+
+.app-port-empty,
+.app-port-count,
+.app-port-more {
+  background: transparent;
+  padding-inline: 0;
+  color: var(--ui-text-tertiary);
+  font-family: var(--ui-font-sans);
+  font-weight: 600;
+}
+
+.app-card-body:not(:has(.app-card-images:not([hidden]), .app-card-url:not([hidden]))) { display: none; }
+
+.app-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.15rem 0.95rem 0.75rem;
+}
+
+.app-card-images {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+.app-card-image-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  min-height: 1.55rem;
+  padding: 0.16rem 0.45rem;
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--ui-sunken) 72%, var(--ui-surface));
+}
+
+.app-card-image-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--ui-text-tertiary);
+}
+
+.app-card-image-icon .ui-icon { width: 0.85rem; height: 0.85rem; }
+
+.app-card-service {
+  flex: 0 1 auto;
+  max-width: 6.5rem;
+  min-width: 0;
   overflow: hidden;
   color: var(--ui-text-secondary);
-  font-size: 0.75rem;
-  line-height: 1.35;
+  font-size: 0.66rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.app-card-image {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-family: var(--app-mono);
+  font-size: 0.72rem;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.app-card-status {
-  grid-area: status;
-  justify-self: end;
-  align-self: center;
+.app-card-version {
+  display: inline-flex;
+  flex: 0 0 auto;
+  max-width: 9.5rem;
+  overflow: hidden;
+  padding: 0.05rem 0.42rem;
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-subtle);
+  color: var(--ui-text-secondary);
+  font-size: 0.64rem;
+  font-weight: 650;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-card-version[data-state="outdated"] { background: var(--ui-warning-soft); color: var(--ui-warning-text); }
+.app-card-version[data-state="ready"] { background: var(--ui-success-soft); color: var(--ui-success-text); }
+.app-card-version[data-state="pending"],
+.app-card-version[data-state="unknown"] { background: var(--ui-subtle); color: var(--ui-text-tertiary); }
+
+.app-card-services-more {
+  margin: 0;
+  color: var(--ui-text-tertiary);
+  font-size: 0.7rem;
+  line-height: 1.3;
+}
+
+.app-card-url {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  margin: 0;
+  color: var(--ui-primary);
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.app-card-url-icon { display: inline-flex; flex: 0 0 auto; }
+.app-card-url-icon .ui-icon { width: 0.85rem; height: 0.85rem; }
+
+.app-card-url-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-card-actions {

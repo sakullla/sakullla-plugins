@@ -325,8 +325,8 @@ try {
         })()`);
         assert.match(layout.search, /example\/gateway:v1\.2\.3/, "gateway image stays searchable from the row");
         assert.match(layout.search, /example\/worker:latest/, "worker image stays searchable from the row");
-        assert.equal(layout.images, 0, "service images stay out of the scan row");
-        assert.ok(layout.height < layout.rem * 8, `a multi-service app stays one card: ${layout.height}`);
+        assert.equal(layout.images, 2, "both service versions stay on the card");
+        assert.ok(layout.height < layout.rem * 16, `a multi-service app stays one card: ${layout.height}`);
         assert.equal(layout.overflow, false);
         assert.deepEqual(layout.actions, ["重启", "停止", "详情"]);
         await capture("multi-service-card", width);

@@ -477,19 +477,24 @@
     <template id="app-card-template">
       <article class="ui-card app-card" tabindex="0">
         <div class="app-card-head">
+          <span class="app-card-mark" data-app-mark aria-hidden="true"></span>
           <div class="app-card-identity">
-            <h3 data-app-name></h3>
-            <div class="app-card-sub">
-              <p class="app-card-meta" data-app-image></p>
-              <p class="app-card-status ui-badge" data-app-status hidden></p>
+            <div class="app-card-title-row">
+              <h3 data-app-name></h3>
+              <div class="app-card-badges">
+                <p class="app-card-status ui-badge" data-app-status hidden></p>
+              </div>
             </div>
+            <p class="app-card-ports" data-app-ports hidden></p>
           </div>
+        </div>
+        <div class="app-card-body">
+          <div class="app-card-images" data-app-image></div>
+          <p class="app-card-url" data-app-url hidden></p>
         </div>
         <div class="app-card-actions">
           <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-action="detail">详情</button>
         </div>
-        <p class="app-card-ports" data-app-ports hidden></p>
-        <p class="app-card-url" data-app-url hidden></p>
       </article>
     </template>
 

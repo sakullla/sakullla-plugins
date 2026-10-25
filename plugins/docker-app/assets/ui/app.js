@@ -2471,45 +2471,139 @@ const renderApp = (app) => {
   card.tabIndex = 0;
   const nameNode = card.querySelector("[data-app-name]");
   if (nameNode) nameNode.textContent = app.name || app.id;
+  const markNode = card.querySelector("[data-app-mark]");
+  if (markNode) {
+    const mark = appMark(app.name || app.id);
+    markNode.textContent = mark.letters;
+    markNode.dataset.tone = mark.tone;
+  }
   const hasUpdate = appHasUpdate(app);
   const statusHook = card.querySelector("[data-app-status]");
   if (statusHook) {
     const status = app.status && app.status !== "有新版本" ? app.status : "";
     delete statusHook.dataset.updateHint;
-    if (hasUpdate) {
-      statusHook.hidden = false;
-      statusHook.dataset.status = "有新版本";
-      statusHook.dataset.updateHint = "";
-      statusHook.textContent = "可更新";
-    } else if (status && status !== "运行中") {
-      statusHook.hidden = false;
-      statusHook.dataset.status = status;
-      statusHook.textContent = status;
-    } else {
-      statusHook.hidden = true;
-      statusHook.textContent = "";
-      delete statusHook.dataset.status;
+    statusHook.hidden = !status;
+    statusHook.textContent = status;
+    if (status) statusHook.dataset.status = status;
+    else delete statusHook.dataset.status;
+    if (hasUpdate && statusHook.parentNode) {
+      const notice = document.createElement("p");
+      notice.className = "app-card-status ui-badge";
+      notice.dataset.status = "有新版本";
+      notice.dataset.updateHint = "";
+      notice.textContent = "可更新";
+      statusHook.parentNode.append(notice);
     }
   }
   const openURL = firstEnabledRuleURL(app);
+  const services = serviceImages(app);
+  const serviceCount = services.length || (Array.isArray(app.services) ? app.services.filter(Boolean).length : 0);
   const imageNode = card.querySelector("[data-app-image]");
   if (imageNode) {
-    const services = serviceImages(app);
-    const host = app.rules_error ? "入口读取失败" : (openURL ? displayHost(openURL) : "");
-    const image = services[0]?.image || appVersion(app);
-    const count = services.length || (Array.isArray(app.services) ? app.services.filter(Boolean).length : 0);
-    const parts = [];
-    if (host) parts.push(host);
-    else if (image && image !== "未解析镜像") parts.push(image);
-    if (count > 1) parts.push(`${count} 个服务`);
-    imageNode.textContent = parts.join(" · ");
-    imageNode.title = [host, ...services.map((service) => service.image || service.name)].filter(Boolean).join("\n");
-    imageNode.hidden = !imageNode.textContent;
+    const version = appVersion(app);
+    const images = services.length ? services : (version && version !== "未解析镜像" ? [{ image: version }] : []);
+    imageNode.replaceChildren();
+    images.slice(0, 2).forEach((service) => {
+      const shown = service.image || service.current || version;
+      if (!shown || shown === "未解析镜像") return;
+      const row = document.createElement("div");
+      row.className = "app-card-image-row";
+      const kind = document.createElement("span");
+      kind.className = "app-card-image-icon";
+      kind.setAttribute("aria-hidden", "true");
+      kind.append(iconNode("image"));
+      row.append(kind);
+      if (service.name) {
+        const serviceName = document.createElement("span");
+        serviceName.className = "app-card-service";
+        serviceName.textContent = service.name;
+        serviceName.title = service.name;
+        row.append(serviceName);
+      }
+      const image = document.createElement("span");
+      image.className = "app-card-image";
+      image.textContent = shown;
+      image.title = shown;
+      row.append(image);
+      const versionStatus = serviceImageStatus(service);
+      if (versionStatus.text) {
+        const badge = document.createElement("span");
+        badge.className = "app-card-version";
+        badge.dataset.state = versionStatus.state || "empty";
+        badge.textContent = versionStatus.text;
+        badge.title = versionStatus.text;
+        row.append(badge);
+      }
+      imageNode.append(row);
+    });
+    if (images.length > 2) {
+      const remaining = document.createElement("p");
+      remaining.className = "app-card-services-more";
+      remaining.textContent = `另有 ${images.length - 2} 个服务`;
+      imageNode.append(remaining);
+    }
+    imageNode.hidden = imageNode.childElementCount === 0;
   }
   const portNode = card.querySelector("[data-app-ports]");
-  if (portNode) portNode.hidden = true;
+  if (portNode) {
+    portNode.replaceChildren();
+    const ports = appPorts(app);
+    const shownPorts = ports.slice(0, 3);
+    shownPorts.forEach((port) => {
+      const bit = document.createElement("span");
+      bit.className = "app-port";
+      bit.textContent = `:${port}`;
+      bit.title = `已发布端口 ${port}`;
+      portNode.append(bit);
+    });
+    if (ports.length > shownPorts.length) {
+      const more = document.createElement("span");
+      more.className = "app-port app-port-more";
+      more.textContent = `+${ports.length - shownPorts.length}`;
+      more.title = ports.slice(shownPorts.length).map((port) => `:${port}`).join(" ");
+      portNode.append(more);
+    }
+    if (!ports.length) {
+      const empty = document.createElement("span");
+      empty.className = "app-port app-port-empty";
+      empty.textContent = "无发布端口";
+      portNode.append(empty);
+    }
+    if (serviceCount > 1) {
+      const count = document.createElement("span");
+      count.className = "app-port app-port-count";
+      count.textContent = `${serviceCount} 个服务`;
+      portNode.append(count);
+    }
+    portNode.hidden = false;
+  }
   const urlNode = card.querySelector("[data-app-url]");
-  if (urlNode) urlNode.hidden = true;
+  if (urlNode) {
+    urlNode.replaceChildren();
+    const hosts = [];
+    if (app.rules_error) hosts.push("入口读取失败");
+    else {
+      (Array.isArray(app.rules) ? app.rules : []).forEach((rule) => {
+        const forced = rule ? { ...rule, enabled: true } : null;
+        const label = displayHost(publicURLFromRule(forced) || "");
+        if (label && !hosts.includes(label)) hosts.push(label);
+      });
+    }
+    if (!hosts.length) urlNode.hidden = true;
+    else {
+      const icon = document.createElement("span");
+      icon.className = "app-card-url-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.append(iconNode("globe"));
+      const text = document.createElement("span");
+      text.className = "app-card-url-text";
+      const visibleHosts = hosts.slice(0, 2);
+      text.textContent = visibleHosts.join(" · ") + (hosts.length > 2 ? ` +${hosts.length - 2}` : "");
+      text.title = hosts.join("\n");
+      urlNode.append(icon, text);
+      urlNode.hidden = false;
+    }
+  }
   const detailButton = card.querySelector('[data-action="detail"]');
   const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, "overview"); };
   const actionsHost = card.querySelector(".app-card-actions");

@@ -128,13 +128,13 @@ count. The home page is the card list: search (the `/` shortcut focuses it)
 sits above a full-width card grid, ordered so
 updates, stopped or failed apps, and in-progress publishes come before healthy
 ones, with those two groups labeled when both exist. A card shows the name,
-one secondary fact (domain, otherwise the first image, plus a service count
-when there is more than one), and one status badge. Healthy running cards do
-not carry that badge. The card footer offers the everyday actions the API
-allows — open, start, update, restart, stop — then `详情`. Those controls stay
-secondary or ghost; the only filled primary on the list is `部署应用`. Arrow
-keys move between visible cards. The card body opens the detail view and is
-keyboard focusable. Service images stay searchable and are edited from the
+the status, published ports, up to two service images with their version state,
+and the configured HTTP hosts. Further services stay collapsed as a count.
+The card footer offers the everyday actions the API allows — open, start,
+update, restart, stop — then `详情`. Those controls stay secondary or ghost;
+the only filled primary on the list is `部署应用`. Arrow keys move between
+visible cards. The card body opens the detail view and is keyboard focusable.
+Service images stay searchable and are edited from the
 detail overview. Selecting nothing leaves an actionable work area instead of
 blank space: its figure is the count that needs attention, or the running count
 when nothing does, then the applications that need attention, the node facts

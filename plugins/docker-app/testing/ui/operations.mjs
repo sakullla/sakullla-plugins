@@ -114,12 +114,11 @@ export async function runOperations({page,test,navigate,hold,state,capture,event
     for (const width of [1440,375]) {
       await capture("bounded-services",width);
       const box = await page.evaluate(`(() => {const card=document.querySelector('[data-id="alpha"]'), preview=card.querySelector('[data-app-image]'); return {rows:preview.querySelectorAll('.app-card-image-row').length,height:card.getBoundingClientRect().height,width:card.getBoundingClientRect().width,rem:parseFloat(getComputedStyle(document.documentElement).fontSize),copy:preview.textContent,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
-      assert.equal(box.rows, 0, "a long service list does not unfold on the scan row");
-      assert.ok(box.height < box.rem * 8, `card height stays bounded: ${box.height}`);
+      assert.equal(box.rows, 2, "a long service list shows two versions and keeps the rest collapsed");
+      assert.ok(box.height < box.rem * 16, `card height stays bounded: ${box.height}`);
       assert.ok(box.width <= width);
       assert.equal(box.overflow, false);
-      assert.match(box.copy, /20 个服务/);
-      assert.doesNotMatch(box.copy, /namespace\/namespace/);
+      assert.match(box.copy, /另有 18 个服务/);
     }
     await page.click('[data-id="alpha"] [data-action="detail"]'); await page.waitVisible("#app-detail");
     assert.equal(await page.evaluate(`document.querySelectorAll('#detail-overview .overview-service').length`),20);
