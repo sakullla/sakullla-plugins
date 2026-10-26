@@ -615,10 +615,16 @@ func (b *boundListen) goHandle(fn func()) bool {
 }
 
 func (b *boundListen) serveTCP(ctx context.Context) {
-	for {
+	for ctx.Err() == nil {
 		conn, err := b.tcp.Accept()
 		if err != nil {
-			return
+			if ctx.Err() != nil || !retryManagedAccept(err) {
+				return
+			}
+			if waitManagedAcceptRetry(ctx) != nil {
+				return
+			}
+			continue
 		}
 		if ctx.Err() != nil || !b.goHandle(func() { b.handleTCP(ctx, conn) }) {
 			_ = conn.Close()

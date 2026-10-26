@@ -326,6 +326,52 @@ func TestManagedTCPAndUDPAcceptedFlowsCarryOpaqueBytes(t *testing.T) {
 	}
 }
 
+type retryAcceptRuntime struct{ rejects int }
+
+func (*retryAcceptRuntime) Call(context.Context, pluginsdk.HostRuntimeCall, any) error {
+	return nil
+}
+func (*retryAcceptRuntime) ScopedSecret(context.Context, pluginsdk.ScopedSecretRequest) (pluginsdk.ScopedSecretResponse, error) {
+	return pluginsdk.ScopedSecretResponse{}, ErrDenied
+}
+func (fake *retryAcceptRuntime) ManagedNetwork(_ context.Context, request pluginsdk.ManagedNetworkRequest) (pluginsdk.ManagedNetworkResponse, error) {
+	switch request.Action {
+	case pluginsdk.ManagedNetworkListen:
+		return pluginsdk.ManagedNetworkResponse{Handle: &pluginsdk.ManagedNetworkHandle{Binding: request.Binding, Token: "listener-token-000000000001", Kind: "listener", Protocol: request.Protocol}}, nil
+	case pluginsdk.ManagedNetworkAccept:
+		if fake.rejects == 0 {
+			fake.rejects++
+			return pluginsdk.ManagedNetworkResponse{}, &pluginsdk.RuntimeError{Code: pluginsdk.ErrorResourceExhausted, Message: "managed operation identity or concurrency exceeded", Retryable: true}
+		}
+		return pluginsdk.ManagedNetworkResponse{Handle: &pluginsdk.ManagedNetworkHandle{Binding: request.Binding, Token: "inbound-token-000000000001", Kind: "stream", Protocol: "tcp"}, Source: &pluginsdk.ManagedSourceMetadata{Peer: pluginsdk.ManagedNetworkEndpoint{Host: "192.0.2.10", Port: 50000}, Source: pluginsdk.ManagedNetworkEndpoint{Host: "192.0.2.10", Port: 50000}, Authority: "socket"}}, nil
+	case pluginsdk.ManagedNetworkClose:
+		return pluginsdk.ManagedNetworkResponse{Done: true}, nil
+	default:
+		return pluginsdk.ManagedNetworkResponse{}, ErrDenied
+	}
+}
+
+func TestManagedAcceptRetriesWhenOperationTableIsFull(t *testing.T) {
+	fake := &retryAcceptRuntime{}
+	runtime := newHostCapabilityRuntime(fake)
+	if err := runtime.bind("instance-a", "generation-a"); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := runtime.listenTCP(t.Context(), 8388)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if fake.rejects != 1 {
+		t.Fatalf("rejects=%d", fake.rejects)
+	}
+}
+
 func TestManagedAcceptDenialExposesNoPayloadOrDial(t *testing.T) {
 	fake := &deniedManagedRuntime{}
 	runtime := newHostCapabilityRuntime(fake)

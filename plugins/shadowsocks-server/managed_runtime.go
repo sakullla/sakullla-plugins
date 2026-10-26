@@ -466,19 +466,13 @@ func (runtime *hostCapabilityRuntime) listenTCP(ctx context.Context, port int) (
 }
 
 func (listener *managedTCPListener) Accept() (net.Conn, error) {
-	for {
-		response, err := listener.runtime.managed.ManagedNetwork(listener.ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkAccept, Binding: listener.handle.Binding, RequestID: managedRequestID("accept-tcp"), Handle: &listener.handle, WaitMS: 30000})
-		if isManagedDeadline(err) && listener.ctx.Err() == nil {
-			continue
-		}
-		if err != nil || response.Handle == nil || response.Source == nil {
-			if err == nil {
-				err = ErrTypedHandlesUnavailable
-			}
-			return nil, err
-		}
-		return newManagedConn(listener.runtime, *response.Handle, response.Source), nil
+	response, err := managedAccept(listener.ctx, func() (pluginsdk.ManagedNetworkResponse, error) {
+		return listener.runtime.managed.ManagedNetwork(listener.ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkAccept, Binding: listener.handle.Binding, RequestID: managedRequestID("accept-tcp"), Handle: &listener.handle, WaitMS: 30000})
+	})
+	if err != nil {
+		return nil, err
 	}
+	return newManagedConn(listener.runtime, *response.Handle, response.Source), nil
 }
 func (listener *managedTCPListener) Close() error {
 	var err error
@@ -528,11 +522,10 @@ func (runtime *hostCapabilityRuntime) listenUDP(ctx context.Context, port int) (
 
 func (conn *managedPacketConn) accept() {
 	for conn.ctx.Err() == nil {
-		response, err := conn.runtime.managed.ManagedNetwork(conn.ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkAccept, Binding: conn.listener.Binding, RequestID: managedRequestID("accept-udp"), Handle: &conn.listener, WaitMS: 30000})
-		if isManagedDeadline(err) && conn.ctx.Err() == nil {
-			continue
-		}
-		if err != nil || response.Handle == nil || response.Source == nil {
+		response, err := managedAccept(conn.ctx, func() (pluginsdk.ManagedNetworkResponse, error) {
+			return conn.runtime.managed.ManagedNetwork(conn.ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkAccept, Binding: conn.listener.Binding, RequestID: managedRequestID("accept-udp"), Handle: &conn.listener, WaitMS: 30000})
+		})
+		if err != nil {
 			return
 		}
 		flow := newManagedConn(conn.runtime, *response.Handle, response.Source)
@@ -547,6 +540,66 @@ func (conn *managedPacketConn) accept() {
 func isManagedDeadline(err error) bool {
 	var runtimeError *pluginsdk.RuntimeError
 	return errors.As(err, &runtimeError) && runtimeError.Code == pluginsdk.ErrorDeadlineExceeded
+}
+
+// managedAccept keeps polling through a full operation table or a timed-out
+// poll. Leaving the loop on those errors stops the plugin while the public
+// port stays open and new connections are closed unread.
+func managedAccept(ctx context.Context, call func() (pluginsdk.ManagedNetworkResponse, error)) (pluginsdk.ManagedNetworkResponse, error) {
+	for ctx.Err() == nil {
+		response, err := call()
+		if err == nil && response.Handle != nil && response.Source != nil {
+			return response, nil
+		}
+		if ctx.Err() != nil {
+			return pluginsdk.ManagedNetworkResponse{}, net.ErrClosed
+		}
+		if isManagedDeadline(err) {
+			continue
+		}
+		if retryManagedAccept(err) {
+			if waitErr := waitManagedAcceptRetry(ctx); waitErr != nil {
+				return pluginsdk.ManagedNetworkResponse{}, net.ErrClosed
+			}
+			continue
+		}
+		if err == nil {
+			err = ErrTypedHandlesUnavailable
+		}
+		return pluginsdk.ManagedNetworkResponse{}, err
+	}
+	return pluginsdk.ManagedNetworkResponse{}, net.ErrClosed
+}
+
+func retryManagedAccept(err error) bool {
+	if err == nil {
+		return false
+	}
+	var runtimeError *pluginsdk.RuntimeError
+	if errors.As(err, &runtimeError) {
+		switch runtimeError.Code {
+		case pluginsdk.ErrorDeadlineExceeded, pluginsdk.ErrorResourceExhausted:
+			return true
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return strings.Contains(err.Error(), "status 429")
+}
+
+func waitManagedAcceptRetry(ctx context.Context) error {
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (conn *managedPacketConn) receive(flow *managedConn, addr managedAddr) {
