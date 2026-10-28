@@ -3822,11 +3822,8 @@ func TestAppUIPageUsesSearchableAgentPickerAndViewportBreakpoints(t *testing.T) 
 		t.Fatal("#create-form does not offer the full editor width")
 	}
 	appList := cssRule(stylesheet, ".app-list")
-	if !strings.Contains(appList, "display: flex") || !strings.Contains(appList, "flex-direction: column") {
-		t.Fatal("application inventory must be a vertical master list")
-	}
-	if !strings.Contains(appList, "overflow-y: auto") {
-		t.Fatal("application inventory must scroll independently when the fleet grows")
+	if !strings.Contains(appList, "display: grid") || !strings.Contains(appList, "repeat(auto-fill, minmax(") {
+		t.Fatal("application inventory must be a responsive card wall")
 	}
 	workspaceLayout := cssRule(stylesheet, ".workspace-layout")
 	if !strings.Contains(workspaceLayout, "grid-template-columns: minmax(") {

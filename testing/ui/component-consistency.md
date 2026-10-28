@@ -37,7 +37,7 @@
 | cloudflare-dns | mappings | 对话框 | dialog#mapping-create.ui-dialog | 是 | 是 | 已消除 |
 | cloudflare-dns | empty | 空状态 | div#mapping-empty.ui-empty | 是 | 是 | 已消除 |
 | docker-app | apps | 主按钮 | button#deploy-toggle.ui-btn.topbar__deploy | 是 | 是 | 已消除（布局类：topbar__deploy） |
-| docker-app | apps | 输入 | input#app-search.ui-input | 是 | 是 | 已消除 |
+| docker-app | apps | 输入 | input#app-search.ui-input | 是 | 是 | 已消除（大尺寸变体（--ui-control-height-lg、--ui-text-base）） |
 | docker-app | apps | 表格 | — | — | — | 不适用（页面主流程没有表格） |
 | docker-app | apps | 徽章 | p.app-card-status.ui-badge | 是 | 是 | 已消除（布局类：app-card-status） |
 | docker-app | files | 对话框 | dialog#files-mkdir-dialog.ui-dialog.files-dialog | 是 | 是 | 已消除（布局类：files-dialog） |

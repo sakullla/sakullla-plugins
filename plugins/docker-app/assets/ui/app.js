@@ -2457,6 +2457,10 @@ const markSelectedApp = (appID) => {
   });
 };
 
+// Card shortcuts carry the same line icons as the detail header; the label
+// stays the button's only text.
+const cardActionIcons = { start: "play", update: "download", restart: "refresh", stop: "stop" };
+
 const renderApp = (app) => {
   const source = appCardTemplate && appCardTemplate.content.querySelector(".app-card");
   const card = source ? source.cloneNode(true) : document.createElement("article");
@@ -2615,6 +2619,8 @@ const renderApp = (app) => {
     button.className = "ui-btn ui-btn--secondary ui-btn--sm";
     button.dataset.action = action.id;
     button.textContent = action.label || action.id;
+    const icon = cardActionIcons[action.id];
+    if (icon) button.prepend(iconNode(icon));
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       runAppAction(app, action);
@@ -2629,6 +2635,7 @@ const renderApp = (app) => {
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.textContent = "打开";
+    link.append(iconNode("external"));
     link.addEventListener("click", (event) => event.stopPropagation());
     actionsHost.insertBefore(link, detailButton);
   }
