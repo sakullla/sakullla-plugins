@@ -261,9 +261,11 @@ try {
       const head = detail.querySelector('.detail-head').getBoundingClientRect();
       const nav = detail.querySelector('.detail-nav').getBoundingClientRect();
       const context = detail.querySelector('#detail-context').getBoundingClientRect();
-      return {headBottom:head.bottom, navTop:nav.top, contextTop:context.top, headTop:head.top};
+      return {headBottom:head.bottom, navTop:nav.top, navBottom:nav.bottom, contextTop:context.top, contextBottom:context.bottom, headTop:head.top};
     })()`);
-    if (bounds) assert.ok(bounds.navTop >= bounds.headBottom - 1 && bounds.contextTop >= bounds.headTop, `detail context and navigation must not be clipped: ${JSON.stringify(bounds)}`);
+    // The section tabs live inside the identity header: they sit below the
+    // context line and end within the header, so neither is clipped or covered.
+    if (bounds) assert.ok(bounds.navTop >= bounds.contextBottom - 1 && bounds.navBottom <= bounds.headBottom + 1 && bounds.contextTop >= bounds.headTop, `detail context and navigation must not be clipped: ${JSON.stringify(bounds)}`);
     const shot = await page.send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false});
     const ref = `dist/docker-app-ui-validation/${suite}/${name}-${width}.png`;
     await mkdir(dirname(resolve(repo, ref)), {recursive:true});

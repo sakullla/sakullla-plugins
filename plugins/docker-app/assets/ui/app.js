@@ -2609,7 +2609,8 @@ const renderApp = (app) => {
     }
   }
   const detailButton = card.querySelector('[data-action="detail"]');
-  const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, "overview"); };
+  // From the wide-screen rail, switching applications keeps the open section.
+  const openDetail = () => { if (!busy && !detailButton?.disabled) showDetail(app.id, view === "detail" ? detailSection : "overview"); };
   const actionsHost = card.querySelector(".app-card-actions");
   const offered = new Map((Array.isArray(app.actions) ? app.actions : []).map((item) => [item.id, item]));
   const addShortcut = (action) => {
@@ -3986,6 +3987,28 @@ const setDetailPrimary = (primary) => {
   });
 };
 
+// Tabs carry how many entries and records sit behind them. The count lives on
+// the label as data so the tab's accessible name and text stay unchanged.
+const paintSectionCounts = (app) => {
+  if (!detailNav) return;
+  const rules = Array.isArray(app.rules) ? app.rules : [];
+  const records = Array.isArray(app.backups) ? app.backups : [];
+  const visibleRecords = app.backup && app.backup.node_enabled === false
+    ? records.filter((record) => record.destination !== "node")
+    : records;
+  const counts = {
+    http: app.rules_error ? 0 : rules.length,
+    backup: app.backups_error ? 0 : visibleRecords.length,
+  };
+  detailNav.querySelectorAll("[data-section]").forEach((tab) => {
+    const label = tab.querySelector("span");
+    if (!label) return;
+    const count = counts[tab.dataset.section] || 0;
+    if (count > 0) label.dataset.count = String(count);
+    else delete label.dataset.count;
+  });
+};
+
 const paintDetail = (app, composeRevision) => {
   const appChanged = !detailApp || detailApp.id !== app.id;
   if (appChanged || detailApp?.agent_id !== app.agent_id) filesWorkspace.unbind();
@@ -4044,6 +4067,7 @@ const paintDetail = (app, composeRevision) => {
   // R4: the header keeps a single filled primary — open when the app has an
   // entry, otherwise the lifecycle action the API actually allows.
   setDetailPrimary(openURL ? "open" : actionsByID.has("restart") ? "restart" : actionsByID.has("start") ? "start" : "");
+  paintSectionCounts(app);
   renderOverview(app);
   if (composeFilledFor !== app.id) fillCompose(app, composeRevision);
   renderHTTP(app);
@@ -4351,9 +4375,11 @@ document.querySelector("#app-filter")?.addEventListener("change", applyInventory
 document.querySelector("#empty-deploy")?.addEventListener("click", () => { if (!busy) deployToggle?.click(); });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing || view !== "list") return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
   const target = event.target;
   if (!(target instanceof HTMLElement) || target.matches("input, textarea, select") || target.isContentEditable) return;
+  // The detail view only moves between cards while focus is in the rail.
+  if (view !== "list" && !target.closest("#app-list")) return;
   const cards = [...listNode.querySelectorAll(".app-card")].filter((row) => !row.hidden);
   if (!cards.length) return;
   const owner = target.closest(".app-card");
@@ -4371,7 +4397,8 @@ document.addEventListener("keydown", (event) => {
   const target = event.target;
   const editable = target instanceof HTMLElement
     && (target.matches("input, textarea, select") || target.isContentEditable);
-  if (editable || view !== "list" || !searchInput?.getClientRects().length) return;
+  // The search box is only visible on the list and in the wide-screen rail.
+  if (editable || !searchInput?.getClientRects().length) return;
   event.preventDefault();
   searchInput.focus();
   searchInput.select();

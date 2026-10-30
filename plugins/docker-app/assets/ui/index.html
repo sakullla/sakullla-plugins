@@ -312,7 +312,6 @@
           </div>
           <p class="workspace-head-note">需要处理的应用排在最前，点开卡片查看详情</p>
         </div>
-        <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
         <div class="workspace-head-actions">
           <button id="disk-cleanup" class="ui-btn ui-btn--secondary" type="button">
             <svg class="ui-icon" aria-hidden="true"><use href="#i-trash"></use></svg>清理磁盘
@@ -323,6 +322,7 @@
       <div class="workspace-layout">
         <section class="ui-card panel" id="app-list-panel" aria-labelledby="app-list-title">
           <div class="ui-toolbar inventory-toolbar">
+            <div id="inventory-chips" class="inventory-chips" role="group" aria-label="应用状态概览" hidden></div>
             <div class="inventory-search ui-toolbar__grow">
               <span class="inventory-search__icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-search"></use></svg></span>
               <input class="ui-input" id="app-search" type="search" placeholder="搜索应用、服务、镜像或域名" aria-label="搜索应用、服务、镜像或域名" autocomplete="off">
@@ -385,7 +385,6 @@
                   </a>
                 </div>
               </div>
-            </header>
             <nav id="detail-nav" class="ui-tabs detail-nav" role="tablist" data-ui-tabs aria-label="应用分区">
               <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-overview" data-section="overview" aria-selected="true" aria-controls="detail-overview"><svg class="ui-icon" aria-hidden="true"><use href="#i-layers"></use></svg><span>概览</span></button>
               <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-compose" data-section="compose" aria-selected="false" aria-controls="detail-compose"><svg class="ui-icon" aria-hidden="true"><use href="#i-file"></use></svg><span>Compose</span></button>
@@ -394,6 +393,7 @@
               <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-http" data-section="http" aria-selected="false" aria-controls="detail-http"><svg class="ui-icon" aria-hidden="true"><use href="#i-globe"></use></svg><span>HTTP 入口</span></button>
               <button type="button" class="ui-tab detail-nav-item" role="tab" id="tab-backup" data-section="backup" aria-selected="false" aria-controls="detail-backup"><svg class="ui-icon" aria-hidden="true"><use href="#i-database"></use></svg><span>备份</span></button>
             </nav>
+            </header>
 
             <section id="detail-overview" class="detail-section" data-section-panel="overview" role="tabpanel" aria-labelledby="tab-overview"></section>
 

@@ -121,11 +121,13 @@ open editor. Agent Docker proxy support for `docker info` and formatted
 
 The management page is a working console rather than a list beside an empty
 column. A sticky command bar carries the brand, the target-node picker with its
-live engine badge and refresh, and the only primary deployment entry. A compact
-status band counts all, running, updatable and stopped applications and doubles
-as the status filter; a non-zero update or stopped count is the only colored
-count. The home page is the card list: search (the `/` shortcut focuses it)
-sits above a full-width card grid, ordered so
+live engine badge and refresh, and the only primary deployment entry. The page
+sits on a calm solid canvas with hairline surfaces; status is carried by small
+dots and soft badges rather than colored panels. One toolbar row pairs a
+segmented status filter (all, running, updatable, stopped, each with its count;
+a non-zero update or stopped count is the only colored count) with search (the
+`/` shortcut focuses it). On phones the filter becomes a four-up counter above
+the search. The home page is the card list: a full-width card grid ordered so
 updates, stopped or failed apps, and in-progress publishes come before healthy
 ones, with those two groups labeled when both exist. A card shows the name,
 the status, published ports, up to two service images with their version state,
@@ -144,8 +146,13 @@ Empty inventories, unmatched searches and offline nodes replace the previous
 content instead of leaving stale rows behind.
 
 The work area keeps a sticky identity header with the monogram, title, status,
-node/application context and domain link, followed by a six-tab section bar
-(overview, Compose, files, logs, HTTP ingress, backups). The header holds at
+node/application context and domain link; its bottom edge is a six-tab
+underline strip (overview, Compose, files, logs, HTTP ingress, backups), and
+the ingress and backup tabs show how many entries or records they hold. On
+screens 1280px and wider an opened application keeps the catalog beside it as
+a compact rail with its own search: picking another application there keeps
+the open section, arrow keys move between rail entries, and the selected entry
+is highlighted. The header holds at
 most one filled primary action (opening the application); stop uses a secondary
 danger style and delete exists only in the closing danger zone. The overview
 pairs a compact fact strip (state, services, published ports, HTTP ingress) with
@@ -156,7 +163,7 @@ and rollback for the application, and an update still passes the existing risk
 confirmation. Compose and workspace files use titled editor windows; logs use a
 dark terminal with a themed toolbar and keep their four-second polling, pause
 and copy/download controls. Image names and ingress domains can be copied from
-the overview and ingress sections. Below 1024px the inventory and work area
+the overview and ingress sections. Below 1280px the inventory and work area
 become a single pane: opening an application hides the inventory, the back
 control restores it together with the selected row and focus, and controls keep
 a 44px target without horizontal overflow. Operation feedback floats above the
@@ -219,8 +226,8 @@ node testing/ui/capture.mjs --plugin docker-app --theme host --size 1440,768,390
 
 Its eight scenes cover the inventory, the deployment drawer, the detail
 overview, Compose, workspace files, logs, HTTP ingress and backups. Each scene
-waits for an anchor of the current interface (the inventory status band, the
-identity header's fact strip, the section panels) before the capture, so a page
+waits for an anchor of the current interface (the segmented status filter with
+its active segment, the overview fact strip, the section panels) before the capture, so a page
 that fails to render records a failing gallery entry instead of a stale image,
 and the requested theme must match the page root or the run fails.
 

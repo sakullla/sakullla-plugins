@@ -11,13 +11,14 @@ import { agents, engineFor } from "./fixtures/workspace.mjs";
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-// The workspace is ready once the status band and the rows are both rendered.
-// These fixtures always carry applications, so the band is visible here; an
-// empty node would need its own scene instead of reusing this helper.
+// The workspace is ready once the status filter and the rows are both rendered
+// and the filter has marked its active segment. These fixtures always carry
+// applications, so the filter is visible here; an empty node would need its
+// own scene instead of reusing this helper.
 const openWorkspace = async (ui) => {
   await ui.waitFor("#app-list .app-card");
   await ui.waitFor("#inventory-chips .inventory-chip");
-  await ui.waitFor("#inventory-summary:not(:empty)");
+  await ui.waitFor('#inventory-chips .inventory-chip[aria-pressed="true"]');
 };
 
 const openDetail = async (ui, section) => {
