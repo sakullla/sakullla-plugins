@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "code_dependencies": [
+    {
+      "name": "github.com/Masterminds/semver/v3",
+      "version": "v3.5.0",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/cespare/xxhash/v2",
+      "version": "v2.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/dustin/go-humanize",
+      "version": "v1.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "github.com/klauspost/compress",
+      "version": "v1.19.2",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "github.com/klauspost/cpuid/v2",
+      "version": "v2.4.0",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/klauspost/crc32",
+      "version": "v1.3.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "github.com/minio/crc64nvme",
+      "version": "v1.1.1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/minio/md5-simd",
+      "version": "v1.1.2",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/minio/minio-go/v7",
+      "version": "v7.4.1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/philhofer/fwd",
+      "version": "v1.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/rs/xid",
+      "version": "v1.6.0",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+      "version": "v0.13.1",
+      "license": "GPL-3.0-only"
+    },
+    {
+      "name": "github.com/santhosh-tekuri/jsonschema/v6",
+      "version": "v6.0.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/tetratelabs/wazero",
+      "version": "v1.12.0",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "github.com/tinylib/msgp",
+      "version": "v1.6.4",
+      "license": "MIT"
+    },
+    {
+      "name": "github.com/zeebo/xxh3",
+      "version": "v1.1.0",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "name": "go.yaml.in/yaml/v3",
+      "version": "v3.0.5",
+      "license": "MIT AND Apache-2.0"
+    },
+    {
+      "name": "golang.org/x/crypto",
+      "version": "v0.57.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/mod",
+      "version": "v0.41.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/net",
+      "version": "v0.60.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/sys",
+      "version": "v0.48.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "golang.org/x/text",
+      "version": "v0.42.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20240604185151-ef581f913117",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "google.golang.org/grpc",
+      "version": "v1.66.2",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "google.golang.org/protobuf",
+      "version": "v1.36.12",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "gopkg.in/ini.v1",
+      "version": "v1.67.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "license": "MIT AND Apache-2.0"
+    }
+  ],
+  "data_dependencies": []
+}

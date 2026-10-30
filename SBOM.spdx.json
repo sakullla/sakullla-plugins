@@ -1,0 +1,450 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "name": "sakullla-official-plugins-source",
+  "documentNamespace": "https://github.com/sakullla/sakullla-plugins/sbom/source-v1",
+  "creationInfo": {
+    "created": "2026-08-10T00:00:00Z",
+    "creators": [
+      "Tool: sakullla-release"
+    ]
+  },
+  "documentDescribes": [
+    "SPDXRef-Package-sakullla-plugins"
+  ],
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-sakullla-plugins",
+      "name": "github.com/sakullla/sakullla-plugins",
+      "versionInfo": "0.1.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-3.0-only",
+      "licenseDeclared": "GPL-3.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Masterminds-semver-v3",
+      "name": "github.com/Masterminds/semver/v3",
+      "versionInfo": "v3.5.0",
+      "downloadLocation": "https://github.com/Masterminds/semver",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-cespare-xxhash-v2",
+      "name": "github.com/cespare/xxhash/v2",
+      "versionInfo": "v2.3.0",
+      "downloadLocation": "https://github.com/cespare/xxhash",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-dustin-go-humanize",
+      "name": "github.com/dustin/go-humanize",
+      "versionInfo": "v1.0.1",
+      "downloadLocation": "https://github.com/dustin/go-humanize",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-google-uuid",
+      "name": "github.com/google/uuid",
+      "versionInfo": "v1.6.0",
+      "downloadLocation": "https://github.com/google/uuid",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-klauspost-compress",
+      "name": "github.com/klauspost/compress",
+      "versionInfo": "v1.19.2",
+      "downloadLocation": "github.com/klauspost/compress",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-klauspost-cpuid-v2",
+      "name": "github.com/klauspost/cpuid/v2",
+      "versionInfo": "v2.4.0",
+      "downloadLocation": "https://github.com/klauspost/cpuid",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-klauspost-crc32",
+      "name": "github.com/klauspost/crc32",
+      "versionInfo": "v1.3.0",
+      "downloadLocation": "https://github.com/klauspost/crc32",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-minio-crc64nvme",
+      "name": "github.com/minio/crc64nvme",
+      "versionInfo": "v1.1.1",
+      "downloadLocation": "https://github.com/minio/crc64nvme",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-minio-md5-simd",
+      "name": "github.com/minio/md5-simd",
+      "versionInfo": "v1.1.2",
+      "downloadLocation": "https://github.com/minio/md5-simd",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-minio-minio-go-v7",
+      "name": "github.com/minio/minio-go/v7",
+      "versionInfo": "v7.4.1",
+      "downloadLocation": "https://github.com/minio/minio-go",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-philhofer-fwd",
+      "name": "github.com/philhofer/fwd",
+      "versionInfo": "v1.2.0",
+      "downloadLocation": "https://github.com/philhofer/fwd",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-rs-xid",
+      "name": "github.com/rs/xid",
+      "versionInfo": "v1.6.0",
+      "downloadLocation": "https://github.com/rs/xid",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-plugin-sdk",
+      "name": "github.com/sakullla/nginx-reverse-emby/plugin-sdk",
+      "versionInfo": "v0.13.1",
+      "downloadLocation": "https://github.com/sakullla/nginx-reverse-emby",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-3.0-only",
+      "licenseDeclared": "GPL-3.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-jsonschema-v6",
+      "name": "github.com/santhosh-tekuri/jsonschema/v6",
+      "versionInfo": "v6.0.3",
+      "downloadLocation": "https://github.com/santhosh-tekuri/jsonschema",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-wazero",
+      "name": "github.com/tetratelabs/wazero",
+      "versionInfo": "v1.12.0",
+      "downloadLocation": "https://github.com/tetratelabs/wazero",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-tinylib-msgp",
+      "name": "github.com/tinylib/msgp",
+      "versionInfo": "v1.6.4",
+      "downloadLocation": "https://github.com/tinylib/msgp",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-zeebo-xxh3",
+      "name": "github.com/zeebo/xxh3",
+      "versionInfo": "v1.1.0",
+      "downloadLocation": "https://github.com/zeebo/xxh3",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-2-Clause",
+      "licenseDeclared": "BSD-2-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-go-yaml-in-yaml-v3",
+      "name": "go.yaml.in/yaml/v3",
+      "versionInfo": "v3.0.5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT AND Apache-2.0",
+      "licenseDeclared": "MIT AND Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-crypto",
+      "name": "golang.org/x/crypto",
+      "versionInfo": "v0.57.0",
+      "downloadLocation": "https://go.googlesource.com/crypto",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-mod",
+      "name": "golang.org/x/mod",
+      "versionInfo": "v0.41.0",
+      "downloadLocation": "https://go.googlesource.com/mod",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-net",
+      "name": "golang.org/x/net",
+      "versionInfo": "v0.60.0",
+      "downloadLocation": "https://go.googlesource.com/net",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-sys",
+      "name": "golang.org/x/sys",
+      "versionInfo": "v0.48.0",
+      "downloadLocation": "https://go.googlesource.com/sys",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-x-text",
+      "name": "golang.org/x/text",
+      "versionInfo": "v0.42.0",
+      "downloadLocation": "https://go.googlesource.com/text",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-genproto-googleapis-rpc",
+      "name": "google.golang.org/genproto/googleapis/rpc",
+      "versionInfo": "v0.0.0-20240604185151-ef581f913117",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-grpc",
+      "name": "google.golang.org/grpc",
+      "versionInfo": "v1.66.2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-protobuf",
+      "name": "google.golang.org/protobuf",
+      "versionInfo": "v1.36.12",
+      "downloadLocation": "https://github.com/protocolbuffers/protobuf-go",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-ini-v1",
+      "name": "gopkg.in/ini.v1",
+      "versionInfo": "v1.67.3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-yaml-v3",
+      "name": "gopkg.in/yaml.v3",
+      "versionInfo": "v3.0.1",
+      "downloadLocation": "https://github.com/go-yaml/yaml",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT AND Apache-2.0",
+      "licenseDeclared": "MIT AND Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Masterminds-semver-v3"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-cespare-xxhash-v2"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-dustin-go-humanize"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-google-uuid"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-klauspost-compress"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-klauspost-cpuid-v2"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-klauspost-crc32"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-minio-crc64nvme"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-minio-md5-simd"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-minio-minio-go-v7"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-philhofer-fwd"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-rs-xid"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-plugin-sdk"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-jsonschema-v6"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-wazero"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-tinylib-msgp"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-zeebo-xxh3"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-go-yaml-in-yaml-v3"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-crypto"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-mod"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-net"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-sys"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-x-text"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-genproto-googleapis-rpc"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-grpc"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-protobuf"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-ini-v1"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-sakullla-plugins",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-yaml-v3"
+    }
+  ]
+}

@@ -1,0 +1,163 @@
+schema_version: 2
+commit: "7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d"
+sdk_abi: "nre:policy/v1,nre:rpc/v1"
+packages:
+  - id: "accelerator-sources"
+    version: "0.1.19"
+    description: "为零配置发布的自有域名提供 Docker、GitHub、Hugging Face 与 npm 加速"
+    capabilities:
+      - "http.backend-provider"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "agent"
+    artifacts:
+      - sha256: "6ad90708e6b8aff0a7be5ee824c387dfafe7d7ce9812cf5d41c81187989c6ac1"
+        size: 21871509
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "5bc06bd73c90ed34734269763c41d08d4458addb9352407092561e963c9a7ef9"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/accelerator-sources-0.1.19-538370eb1aaf705d6d9ca653c5fbd6f749b5bbe7988202b505271f02e4d8c56e.nrepkg"
+    blob_sha256: "538370eb1aaf705d6d9ca653c5fbd6f749b5bbe7988202b505271f02e4d8c56e"
+    blob_size: 11589632
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "cloudflare-dns"
+    version: "0.1.20"
+    description: "按域名后缀绑定一家 DNS 服务商，解析 Cloudflare Token，并写删国内 DNS 记录"
+    capabilities:
+      - "dns.provider"
+      - "ui.route"
+      - "resource.group"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "control-plane"
+    artifacts:
+      - sha256: "2441fa8b17aa1a882c0354ddd0ba009b2b93171f20e664a78bad9f649b9fedf0"
+        size: 21589006
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "8fc5a4e0cf5ec3725618c071774a1b34763d1c5aa2595dec4491f7ad4e5a316c"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/cloudflare-dns-0.1.20-35b86d7a20b49a2ca2d11717523c7a7a30055c88172d5449553dc9f66b06e0ce.nrepkg"
+    blob_sha256: "35b86d7a20b49a2ca2d11717523c7a7a30055c88172d5449553dc9f66b06e0ce"
+    blob_size: 11378644
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "docker-app"
+    version: "0.1.65"
+    description: "通过 compose YAML 管理 Agent 上的应用启停、日志、工作区文件、备份恢复与删除"
+    capabilities:
+      - "ui.route"
+      - "resource.group"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "control-plane"
+    artifacts:
+      - sha256: "7c0b4dcfcaa36bd2cb6f69ca9af2fd2de975c88ba0948b34d6b7ce2dcf63bbae"
+        size: 27075069
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "33b638dd9f7e5b4e060d6bfb9f3a4d588794e43181c99beb600c3804dbd090ee"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/docker-app-0.1.65-edf0265e1a14e17ba5c727fa31df5c50f50c57b44b262b0ebf3c85fc9eb3edcd.nrepkg"
+    blob_sha256: "edf0265e1a14e17ba5c727fa31df5c50f50c57b44b262b0ebf3c85fc9eb3edcd"
+    blob_size: 15819444
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "doh"
+    version: "0.2.7"
+    description: "为零配置发布的自有域名提供 DNS over HTTPS 解析"
+    capabilities:
+      - "http.backend-provider"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "agent"
+    artifacts:
+      - sha256: "40c914ea101dbc4c34f91ac09d71f4fdbe0dfe4cc4ffea1ac4abe80e41a12600"
+        size: 20901576
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "ec5e342e2b589d0e8219c42f7cc2803bc5ba3eaf58c1578acc226270ac9527e7"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/doh-0.2.7-2ba560d76ac6bdc031673c97c6da4ba68a198d53429f9f9685a2bcb9ed22b6c1.nrepkg"
+    blob_sha256: "2ba560d76ac6bdc031673c97c6da4ba68a198d53429f9f9685a2bcb9ed22b6c1"
+    blob_size: 11105210
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "reverse-l4"
+    version: "0.3.11"
+    description: "把内网 TCP/UDP 服务经入口 L4 规则与出口反向通道发布到公网入口"
+    capabilities:
+      - "ui.route"
+      - "resource.group"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "control-plane"
+    artifacts:
+      - sha256: "ec5f3a480335cdb34de1a7350d8c5681bdd617f47b860bb5a2a9355d9179c640"
+        size: 21200840
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "45c483922bceb07238c174c13ad419900c9e39a7c585da258c2215a5f8988897"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/reverse-l4-0.3.11-b5abbc713173c7f00b5aa4d69e697d8d81fa362672bb186cc7a747d76e8f2375.nrepkg"
+    blob_sha256: "b5abbc713173c7f00b5aa4d69e697d8d81fa362672bb186cc7a747d76e8f2375"
+    blob_size: 11235612
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "shadowsocks-server"
+    version: "0.1.25"
+    description: "管理宿主受管 Shadowsocks 入口，并按 GeoSite、GeoIP 或 CIDR 数据集选择直连、拒绝和上游"
+    capabilities:
+      - "ui.route"
+      - "resource.group"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "control-plane"
+    artifacts:
+      - sha256: "13a0a91786c1aa2879ecd214b253c64387cdc57152560f6b131771c2d4a44a11"
+        size: 22647526
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "c27ecb7591e60e9ca4c583879345b44e85ef32234faad940c3c3961696fcbbc2"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/shadowsocks-server-0.1.25-83acbf47469df6043c19e79f3695d85e0a86fb2811fe36020c04a75ef3fedca6.nrepkg"
+    blob_sha256: "83acbf47469df6043c19e79f3695d85e0a86fb2811fe36020c04a75ef3fedca6"
+    blob_size: 11960459
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
+  - id: "webdav"
+    version: "0.1.12"
+    description: "在发布的自有域名上提供网页文件管理与 WebDAV 共享"
+    capabilities:
+      - "http.backend-provider"
+    compatibility:
+      host: "*"
+      agent: "*"
+    runtime: "rpc-service"
+    abi: "nre:rpc/v1"
+    host_scope: "agent"
+    artifacts:
+      - sha256: "d1905460a62fa059ea7709017f08fb98db15020368c285933608bddc43442152"
+        size: 20514160
+        goos: "linux"
+        goarch: "amd64"
+    package_sha256: "7a848b4dcfa3614dccc6233b3f875bd5e2642f63ed76fbf72a7da468dedb9697"
+    package_url: "https://github.com/sakullla/sakullla-plugins/releases/download/official-7eec6e09b438f3fda9b5c91fb8ff62aa7f14dc4d/webdav-0.1.12-ff14add006f345dae43e73d60e8f4c82e3c6bcb548f04f85baa5bb7a066e8f54.nrepkg"
+    blob_sha256: "ff14add006f345dae43e73d60e8f4c82e3c6bcb548f04f85baa5bb7a066e8f54"
+    blob_size: 10891636
+    blob_format: "tar+gzip-v1"
+    signer_identity: "sakullla-official-root-2026"
