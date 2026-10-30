@@ -759,6 +759,27 @@
     </form>
   </dialog>
 
+  <dialog id="deploy-progress" class="ui-dialog deploy-progress" aria-labelledby="deploy-progress-title" aria-describedby="deploy-progress-phase">
+    <div class="ui-dialog__head">
+      <div>
+        <p class="section-kicker">DEPLOYMENT</p>
+        <h3 id="deploy-progress-title" class="ui-dialog__title">正在部署</h3>
+        <p id="deploy-progress-phase" class="ui-dialog__desc" role="status"></p>
+      </div>
+    </div>
+    <div class="ui-dialog__body deploy-progress__body">
+      <p id="deploy-progress-meta" class="hint"></p>
+      <div class="deploy-progress__log-shell">
+        <pre id="deploy-progress-log" class="deploy-progress__log" tabindex="0">等待部署日志…</pre>
+      </div>
+    </div>
+    <div class="ui-dialog__footer dialog-actions">
+      <button type="button" class="ui-btn ui-btn--secondary" id="deploy-progress-hide">收起，后台继续</button>
+      <button type="button" class="ui-btn ui-btn--danger" id="deploy-progress-cancel">停止部署</button>
+      <button type="button" class="ui-btn" id="deploy-progress-close" hidden>关闭</button>
+    </div>
+  </dialog>
+
   <dialog id="confirm-dialog" class="ui-dialog confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog" class="files-dialog-form">
       <div class="ui-dialog__head confirm-head">

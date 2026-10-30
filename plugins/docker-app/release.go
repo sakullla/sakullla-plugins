@@ -189,8 +189,14 @@ func projectServiceRelease(image string, listing serviceTagListing, observedDige
 		if hasLatest {
 			release.Latest = latest.Tag
 			release.LatestRelease = latest.Tag
-			if latest.Version != parsed.version.String() {
+			switch cmp, ok := SemverCompare(latest.Tag, tag); {
+			case ok && cmp > 0:
 				release.State = VersionStateOutdated
+			case ok && cmp < 0:
+				// A short alphabetical page can make an older tag look like
+				// the repository maximum. Do not offer that tag as an upgrade.
+				release.Latest = tag
+				release.LatestRelease = tag
 			}
 		} else if !listing.Known {
 			release.State = VersionStateUnknown

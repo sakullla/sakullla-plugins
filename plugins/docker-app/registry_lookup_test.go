@@ -111,6 +111,155 @@ func TestImageObserveUsesMirrorManifestWithoutRewritingImageIdentity(t *testing.
 	}
 }
 
+func TestDockerHubLaterPageRefusalKeepsEarlierTags(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/repositories/xream/sub-store/tags" {
+			t.Errorf("unexpected hub request %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("page") == "2" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		next := server.URL + "/v2/repositories/xream/sub-store/tags?page=2"
+		_, _ = w.Write([]byte(`{"next":"` + next + `","results":[{"name":"latest"},{"name":"2.44.2"},{"name":"2.44.2-http-meta"}]}`))
+	}))
+	defer server.Close()
+	previous := dockerHubTagListURL
+	dockerHubTagListURL = func(repository string) string {
+		return server.URL + "/v2/repositories/" + repository + "/tags"
+	}
+	defer func() { dockerHubTagListURL = previous }()
+
+	entries, err := listDockerHubTagEntries(context.Background(), "xream/sub-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(imageTagNames(entries), ",") != "latest,2.44.2,2.44.2-http-meta" {
+		t.Fatalf("entries=%v", entries)
+	}
+}
+
+func TestDockerHubFirstPageRefusalReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	previous := dockerHubTagListURL
+	dockerHubTagListURL = func(repository string) string {
+		return server.URL + "/v2/repositories/" + repository + "/tags"
+	}
+	defer func() { dockerHubTagListURL = previous }()
+	if _, err := listDockerHubTagEntries(context.Background(), "xream/sub-store"); err == nil {
+		t.Fatal("first page refusal looked like an empty repository")
+	}
+}
+
+func TestRegistryTagListFollowsAlphabeticalPages(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/gitea/tags/list" {
+			t.Errorf("unexpected registry request %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("n") != "20" {
+			t.Errorf("n=%s", r.URL.Query().Get("n"))
+		}
+		if r.URL.Query().Get("last") == "" {
+			next := server.URL + "/v2/gitea/tags/list?n=20&last=1.11.0"
+			w.Header().Set("Link", `<`+next+`>; rel="next"`)
+			_, _ = w.Write([]byte(`{"name":"gitea","tags":["1.10.0","1.11.0"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"gitea","tags":["1.27.3","1.28.0"]}`))
+	}))
+	defer server.Close()
+	previous := registryTagListURL
+	registryTagListURL = func(_, repository string) string {
+		return server.URL + "/v2/" + repository + "/tags/list"
+	}
+	defer func() { registryTagListURL = previous }()
+
+	entries, err := listRegistryTagEntries(context.Background(), "docker.gitea.com", "gitea")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(imageTagNames(entries), ",") != "1.10.0,1.11.0,1.27.3,1.28.0" {
+		t.Fatalf("entries=%v", entries)
+	}
+	listing := serviceTagListing{Tags: imageTagNames(entries), Entries: entries, Known: true}
+	view := projectServiceView(App{ID: "git"}, ServiceImage{Name: "server", Image: "docker.gitea.com/gitea:1.27.3"}, listing, serviceDigestState{})
+	if view.VersionState != VersionStateOutdated || view.Latest != "1.28.0" || !view.Update || view.DefaultTag != "1.28.0" {
+		t.Fatalf("view=%#v", view)
+	}
+	if strings.Contains(view.Latest, "1.11.0") || view.Message == serviceListingFailedMessage {
+		t.Fatalf("older alphabetical tag was offered: %#v", view)
+	}
+}
+
+func TestRegistryTagListStopsAfterTwentyTags(t *testing.T) {
+	var pages int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		if pages > 1 {
+			t.Errorf("listed past the first twenty tags: %s", r.URL)
+		}
+		tags := make([]string, maxListedTags)
+		for i := range tags {
+			tags[i] = fmt.Sprintf("1.0.%d", i)
+		}
+		w.Header().Set("Link", `<`+serverPlaceholder(r)+`>; rel="next"`)
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "app", "tags": tags})
+	}))
+	defer server.Close()
+	previous := registryTagListURL
+	registryTagListURL = func(_, repository string) string {
+		return server.URL + "/v2/" + repository + "/tags/list"
+	}
+	defer func() { registryTagListURL = previous }()
+	entries, err := listRegistryTagEntries(context.Background(), "registry.example", "library/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != maxListedTags || pages != 1 {
+		t.Fatalf("entries=%d pages=%d", len(entries), pages)
+	}
+}
+
+func serverPlaceholder(r *http.Request) string {
+	return "http://" + r.Host + r.URL.Path + "?n=20&last=more"
+}
+
+func TestRegistryLaterPageFailureKeepsEarlierTags(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("last") != "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		next := server.URL + r.URL.Path + "?n=1000&last=1.11.0"
+		w.Header().Set("Link", `<`+next+`>; rel="next"`)
+		_, _ = w.Write([]byte(`{"name":"gitea","tags":["1.11.0","1.27.3"]}`))
+	}))
+	defer server.Close()
+	previous := registryTagListURL
+	registryTagListURL = func(_, repository string) string {
+		return server.URL + "/v2/" + repository + "/tags/list"
+	}
+	defer func() { registryTagListURL = previous }()
+
+	entries, err := listRegistryTagEntries(context.Background(), "docker.gitea.com", "gitea")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(imageTagNames(entries), ",") != "1.11.0,1.27.3" {
+		t.Fatalf("entries=%v", entries)
+	}
+}
+
 func TestRegistryTagPaginationRejectsOtherOrigins(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Link", `<https://unrelated.invalid/v2/example/worker/tags/list?n=100>; rel="next"`)

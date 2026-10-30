@@ -1,9 +1,22 @@
 package dockerapp
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
+
+func TestSemverCandidatesStopAtTwenty(t *testing.T) {
+	t.Parallel()
+	tags := make([]string, 30)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("1.2.%d", i+1)
+	}
+	got := SelectSemverCandidates("1.2.0", tags, "")
+	if len(got) != maxListedTags || got[0] != "1.2.30" {
+		t.Fatalf("candidates=%v", got)
+	}
+}
 
 func TestSemverSelectsOfficialCandidatesDescending(t *testing.T) {
 	t.Parallel()

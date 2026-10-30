@@ -143,6 +143,9 @@ func SelectSemverCandidates(current string, tags []string, constraint string) []
 	sort.Slice(selected, func(i, j int) bool {
 		return selected[i].version.GreaterThan(selected[j].version)
 	})
+	if len(selected) > maxListedTags {
+		selected = selected[:maxListedTags]
+	}
 	out := make([]string, len(selected))
 	for i, item := range selected {
 		out[i] = item.tag

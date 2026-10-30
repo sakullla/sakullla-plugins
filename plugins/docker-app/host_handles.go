@@ -172,6 +172,37 @@ func (runtime *hostCapabilityRuntime) StoreRuntime(ctx context.Context, values m
 	return nil
 }
 
+func (runtime *hostCapabilityRuntime) StartDeploy(ctx context.Context, app App) (DeployProgress, error) {
+	return runtime.deployCall(ctx, app, "deploy-start")
+}
+
+func (runtime *hostCapabilityRuntime) DeployStatus(ctx context.Context, app App) (DeployProgress, error) {
+	return runtime.deployCall(ctx, app, "deploy-status")
+}
+
+func (runtime *hostCapabilityRuntime) CancelDeploy(ctx context.Context, app App) error {
+	_, err := runtime.deployCall(ctx, app, "deploy-cancel")
+	return err
+}
+
+func (runtime *hostCapabilityRuntime) deployCall(ctx context.Context, app App, action string) (DeployProgress, error) {
+	if !validAgentID(app.AgentID) {
+		return DeployProgress{}, ErrAgentOffline
+	}
+	payload := map[string]any{
+		"action": action, "agent_id": app.AgentID, "app_id": app.ID, "workdir": app.WorkDir,
+	}
+	if action == "deploy-start" {
+		payload["compose"] = app.Compose
+		payload["env"] = app.Env
+	}
+	var progress DeployProgress
+	if err := runtime.compose(ctx, payload, &progress); err != nil {
+		return DeployProgress{}, err
+	}
+	return progress, nil
+}
+
 func (runtime *hostCapabilityRuntime) ApplyApp(ctx context.Context, app App) error {
 	if !validAgentID(app.AgentID) {
 		return ErrAgentOffline
@@ -722,6 +753,7 @@ func bindHostCapabilityClient(config ControllerConfig, factory func() (hostRunti
 		config.UIAppState = runtime
 	}
 	config.UIApply = runtime
+	config.UIDeploy = runtime
 	config.UIStart = runtime
 	config.UIStop = runtime
 	config.UIRestart = runtime

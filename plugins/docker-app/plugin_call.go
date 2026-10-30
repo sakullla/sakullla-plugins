@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -261,6 +263,15 @@ func (controller *Controller) callCompose(ctx context.Context, payload []byte) (
 			instanceID = request.AppID
 		}
 		return json.Marshal(map[string]any{"accepted": true, "instance_id": instanceID})
+	case "deploy-start":
+		if strings.TrimSpace(request.Compose) == "" {
+			return nil, ErrInvalidCompose
+		}
+		return controller.startComposeDeploy(root, request)
+	case "deploy-status":
+		return controller.composeDeployStatus(root, request)
+	case "deploy-cancel":
+		return controller.cancelComposeDeploy(root, request)
 	case "inspect":
 		dir, err := controller.prepareComposeCallWorkspace(root, request)
 		if err != nil {
@@ -984,7 +995,7 @@ func marshalImageTags(entries []ImageTagEntry) ([]byte, error) {
 var (
 	imageTagHTTPClient  = http.DefaultClient
 	dockerHubTagListURL = func(repository string) string {
-		return "https://hub.docker.com/v2/repositories/" + repository + "/tags?page_size=100"
+		return "https://hub.docker.com/v2/repositories/" + repository + "/tags?page_size=20"
 	}
 	registryTagListURL = func(registry, repository string) string {
 		return "https://" + registry + "/v2/" + repository + "/tags/list"
@@ -1030,10 +1041,16 @@ func listDockerHubTagEntries(ctx context.Context, repository string) ([]ImageTag
 	url := dockerHubTagListURL(repository)
 	seen := map[string]struct{}{}
 	entries := make([]ImageTagEntry, 0, 32)
-	for url != "" && len(entries) < MaxImageTags {
+	for url != "" && len(entries) < maxListedTags {
 		payload, err := fetchImageTagJSON(ctx, url)
 		if err != nil {
-			return entries, err
+			// Docker Hub stops anonymous catalog pages after roughly a thousand
+			// tags. The newest releases are on the first pages, so a later
+			// refusal must not discard the versions already read.
+			if len(entries) > 0 {
+				return entries, nil
+			}
+			return nil, err
 		}
 		var document struct {
 			Next    string `json:"next"`
@@ -1060,7 +1077,7 @@ func listDockerHubTagEntries(ctx context.Context, repository string) ([]ImageTag
 				Digest:    imageDigestValue(item.Digest),
 				UpdatedAt: strings.TrimSpace(item.LastUpdated),
 			})
-			if len(entries) >= MaxImageTags {
+			if len(entries) >= maxListedTags {
 				break
 			}
 		}
@@ -1070,33 +1087,20 @@ func listDockerHubTagEntries(ctx context.Context, repository string) ([]ImageTag
 }
 
 func listRegistryTagEntries(ctx context.Context, registry, repository string) ([]ImageTagEntry, error) {
-	payload, err := fetchImageTagJSON(ctx, registryTagListURL(registry, repository))
-	if err != nil {
-		return nil, err
+	endpoint, err := url.Parse(registryTagListURL(registry, repository))
+	if err != nil || endpoint.Host == "" {
+		return nil, errors.New("image tags URL is empty")
 	}
-	var document struct {
-		Tags []string `json:"tags"`
+	// Distribution registries answer in alphabetical order, a page at a time.
+	// Follow the Link only until maxListedTags. A short first page is not the
+	// whole repository, and a long catalog is not walked. An older maximum
+	// is not offered as an upgrade.
+	query := endpoint.Query()
+	if query.Get("n") == "" {
+		query.Set("n", strconv.Itoa(maxListedTags))
 	}
-	if json.Unmarshal(payload, &document) != nil {
-		return nil, errors.New("image tags payload is invalid")
-	}
-	seen := map[string]struct{}{}
-	entries := make([]ImageTagEntry, 0, len(document.Tags))
-	for _, tag := range document.Tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" {
-			continue
-		}
-		if _, dup := seen[tag]; dup {
-			continue
-		}
-		seen[tag] = struct{}{}
-		entries = append(entries, ImageTagEntry{Tag: tag})
-		if len(entries) >= MaxImageTags {
-			break
-		}
-	}
-	return entries, nil
+	endpoint.RawQuery = query.Encode()
+	return listMirrorTagPages(ctx, endpoint, false)
 }
 
 func fetchImageTagJSON(ctx context.Context, url string) ([]byte, error) {

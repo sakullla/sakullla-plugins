@@ -103,6 +103,41 @@ func TestProjectServiceReleaseOffersReleaseForMovingTag(t *testing.T) {
 	}
 }
 
+func TestPinnedReleaseIgnoresOlderAlphabeticalMaximum(t *testing.T) {
+	listing := serviceTagListing{Tags: []string{"1.10.0", "1.11.0"}, Known: true}
+	view := projectServiceView(App{ID: "git"}, ServiceImage{Name: "server", Image: "docker.gitea.com/gitea:1.27.3"}, listing, serviceDigestState{})
+	if view.VersionState != VersionStateCurrent {
+		t.Fatalf("version state=%q", view.VersionState)
+	}
+	if view.Latest != "1.27.3" || view.Version != "1.27.3" {
+		t.Fatalf("version=%q latest=%q", view.Version, view.Latest)
+	}
+	if view.Update || len(view.Candidates) != 0 {
+		t.Fatalf("older tag was offered as an upgrade: %#v", view)
+	}
+	if view.Message != "已是最新版本 1.27.3" {
+		t.Fatalf("message=%q", view.Message)
+	}
+	if view.Listing == serviceListingFailed {
+		t.Fatal("a short alphabetical page was reported as unlistable")
+	}
+}
+
+func TestFloatingTagKeepsKnownReleaseWhenDigestFails(t *testing.T) {
+	entries := subStoreTagEntries()
+	listing := serviceTagListing{Tags: imageTagNames(entries), Entries: entries, Known: true}
+	view := projectServiceView(App{ID: "store"}, ServiceImage{Name: "substore", Image: "xream/sub-store:latest"}, listing, serviceDigestState{Failed: true})
+	if view.Listing == serviceListingFailed || view.Message == serviceListingFailedMessage {
+		t.Fatalf("known tags were hidden behind a listing failure: %#v", view)
+	}
+	if !view.Floating || view.Latest != "2.42.6" {
+		t.Fatalf("view=%#v", view)
+	}
+	if view.VersionState != VersionStateFloating {
+		t.Fatalf("version state=%q", view.VersionState)
+	}
+}
+
 func TestProjectServiceReleaseReadsReleaseLineFromTagNames(t *testing.T) {
 	listing := serviceTagListing{Tags: []string{"latest", "2.42.6", "2.42.6-http-meta", "2.42.5"}, Known: true}
 	view := projectServiceView(App{ID: "store"}, ServiceImage{Name: "sub-store", Image: "xream/sub-store:latest"}, listing, serviceDigestState{Current: true})

@@ -4154,7 +4154,7 @@ func assertFilesManagerPage(t *testing.T) {
 		}
 	}
 
-	setBusyStart := strings.Index(js, "const setBusy = (next) => {")
+	setBusyStart := strings.Index(js, "const setBusy = (next, statusMessage) => {")
 	setBusyEnd := strings.Index(js, "const parseAgentTime = (value) => {")
 	if setBusyStart < 0 || setBusyEnd <= setBusyStart {
 		t.Fatal("setBusy is missing")

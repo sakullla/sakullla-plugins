@@ -135,7 +135,10 @@ func projectServiceView(app App, service ServiceImage, listing serviceTagListing
 
 	_, _, semver := ParseSemverTag(service.Image)
 	if !semver {
-		if digest.Failed {
+		// Digest inspection can fail after the release line is already known,
+		// as it does for a secondary latest service. An empty catalog still
+		// has nothing to show, so that case stays a temporary listing failure.
+		if digest.Failed && release.Latest == "" {
 			view.Listing = serviceListingFailed
 			view.Message = serviceListingFailedMessage
 			return view

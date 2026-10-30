@@ -89,6 +89,7 @@ type ControllerConfig struct {
 	UIDeploymentState                                          DeploymentStateStore
 	BackupSecrets                                              ScopedSecretSource
 	UIBackup                                                   BackupRuntime
+	UIDeploy                                                   DeploySupervisor
 }
 
 type Controller struct {
@@ -132,6 +133,11 @@ type Controller struct {
 	imageDeleteEpoch   map[string]uint64
 	imageSlots         chan struct{}
 	imageUpdateLocks   sync.Map // app ID -> *sync.Mutex; serializes observation commits and manual digest updates.
+	uiDeploy           DeploySupervisor
+	deployMu           sync.Mutex
+	deployRuns         map[string]*activeDeploy
+	deployStarter      deployProcessStarter
+	pendingDeploys     map[string]pendingDeploy
 }
 
 func (controller *Controller) lockImageUpdate(appID string) func() {
@@ -193,7 +199,7 @@ func NewController(config ControllerConfig) (*Controller, error) {
 		uiHTTPRuleList: httpRuleList, uiHTTPRuleDelete: httpRuleDelete, uiHTTPBackendOffer: config.UIHTTPBackendOffer,
 		uiAuditor: auditor, uiWorkDirRoot: config.UIWorkDirRoot, uiImageObserver: config.UIImageObserver,
 		commandRunner: config.CommandRunner, callImages: config.CallImages, uiAppState: config.UIAppState,
-		backupSecrets: config.BackupSecrets, uiBackup: config.UIBackup,
+		backupSecrets: config.BackupSecrets, uiBackup: config.UIBackup, uiDeploy: config.UIDeploy,
 		appRuntime: map[string]bool{},
 		imageCache: map[string]cachedImageObservation{}, imageRefresh: map[string]bool{}, imageObserveToken: map[string]uint64{}, imageDeleteEpoch: map[string]uint64{},
 		imageSlots: make(chan struct{}, 2),

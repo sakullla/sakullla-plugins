@@ -607,7 +607,7 @@ func TestProductionRuntimeBindsHostCapabilityWhenClientExists(t *testing.T) {
 	if !ok || runtime == nil || runtime.client == nil {
 		t.Fatalf("engine source = %#v", config.UIEngineSource)
 	}
-	if config.UIApply != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIFiles != runtime || config.UIRemove != runtime || config.UIDiskCleanup != runtime {
+	if config.UIApply != runtime || config.UIDeploy != runtime || config.UIStart != runtime || config.UIStop != runtime || config.UIRestart != runtime || config.UILogs != runtime || config.UIFiles != runtime || config.UIRemove != runtime || config.UIDiskCleanup != runtime {
 		t.Fatal("compose executors were not bound to the generic host handle")
 	}
 	if config.UIHTTPRule != runtime || config.UIHTTPRuleList != runtime || config.UIHTTPRuleDelete != runtime || config.UIHTTPBackendOffer != runtime || config.UIImageObserver != runtime {

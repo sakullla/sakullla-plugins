@@ -26,10 +26,13 @@ const (
 	MaxComposeServices       = 128
 	MaxCollectionItems       = 256
 	MaxSecretRefs            = MaxCollectionItems
-	// MaxImageTags bounds one repository tag listing. Release-heavy
-	// repositories publish well over a thousand tags, so the version detector
-	// reads more than the generic collection budget.
-	MaxImageTags = 2048
+	// MaxImageTags is the hard ceiling for one repository tag listing.
+	// maxListedTags is the number a version check actually reads: twenty
+	// releases is already more than a person chooses among, and walking a
+	// whole catalog is slower than it is useful. Docker Hub returns its
+	// newest page first.
+	MaxImageTags  = 2048
+	maxListedTags = 20
 )
 
 var resourceGroupRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)

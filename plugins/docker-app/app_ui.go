@@ -100,6 +100,7 @@ type appHTTPRuleView struct {
 type appWriteRequest struct {
 	ID         string             `json:"id"`
 	AgentID    string             `json:"agent_id"`
+	Action     string             `json:"action,omitempty"`
 	Compose    string             `json:"compose"`
 	Env        string             `json:"env"`
 	AutoUpdate bool               `json:"auto_update"`
@@ -165,6 +166,7 @@ type appAPIResponse struct {
 	Apps         []appView            `json:"apps,omitempty"`
 	App          *appView             `json:"app,omitempty"`
 	Logs         string               `json:"logs,omitempty"`
+	Deploy       *DeployProgress      `json:"deploy,omitempty"`
 	Error        string               `json:"error,omitempty"`
 	Engine       *engineAPIView       `json:"engine,omitempty"`
 	Rules        []HostHTTPRule       `json:"rules,omitempty"`
@@ -211,6 +213,10 @@ func (controller *Controller) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	if path == "/api/apps/preview" {
 		controller.serveComposePreview(writer, request)
+		return
+	}
+	if path == "/api/deploy-jobs" {
+		controller.serveDeployJob(writer, request)
 		return
 	}
 	if path == "/api/disk-cleanup" {
@@ -363,38 +369,291 @@ func (controller *Controller) serveAppCollection(writer http.ResponseWriter, req
 			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
 			return
 		}
-		for index := range next {
-			if next[index].ID == body.ID {
-				next[index].ImageLocks = cloneStringMap(existingApp.ImageLocks)
-				next[index].IgnoredUpdates = cloneStringSlicesMap(existingApp.IgnoredUpdates)
-				next[index].AutoUpdate = cloneBool(&body.AutoUpdate)
-				if err := next[index].normalizeServicePolicies(); err != nil {
-					controller.allowImageObservation(body.ID)
-					writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
-					return
-				}
-			}
-		}
-		if err := controller.replaceApps(request.Context(), next); err != nil {
+		if err := controller.persistDeployedApp(request.Context(), body.ID, next, existingApp, body.AutoUpdate); err != nil {
 			controller.allowImageObservation(body.ID)
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+			writePersistError(writer, err)
 			return
 		}
 		controller.allowImageObservation(body.ID)
-		if err := controller.setAppRunning(request.Context(), body.ID, true); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
-			return
-		}
-		if err := controller.clearAppDeployment(request.Context(), body.ID); err != nil {
-			writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
-			return
-		}
-		controller.publishHTTPBackendOffers(request.Context())
 		writeAppJSON(writer, http.StatusOK, controller.appCollectionResponse(request.Context(), agentID))
 	default:
 		writer.Header().Set("Allow", "GET, HEAD, POST")
 		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
 	}
+}
+
+type deployPolicyError struct{ error }
+
+func (controller *Controller) persistDeployedApp(ctx context.Context, appID string, next []App, existing App, autoUpdate bool) error {
+	for index := range next {
+		if next[index].ID != appID {
+			continue
+		}
+		next[index].ImageLocks = cloneStringMap(existing.ImageLocks)
+		next[index].IgnoredUpdates = cloneStringSlicesMap(existing.IgnoredUpdates)
+		next[index].AutoUpdate = cloneBool(&autoUpdate)
+		if err := next[index].normalizeServicePolicies(); err != nil {
+			return deployPolicyError{err}
+		}
+	}
+	if err := controller.replaceApps(ctx, next); err != nil {
+		return err
+	}
+	if err := controller.setAppRunning(ctx, appID, true); err != nil {
+		return err
+	}
+	if err := controller.clearAppDeployment(ctx, appID); err != nil {
+		return err
+	}
+	controller.publishHTTPBackendOffers(ctx)
+	return nil
+}
+
+func writePersistError(writer http.ResponseWriter, err error) {
+	var policy deployPolicyError
+	if errors.As(err, &policy) {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: policy.Error()})
+		return
+	}
+	writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "persist")})
+}
+
+func (controller *Controller) serveDeployJob(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeAppJSON(writer, http.StatusMethodNotAllowed, appAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := controller.uiIdentity(request); err != nil {
+		writeAppJSON(writer, http.StatusForbidden, appAPIResponse{Error: ErrUnauthorized.Error()})
+		return
+	}
+	body, err := decodeAppWrite(request)
+	if err != nil {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: ErrInvalidCompose.Error()})
+		return
+	}
+	switch strings.TrimSpace(body.Action) {
+	case "status":
+		controller.serveDeployStatus(writer, request, body)
+	case "cancel":
+		controller.serveDeployCancel(writer, request, body)
+	default:
+		controller.serveDeployStart(writer, request, body)
+	}
+}
+
+func (controller *Controller) serveDeployStart(writer http.ResponseWriter, request *http.Request, body appWriteRequest) {
+	accepted, ok := controller.acceptDeployBody(writer, request, body)
+	if !ok {
+		return
+	}
+	app := App{ID: body.ID, AgentID: accepted.report.AgentID, Compose: body.Compose, Env: accepted.environment, Generation: accepted.generation}
+	if controller.uiDeploy == nil {
+		controller.finishSyncDeploy(writer, request, accepted, body)
+		return
+	}
+	progress, err := controller.uiDeploy.StartDeploy(request.Context(), app)
+	if err != nil {
+		controller.allowImageObservation(body.ID)
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
+		return
+	}
+	progress.AppID = body.ID
+	controller.mu.Lock()
+	if controller.pendingDeploys == nil {
+		controller.pendingDeploys = map[string]pendingDeploy{}
+	}
+	controller.pendingDeploys[body.ID] = pendingDeploy{
+		spec: ComposeDeploySpec{
+			AppID: body.ID, Generation: accepted.generation, Compose: body.Compose,
+			WorkDirRoot: controller.uiWorkDirRoot, Env: accepted.environment, Confirm: body.Confirm, AgentID: accepted.report.AgentID,
+		},
+		report: accepted.report, autoUpdate: body.AutoUpdate, existing: accepted.existing,
+	}
+	controller.mu.Unlock()
+	if progress.Phase == deployPhaseSucceeded {
+		controller.completePendingDeploy(writer, request, body.ID, progress)
+		return
+	}
+	if deployTerminal(progress.Phase) {
+		controller.mu.Lock()
+		delete(controller.pendingDeploys, body.ID)
+		controller.mu.Unlock()
+		controller.allowImageObservation(body.ID)
+	}
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Deploy: &progress})
+}
+
+func (controller *Controller) finishSyncDeploy(writer http.ResponseWriter, request *http.Request, accepted deployAcceptance, body appWriteRequest) {
+	next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), ComposeDeploySpec{
+		AppID: body.ID, Generation: accepted.generation, Compose: body.Compose, WorkDirRoot: controller.uiWorkDirRoot, Env: accepted.environment, Confirm: body.Confirm,
+	}, accepted.report, controller.uiApply, controller.uiAuditor)
+	if err != nil {
+		controller.allowImageObservation(body.ID)
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
+		return
+	}
+	if err := controller.persistDeployedApp(request.Context(), body.ID, next, accepted.existing, body.AutoUpdate); err != nil {
+		controller.allowImageObservation(body.ID)
+		writePersistError(writer, err)
+		return
+	}
+	controller.allowImageObservation(body.ID)
+	progress := DeployProgress{AppID: body.ID, Phase: deployPhaseSucceeded, Message: deployPhaseMessage(deployPhaseSucceeded), Logs: "Compose 已应用。\n"}
+	response := controller.appCollectionResponse(request.Context(), accepted.report.AgentID)
+	response.Deploy = &progress
+	writeAppJSON(writer, http.StatusOK, response)
+}
+
+func (controller *Controller) serveDeployStatus(writer http.ResponseWriter, request *http.Request, body appWriteRequest) {
+	app, progress, err := controller.readRemoteDeploy(request.Context(), body)
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
+		return
+	}
+	if progress.Phase == deployPhaseSucceeded {
+		controller.completePendingDeploy(writer, request, app.ID, progress)
+		return
+	}
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Deploy: &progress})
+}
+
+func (controller *Controller) serveDeployCancel(writer http.ResponseWriter, request *http.Request, body appWriteRequest) {
+	app, _, err := controller.deploySubject(body)
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
+		return
+	}
+	if controller.uiDeploy == nil {
+		writeAppJSON(writer, http.StatusServiceUnavailable, appAPIResponse{Error: publicAppActionError(ErrTypedHandlesUnavailable, "deploy")})
+		return
+	}
+	if err := controller.uiDeploy.CancelDeploy(request.Context(), app); err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "deploy")})
+		return
+	}
+	controller.mu.Lock()
+	delete(controller.pendingDeploys, app.ID)
+	controller.mu.Unlock()
+	controller.allowImageObservation(app.ID)
+	progress := DeployProgress{AppID: app.ID, Phase: deployPhaseCancelled, Message: deployPhaseMessage(deployPhaseCancelled)}
+	writeAppJSON(writer, http.StatusOK, appAPIResponse{Deploy: &progress})
+}
+
+func (controller *Controller) completePendingDeploy(writer http.ResponseWriter, request *http.Request, appID string, progress DeployProgress) {
+	controller.mu.Lock()
+	pending, ok := controller.pendingDeploys[appID]
+	controller.mu.Unlock()
+	if !ok {
+		response := controller.appCollectionResponse(request.Context(), "")
+		response.Deploy = &progress
+		writeAppJSON(writer, http.StatusOK, response)
+		return
+	}
+	next, err := DeployComposeAppForAgent(request.Context(), controller.Apps(), pending.spec, pending.report, AppApplyExecutorFunc(func(context.Context, App) error {
+		return nil
+	}), controller.uiAuditor)
+	if err != nil {
+		progress.Error = publicAppActionError(err, "persist")
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Deploy: &progress})
+		return
+	}
+	if err := controller.persistDeployedApp(request.Context(), appID, next, pending.existing, pending.autoUpdate); err != nil {
+		progress.Error = publicAppActionError(err, "persist")
+		writeAppJSON(writer, http.StatusOK, appAPIResponse{Deploy: &progress})
+		return
+	}
+	controller.mu.Lock()
+	delete(controller.pendingDeploys, appID)
+	controller.mu.Unlock()
+	controller.allowImageObservation(appID)
+	response := controller.appCollectionResponse(request.Context(), pending.report.AgentID)
+	response.Deploy = &progress
+	writeAppJSON(writer, http.StatusOK, response)
+}
+
+type deployAcceptance struct {
+	report      AgentEngineReport
+	existing    App
+	environment string
+	generation  string
+}
+
+func (controller *Controller) acceptDeployBody(writer http.ResponseWriter, request *http.Request, body appWriteRequest) (deployAcceptance, bool) {
+	agentID := strings.TrimSpace(body.AgentID)
+	if !validAgentID(agentID) {
+		writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: "agent_id is required"})
+		return deployAcceptance{}, false
+	}
+	existingApp, existing := controller.appByID(body.ID)
+	environment := body.Env
+	if existing && strings.TrimSpace(environment) == "" {
+		environment = existingApp.Env
+	}
+	if !existing || strings.TrimSpace(environment) != "" {
+		if err := validateRequiredComposeVariables(body.Compose, environment); err != nil {
+			writeAppJSON(writer, http.StatusBadRequest, appAPIResponse{Error: err.Error()})
+			return deployAcceptance{}, false
+		}
+	}
+	report, err := controller.observeAgent(request.Context(), agentID)
+	if err != nil {
+		writeAppJSON(writer, appStatus(err), appAPIResponse{Error: publicAppActionError(err, "engine")})
+		return deployAcceptance{}, false
+	}
+	if !report.Online {
+		writeAppJSON(writer, appStatus(ErrAgentOffline), appAPIResponse{Error: publicAppActionError(ErrAgentOffline, "engine")})
+		return deployAcceptance{}, false
+	}
+	if !ProjectEngine(ObservationFromReport(report)).Ready {
+		writeAppJSON(writer, appStatus(ErrEngineNotReady), appAPIResponse{Error: publicAppActionError(ErrEngineNotReady, "engine")})
+		return deployAcceptance{}, false
+	}
+	generation := controller.lifecycleGeneration()
+	preview, previewErr := PreviewComposeDocument(body.ID, generation, body.Compose, "")
+	if previewErr != nil {
+		writeAppJSON(writer, appStatus(previewErr), appAPIResponse{Error: publicAppActionError(previewErr, "deploy")})
+		return deployAcceptance{}, false
+	}
+	if RequiresRiskConfirmation(preview) && body.Confirm != preview.Digest {
+		writeRiskDenied(writer, preview, ErrInvalidPreview, "deploy")
+		return deployAcceptance{}, false
+	}
+	controller.pinComposeSaveObservation(body.ID)
+	return deployAcceptance{report: report, existing: existingApp, environment: environment, generation: generation}, true
+}
+
+func (controller *Controller) deploySubject(body appWriteRequest) (App, pendingDeploy, error) {
+	if !validID(body.ID) || !validAgentID(strings.TrimSpace(body.AgentID)) {
+		return App{}, pendingDeploy{}, ErrInvalidCompose
+	}
+	controller.mu.Lock()
+	pending, ok := controller.pendingDeploys[body.ID]
+	controller.mu.Unlock()
+	if ok {
+		return App{ID: pending.spec.AppID, AgentID: pending.spec.AgentID, Compose: pending.spec.Compose, Env: pending.spec.Env, Generation: pending.spec.Generation}, pending, nil
+	}
+	if app, found := controller.appByID(body.ID); found {
+		return app, pendingDeploy{}, nil
+	}
+	return App{ID: body.ID, AgentID: strings.TrimSpace(body.AgentID)}, pendingDeploy{}, nil
+}
+
+func (controller *Controller) readRemoteDeploy(ctx context.Context, body appWriteRequest) (App, DeployProgress, error) {
+	app, _, err := controller.deploySubject(body)
+	if err != nil {
+		return App{}, DeployProgress{}, err
+	}
+	if controller.uiDeploy == nil {
+		return app, DeployProgress{}, ErrTypedHandlesUnavailable
+	}
+	progress, err := controller.uiDeploy.DeployStatus(ctx, app)
+	if err != nil {
+		return app, DeployProgress{}, err
+	}
+	progress.AppID = app.ID
+	return app, progress, nil
 }
 
 func (controller *Controller) serveAppItem(writer http.ResponseWriter, request *http.Request, appID, action string) {

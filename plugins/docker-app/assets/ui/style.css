@@ -3586,6 +3586,26 @@ dialog.ui-dialog--drawer::backdrop {
 
 dialog.ui-dialog[open] { animation: deck-dialog-in 200ms var(--ui-ease-out); }
 
+.deploy-progress { width: min(92vw, 46rem); }
+.deploy-progress__body { display: flex; flex-direction: column; gap: 0.65rem; }
+.deploy-progress__log-shell {
+  max-height: min(48vh, 24rem);
+  overflow: auto;
+  background: var(--app-terminal-bg);
+  border-radius: var(--ui-radius-lg);
+}
+.deploy-progress__log {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  color: var(--app-terminal-text);
+  font-family: var(--app-mono);
+  font-size: 0.75rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.app-status[data-deploy="active"] { cursor: pointer; }
+
 dialog.ui-dialog > form {
   display: flex;
   flex-direction: column;

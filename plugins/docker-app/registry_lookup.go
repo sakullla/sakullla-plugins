@@ -96,20 +96,26 @@ func listMirrorTagEntries(ctx context.Context, mirror *url.URL, repository strin
 	// distribution API. Keep pagination on that mirror, even when Hub's JSON
 	// contains an absolute next-page URL pointing back to hub.docker.com.
 	endpoint = mirrorEndpoint(mirror, "/api/tags")
-	endpoint.RawQuery = url.Values{"image": {repository}, "page_size": {"100"}, "page": {"1"}}.Encode()
+	endpoint.RawQuery = url.Values{"image": {repository}, "page_size": {strconv.Itoa(maxListedTags)}, "page": {"1"}}.Encode()
 	return listMirrorTagPages(ctx, endpoint, true)
 }
 
 func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([]ImageTagEntry, error) {
 	seenPages, seenTags := map[string]bool{}, map[string]bool{}
 	entries := make([]ImageTagEntry, 0, 32)
-	for len(entries) < MaxImageTags && len(seenPages) < MaxImageTags {
+	for len(entries) < maxListedTags && len(seenPages) < maxListedTags {
 		if seenPages[endpoint.String()] {
 			return nil, errors.New("registry tag pagination repeated a page")
 		}
 		seenPages[endpoint.String()] = true
 		data, headers, err := fetchRegistryDocument(ctx, endpoint, "application/json")
 		if err != nil {
+			// A later page can time out or be refused after earlier tags were
+			// read. Keep those tags. An alphabetical page whose maximum is
+			// older than the running tag is not offered as an upgrade.
+			if len(entries) > 0 {
+				return entries, nil
+			}
 			return nil, err
 		}
 		var page struct {
@@ -130,7 +136,7 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 		}
 		for _, name := range names {
 			name = strings.TrimSpace(name)
-			if name == "" || seenTags[name] || len(entries) >= MaxImageTags {
+			if name == "" || seenTags[name] || len(entries) >= maxListedTags {
 				continue
 			}
 			seenTags[name] = true
@@ -146,6 +152,9 @@ func listMirrorTagPages(ctx context.Context, endpoint *url.URL, catalog bool) ([
 				}
 			}
 			entries = append(entries, entry)
+		}
+		if len(entries) >= maxListedTags {
+			return entries, nil
 		}
 		if catalog {
 			if page.Next == "" {

@@ -354,7 +354,7 @@ const deployComposePayload = async (payload) => {
   return sendPluginJSON("api/apps", next);
 };
 
-const setBusy = (next) => {
+const setBusy = (next, statusMessage) => {
   if (next && !busy) {
     busyFocusTarget = document.activeElement;
     // A mutation owns the target from preview through confirmation and completion.
@@ -364,7 +364,7 @@ const setBusy = (next) => {
     detailRequest += 1;
   }
   busy = next;
-  if (next) showStatus("正在执行操作…", false, "running");
+  if (next && statusMessage !== false) showStatus(statusMessage || "正在执行操作…", false, "running");
   const roots = [workspaceNode, contextNode, createPanel, document.querySelector(".page-head")].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
@@ -2300,6 +2300,12 @@ const renderUpdateServiceRow = (service, options = {}) => {
       select.append(option);
     });
     target.append(targetLabel, select);
+    if (candidates.length >= 20) {
+      const note = document.createElement("p");
+      note.className = "hint";
+      note.textContent = "只列出较新的 20 个版本。";
+      target.append(note);
+    }
   }
   target.hidden = !!options.policyOnly;
   arrow.hidden = !!options.policyOnly;
@@ -2903,11 +2909,16 @@ const renderOverview = (app) => {
         const label = document.createElement("span");
         label.textContent = "候选：";
         candidates.append(label);
-        candidateTags.forEach((tag) => {
+        candidateTags.slice(0, 3).forEach((tag) => {
           const code = document.createElement("code");
           code.textContent = tag;
           candidates.append(code);
         });
+        if (candidateTags.length > 3) {
+          const more = document.createElement("span");
+          more.textContent = `还有 ${candidateTags.length - 3} 个，在版本策略中选择`;
+          candidates.append(more);
+        }
         tools.append(candidates);
       }
       const serviceActions = document.createElement("div");
@@ -5265,6 +5276,145 @@ const showFieldFeedback = (field, message) => {
   field.setAttribute("aria-invalid", "true");
   field.setAttribute("aria-describedby", id);
 };
+const deployProgress = document.querySelector("#deploy-progress");
+const deployProgressTitle = document.querySelector("#deploy-progress-title");
+const deployProgressPhase = document.querySelector("#deploy-progress-phase");
+const deployProgressMeta = document.querySelector("#deploy-progress-meta");
+const deployProgressLog = document.querySelector("#deploy-progress-log");
+const deployProgressHide = document.querySelector("#deploy-progress-hide");
+const deployProgressCancel = document.querySelector("#deploy-progress-cancel");
+const deployProgressClose = document.querySelector("#deploy-progress-close");
+let deployWatch = null;
+let deployStartedAt = 0;
+let deployPollTimer = 0;
+let deployFailures = 0;
+const deployTerminalPhase = (phase) => phase === "succeeded" || phase === "failed" || phase === "cancelled";
+const deployElapsed = () => {
+  const seconds = Math.max(0, Math.floor((Date.now() - deployStartedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes ? `已进行 ${minutes} 分 ${String(rest).padStart(2, "0")} 秒` : `已进行 ${rest} 秒`;
+};
+const renderDeployProgress = (deploy) => {
+  if (!deployProgress || !deploy) return;
+  const terminal = deployTerminalPhase(deploy.phase);
+  deployProgressTitle.textContent = deploy.phase === "succeeded" ? "部署完成" : deploy.phase === "failed" ? "部署失败" : deploy.phase === "cancelled" ? "部署已停止" : `正在部署 ${deployWatch?.id || ""}`.trim();
+  deployProgressPhase.textContent = deploy.error || deploy.message || "";
+  deployProgressMeta.textContent = deployElapsed();
+  const shell = deployProgressLog.parentElement;
+  const nearEnd = !shell || shell.scrollHeight - shell.scrollTop - shell.clientHeight <= 48;
+  deployProgressLog.textContent = deploy.logs || "还没有日志。镜像开始拉取后，进度会出现在这里。";
+  if (nearEnd && shell) shell.scrollTop = shell.scrollHeight;
+  deployProgressHide.hidden = terminal;
+  deployProgressCancel.hidden = terminal;
+  deployProgressClose.hidden = !terminal;
+};
+const stopDeployWatch = () => {
+  clearTimeout(deployPollTimer);
+  deployPollTimer = 0;
+  if (statusNode) delete statusNode.dataset.deploy;
+};
+const showDeployDialog = () => {
+  if (!deployProgress) return;
+  if (!deployProgress.open) deployProgress.showModal();
+  if (statusNode) delete statusNode.dataset.deploy;
+  if (deployWatch && !deployTerminalPhase(deployWatch.phase) && !deployPollTimer) {
+    deployFailures = 0;
+    deployPollTimer = setTimeout(pollDeploy, 300);
+  }
+};
+const hideDeployDialog = () => {
+  if (deployProgress?.open) deployProgress.close();
+  if (!deployWatch || deployTerminalPhase(deployWatch.phase)) return;
+  if (statusNode) statusNode.dataset.deploy = "active";
+  showStatus(`正在部署 ${deployWatch.id}，点击查看进度`, false, "running");
+};
+const finishDeployWatch = async (deploy, updating) => {
+  stopDeployWatch();
+  if (deployWatch) deployWatch.phase = deploy.phase;
+  renderDeployProgress(deploy);
+  const form = deployWatch?.form;
+  const draft = updating ? composeDraft : createDraft;
+  setBusy(false);
+  if (deploy.phase === "succeeded") {
+    // The persisted configuration becomes the draft baseline before any fallible refresh.
+    draft.capture();
+    updateDraftIndicators();
+    if (updating) composeFilledFor = "";
+    else closeCreate();
+    showFormFeedback(form, "已保存。", "succeeded");
+    showStatus(updating ? "已更新应用。" : "已部署应用。", false);
+    try {
+      const refreshed = await renderWorkspace();
+      if (refreshed === false) throw new Error("节点或详情未能刷新");
+      showStatus(updating ? "已更新应用。" : "已部署应用。", false);
+    } catch (refreshError) {
+      showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true, "partial");
+      showFormFeedback(form, "操作已完成，但页面刷新失败。请稍后刷新，无需重复提交。", "partial");
+    }
+    return;
+  }
+  if (deploy.phase === "cancelled") {
+    showFormFeedback(form, "已停止部署，输入已保留。", "cancelled");
+    showStatus("已停止部署。", false, "cancelled");
+    return;
+  }
+  const message = deploy.error || deploy.message || "部署失败";
+  showFormFeedback(form, message);
+  showStatus(message, true);
+};
+const pollDeploy = async () => {
+  const watch = deployWatch;
+  if (!watch) return;
+  deployPollTimer = 0;
+  try {
+    const payload = await sendPluginJSON("api/deploy-jobs", { action: "status", id: watch.id, agent_id: watch.agent_id });
+    deployFailures = 0;
+    const deploy = payload.deploy || {};
+    watch.phase = deploy.phase;
+    renderDeployProgress(deploy);
+    if (deployTerminalPhase(deploy.phase)) {
+      await finishDeployWatch(deploy, watch.updating);
+      return;
+    }
+  } catch (error) {
+    deployFailures += 1;
+    if (deployProgressPhase) {
+      deployProgressPhase.textContent = deployFailures >= 3
+        ? "暂时读不到进度。部署可能仍在节点上继续。"
+        : `正在重试读取进度… ${error.message || ""}`.trim();
+    }
+    if (deployFailures >= 3) {
+      if (deployProgressClose) deployProgressClose.hidden = false;
+      setBusy(false);
+      return;
+    }
+  }
+  if (deployWatch) deployPollTimer = setTimeout(pollDeploy, 1500);
+};
+if (deployProgress) {
+  deployProgress.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    hideDeployDialog();
+  });
+  deployProgressHide?.addEventListener("click", hideDeployDialog);
+  deployProgressClose?.addEventListener("click", () => deployProgress.close());
+  deployProgressCancel?.addEventListener("click", async () => {
+    if (!deployWatch) return;
+    deployProgressCancel.disabled = true;
+    try {
+      const payload = await sendPluginJSON("api/deploy-jobs", { action: "cancel", id: deployWatch.id, agent_id: deployWatch.agent_id });
+      await finishDeployWatch(payload.deploy || { phase: "cancelled", message: "已停止这次部署。" }, deployWatch.updating);
+    } catch (error) {
+      if (deployProgressPhase) deployProgressPhase.textContent = error.message;
+    } finally {
+      deployProgressCancel.disabled = false;
+    }
+  });
+  statusNode?.addEventListener("click", () => {
+    if (statusNode.dataset.deploy === "active") showDeployDialog();
+  });
+}
 const submitCompose = async (form, updating) => {
   if (busy || (updating && !detailApp)) return;
   clearFormFieldFeedback(form);
@@ -5287,36 +5437,42 @@ const submitCompose = async (form, updating) => {
     env: String(data.get("env") || ""),
     auto_update: data.get("auto_update") === "on",
   };
-  const draft = updating ? composeDraft : createDraft;
-  setBusy(true);
+  setBusy(true, false);
   showFormFeedback(form, updating ? "正在保存 Compose…" : "正在部署应用…", "running");
   try {
-    const saved = await deployComposePayload(nextApp);
-    if (!saved) { showFormFeedback(form, "已取消，输入已保留。", "cancelled"); return; }
-    if (selectedAgentID !== nextApp.agent_id || (updating && selectedAppID !== nextApp.id)) {
-      showStatus(`应用 ${nextApp.id} 已保存，请在目标节点刷新查看结果。`, false);
+    const previewed = await sendPluginJSON("api/apps/preview", {
+      id: nextApp.id,
+      agent_id: nextApp.agent_id,
+      compose: nextApp.compose,
+    });
+    if (!(await confirmComposeRisk(previewed.preview, nextApp))) {
+      showFormFeedback(form, "已取消，输入已保留。", "cancelled");
+      setBusy(false);
       return;
     }
-    // Submission succeeded. The persisted configuration becomes the draft
-    // baseline before any fallible refresh.
-    draft.capture();
-    updateDraftIndicators();
-    if (updating) composeFilledFor = "";
-    else closeCreate();
-    showStatus(updating ? "已更新应用。" : "已部署应用。", false);
-    showFormFeedback(form, "已保存。", "succeeded");
-    try {
-      const refreshed = await renderWorkspace();
-      if (refreshed === false) throw new Error("节点或详情未能刷新");
-      showStatus(updating ? "已更新应用。" : "已部署应用。", false);
-    } catch (refreshError) {
-      showStatus(`${updating ? "应用已更新" : "应用已部署"}，但列表刷新失败：${refreshError.message}`, true, "partial");
-      showFormFeedback(form, "操作已完成，但页面刷新失败。请稍后刷新，无需重复提交。", "partial");
+    const payload = { ...nextApp };
+    if (previewed.preview?.digest) payload.confirm = previewed.preview.digest;
+    deployWatch = { ...payload, updating, form, phase: "preparing" };
+    deployStartedAt = Date.now();
+    deployFailures = 0;
+    renderDeployProgress({ phase: "preparing", message: "正在连接节点…", logs: "等待部署日志…" });
+    showDeployDialog();
+    const started = await sendPluginJSON("api/deploy-jobs", payload);
+    const deploy = started.deploy || { phase: "succeeded", message: "部署完成。", logs: started.error || "" };
+    deployWatch.phase = deploy.phase;
+    renderDeployProgress(deploy);
+    if (deployTerminalPhase(deploy.phase)) {
+      await finishDeployWatch(deploy, updating);
+      return;
     }
+    deployPollTimer = setTimeout(pollDeploy, 1500);
   } catch (error) {
     showFormFeedback(form, error.message);
     showStatus(error.message, true);
-  } finally {
+    if (deployProgressPhase) deployProgressPhase.textContent = error.message;
+    if (deployProgressHide) deployProgressHide.hidden = true;
+    if (deployProgressCancel) deployProgressCancel.hidden = true;
+    if (deployProgressClose) deployProgressClose.hidden = false;
     setBusy(false);
   }
 };
