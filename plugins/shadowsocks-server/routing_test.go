@@ -527,11 +527,11 @@ func TestUDPUpstreamRoundTripAuthenticatesResponse(t *testing.T) {
 
 func TestUDPAssociationCollectorBoundsCountAndBytes(t *testing.T) {
 	client, server := messageConnPair()
-	go func() {
+	go func(out chan<- []byte) {
 		for index := 0; index < maxUDPAssociationResponses+1; index++ {
-			server.out <- []byte{byte(index)}
+			out <- []byte{byte(index)}
 		}
-	}()
+	}(server.out)
 	responses, err := collectUDPAssociationResponses(client, func(value []byte) ([]byte, error) { return value, nil })
 	if err != nil || len(responses) != maxUDPAssociationResponses {
 		t.Fatalf("count responses=%d err=%v", len(responses), err)
