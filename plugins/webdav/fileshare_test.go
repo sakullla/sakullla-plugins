@@ -1069,12 +1069,15 @@ func TestWebDAVIfMatch(t *testing.T) {
 			t.Fatalf("propfind = %d %q, want etag %s", found.Code, found.Body.String(), etag)
 		}
 
-		updated := putWithMatch(t, controller, "http://share.test/dav/config.bin", etag, "version-two")
+		// A different size guarantees a new metadata validator even when the
+		// filesystem assigns the same modification time to consecutive writes.
+		const updatedContent = "version-two-updated"
+		updated := putWithMatch(t, controller, "http://share.test/dav/config.bin", etag, updatedContent)
 		if updated.Code != http.StatusCreated {
 			t.Fatalf("matching put status = %d, want 201 body=%q", updated.Code, updated.Body.String())
 		}
 		body, err := os.ReadFile(filepath.Join(owned, "config.bin"))
-		if err != nil || string(body) != "version-two" {
+		if err != nil || string(body) != updatedContent {
 			t.Fatalf("updated file = %q err=%v", body, err)
 		}
 		stale := putWithMatch(t, controller, "http://share.test/dav/config.bin", etag, "version-three")
@@ -1082,7 +1085,7 @@ func TestWebDAVIfMatch(t *testing.T) {
 			t.Fatalf("stale put status = %d, want 412 body=%q", stale.Code, stale.Body.String())
 		}
 		body, err = os.ReadFile(filepath.Join(owned, "config.bin"))
-		if err != nil || string(body) != "version-two" {
+		if err != nil || string(body) != updatedContent {
 			t.Fatalf("file after stale put = %q err=%v", body, err)
 		}
 	})
