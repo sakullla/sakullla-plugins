@@ -15,7 +15,9 @@ import (
 // TCPClientSession owns one outbound Shadowsocks request stream and validates
 // that the first server response is bound to that request salt.
 type TCPClientSession struct {
-	mu          sync.Mutex
+	mu          sync.RWMutex
+	readMu      sync.Mutex
+	writeMu     sync.Mutex
 	engine      *ProtocolEngine
 	key         []byte
 	requestSalt []byte
@@ -44,8 +46,10 @@ func newTCPClientSession(engine *ProtocolEngine, requestSalt []byte) (*TCPClient
 }
 
 func (session *TCPClientSession) SealPayload(payload []byte) ([]byte, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	session.mu.RLock()
+	defer session.mu.RUnlock()
 	if session.closed || session.outbound == nil {
 		return nil, ErrRevoked
 	}
@@ -100,8 +104,10 @@ func (session *TCPClientSession) openFirstResponse(reader io.Reader, now time.Ti
 }
 
 func (session *TCPClientSession) OpenPayload(reader io.Reader, now time.Time) ([]byte, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.readMu.Lock()
+	defer session.readMu.Unlock()
+	session.mu.RLock()
+	defer session.mu.RUnlock()
 	if session.closed {
 		return nil, ErrRevoked
 	}
@@ -120,26 +126,32 @@ func (session *TCPClientSession) OpenPayload(reader io.Reader, now time.Time) ([
 }
 
 func readEncryptedPayload(reader io.Reader, cipher *streamCipher, maximum int) ([]byte, error) {
+	return readEncryptedPayloadRecord(reader, cipher, maximum, false)
+}
+
+func readEncryptedPayloadRecord(reader io.Reader, cipher *streamCipher, maximum int, allowEmpty bool) ([]byte, error) {
 	header := make([]byte, 2+cipher.aead.Overhead())
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err
 	}
-	plain, err := cipher.open(header)
+	plain, err := cipher.aead.Open(header[:0], cipher.nonce[:], header, nil)
 	if err != nil || len(plain) != 2 {
 		return nil, ErrAuthentication
 	}
+	incrementNonce(&cipher.nonce)
 	length := int(binary.BigEndian.Uint16(plain))
-	if length < 1 || length > maximum {
+	if (!allowEmpty && length == 0) || length > maximum {
 		return nil, ErrProtocol
 	}
 	body := make([]byte, length+cipher.aead.Overhead())
 	if _, err := io.ReadFull(reader, body); err != nil {
 		return nil, err
 	}
-	payload, err := cipher.open(body)
+	payload, err := cipher.aead.Open(body[:0], cipher.nonce[:], body, nil)
 	if err != nil {
 		return nil, ErrAuthentication
 	}
+	incrementNonce(&cipher.nonce)
 	return payload, nil
 }
 
@@ -165,6 +177,7 @@ type upstreamTCPConn struct {
 	net.Conn
 	session *TCPClientSession
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	pending bytes.Reader
 }
 
@@ -182,6 +195,8 @@ func (connection *upstreamTCPConn) Read(value []byte) (int, error) {
 }
 
 func (connection *upstreamTCPConn) Write(value []byte) (int, error) {
+	connection.writeMu.Lock()
+	defer connection.writeMu.Unlock()
 	total := 0
 	for total < len(value) {
 		maximum := maxLegacyPayload
@@ -205,8 +220,10 @@ func (connection *upstreamTCPConn) Write(value []byte) (int, error) {
 }
 
 func (connection *upstreamTCPConn) Close() error {
+	// Wake a blocked response read before waiting for session key cleanup.
+	err := connection.Conn.Close()
 	connection.session.Close()
-	return connection.Conn.Close()
+	return err
 }
 
 func (b *boundListen) upstreamEngine(ctx context.Context, upstream Upstream) (*ProtocolEngine, error) {

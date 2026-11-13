@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,13 +50,14 @@ type nativeNetworkDialer struct{ net.Dialer }
 // ListenReport is the execution-face presence plus bound port summary.
 // It never includes secret material.
 type ListenReport struct {
-	AgentID string             `json:"agent_id"`
-	Online  bool               `json:"online"`
-	Listens []ListenPortStatus `json:"listens"`
-	DDNS    string             `json:"ddns_domain,omitempty"`
-	IPv4    string             `json:"ipv4,omitempty"`
-	IPv6    string             `json:"ipv6,omitempty"`
-	Routes  []RouteStatus      `json:"routes,omitempty"`
+	AgentID       string             `json:"agent_id"`
+	Online        bool               `json:"online"`
+	Listens       []ListenPortStatus `json:"listens"`
+	DDNS          string             `json:"ddns_domain,omitempty"`
+	IPv4          string             `json:"ipv4,omitempty"`
+	IPv6          string             `json:"ipv6,omitempty"`
+	Routes        []RouteStatus      `json:"routes,omitempty"`
+	RoutingDigest string             `json:"routing_digest,omitempty"`
 }
 
 // ListenPortStatus is one bound TCP+UDP port without keys or passwords.
@@ -198,7 +198,21 @@ func (exec *listenExecutor) report(payload []byte) ([]byte, error) {
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
-	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked(), Routes: exec.routeStatusesLocked()})
+	digest := ""
+	for _, bound := range exec.bound {
+		current := bound.snapshotRoutes()
+		if current == nil {
+			digest = ""
+			break
+		}
+		value := routingDigest(current.configuration)
+		if digest != "" && digest != value {
+			digest = ""
+			break
+		}
+		digest = value
+	}
+	return json.Marshal(ListenReport{AgentID: agentID, Online: true, Listens: exec.viewsLocked(), Routes: exec.routeStatusesLocked(), RoutingDigest: digest})
 }
 
 func (exec *listenExecutor) routeStatusesLocked() []RouteStatus {
@@ -994,30 +1008,11 @@ func readTCPPayloadChunk(conn net.Conn, session *TCPServerSession) ([]byte, erro
 	if closed || inbound == nil {
 		return nil, ErrRevoked
 	}
-	headerSize := 2 + inbound.aead.Overhead()
-	header := make([]byte, headerSize)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return nil, err
-	}
-	session.mu.Lock()
-	lengthPlain, err := inbound.aead.Open(nil, inbound.nonce[:], header, nil)
-	session.mu.Unlock()
-	if err != nil || len(lengthPlain) != 2 {
-		return nil, ErrAuthentication
-	}
-	length := int(binary.BigEndian.Uint16(lengthPlain))
 	maximum := maxLegacyPayload
 	if modern {
 		maximum = max2022Payload
 	}
-	if length > maximum {
-		return nil, ErrProtocol
-	}
-	rest := make([]byte, length+inbound.aead.Overhead())
-	if _, err := io.ReadFull(conn, rest); err != nil {
-		return nil, err
-	}
-	return session.OpenPayloadChunk(append(header, rest...))
+	return readEncryptedPayloadRecord(conn, inbound, maximum, true)
 }
 
 func clonePacketAddr(addr net.Addr) net.Addr {

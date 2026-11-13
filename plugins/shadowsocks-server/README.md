@@ -58,7 +58,7 @@ KDF. Missing Host runtime endpoints fail closed at SDK validation.
 
 The management page stores up to 16 scoped-secret upstreams and 64 ordered
 rules. Each rule selects one Host-managed dataset source and classification,
-including GeoSite attributes such as `category-ai` with `!cn`, then chooses
+including GeoSite classifications such as `category-ai-!cn`, then chooses
 `direct`, `reject`, or one upstream. The first match wins and the explicit
 default action applies after ordinary non-matches. A missing classification,
 unavailable dataset, disabled or protocol-incompatible upstream, failed dial,
@@ -71,6 +71,23 @@ separate inputs remain isolated and protocol replay checks remain active.
 Upstream endpoints are dialed directly and are never routed recursively.
 Diagnostics expose rule, source, classification, immutable version, selected
 exit, and stable failure codes. They never expose upstream secret material.
+
+Upstreams use separate host, port, method, and password fields, not an Xray
+outbound JSON object. For SS2022 multi-user upstreams, the password field holds
+the complete `serverPSK:userPSK` pair. Select a classification present in the
+source catalog; `category-ai-!cn` is a literal classification name, not the
+`!cn` attribute on a different classification. Bind the dataset to each target
+node before applying the rule.
+
+Saving routing commits the desired configuration independently of node
+availability. A failed or removed node cannot roll back healthy nodes. The
+reconciler compares routing digests as well as bound ports and retries pending
+nodes. The routing API reports `routing_applied` and `routing_error` for the
+requested node; saved configuration alone is not evidence of application.
+Consecutive compatible rules use one bounded dataset query while retaining
+first-match order and fail-closed behavior. No cross-generation decision cache
+can hide revoked dataset access. TCP upstream reads and writes proceed
+independently; closing the socket wakes reads before clearing session keys.
 
 When a TCP request names only an IP target, routing may inspect at most 16 KiB
 for 250 ms before dialing. It recognizes HTTP/1.0 or HTTP/1.1 `Host` and clear

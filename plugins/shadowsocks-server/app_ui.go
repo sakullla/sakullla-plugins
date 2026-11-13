@@ -80,17 +80,19 @@ type listenWriteRequest struct {
 }
 
 type listenAPIResponse struct {
-	Ready        bool                  `json:"ready"`
-	Listens      []listenAPIView       `json:"listens,omitempty"`
-	Listen       *listenAPIView        `json:"listen,omitempty"`
-	User         *listenUserView       `json:"user,omitempty"`
-	Defaults     *listenDefaultsView   `json:"defaults,omitempty"`
-	Execution    *executionView        `json:"execution,omitempty"`
-	Routing      *RoutingConfiguration `json:"routing,omitempty"`
-	RouteStatus  []RouteStatus         `json:"route_status,omitempty"`
-	RouteSources []RouteSourceStatus   `json:"route_sources,omitempty"`
-	Error        string                `json:"error,omitempty"`
-	Access       struct {
+	Ready          bool                  `json:"ready"`
+	Listens        []listenAPIView       `json:"listens,omitempty"`
+	Listen         *listenAPIView        `json:"listen,omitempty"`
+	User           *listenUserView       `json:"user,omitempty"`
+	Defaults       *listenDefaultsView   `json:"defaults,omitempty"`
+	Execution      *executionView        `json:"execution,omitempty"`
+	Routing        *RoutingConfiguration `json:"routing,omitempty"`
+	RoutingApplied *bool                 `json:"routing_applied,omitempty"`
+	RoutingError   string                `json:"routing_error,omitempty"`
+	RouteStatus    []RouteStatus         `json:"route_status,omitempty"`
+	RouteSources   []RouteSourceStatus   `json:"route_sources,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	Access         struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
 	} `json:"access,omitempty"`
@@ -1128,8 +1130,9 @@ func (c *Controller) reconcileAgentListens(ctx context.Context, agentID string) 
 		return
 	}
 	c.listenHost.setLive(agentID, report.Listens)
-	desired := c.directory().ListenersForAgent(agentID)
-	if !report.Online || listenRuntimeMatchesDesired(desired, report.Listens) {
+	configuration := c.directory()
+	desired := configuration.ListenersForAgent(agentID)
+	if !report.Online || (listenRuntimeMatchesDesired(desired, report.Listens) && report.RoutingDigest == routingDigest(configuration.Routing)) {
 		return
 	}
 	items, err := c.listenApplyItems(ctx, agentID)

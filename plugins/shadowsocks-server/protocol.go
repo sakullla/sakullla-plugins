@@ -445,9 +445,15 @@ func (s *TCPServerSession) SealPayloadChunk(payload []byte) ([]byte, error) {
 }
 
 func sealPayloadChunk(session *streamCipher, payload []byte) []byte {
-	length := []byte{byte(len(payload) >> 8), byte(len(payload))}
-	wire := session.seal(length)
-	return append(wire, session.seal(payload)...)
+	// Both authenticated records fit in one owned output buffer. Sealing the
+	// length in place avoids retaining a second full-sized payload allocation.
+	wire := make([]byte, 2, 2+len(payload)+2*session.aead.Overhead())
+	binary.BigEndian.PutUint16(wire, uint16(len(payload)))
+	wire = session.aead.Seal(wire[:0], session.nonce[:], wire, nil)
+	incrementNonce(&session.nonce)
+	wire = session.aead.Seal(wire, session.nonce[:], payload, nil)
+	incrementNonce(&session.nonce)
+	return wire
 }
 
 func openPayloadChunk(session *streamCipher, wire []byte, maximum int) ([]byte, error) {

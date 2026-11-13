@@ -54,14 +54,34 @@ func (c *Controller) serveRouting(writer http.ResponseWriter, request *http.Requ
 	case http.MethodGet, http.MethodHead:
 		routing := cloneRouting(c.directory().Routing)
 		var status []RouteStatus
+		var routingApplied *bool
+		routingError := ""
 		if agentID := strings.TrimSpace(request.URL.Query().Get("agent_id")); validAgentID(agentID) {
+			applied := false
+			routingApplied = &applied
 			if report, err := c.ReportListen(request.Context(), agentID); err == nil {
 				status = report.Routes
+				applied = report.Online && report.RoutingDigest == routingDigest(routing)
+				if !applied {
+					routingError = "分流配置已保存，等待该节点应用"
+				}
+			} else {
+				routingError = publicListenError(err)
 			}
 		}
 		sources := c.routeSourceStatuses(request.Context(), routing)
+		// Execution faces resolve their own scoped dataset handles. A control
+		// face without that handle must not overwrite a node's applied evidence.
+		for index := range sources {
+			for _, applied := range status {
+				if applied.SourceID == sources[index].SourceID && applied.VersionDigest != "" {
+					sources[index].VersionDigest, sources[index].Error = applied.VersionDigest, ""
+					break
+				}
+			}
+		}
 		status = mergeRouteStatuses(routing, sources, status)
-		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, RouteStatus: status, RouteSources: sources, Access: readWriteAccess()})
+		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, RoutingApplied: routingApplied, RoutingError: routingError, RouteStatus: status, RouteSources: sources, Access: readWriteAccess()})
 	case http.MethodPost:
 		var body routingWriteRequest
 		if err := decodeRoutingWrite(request, &body); err != nil {
@@ -267,8 +287,7 @@ func (c *Controller) replaceRouting(ctx context.Context, routing RoutingConfigur
 	if err := routing.Validate(); err != nil {
 		return err
 	}
-	previous := c.directory()
-	next := clone(previous)
+	next := c.directory()
 	next.Routing = cloneRouting(routing)
 	if store, ok := c.listenState.(RoutingCatalogStore); ok {
 		if err := store.StoreRouting(ctx, next.Routing); err != nil {
@@ -277,24 +296,21 @@ func (c *Controller) replaceRouting(ctx context.Context, routing RoutingConfigur
 	}
 	c.mu.Lock()
 	c.configuration.Routing = cloneRouting(next.Routing)
+	published := c.published
 	c.mu.Unlock()
+	if published != nil {
+		if err := published.commitDirectory(next); err != nil {
+			return err
+		}
+	}
 	agents := map[string]bool{}
 	for _, listener := range next.Listeners {
 		agents[listener.AgentID] = true
 	}
 	for agentID := range agents {
-		if err := c.applyAgentListens(ctx, agentID); err != nil {
-			if store, ok := c.listenState.(RoutingCatalogStore); ok {
-				_ = store.StoreRouting(ctx, previous.Routing)
-			}
-			c.mu.Lock()
-			c.configuration.Routing = cloneRouting(previous.Routing)
-			c.mu.Unlock()
-			for restored := range agents {
-				_ = c.applyAgentListens(ctx, restored)
-			}
-			return err
-		}
+		// Desired routing is durable. A missing or failing execution face must
+		// not roll back healthy nodes; reconciliation retries its own state.
+		_ = c.applyAgentListens(ctx, agentID)
 	}
 	return nil
 }

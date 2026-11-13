@@ -57,7 +57,9 @@ func (fake *routeDatasetFake) QueryDatasets(_ context.Context, request pluginsdk
 	}
 	response := pluginsdk.DatasetQueryResponse{Reference: request.Reference, Status: status}
 	if status == pluginsdk.DatasetQueryOK {
-		response.Matches = []pluginsdk.DatasetMatch{{Index: 0, Matched: fake.matches[request.Classifications[0].Name], Coverage: pluginsdk.DatasetCovered}}
+		for index, classification := range request.Classifications {
+			response.Matches = append(response.Matches, pluginsdk.DatasetMatch{Index: index, Matched: fake.matches[classification.Name], Coverage: pluginsdk.DatasetCovered})
+		}
 	}
 	return response, nil
 }
@@ -98,7 +100,7 @@ func TestRouteSnapshotUsesFirstMatchAndDistinguishesDatasetFailure(t *testing.T)
 	fake.matches["category-ai-cn"] = false
 	fake.queries = nil
 	decision, err = snapshot.decide(t.Context(), "udp", "chat.example.com:53")
-	if err != nil || decision.Action != RouteUpstream || decision.RuleID != "ai-not-cn" || decision.Upstream == nil || len(fake.queries) != 2 {
+	if err != nil || decision.Action != RouteUpstream || decision.RuleID != "ai-not-cn" || decision.Upstream == nil || len(fake.queries) != 1 {
 		t.Fatalf("upstream decision=%+v queries=%d err=%v", decision, len(fake.queries), err)
 	}
 

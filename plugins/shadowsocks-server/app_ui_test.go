@@ -27,6 +27,8 @@ type uiListenHost struct {
 	applyErr       error
 	node           NodeAddresses
 	hideReportNode bool
+	routingDigest  string
+	routes         []RouteStatus
 }
 
 func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
@@ -40,7 +42,7 @@ func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, t
 	defer h.mu.Unlock()
 	switch request.Name {
 	case pluginCallListenReport:
-		report := ListenReport{AgentID: request.AgentID, Online: h.online, Listens: append([]ListenPortStatus(nil), h.live...)}
+		report := ListenReport{AgentID: request.AgentID, Online: h.online, Listens: append([]ListenPortStatus(nil), h.live...), RoutingDigest: h.routingDigest, Routes: append([]RouteStatus(nil), h.routes...)}
 		if !h.hideReportNode {
 			report.DDNS, report.IPv4, report.IPv6 = h.node.DDNS, h.node.IPv4, h.node.IPv6
 		}
@@ -52,6 +54,7 @@ func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, t
 		var body listenApplyRequest
 		_ = json.Unmarshal(request.Payload, &body)
 		h.apply = append(h.apply, body)
+		h.routingDigest = routingDigest(body.Routing)
 		listens := make([]ListenPortStatus, 0, len(body.Listens))
 		for _, item := range body.Listens {
 			listens = append(listens, ListenPortStatus{ID: item.ID, Port: item.Port, TCP: true, UDP: true})

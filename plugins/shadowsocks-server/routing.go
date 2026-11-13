@@ -2,6 +2,9 @@ package shadowsocksserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
@@ -51,6 +54,12 @@ type RoutingConfiguration struct {
 	Rules             []RouteRule `json:"rules"`
 	DefaultAction     string      `json:"default_action"`
 	DefaultUpstreamID string      `json:"default_upstream_id,omitempty"`
+}
+
+func routingDigest(configuration RoutingConfiguration) string {
+	wire, _ := json.Marshal(cloneRouting(configuration))
+	digest := sha256.Sum256(wire)
+	return hex.EncodeToString(digest[:])
 }
 
 func (configuration RoutingConfiguration) effectiveDefault() string {
@@ -114,6 +123,14 @@ type routeSnapshot struct {
 	configuration RoutingConfiguration
 	references    map[string]pluginsdk.DatasetReference
 	datasets      datasetRoutingClient
+	domainGroups  []routeQueryGroup
+	addressGroups []routeQueryGroup
+}
+
+type routeQueryGroup struct {
+	reference       pluginsdk.DatasetReference
+	classifications []pluginsdk.DatasetClassification
+	rules           []RouteRule
 }
 
 type routeDecision struct {
@@ -185,6 +202,18 @@ func prepareRouteSnapshot(ctx context.Context, configuration RoutingConfiguratio
 		}
 		snapshot.references[rule.SourceID] = reference
 	}
+	for _, rule := range snapshot.configuration.Rules {
+		groups := &snapshot.addressGroups
+		if rule.Classification.Kind == pluginsdk.DatasetClassificationDomain {
+			groups = &snapshot.domainGroups
+		}
+		if len(*groups) == 0 || (*groups)[len(*groups)-1].reference.SourceID != rule.SourceID {
+			*groups = append(*groups, routeQueryGroup{reference: snapshot.references[rule.SourceID]})
+		}
+		group := &(*groups)[len(*groups)-1]
+		group.classifications = append(group.classifications, rule.Classification)
+		group.rules = append(group.rules, rule)
+	}
 	return snapshot, nil
 }
 
@@ -198,33 +227,52 @@ func (snapshot *routeSnapshot) decide(ctx context.Context, protocol, target stri
 	}
 	host = strings.Trim(host, "[]")
 	address, addressErr := netip.ParseAddr(host)
-	for _, rule := range snapshot.configuration.Rules {
-		isDomain := rule.Classification.Kind == pluginsdk.DatasetClassificationDomain
-		if isDomain == (addressErr == nil) {
-			continue
-		}
-		request := pluginsdk.DatasetQueryRequest{Reference: snapshot.references[rule.SourceID], Classifications: []pluginsdk.DatasetClassification{rule.Classification}, Budget: pluginsdk.DatasetQueryBudget{MaxDurationMicros: 2000, MaxResponseBytes: 32768}}
-		if isDomain {
+	groups := snapshot.addressGroups
+	if addressErr != nil {
+		groups = snapshot.domainGroups
+	}
+	for _, group := range groups {
+		request := pluginsdk.DatasetQueryRequest{Reference: group.reference, Classifications: group.classifications, Budget: pluginsdk.DatasetQueryBudget{MaxDurationMicros: 2000, MaxResponseBytes: 32768}}
+		if addressErr != nil {
 			request.Domain = strings.ToLower(host)
 		} else {
 			request.Address = address.String()
 		}
 		response, err := snapshot.datasets.QueryDatasets(ctx, request)
-		if err != nil || response.Status != pluginsdk.DatasetQueryOK || len(response.Matches) != 1 {
-			return routeDecision{RuleID: rule.ID, VersionDigest: request.Reference.VersionDigest}, ErrRouteDatasetUnavailable
-		}
-		if !response.Matches[0].Matched {
-			continue
-		}
-		decision := routeDecision{Action: rule.Action, RuleID: rule.ID, VersionDigest: response.Reference.VersionDigest}
-		if rule.Action == RouteUpstream {
-			upstream := snapshot.upstream(rule.UpstreamID)
-			if upstream == nil || !supportsProtocol(*upstream, protocol) {
-				return decision, ErrRouteUpstreamUnavailable
+		batchOK := err == nil && response.Status == pluginsdk.DatasetQueryOK && len(response.Matches) == len(group.rules)
+		for index, rule := range group.rules {
+			var matched bool
+			if batchOK {
+				if response.Matches[index].Index != index {
+					return routeDecision{RuleID: rule.ID, VersionDigest: group.reference.VersionDigest}, ErrRouteDatasetUnavailable
+				}
+				matched = response.Matches[index].Matched
+			} else {
+				// Preserve first-match behavior if a later classification makes
+				// a batch fail. Each fallback still requires Host authorization.
+				if len(group.rules) == 1 {
+					return routeDecision{RuleID: rule.ID, VersionDigest: group.reference.VersionDigest}, ErrRouteDatasetUnavailable
+				}
+				request.Classifications = group.classifications[index : index+1]
+				response, err = snapshot.datasets.QueryDatasets(ctx, request)
+				if err != nil || response.Status != pluginsdk.DatasetQueryOK || len(response.Matches) != 1 || response.Matches[0].Index != 0 {
+					return routeDecision{RuleID: rule.ID, VersionDigest: group.reference.VersionDigest}, ErrRouteDatasetUnavailable
+				}
+				matched = response.Matches[0].Matched
 			}
-			decision.Upstream = upstream
+			if !matched {
+				continue
+			}
+			decision := routeDecision{Action: rule.Action, RuleID: rule.ID, VersionDigest: response.Reference.VersionDigest}
+			if rule.Action == RouteUpstream {
+				upstream := snapshot.upstream(rule.UpstreamID)
+				if upstream == nil || !supportsProtocol(*upstream, protocol) {
+					return decision, ErrRouteUpstreamUnavailable
+				}
+				decision.Upstream = upstream
+			}
+			return decision, nil
 		}
-		return decision, nil
 	}
 	decision := routeDecision{Action: snapshot.configuration.effectiveDefault()}
 	if decision.Action == RouteUpstream {
@@ -239,8 +287,7 @@ func (snapshot *routeSnapshot) decide(ctx context.Context, protocol, target stri
 func (snapshot *routeSnapshot) upstream(id string) *Upstream {
 	for index := range snapshot.configuration.Upstreams {
 		if snapshot.configuration.Upstreams[index].ID == id && snapshot.configuration.Upstreams[index].Enabled {
-			value := snapshot.configuration.Upstreams[index]
-			return &value
+			return &snapshot.configuration.Upstreams[index]
 		}
 	}
 	return nil
