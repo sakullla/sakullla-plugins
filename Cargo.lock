@@ -8,21 +8,21 @@ version = "0.1.0"
 
 [[package]]
 name = "sakullla-ip-policy"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "nre-policy-guest",
 ]
 
 [[package]]
 name = "sakullla-rate-limit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nre-policy-guest",
 ]
 
 [[package]]
 name = "sakullla-waf"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "nre-policy-guest",
 ]

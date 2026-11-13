@@ -32,8 +32,8 @@ github.com/philhofer/fwd v1.2.0/go.mod h1:RqIHx9QI14HlwKwm98g9Re5prTQ6LdeRQn+gXJ
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/rs/xid v1.6.0 h1:fV591PaemRlL6JfRxGDEPl69wICngIQ3shQtzfy2gxU=
 github.com/rs/xid v1.6.0/go.mod h1:7XoLgs4eV+QndskICGsho+ADou8ySMSjJKDIan90Nz0=
-github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.2 h1:84d1JMS1WjgkoesvpGvhHAs1Hh2PEVitA+hkFQ45PYE=
-github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.2/go.mod h1:w4sTjdgA/GKwsbrjWvIhmJJR5mxZanZECFFvxcxEV/g=
+github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.4 h1:/Tw/g7LODjH06CeJDekujcPCGPZObHK9Ks8Pa9lv9tU=
+github.com/sakullla/nginx-reverse-emby/plugin-sdk v0.13.4/go.mod h1:w4sTjdgA/GKwsbrjWvIhmJJR5mxZanZECFFvxcxEV/g=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 h1:1EYB5IzjZawrrnELUi78f9fPu57HuXjmddZPjrls/28=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.3/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

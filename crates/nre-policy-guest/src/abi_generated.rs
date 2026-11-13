@@ -25,7 +25,7 @@ pub const HOST_READ_TRUSTED_SOURCE: &str = "nre_host_read_trusted_source";
 pub const HOST_DATASET_QUERY: &str = "nre_host_dataset_query";
 pub const HOST_DATASET_RESOLVE: &str = "nre_host_dataset_resolve";
 
-pub const MAX_TIMEOUT_MILLISECONDS: u32 = 2;
+pub const MAX_TIMEOUT_MILLISECONDS: u32 = 20;
 pub const MIN_MEMORY_BYTES: u64 = 65536;
 pub const MAX_MEMORY_BYTES: u64 = 16777216;
 pub const MAX_CONCURRENCY: u32 = 64;

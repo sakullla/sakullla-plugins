@@ -257,7 +257,7 @@ fn host_response_and_call_budgets_fail_closed() {
 #[test]
 fn resource_budget_uses_canonical_ceilings() {
     let valid = PolicyResourceBudget {
-        timeout_milliseconds: 2,
+        timeout_milliseconds: 20,
         memory_bytes: 16 << 20,
         concurrency: 64,
         input_frame_bytes: 128 << 10,
@@ -266,7 +266,7 @@ fn resource_budget_uses_canonical_ceilings() {
     assert_eq!(valid.validate().unwrap(), valid);
     assert_eq!(
         PolicyResourceBudget {
-            timeout_milliseconds: 3,
+            timeout_milliseconds: 21,
             ..valid
         }
         .validate()

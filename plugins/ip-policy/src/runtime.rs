@@ -9,7 +9,7 @@ use nre_policy_guest::{
 use crate::config::{Config, FixedStr, MAX_CLASSIFICATIONS, MAX_DATASETS, Overlay, Rule, Selector};
 use crate::{IpAddress, RuleEffect};
 
-const DATASET_CALL_MICROS: u32 = 1200;
+const DATASET_CALL_MICROS: u32 = 12000;
 const DATASET_RESPONSE_BYTES: u32 = 4096;
 const HOST_CALLS: u16 = 8;
 

@@ -18,6 +18,13 @@ GeoLite databases are ignored.
 
 ## Common commands
 
+Shadowsocks listeners admit up to 4096 flows. Large deployments also require a
+host with separate managed read, work and cleanup admission budgets and a matching
+descriptor allowance; increasing the listener limit alone is insufficient.
+The plugin reserves a 512 MiB memory budget and starts idle response buffers at
+4 KiB, growing to 32 KiB for busy streams. The main repository's `TESTING.md`
+documents the isolated 3000-connection capacity gate (`NRE_SS_CAPACITY=3000`).
+
 ```sh
 make test
 make ci

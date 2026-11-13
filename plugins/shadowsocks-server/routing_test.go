@@ -588,13 +588,13 @@ func TestUDPFlowKeepsRouteSnapshotAcrossUpdatesAndPrunes(t *testing.T) {
 	}
 
 	native := &boundListen{routes: newSnapshot, flowRoutes: map[string]*routeSnapshot{}}
-	for index := 0; index < 300; index++ {
+	for index := 0; index < pluginsdk.ManagedNetworkMaxFlows+44; index++ {
 		native.snapshotRoutesForFlow(managedAddr{network: "native", value: fmt.Sprintf("peer-%d", index)})
 	}
 	native.mu.Lock()
 	size := len(native.flowRoutes)
 	native.mu.Unlock()
-	if size > 256 {
+	if size != pluginsdk.ManagedNetworkMaxFlows {
 		t.Fatalf("native flow route cache=%d", size)
 	}
 }

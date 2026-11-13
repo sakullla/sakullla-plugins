@@ -441,7 +441,7 @@ func (b *boundListen) snapshotRoutesForFlow(address net.Addr) *routeSnapshot {
 		}
 		b.flowOrder = kept
 	}
-	for len(b.flowOrder) >= 256 {
+	for len(b.flowOrder) >= pluginsdk.ManagedNetworkMaxFlows {
 		oldest := b.flowOrder[0]
 		b.flowOrder = b.flowOrder[1:]
 		delete(b.flowRoutes, oldest)
@@ -813,7 +813,13 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		relayTCPClientToTarget(conn, target, session)
+		err := relayTCPClientToTarget(conn, target, session)
+		if errors.Is(err, io.EOF) {
+			if half, ok := target.(interface{ CloseWrite() error }); ok && half.CloseWrite() == nil {
+				return
+			}
+		}
+		shutdown()
 	}()
 	relayTCPTargetToClient(conn, target, session)
 	shutdown()
@@ -942,23 +948,25 @@ func (b *boundListen) nextUDPPacketID() uint64 {
 	return value
 }
 
-func relayTCPClientToTarget(conn, target net.Conn, session *TCPServerSession) {
+func relayTCPClientToTarget(conn, target net.Conn, session *TCPServerSession) error {
 	for {
 		payload, err := readTCPPayloadChunk(conn, session)
 		if err != nil {
-			return
+			return err
 		}
 		if len(payload) == 0 {
 			continue
 		}
 		if _, err := target.Write(payload); err != nil {
-			return
+			return err
 		}
 	}
 }
 
 func relayTCPTargetToClient(conn, target net.Conn, session *TCPServerSession) {
-	buf := make([]byte, 32*1024)
+	// Most browser connections spend their life idle or exchanging small replies.
+	// Grow only for a busy stream instead of pinning 32 KiB per idle connection.
+	buf := make([]byte, 4*1024)
 	startResponse := true
 	for {
 		n, err := target.Read(buf)
@@ -971,6 +979,9 @@ func relayTCPTargetToClient(conn, target net.Conn, session *TCPServerSession) {
 		}
 		if err != nil {
 			return
+		}
+		if n == len(buf) && len(buf) < 32*1024 {
+			buf = make([]byte, min(2*len(buf), 32*1024))
 		}
 	}
 }

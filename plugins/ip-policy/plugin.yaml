@@ -1,6 +1,6 @@
 schema_version: 1
 id: ip-policy
-version: 0.2.3
+version: 0.2.4
 name: IP 策略
 description: 用可信来源、CIDR、GeoIP 国家与中国大陆省份数据保护 HTTP、TCP、UDP 和受管插件入口
 compatibility:
@@ -18,7 +18,7 @@ runtime:
     host_scope: agent
     entry: artifacts/ip-policy.wasm
     resource_budget:
-      timeout_ms: 2
+      timeout_ms: 20
       memory_bytes: 16777216
       concurrency: 64
       input_bytes: 131072

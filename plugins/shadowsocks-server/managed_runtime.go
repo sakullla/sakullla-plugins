@@ -351,7 +351,7 @@ func (conn *managedConn) Read(value []byte) (int, error) {
 	}
 	for {
 		request := pluginsdk.ManagedNetworkRequest{Action: action, Binding: conn.handle.Binding, RequestID: managedRequestID("read"), Handle: &conn.handle, MaxBytes: maximum, WaitMS: 30000}
-		response, err := conn.runtime.managed.ManagedNetwork(ctx, request)
+		response, err := conn.call(ctx, request)
 		if err != nil {
 			return 0, err
 		}
@@ -389,7 +389,7 @@ func (conn *managedConn) Write(value []byte) (int, error) {
 			chunk = chunk[:pluginsdk.ManagedNetworkMaxChunkBytes]
 		}
 		request := pluginsdk.ManagedNetworkRequest{Action: action, Binding: conn.handle.Binding, RequestID: managedRequestID("write"), Handle: &conn.handle, Data: chunk, WaitMS: 30000}
-		response, err := conn.runtime.managed.ManagedNetwork(ctx, request)
+		response, err := conn.call(ctx, request)
 		if err != nil {
 			return total, err
 		}
@@ -412,8 +412,30 @@ func (conn *managedConn) Close() error {
 	conn.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := conn.runtime.managed.ManagedNetwork(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkClose, Binding: conn.handle.Binding, RequestID: managedRequestID("close"), Handle: &conn.handle})
+	_, err := conn.call(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkClose, Binding: conn.handle.Binding, RequestID: managedRequestID("close"), Handle: &conn.handle})
 	return err
+}
+
+func (conn *managedConn) CloseWrite() error {
+	ctx, cancel := context.WithTimeout(conn.ctx, 5*time.Second)
+	defer cancel()
+	_, err := conn.call(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkHalfClose, Binding: conn.handle.Binding, RequestID: managedRequestID("half-close"), Handle: &conn.handle, Direction: "write"})
+	return err
+}
+
+// Only admission rejection is safe to retry: the host has not performed I/O.
+// Never replay a write after a transport error or an ambiguous partial result.
+func (conn *managedConn) call(ctx context.Context, request pluginsdk.ManagedNetworkRequest) (pluginsdk.ManagedNetworkResponse, error) {
+	for {
+		response, err := conn.runtime.managed.ManagedNetwork(ctx, request)
+		var runtimeError *pluginsdk.RuntimeError
+		if !errors.As(err, &runtimeError) || runtimeError.Code != pluginsdk.ErrorResourceExhausted || !runtimeError.Retryable {
+			return response, err
+		}
+		if err := waitManagedAcceptRetry(ctx); err != nil {
+			return pluginsdk.ManagedNetworkResponse{}, err
+		}
+	}
 }
 func (conn *managedConn) LocalAddr() net.Addr {
 	return managedAddr{network: conn.handle.Protocol, value: "host"}
@@ -457,7 +479,7 @@ func (runtime *hostCapabilityRuntime) listenTCP(ctx context.Context, port int) (
 		return nil, err
 	}
 	endpoint := pluginsdk.ManagedNetworkEndpoint{Host: "0.0.0.0", Port: port}
-	response, err := runtime.managed.ManagedNetwork(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkListen, Binding: binding, RequestID: managedRequestID("listen-tcp"), Endpoint: &endpoint, Protocol: "tcp", MaxFlows: 256, IdleMS: 300000})
+	response, err := runtime.managed.ManagedNetwork(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkListen, Binding: binding, RequestID: managedRequestID("listen-tcp"), Endpoint: &endpoint, Protocol: "tcp", MaxFlows: pluginsdk.ManagedNetworkMaxFlows, IdleMS: 300000})
 	if err != nil || response.Handle == nil {
 		return nil, ErrListenBind
 	}
@@ -510,7 +532,7 @@ func (runtime *hostCapabilityRuntime) listenUDP(ctx context.Context, port int) (
 		return nil, err
 	}
 	endpoint := pluginsdk.ManagedNetworkEndpoint{Host: "0.0.0.0", Port: port}
-	response, err := runtime.managed.ManagedNetwork(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkListen, Binding: binding, RequestID: managedRequestID("listen-udp"), Endpoint: &endpoint, Protocol: "udp", MaxFlows: 256, IdleMS: 300000})
+	response, err := runtime.managed.ManagedNetwork(ctx, pluginsdk.ManagedNetworkRequest{Action: pluginsdk.ManagedNetworkListen, Binding: binding, RequestID: managedRequestID("listen-udp"), Endpoint: &endpoint, Protocol: "udp", MaxFlows: pluginsdk.ManagedNetworkMaxFlows, IdleMS: 300000})
 	if err != nil || response.Handle == nil {
 		return nil, ErrListenBind
 	}

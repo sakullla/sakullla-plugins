@@ -1,6 +1,6 @@
 schema_version: 1
 id: rate-limit
-version: 0.1.0
+version: 0.1.1
 name: 速率限制
 description: 限制本节点 HTTP 来源、规则和新建四层连接的速率
 compatibility:
@@ -28,7 +28,7 @@ permissions:
 config_schema: config.schema.json
 ui_schema: ui.schema.json
 resource_budget:
-  timeout_ms: 2
+  timeout_ms: 20
   memory_bytes: 16777216
   concurrency: 64
   input_bytes: 131072

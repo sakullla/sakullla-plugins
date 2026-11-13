@@ -226,6 +226,15 @@ func (connection *upstreamTCPConn) Close() error {
 	return err
 }
 
+func (connection *upstreamTCPConn) CloseWrite() error {
+	connection.writeMu.Lock()
+	defer connection.writeMu.Unlock()
+	if half, ok := connection.Conn.(interface{ CloseWrite() error }); ok {
+		return half.CloseWrite()
+	}
+	return io.ErrClosedPipe
+}
+
 func (b *boundListen) upstreamEngine(ctx context.Context, upstream Upstream) (*ProtocolEngine, error) {
 	if b.secrets == nil {
 		return nil, ErrRouteUpstreamUnavailable

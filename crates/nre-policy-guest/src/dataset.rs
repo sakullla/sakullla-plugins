@@ -77,7 +77,7 @@ impl DatasetResolveRequest<'_> {
     pub fn encode(self, output: &mut [u8]) -> Result<usize, GuestError> {
         if self.source_id.is_empty()
             || self.max_duration_micros == 0
-            || self.max_duration_micros > 2000
+            || self.max_duration_micros > 20000
             || self.max_response_bytes == 0
             || self.max_response_bytes > 4096
         {
@@ -142,7 +142,7 @@ impl DatasetQueryRequest<'_> {
         if self.classifications.is_empty()
             || self.classifications.len() > MAX_QUERY_CLASSIFICATIONS
             || self.max_duration_micros == 0
-            || self.max_duration_micros > 2000
+            || self.max_duration_micros > 20000
             || self.max_response_bytes == 0
             || self.max_response_bytes > 4096
         {

@@ -232,7 +232,7 @@ func (snapshot *routeSnapshot) decide(ctx context.Context, protocol, target stri
 		groups = snapshot.domainGroups
 	}
 	for _, group := range groups {
-		request := pluginsdk.DatasetQueryRequest{Reference: group.reference, Classifications: group.classifications, Budget: pluginsdk.DatasetQueryBudget{MaxDurationMicros: 2000, MaxResponseBytes: 32768}}
+		request := pluginsdk.DatasetQueryRequest{Reference: group.reference, Classifications: group.classifications, Budget: pluginsdk.DatasetQueryBudget{MaxDurationMicros: pluginsdk.DatasetMaxQueryDurationMicros, MaxResponseBytes: 32768}}
 		if addressErr != nil {
 			request.Domain = strings.ToLower(host)
 		} else {
