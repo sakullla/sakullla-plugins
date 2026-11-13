@@ -104,6 +104,20 @@ const appendError = document.querySelector("#append-error");
 const upstreamError = document.querySelector("#upstream-error");
 const routeError = document.querySelector("#route-error");
 const detailStatus = document.querySelector("#detail-status");
+const detailSummary = document.querySelector("#detail-summary");
+const detailUsersCount = document.querySelector("#detail-users-count");
+const detailUsersHint = document.querySelector("#detail-users-hint");
+const metricPending = document.querySelector("#metric-pending");
+const metricPendingCount = document.querySelector("#metric-pending-count");
+const listenFilterField = document.querySelector("#listen-filter-field");
+const listenFilterInput = document.querySelector("#listen-filter");
+const listenFilterEmpty = document.querySelector("#listen-filter-empty");
+const routeDefaultHint = document.querySelector("#route-default-hint");
+const routeUpstreamHint = document.querySelector("#route-upstream-hint");
+const routeDialogTitle = document.querySelector("#route-dialog-title");
+const routeDialogDesc = document.querySelector("#route-dialog-desc");
+
+const LISTEN_FILTER_MIN = 4;
 
 const METHOD_LABELS = {
   "2022-blake3-aes-128-gcm": "SS2022 · AES-128",
@@ -133,6 +147,19 @@ const FAILURE_LABELS = {
   "tcp-unsupported": "上游未开启 TCP",
   "udp-unsupported": "上游未开启 UDP",
   "protocol-unsupported": "协议不支持",
+};
+
+// 只缺一种协议时规则仍可处理另一种流量，用警告色区分完全失效。
+const PARTIAL_FAILURES = new Set(["tcp-unsupported", "udp-unsupported"]);
+
+const FAILURE_HINTS = {
+  "dataset-unavailable": "宿主暂时读不到该数据源，确认数据集已同步。",
+  "upstream-missing": "目标上游已被删除，请改用其它上游。",
+  "upstream-disabled": "启用目标上游后恢复。",
+  "upstream-disabled-or-missing": "确认目标上游存在并已启用。",
+  "tcp-unsupported": "命中的 TCP 流量无法经该上游转发。",
+  "udp-unsupported": "命中的 UDP 流量无法经该上游转发。",
+  "protocol-unsupported": "该上游未开启 TCP 或 UDP。",
 };
 
 const ROUTE_PRESETS = {
@@ -367,6 +394,17 @@ const showStatus = (message, isError) => {
     clearTimeout(statusTimer);
     statusTimer = null;
   }
+  // 成功提示走浮层，不推挤页面；错误同时留在页首状态行，滚动后也能看到浮层。
+  const toast = window.NREUI && typeof window.NREUI.toast === "function" ? window.NREUI.toast : null;
+  if (message && toast) {
+    toast(message, isError ? "danger" : "success");
+    if (!isError) {
+      statusNode.hidden = true;
+      statusNode.textContent = "";
+      delete statusNode.dataset.error;
+      return;
+    }
+  }
   statusNode.hidden = !message;
   statusNode.textContent = message || "";
   if (!message) {
@@ -522,6 +560,11 @@ const updateOverviewMetrics = () => {
     });
     metricUsers.textContent = String(totalEnabled);
   }
+  if (metricPending) {
+    const pending = listensCache.filter((listen) => listen && !listen.bound).length;
+    metricPending.hidden = pending === 0;
+    if (metricPendingCount) metricPendingCount.textContent = String(pending);
+  }
   if (metricRouting) {
     const rulesCount = (routingCache.rules || []).length;
     const defAction = ACTION_LABELS[routingCache.default_action || "direct"] || "直连";
@@ -535,12 +578,13 @@ const syncSelectionActions = () => {
   const blocked = busy || !selectedAgentID || !agentOnline || executionReady !== true;
   if (createToggle) createToggle.disabled = blocked;
   if (emptyCreate) emptyCreate.disabled = blocked;
-  if (shareHostSave) shareHostSave.disabled = blocked;
+  if (shareHostSave) shareHostSave.disabled = blocked || !shareHostDirty();
   if (shareHostAuto) shareHostAuto.disabled = blocked;
   if (shareHostInput) shareHostInput.disabled = blocked;
   document.querySelectorAll("[data-mutate=true]").forEach((node) => {
     node.disabled = blocked;
   });
+  syncDefaultRouteState();
 };
 
 const setBusy = (next, control = null, label = "") => {
@@ -566,12 +610,21 @@ const setBusy = (next, control = null, label = "") => {
     busyControlLabel = "";
     busyScope = null;
   }
+  // 只锁住原本可用的控件，解锁时原样还原；本身禁用的（如首条规则的上移）保持禁用。
   const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel, upstreamDialog, routeDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
       if (agentPickerRoot && agentPickerRoot.contains(node)) return;
-      node.disabled = busy;
+      if (busy) {
+        if (!node.disabled) {
+          node.dataset.busyLock = "true";
+          node.disabled = true;
+        }
+      } else if (node.dataset.busyLock === "true") {
+        delete node.dataset.busyLock;
+        node.disabled = false;
+      }
     });
   });
   if (!busy) syncSelectionActions();
@@ -1123,6 +1176,12 @@ const resetDetailPrompt = () => {
   }
   if (detailUsers) detailUsers.replaceChildren();
   if (detailActions) detailActions.replaceChildren();
+  if (detailSummary) {
+    detailSummary.replaceChildren();
+    detailSummary.hidden = true;
+  }
+  if (detailUsersCount) detailUsersCount.textContent = "";
+  if (detailUsersHint) detailUsersHint.hidden = true;
   showDetailStatus("", false);
 };
 
@@ -1289,7 +1348,7 @@ const renderShare = (user) => {
   return wrap;
 };
 
-const userManageButtons = (user) => {
+const userManageButtons = (user, listen = null) => {
   const actions = document.createElement("div");
   actions.className = "account-actions";
   const toggle = document.createElement("button");
@@ -1301,33 +1360,38 @@ const userManageButtons = (user) => {
   const rotate = document.createElement("button");
   rotate.type = "button";
   rotate.className = "ui-btn ui-btn--ghost ui-btn--sm";
+  rotate.dataset.mutate = "true";
   rotate.textContent = "轮换密钥";
   rotate.addEventListener("click", (event) => mutateUser(user, "rotate", true, event.currentTarget));
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
+  remove.className = "ui-btn ui-btn--ghost ui-btn--sm btn-danger-text";
   remove.dataset.mutate = "true";
   remove.textContent = "删除用户";
-  remove.addEventListener("click", (event) => mutateUser(user, "delete", true, event.currentTarget));
+  const lastUser = Boolean(listen && (listen.users || []).length <= 1);
+  remove.addEventListener("click", (event) => mutateUser(user, "delete", true, event.currentTarget, { lastUser }));
   actions.append(toggle, rotate, remove);
   return actions;
 };
 
-const renderUser = (user, { manage = false, compact = false } = {}) => {
+const renderUser = (user, { manage = false, compact = false, listen = null } = {}) => {
   const article = document.createElement("article");
   article.className = compact ? "account account--compact" : "account";
   article.dataset.id = user.id;
   article.dataset.enabled = user.enabled ? "true" : "false";
   const head = document.createElement("div");
   head.className = "account-head";
-  const identity = document.createElement("strong");
-  identity.textContent = user.name || user.id;
-  head.append(identity, renderStatusPill(user.enabled ? "启用" : "已停用", user.enabled));
+  const identity = document.createElement("div");
+  identity.className = "account-identity";
+  const name = document.createElement("strong");
+  name.textContent = user.name || user.id;
+  identity.append(name, renderStatusPill(user.enabled ? "启用" : "已停用", user.enabled));
+  head.append(identity);
   article.append(head);
   if (manage) {
     const ops = document.createElement("div");
     ops.className = "account-ops";
-    ops.append(renderShare(user), userManageButtons(user));
+    ops.append(renderShare(user), userManageButtons(user, listen));
     article.append(ops);
   } else {
     article.append(renderShare(user));
@@ -1343,21 +1407,7 @@ const primaryUser = (listen) => {
 const listenFooterActions = (listen) => {
   const actions = document.createElement("div");
   actions.className = "dialog-actions listen-detail-actions";
-  if (isSS2022(listen.method)) {
-    const append = document.createElement("button");
-    append.type = "button";
-    append.className = "ui-btn ui-btn--secondary ui-btn--sm";
-    append.dataset.mutate = "true";
-    append.textContent = "追加用户";
-    append.addEventListener("click", () => appendUser(listen));
-    actions.append(append);
-    const rotateServer = document.createElement("button");
-    rotateServer.type = "button";
-    rotateServer.className = "ui-btn ui-btn--ghost ui-btn--sm";
-    rotateServer.textContent = "轮换 Server PSK";
-    rotateServer.addEventListener("click", (event) => rotateServerPSK(listen, event.currentTarget));
-    actions.append(rotateServer);
-  }
+  // 危险操作放左侧，与常用操作拉开距离；常用的追加用户放在最右。
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
@@ -1365,6 +1415,26 @@ const listenFooterActions = (listen) => {
   remove.textContent = "删除监听";
   remove.addEventListener("click", (event) => deleteListen(listen, event.currentTarget));
   actions.append(remove);
+  const spacer = document.createElement("span");
+  spacer.className = "ui-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  actions.append(spacer);
+  if (isSS2022(listen.method)) {
+    const rotateServer = document.createElement("button");
+    rotateServer.type = "button";
+    rotateServer.className = "ui-btn ui-btn--ghost ui-btn--sm";
+    rotateServer.dataset.mutate = "true";
+    rotateServer.textContent = "轮换 Server PSK";
+    rotateServer.addEventListener("click", (event) => rotateServerPSK(listen, event.currentTarget));
+    actions.append(rotateServer);
+    const append = document.createElement("button");
+    append.type = "button";
+    append.className = "ui-btn ui-btn--sm";
+    append.dataset.mutate = "true";
+    append.textContent = "追加用户";
+    append.addEventListener("click", () => appendUser(listen));
+    actions.append(append);
+  }
   return actions;
 };
 
@@ -1388,7 +1458,13 @@ const renderListen = (listen) => {
   const meta = document.createElement("p");
   meta.className = "listen-card__meta";
   const users = listen.users || [];
-  meta.textContent = [methodLabel(listen.method), `${users.length} 个用户`].filter(Boolean).join(" · ");
+  const enabledUsers = users.filter((user) => user && user.enabled).length;
+  const userText = !users.length
+    ? "暂无用户"
+    : enabledUsers === users.length
+      ? `${users.length} 个用户`
+      : `${enabledUsers}/${users.length} 个用户启用`;
+  meta.textContent = [methodLabel(listen.method), userText].filter(Boolean).join(" · ");
   head.append(titleRow, meta);
   card.append(head);
 
@@ -1397,6 +1473,7 @@ const renderListen = (listen) => {
   const address = document.createElement("span");
   address.className = "listen-endpoint__address";
   address.textContent = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
+  address.title = address.textContent;
   const protocol = document.createElement("span");
   protocol.className = "ui-badge ui-badge--plain listen-endpoint__protocol";
   protocol.textContent = "TCP + UDP";
@@ -1419,13 +1496,19 @@ const renderListen = (listen) => {
     const qr = qrButton(first);
     qr.addEventListener("click", (event) => event.stopPropagation());
     actions.append(copy, qr);
-  } else if (first) {
+  } else if (first && listen.bound) {
     actions.append(shareHint(first));
+  } else if (!first) {
+    const hint = document.createElement("p");
+    hint.className = "ui-help-text listen-share-hint";
+    hint.textContent = isSS2022(listen.method) ? "还没有用户，打开管理追加。" : "没有可用账号，可删除后重建。";
+    actions.append(hint);
   }
   const open = document.createElement("button");
   open.type = "button";
-  open.className = "ui-btn ui-btn--ghost ui-btn--sm";
-  open.textContent = "详情";
+  open.className = "ui-btn ui-btn--ghost ui-btn--sm listen-card__manage";
+  open.textContent = "管理";
+  open.setAttribute("aria-label", `管理 ${listenTitle(listen)}`);
   open.addEventListener("click", (event) => {
     event.stopPropagation();
     openDetail(listen);
@@ -1434,6 +1517,7 @@ const renderListen = (listen) => {
   card.append(actions);
   card.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
+    if (window.getSelection && String(window.getSelection())) return;
     openDetail(listen);
   });
   return card;
@@ -1446,6 +1530,50 @@ const closeDetail = () => {
   if (detailPanel && detailPanel.open) detailPanel.close();
 };
 
+const renderDetailSummary = (listen) => {
+  if (!detailSummary) return;
+  detailSummary.replaceChildren();
+  const hostPort = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
+  const rows = [
+    ["连接地址", hostPort, true],
+    ["协议", "TCP + UDP", false],
+  ];
+  const list = document.createElement("dl");
+  list.className = "detail-summary__list";
+  rows.forEach(([term, value, mono]) => {
+    const item = document.createElement("div");
+    item.className = "detail-summary__item";
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    if (mono) dd.className = "ui-mono";
+    dd.textContent = value;
+    dd.title = value;
+    item.append(dt, dd);
+    list.append(item);
+  });
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ui-btn ui-btn--secondary ui-btn--sm";
+  copy.textContent = "复制地址";
+  copy.addEventListener("click", async () => {
+    try {
+      await copyText(hostPort);
+      markCopied(copy);
+    } catch (error) {
+      showFeedback(errorText(error), true);
+    }
+  });
+  detailSummary.append(list, copy);
+  if (!listen.bound) {
+    const note = document.createElement("p");
+    note.className = "listen-binding-note detail-summary__note";
+    note.textContent = "未生效：端口尚未在节点上绑定，客户端暂时连不上；节点应用后自动生效。";
+    detailSummary.append(note);
+  }
+  detailSummary.hidden = false;
+};
+
 const renderDetail = (listen) => {
   if (!detailPanel || !listen) return;
   openListenID = listen.id;
@@ -1455,9 +1583,18 @@ const renderDetail = (listen) => {
     detailMeta.textContent = parts.join(" · ");
     detailMeta.hidden = !detailMeta.textContent;
   }
+  renderDetailSummary(listen);
+  const users = listen.users || [];
+  if (detailUsersCount) detailUsersCount.textContent = String(users.length);
+  if (detailUsersHint) {
+    detailUsersHint.textContent = users.length
+      ? (isSS2022(listen.method) ? "每个用户有独立密钥与链接，停用或轮换只影响该用户。" : "传统加密方式只支持单用户；需要多人共用请新建 SS2022 监听。")
+      : (isSS2022(listen.method) ? "还没有用户，追加后即可分享 ss:// 链接。" : "该监听没有可用账号，可删除后重新创建。");
+    detailUsersHint.hidden = false;
+  }
   if (detailUsers) {
     detailUsers.replaceChildren();
-    (listen.users || []).forEach((user) => detailUsers.append(renderUser(user, { manage: true })));
+    users.forEach((user) => detailUsers.append(renderUser(user, { manage: true, listen })));
   }
   if (detailActions) {
     const footer = listenFooterActions(listen);
@@ -1481,11 +1618,46 @@ const refreshOpenDetail = () => {
   else closeDetail();
 };
 
+const listenSearchText = (listen) => [
+  listenTitle(listen),
+  listen && listen.port,
+  listenHostPort(listen),
+  methodLabel(listen && listen.method),
+  ...((listen && listen.users) || []).map((user) => user && (user.name || user.id)),
+].filter(Boolean).join(" ").toLowerCase();
+
+const applyListenFilter = () => {
+  if (!listNode) return;
+  const showFilter = listensCache.length >= LISTEN_FILTER_MIN;
+  if (listenFilterField) listenFilterField.hidden = !showFilter;
+  const query = showFilter && listenFilterInput ? listenFilterInput.value.trim().toLowerCase() : "";
+  let visible = 0;
+  listNode.querySelectorAll(".listen-card").forEach((card) => {
+    const listen = listensCache.find((item) => item && item.id === card.dataset.id);
+    const match = !query || (listen && listenSearchText(listen).includes(query));
+    card.hidden = !match;
+    if (match) visible += 1;
+  });
+  if (listenFilterEmpty) listenFilterEmpty.hidden = !query || visible > 0;
+};
+
+if (listenFilterInput) {
+  listenFilterInput.addEventListener("input", applyListenFilter);
+  listenFilterInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && listenFilterInput.value) {
+      event.preventDefault();
+      listenFilterInput.value = "";
+      applyListenFilter();
+    }
+  });
+}
+
 const renderListens = (listens, options = {}) => {
   if (!listNode) return;
   listensCache = listens || [];
   listNode.replaceChildren();
   listensCache.forEach((listen) => listNode.append(renderListen(listen)));
+  applyListenFilter();
   if (countNode) {
     countNode.hidden = !listensCache.length;
     countNode.textContent = listensCache.length ? `${listensCache.length}` : "";
@@ -1497,7 +1669,7 @@ const renderListens = (listens, options = {}) => {
   if (busy) setBusy(true);
 };
 
-const mutateUser = async (user, action, confirmDelete = false, control = null) => {
+const mutateUser = async (user, action, confirmDelete = false, control = null, { lastUser = false } = {}) => {
   if (busy || !canMutate()) return;
   const label = user.name || user.id;
   if (action === "disable") {
@@ -1510,9 +1682,12 @@ const mutateUser = async (user, action, confirmDelete = false, control = null) =
     if (!ok) return;
   } else if (confirmDelete || action === "rotate") {
     const rotating = action === "rotate";
+    const deleteBody = lastUser
+      ? `「${label}」是该监听的最后一个用户。删除后不能恢复，端口仍保留但没人能连接；不再需要时可直接删除监听。`
+      : `删除「${label}」后不能恢复，其 ss:// 链接会一起失效。`;
     const ok = await askConfirm(rotating
-      ? { title: "轮换用户密钥", body: "轮换后该用户的旧分享将立即失效。", confirm: "轮换", danger: true }
-      : { title: "删除用户", body: `删除「${label}」后不能恢复，其 ss:// 链接会一起失效。`, confirm: "删除", danger: true });
+      ? { title: "轮换用户密钥", body: `轮换后「${label}」的旧链接和二维码立即失效，需要把新链接重新发给客户端。`, confirm: "轮换", danger: true }
+      : { title: "删除用户", body: deleteBody, confirm: "删除", danger: true });
     if (!ok) return;
   }
   setBusy(true, control);
@@ -1565,7 +1740,7 @@ const deleteListen = async (listen, control = null) => {
   if (busy || !canMutate()) return;
   const ok = await askConfirm({
     title: "删除监听",
-    body: "删除后不能恢复；这个端口上的用户与分享链接会一起失效。",
+    body: `删除端口 ${listen.port} 后不能恢复；这个端口上的 ${(listen.users || []).length} 个用户与分享链接会一起失效。`,
     confirm: "删除",
     danger: true,
   });
@@ -1585,7 +1760,7 @@ const deleteListen = async (listen, control = null) => {
 
 const rotateServerPSK = async (listen, control = null) => {
   if (busy || !canMutate()) return;
-  const ok = await askConfirm({ title: "轮换 Server PSK", body: "轮换后该端口的旧分享将立即失效。", confirm: "轮换", danger: true });
+  const ok = await askConfirm({ title: "轮换 Server PSK", body: "轮换后该端口所有用户的旧链接和二维码立即失效，需要把新链接重新发给每个客户端。", confirm: "轮换", danger: true });
   if (!ok) return;
   setBusy(true, control);
   try {
@@ -1644,13 +1819,26 @@ const fillShareHost = (execution, listens) => {
       agentShareHost(selectedAgent()) ||
       ""
   );
+  shareHostInput.dataset.saved = shareHostInput.value.trim();
   const source = String((execution && execution.share_host_source) || "");
-  const note = shareHostSourceLabel(source);
+  const autoHost = String((execution && execution.share_host_auto) || "").trim();
+  let note = shareHostSourceLabel(source);
+  if (source === "override" && autoHost) note = `${note}；自动地址为 ${autoHost}`;
+  if (!source && !shareHostInput.value) note = "节点没有可用的域名或 IP，填写后客户端才能导入链接。";
   if (shareHostSource) {
     shareHostSource.textContent = note;
     shareHostSource.hidden = !note;
   }
-  if (shareHostAuto) shareHostAuto.hidden = source !== "override";
+  if (shareHostAuto) {
+    shareHostAuto.hidden = source !== "override";
+    shareHostAuto.title = autoHost ? `恢复为 ${autoHost}` : "恢复为节点自动地址";
+  }
+  syncSelectionActions();
+};
+
+const shareHostDirty = () => {
+  if (!shareHostInput) return false;
+  return shareHostInput.value.trim() !== String(shareHostInput.dataset.saved || "");
 };
 
 const syncShareHostBar = (visible) => {
@@ -1679,7 +1867,64 @@ const clearWorkspace = (kind) => {
 };
 
 const escapeHTML = (value) => String(value || "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
-const upstreamOptions = () => `<option value="">请选择上游</option>` + (routingCache.upstreams || []).map((upstream) => `<option value="${escapeHTML(upstream.id)}">${escapeHTML(upstream.id)} (${escapeHTML(upstream.host)}:${upstream.port})</option>`).join("");
+const upstreamOptions = () => {
+  const upstreams = routingCache.upstreams || [];
+  const head = upstreams.length ? `<option value="">请选择上游</option>` : `<option value="">暂无上游，请先添加</option>`;
+  return head + upstreams.map((upstream) => `<option value="${escapeHTML(upstream.id)}">${escapeHTML(upstream.id)} (${escapeHTML(upstream.host)}:${upstream.port})${upstream.enabled ? "" : "（已停用）"}</option>`).join("");
+};
+
+const upstreamReferences = (id) => {
+  // 与服务端删除校验一致：任何规则或默认出口仍指向该上游时都不能删除。
+  const rules = (routingCache.rules || []).filter((rule) => rule && rule.upstream_id === id).length;
+  const asDefault = Boolean(id) && routingCache.default_upstream_id === id;
+  return { rules, asDefault, total: rules + (asDefault ? 1 : 0) };
+};
+
+const ruleMatchesPreset = (rule, preset) => {
+  if (!rule || !preset) return false;
+  const attributes = ((rule.classification && rule.classification.attributes) || []).map((item) => item.name).join(",");
+  return rule.source_id === preset.source_id &&
+    rule.classification && rule.classification.kind === preset.kind &&
+    rule.classification.name === preset.classification &&
+    attributes === (preset.attribute || "");
+};
+
+const syncPresetButtons = () => {
+  document.querySelectorAll("[data-preset]").forEach((button) => {
+    const preset = ROUTE_PRESETS[button.dataset.preset];
+    const exists = (routingCache.rules || []).some((rule) => ruleMatchesPreset(rule, preset));
+    button.dataset.added = exists ? "true" : "false";
+    button.title = exists ? "已有相同匹配的规则，可在表格中调整" : "用该模板新建规则";
+  });
+};
+
+const defaultRouteLabel = (action, upstreamID) => {
+  if (action === "upstream") return upstreamID ? `转发至上游 ${upstreamID}` : "转发至上游（未选择）";
+  return action === "reject" ? "拒绝" : "直连";
+};
+
+const syncDefaultRouteState = () => {
+  if (!routeDefaultAction || !routeSaveDefault) return;
+  const action = routeDefaultAction.value;
+  const upstreamID = action === "upstream" && routeDefaultUpstream ? routeDefaultUpstream.value : "";
+  const savedAction = routingCache.default_action || "direct";
+  const savedUpstream = savedAction === "upstream" ? String(routingCache.default_upstream_id || "") : "";
+  const dirty = action !== savedAction || upstreamID !== savedUpstream;
+  const incomplete = action === "upstream" && !upstreamID;
+  const upstreamOption = routeDefaultAction.querySelector('option[value="upstream"]');
+  const hasUpstreams = (routingCache.upstreams || []).length > 0;
+  if (upstreamOption) {
+    upstreamOption.disabled = !hasUpstreams && savedAction !== "upstream";
+    upstreamOption.textContent = hasUpstreams ? "转发至指定上游" : "转发至指定上游（先添加上游）";
+  }
+  routeSaveDefault.disabled = busy || !dirty || incomplete;
+  if (routeDefaultHint) {
+    if (incomplete) routeDefaultHint.textContent = "请选择默认上游后再保存。";
+    else if (dirty) routeDefaultHint.textContent = `有未保存的修改：当前生效的是「${defaultRouteLabel(savedAction, savedUpstream)}」。`;
+    else routeDefaultHint.textContent = `当前生效：${defaultRouteLabel(savedAction, savedUpstream)}。`;
+    routeDefaultHint.dataset.dirty = dirty ? "true" : "false";
+  }
+};
 
 const routingIssue = (rule) => {
   if (rule.action !== "upstream") return "";
@@ -1693,27 +1938,44 @@ const routingIssue = (rule) => {
 const syncDefaultUpstreamVisibility = () => {
   if (!routeDefaultAction || !routeDefaultUpstreamField) return;
   routeDefaultUpstreamField.hidden = routeDefaultAction.value !== "upstream";
+  syncDefaultRouteState();
 };
 
 const syncRouteModalActionVisibility = () => {
   if (!routeActionSelect || !routeUpstreamField) return;
   const isUpstream = routeActionSelect.value === "upstream";
+  const hasUpstreams = Boolean(routingCache.upstreams && routingCache.upstreams.length);
   routeUpstreamField.hidden = !isUpstream;
-  if (routeUpstreamSelect && isUpstream && !routeUpstreamSelect.value && routingCache.upstreams && routingCache.upstreams.length) {
-    routeUpstreamSelect.value = routingCache.upstreams[0].id;
+  if (routeUpstreamHint) routeUpstreamHint.hidden = !isUpstream || hasUpstreams;
+  if (routeUpstreamSelect) routeUpstreamSelect.disabled = busy || !hasUpstreams;
+  if (routeUpstreamSelect && isUpstream && !routeUpstreamSelect.value && hasUpstreams) {
+    const enabled = routingCache.upstreams.find((item) => item && item.enabled) || routingCache.upstreams[0];
+    routeUpstreamSelect.value = enabled.id;
   }
 };
 
-const uniqueRuleID = (base) => {
+const uniqueRuleID = (base, ignoreIndex = -1) => {
   const clean = String(base || "rule")
     .toLowerCase()
+    .replace(/!/g, "not-")
     .replace(/[^a-z0-9._:/-]+/g, "-")
+    .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "") || "rule";
-  const existing = new Set((routingCache.rules || []).map((item) => item.id));
+  const existing = new Set((routingCache.rules || []).filter((_item, index) => index !== ignoreIndex).map((item) => item.id));
   if (!existing.has(clean)) return clean;
   let counter = 2;
   while (existing.has(`${clean}-${counter}`)) counter += 1;
   return `${clean}-${counter}`;
+};
+
+let editingRuleIndex = -1;
+
+const autoRuleID = () => {
+  if (!routeIdInput || routeIdInput.dataset.auto !== "true") return;
+  const classification = routeClassInput ? routeClassInput.value.trim() : "";
+  const attribute = routeAttrInput ? routeAttrInput.value.trim() : "";
+  const action = routeActionSelect ? routeActionSelect.value : "";
+  routeIdInput.value = uniqueRuleID([classification || "rule", attribute, action].filter(Boolean).join("-"), editingRuleIndex);
 };
 
 const fillRoutePreset = (presetKey) => {
@@ -1724,7 +1986,10 @@ const fillRoutePreset = (presetKey) => {
   if (routeClassInput) routeClassInput.value = preset.classification;
   if (routeAttrInput) routeAttrInput.value = preset.attribute || "";
   if (routeActionSelect) routeActionSelect.value = preset.action;
-  if (routeIdInput) routeIdInput.value = uniqueRuleID(preset.id);
+  if (routeIdInput) {
+    routeIdInput.value = uniqueRuleID(preset.id, editingRuleIndex);
+    routeIdInput.dataset.auto = "true";
+  }
   syncRouteModalActionVisibility();
 };
 
@@ -1748,17 +2013,46 @@ const closeUpstreamModal = () => {
 
 const requestCloseUpstreamModal = () => requestCloseDraft(upstreamDialog, closeUpstreamModal);
 
-const openRouteModal = (presetKey = "") => {
+const setRouteModalMode = (editing) => {
+  if (routeDialogTitle) routeDialogTitle.textContent = editing ? "编辑分流规则" : "添加分流规则";
+  if (routeDialogDesc) {
+    routeDialogDesc.textContent = editing
+      ? "修改匹配条件或命中动作，保存后按原顺序生效。"
+      : "选择数据集分类与命中后的处理动作，支持一键套用常见场景。";
+  }
+  if (routeSubmit) routeSubmit.textContent = editing ? "保存规则" : "添加规则";
+};
+
+const openRouteModal = (presetKey = "", editIndex = -1) => {
   if (!routeDialog) return;
   if (routeForm) routeForm.reset();
+  const rule = editIndex >= 0 ? (routingCache.rules || [])[editIndex] : null;
+  editingRuleIndex = rule ? editIndex : -1;
+  setRouteModalMode(Boolean(rule));
   const options = upstreamOptions();
   if (routeUpstreamSelect) routeUpstreamSelect.innerHTML = options;
-  if (presetKey && ROUTE_PRESETS[presetKey]) {
+  if (rule) {
+    const classification = rule.classification || {};
+    if (routeKindSelect) routeKindSelect.value = classification.kind || "domain";
+    if (routeSourceInput) routeSourceInput.value = rule.source_id || "";
+    if (routeClassInput) routeClassInput.value = classification.name || "";
+    if (routeAttrInput) routeAttrInput.value = ((classification.attributes || [])[0] || {}).name || "";
+    if (routeActionSelect) routeActionSelect.value = rule.action || "direct";
+    if (routeUpstreamSelect) routeUpstreamSelect.value = rule.upstream_id || "";
+    if (routeIdInput) {
+      routeIdInput.value = rule.id;
+      routeIdInput.dataset.auto = "false";
+    }
+    syncRouteModalActionVisibility();
+  } else if (presetKey && ROUTE_PRESETS[presetKey]) {
     fillRoutePreset(presetKey);
   } else {
     if (routeSourceInput) routeSourceInput.value = "geosite";
     if (routeClassInput) routeClassInput.value = "category-ai";
-    if (routeIdInput) routeIdInput.value = uniqueRuleID("ai-not-cn");
+    if (routeIdInput) {
+      routeIdInput.value = uniqueRuleID("ai-not-cn");
+      routeIdInput.dataset.auto = "true";
+    }
     syncRouteModalActionVisibility();
   }
   clearFormErrors(routeForm);
@@ -1773,6 +2067,8 @@ const closeRouteModal = () => {
   showModalError(routeError, "");
   clearFormErrors(routeForm);
   if (routeForm) routeForm.reset();
+  editingRuleIndex = -1;
+  setRouteModalMode(false);
   if (routeDialog && routeDialog.open) routeDialog.close();
 };
 
@@ -1823,22 +2119,28 @@ const renderRouting = (routing, routeStatus = []) => {
       const idText = document.createElement("strong");
       idText.className = "route-id";
       idText.textContent = upstream.id;
-      const secret = document.createElement("span");
-      secret.className = "ui-help-text route-secret";
-      secret.textContent = `${upstream.secret_ref}@${upstream.secret_version}`;
-      identity.append(idText, secret);
+      // secret_ref 是内部密钥引用，只放进悬停提示，不占表格宽度。
+      idText.title = upstream.secret_ref ? `密钥引用 ${upstream.secret_ref}@${upstream.secret_version}` : upstream.id;
+      const refs = upstreamReferences(upstream.id);
+      const usage = document.createElement("span");
+      usage.className = "ui-help-text route-usage";
+      usage.textContent = refs.total
+        ? [refs.rules ? `${refs.rules} 条规则` : "", refs.asDefault ? "默认出口" : ""].filter(Boolean).join(" · ") + " 在用"
+        : "未被引用";
+      identity.append(idText, usage);
 
       const address = tableCell(`${upstream.host}:${upstream.port}`, "ui-table__mono route-address", "地址");
+      address.title = address.textContent;
 
       const capability = document.createElement("td");
       capability.className = "route-capability";
-      capability.dataset.label = "能力";
+      capability.dataset.label = "加密与协议";
       const methodText = document.createElement("span");
       methodText.className = "route-method";
       methodText.textContent = methodLabel(upstream.method);
       const protocolText = document.createElement("span");
       protocolText.className = "ui-help-text";
-      protocolText.textContent = [upstream.tcp ? "TCP" : "", upstream.udp ? "UDP" : ""].filter(Boolean).join(" + ") || "—";
+      protocolText.textContent = [upstream.tcp ? "TCP" : "", upstream.udp ? "UDP" : ""].filter(Boolean).join(" + ") || "未开启协议";
       capability.append(methodText, protocolText);
 
       const status = document.createElement("td");
@@ -1855,8 +2157,10 @@ const renderRouting = (routing, routeStatus = []) => {
       toggle.onclick = (event) => mutateUpstream(upstream.id, upstream.enabled ? "disable" : "enable", event.currentTarget);
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.className = "ui-btn ui-btn--danger-soft ui-btn--sm";
+      remove.className = "ui-btn ui-btn--ghost ui-btn--sm btn-danger-text";
       remove.textContent = "删除";
+      remove.disabled = refs.total > 0;
+      remove.title = refs.total ? "仍被分流规则或默认出口引用，先改掉引用再删除" : `删除上游 ${upstream.id}`;
       remove.onclick = (event) => mutateUpstream(upstream.id, "delete", event.currentTarget);
       actions.append(toggle, remove);
 
@@ -1890,20 +2194,33 @@ const renderRouting = (routing, routeStatus = []) => {
 
       const attributes = (rule.classification.attributes || []).map((item) => item.name).join(",");
       const kindName = KIND_LABELS[rule.classification.kind] || rule.classification.kind;
-      const match = tableCell(
-        `数据源 ${rule.source_id} · ${kindName}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}`,
-        "route-match",
-        "匹配"
-      );
+      const match = document.createElement("td");
+      match.className = "route-match";
+      match.dataset.label = "匹配";
+      const matchMain = document.createElement("span");
+      matchMain.className = "route-match__main";
+      matchMain.textContent = `${rule.source_id}:${rule.classification.name}`;
+      matchMain.title = `数据源 ${rule.source_id} · ${kindName}:${rule.classification.name}${attributes ? ` [${attributes}]` : ""}`;
+      const matchSub = document.createElement("span");
+      matchSub.className = "ui-help-text";
+      matchSub.textContent = [kindName, attributes ? `属性 ${attributes}` : ""].filter(Boolean).join(" · ");
+      match.append(matchMain, matchSub);
 
       const actionCell = document.createElement("td");
       actionCell.dataset.label = "动作";
+      actionCell.className = "route-action-cell";
       const actionText = ACTION_LABELS[rule.action] || rule.action;
       const actionBadge = document.createElement("span");
       const actionTone = rule.action === "reject" ? "danger" : rule.action === "upstream" ? "info" : "success";
       actionBadge.className = `ui-badge ui-badge--${actionTone} route-action`;
-      actionBadge.textContent = rule.upstream_id ? `${actionText} → ${rule.upstream_id}` : actionText;
+      actionBadge.textContent = actionText;
       actionCell.append(actionBadge);
+      if (rule.upstream_id) {
+        const target = document.createElement("span");
+        target.className = "route-target";
+        target.textContent = `→ ${rule.upstream_id}`;
+        actionCell.append(target);
+      }
 
       const applied = (routeStatus.length ? routeStatus : routeStatusCache).find((item) => item.rule_id === rule.id) || {};
       const rawIssue = applied.failure || routingIssue(rule);
@@ -1912,12 +2229,14 @@ const renderRouting = (routing, routeStatus = []) => {
       status.dataset.label = "状态";
       const statusWrap = document.createElement("div");
       statusWrap.className = "route-status";
-      statusWrap.append(renderStatusPill(issueLabel || "规则就绪", !issueLabel, issueLabel ? "danger" : "success"));
-      if (applied.exit) {
-        const exit = document.createElement("span");
-        exit.className = "ui-help-text";
-        exit.textContent = `出口 ${applied.exit}`;
-        statusWrap.append(exit);
+      const issueTone = PARTIAL_FAILURES.has(rawIssue) ? "warning" : "danger";
+      statusWrap.append(renderStatusPill(issueLabel || "规则就绪", !issueLabel, issueLabel ? issueTone : "success"));
+      const hintText = rawIssue ? FAILURE_HINTS[rawIssue] || "" : "";
+      if (hintText) {
+        const hint = document.createElement("span");
+        hint.className = "ui-help-text route-status__hint";
+        hint.textContent = hintText;
+        statusWrap.append(hint);
       }
       status.append(statusWrap);
 
@@ -1925,17 +2244,20 @@ const renderRouting = (routing, routeStatus = []) => {
       actions.className = "ui-table__actions";
       actions.dataset.label = "操作";
       const buttons = [
-        ["上移", (event) => moveRoute(index, -1, event.currentTarget), index === 0],
-        ["下移", (event) => moveRoute(index, 1, event.currentTarget), index === routingCache.rules.length - 1],
-        ["删除", (event) => removeRoute(index, event.currentTarget), false],
+        { text: "↑", label: `上移规则 ${rule.id}`, title: "上移", run: (event) => moveRoute(index, -1, event.currentTarget), disabled: index === 0, icon: true },
+        { text: "↓", label: `下移规则 ${rule.id}`, title: "下移", run: (event) => moveRoute(index, 1, event.currentTarget), disabled: index === routingCache.rules.length - 1, icon: true },
+        { text: "编辑", label: `编辑规则 ${rule.id}`, run: () => openRouteModal("", index), disabled: false },
+        { text: "删除", label: `删除规则 ${rule.id}`, run: (event) => removeRoute(index, event.currentTarget), disabled: false, danger: true },
       ];
-      buttons.forEach(([text, action, disabled]) => {
+      buttons.forEach((item) => {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = text === "删除" ? "ui-btn ui-btn--danger-soft ui-btn--sm" : "ui-btn ui-btn--ghost ui-btn--sm";
-        button.textContent = text;
-        button.disabled = disabled;
-        button.onclick = action;
+        button.className = `ui-btn ui-btn--ghost ui-btn--sm${item.icon ? " route-move" : ""}${item.danger ? " btn-danger-text" : ""}`;
+        button.textContent = item.text;
+        button.setAttribute("aria-label", item.label);
+        if (item.title) button.title = item.title;
+        button.disabled = item.disabled;
+        button.onclick = item.run;
         actions.append(button);
       });
 
@@ -1944,7 +2266,10 @@ const renderRouting = (routing, routeStatus = []) => {
     });
   }
 
+  syncPresetButtons();
+  syncDefaultRouteState();
   updateOverviewMetrics();
+  if (busy) setBusy(true);
 };
 
 const loadRouting = async () => {
@@ -1959,21 +2284,37 @@ const loadRouting = async () => {
   }
 };
 
+// 写入接口只回配置，不回运行状态；保存后静默拉一次，让新规则显示当前状态。
+const refreshRouteStatus = async () => {
+  try {
+    const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
+    routeStatusCache = payload.route_status || [];
+    renderRouting(payload.routing, routeStatusCache);
+  } catch (_error) {
+    // 配置已保存成功；状态刷新失败时保留现有显示，下次加载再更新。
+  }
+};
+
 const saveRoutingRules = async () => {
   const payload = await sendPluginJSON("api/routing", { rules: routingCache.rules, default_action: routingCache.default_action || "direct", default_upstream_id: routingCache.default_upstream_id || "" });
   renderRouting(payload.routing);
+  await refreshRouteStatus();
 };
 
 const moveRoute = async (index, delta, control = null) => {
   if (busy) return;
   const next = index + delta;
   if (next < 0 || next >= routingCache.rules.length) return;
+  const previous = routingCache.rules.slice();
   [routingCache.rules[index], routingCache.rules[next]] = [routingCache.rules[next], routingCache.rules[index]];
-  setBusy(true, control);
+  const movedID = routingCache.rules[next].id;
+  setBusy(true, control, "…");
   try {
     await saveRoutingRules();
-    showStatus("已调整规则匹配顺序。", false);
+    showStatus(`已把规则「${movedID}」移到第 ${next + 1} 位。`, false);
   } catch (error) {
+    routingCache.rules = previous;
+    renderRouting(routingCache);
     showStatus(errorText(error), true);
   } finally {
     setBusy(false);
@@ -1992,12 +2333,15 @@ const removeRoute = async (index, control = null) => {
     danger: true,
   });
   if (!ok) return;
+  const previous = routingCache.rules.slice();
   routingCache.rules.splice(index, 1);
   setBusy(true, control);
   try {
     await saveRoutingRules();
     showStatus("已删除分流规则。", false);
   } catch (error) {
+    routingCache.rules = previous;
+    renderRouting(routingCache);
     showStatus(errorText(error), true);
   } finally {
     setBusy(false);
@@ -2028,6 +2372,7 @@ const mutateUpstream = async (id, action, control = null) => {
   try {
     const payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/${action}`, {});
     renderRouting(payload.routing);
+    await refreshRouteStatus();
     const message = action === "delete" ? "已删除上游节点。" : action === "disable" ? "已停用上游节点。" : "已启用上游节点。";
     showStatus(message, false);
   } catch (error) {
@@ -2109,7 +2454,8 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
     const payload = await sendPluginJSON("api/upstreams", { id, host, port, method, password, tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
     closeUpstreamModal();
     renderRouting(payload.routing);
-    showStatus("已添加上游节点。", false);
+    await refreshRouteStatus();
+    showStatus(`已添加上游节点「${id}」，现在可以在分流规则或默认出口中选用。`, false);
   } catch (error) {
     showModalError(upstreamError, errorText(error, "添加上游失败，请检查标识、地址和密钥后重试。"));
     if (error && error.status === 400) markFieldError(idInput, "标识无效或已存在，请检查后重试。");
@@ -2130,7 +2476,8 @@ if (routeForm) routeForm.addEventListener("submit", async (event) => {
   const classification = { name: String(form.get("classification") || "").trim(), kind: String(form.get("kind") || "") };
   if (attribute) classification.attributes = [{ name: attribute, boolean: true }];
   const action = String(form.get("action") || "");
-  const ruleID = String(form.get("id") || "").trim() || uniqueRuleID(`${classification.name}-${action}`);
+  const editing = editingRuleIndex >= 0 && editingRuleIndex < (routingCache.rules || []).length;
+  const ruleID = String(form.get("id") || "").trim() || uniqueRuleID(`${classification.name}-${action}`, editing ? editingRuleIndex : -1);
   if (!sourceID) {
     markFieldError(routeSourceInput, "请填写数据源 ID，例如 geosite 或 geoip。");
     if (routeSourceInput) routeSourceInput.focus();
@@ -2141,45 +2488,69 @@ if (routeForm) routeForm.addEventListener("submit", async (event) => {
     if (routeClassInput) routeClassInput.focus();
     return;
   }
-  if ((routingCache.rules || []).some((rule) => rule && rule.id === ruleID)) {
+  if ((routingCache.rules || []).some((rule, index) => rule && rule.id === ruleID && (!editing || index !== editingRuleIndex))) {
     markFieldError(routeIdInput, "该规则标识已存在，请换一个。");
     if (routeIdInput) routeIdInput.focus();
     return;
   }
   if (action === "upstream" && !String(form.get("upstream_id") || "")) {
-    markFieldError(routeUpstreamSelect, "请选择要转发的上游节点。");
-    if (routeUpstreamSelect) routeUpstreamSelect.focus();
+    markFieldError(routeUpstreamSelect, (routingCache.upstreams || []).length ? "请选择要转发的上游节点。" : "还没有上游节点，请先添加上游或改为直连 / 拒绝。");
+    if (routeUpstreamSelect && !routeUpstreamSelect.disabled) routeUpstreamSelect.focus();
     return;
   }
-  routingCache.rules.push({ id: ruleID, source_id: sourceID, classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) });
-  setBusy(true, routeSubmit, "正在添加规则…");
+  const nextRule = { id: ruleID, source_id: sourceID, classification, action, ...(action === "upstream" ? { upstream_id: String(form.get("upstream_id") || "") } : {}) };
+  const previous = routingCache.rules.slice();
+  if (editing) routingCache.rules[editingRuleIndex] = nextRule;
+  else routingCache.rules.push(nextRule);
+  setBusy(true, routeSubmit, editing ? "正在保存…" : "正在添加规则…");
   try {
     await saveRoutingRules();
     closeRouteModal();
-    showStatus("已添加分流规则。", false);
+    showStatus(editing ? `已保存规则「${ruleID}」。` : `已添加分流规则「${ruleID}」，位于第 ${routingCache.rules.length} 位。`, false);
   } catch (error) {
-    routingCache.rules.pop();
-    showModalError(routeError, errorText(error, "添加规则失败，请检查数据源、分类和上游后重试。"));
+    routingCache.rules = previous;
+    renderRouting(routingCache);
+    showModalError(routeError, errorText(error, "保存规则失败，请检查数据源、分类和上游后重试。"));
     if (error && error.status === 400) markFieldError(routeClassInput, "请确认数据源与分类名称存在后重试。");
   } finally {
     setBusy(false);
   }
 });
 
+if (routeIdInput) routeIdInput.addEventListener("input", () => {
+  routeIdInput.dataset.auto = routeIdInput.value.trim() ? "false" : "true";
+});
+[routeClassInput, routeAttrInput].forEach((input) => {
+  if (input) input.addEventListener("input", autoRuleID);
+});
+if (routeActionSelect) routeActionSelect.addEventListener("change", autoRuleID);
+if (routeKindSelect) routeKindSelect.addEventListener("change", () => {
+  // 域名类走 geosite，IP 类走 geoip；只在数据源仍是另一套默认值时自动切换，不覆盖自定义数据源。
+  if (!routeSourceInput) return;
+  const source = routeSourceInput.value.trim();
+  const kind = routeKindSelect.value;
+  if (kind === "domain" && source === "geoip") routeSourceInput.value = "geosite";
+  else if ((kind === "country" || kind === "cidr") && source === "geosite") routeSourceInput.value = "geoip";
+});
+
 if (routeSaveDefault) routeSaveDefault.addEventListener("click", async () => {
   if (busy) return;
+  const previous = { action: routingCache.default_action, upstream: routingCache.default_upstream_id };
   routingCache.default_action = routeDefaultAction.value;
   routingCache.default_upstream_id = routeDefaultAction.value === "upstream" ? routeDefaultUpstream.value : "";
   setBusy(true, routeSaveDefault, "正在保存…");
   try {
     await saveRoutingRules();
-    showStatus("已保存默认路由设置。", false);
+    showStatus(`已保存默认路由：${defaultRouteLabel(routingCache.default_action, routingCache.default_upstream_id)}。`, false);
   } catch (error) {
+    routingCache.default_action = previous.action;
+    routingCache.default_upstream_id = previous.upstream;
     showStatus(errorText(error), true);
   } finally {
     setBusy(false);
   }
 });
+if (routeDefaultUpstream) routeDefaultUpstream.addEventListener("change", syncDefaultRouteState);
 
 const renderWorkspace = async () => {
   const seq = workspaceSeq + 1;
@@ -2385,7 +2756,20 @@ const saveShareHost = async (host, message, control = null) => {
 if (shareHostSave) {
   shareHostSave.addEventListener("click", (event) => {
     const host = shareHostInput ? String(shareHostInput.value || "").trim() : "";
-    saveShareHost(host, "已更新连接地址。", event.currentTarget);
+    saveShareHost(host, host ? "已更新连接地址，新链接已生效。" : "已恢复为节点自动地址。", event.currentTarget);
+  });
+}
+if (shareHostInput) {
+  shareHostInput.addEventListener("input", syncSelectionActions);
+  shareHostInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      if (shareHostSave && !shareHostSave.disabled) shareHostSave.click();
+    } else if (event.key === "Escape" && shareHostDirty()) {
+      event.preventDefault();
+      shareHostInput.value = String(shareHostInput.dataset.saved || "");
+      syncSelectionActions();
+    }
   });
 }
 if (shareHostAuto) {

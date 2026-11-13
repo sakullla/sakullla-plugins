@@ -15,12 +15,13 @@
       <div class="ui-page-head__copy">
         <p class="ui-eyebrow">网络 / Shadowsocks</p>
         <h1 class="ui-title">Shadowsocks 服务</h1>
-        <p class="ui-lede">在节点上开端口、加人，把 ss:// 链接或二维码发给客户端；支持按数据集配置出站分流。</p>
+        <p class="ui-lede">在节点上开放端口并添加账号，把 ss:// 链接或二维码发给客户端；出站流量可按数据集分流。</p>
         <div id="workspace-metrics" class="workspace-metrics" hidden>
           <span class="ui-badge ui-badge--plain">监听 <strong id="metric-listens">0</strong></span>
           <span class="ui-badge ui-badge--plain">可用账号 <strong id="metric-users">0</strong></span>
-          <button id="metric-routing-btn" class="ui-badge ui-badge--info metric-link" type="button" title="点击管理数据集分流">
-            出站策略 <strong id="metric-routing">默认直连</strong><span aria-hidden="true">→</span>
+          <span id="metric-pending" class="ui-badge ui-badge--warning" hidden>待生效 <strong id="metric-pending-count">0</strong></span>
+          <button id="metric-routing-btn" class="ui-badge ui-badge--plain metric-link" type="button" title="管理数据集分流">
+            出站 <strong id="metric-routing">默认直连</strong><span class="metric-link__arrow" aria-hidden="true">→</span>
           </button>
         </div>
       </div>
@@ -36,12 +37,13 @@
         </div>
         <div class="share-host-bar" hidden>
           <div class="ui-field">
-            <span class="ui-label">连接地址 <span id="share-host-source" class="ui-help-text" hidden></span></span>
+            <label class="ui-label" for="share-host">连接地址</label>
             <div class="share-host-controls">
-              <input id="share-host" class="ui-input" name="share_host" autocomplete="off" spellcheck="false" placeholder="填写客户端连接的域名或公网 IP" title="只改 ss:// 里的主机名，不改节点绑定端口。">
-              <button id="share-host-save" class="ui-btn ui-btn--secondary" type="button">保存</button>
+              <input id="share-host" class="ui-input" name="share_host" autocomplete="off" spellcheck="false" placeholder="填写客户端连接的域名或公网 IP" aria-describedby="share-host-source" title="只改 ss:// 里的主机名，不改节点绑定端口。">
+              <button id="share-host-save" class="ui-btn ui-btn--secondary" type="button" disabled>保存</button>
               <button id="share-host-auto" class="ui-btn ui-btn--ghost" type="button" hidden>恢复自动</button>
             </div>
+            <p id="share-host-source" class="ui-help-text share-host-note" hidden></p>
           </div>
         </div>
       </section>
@@ -114,8 +116,12 @@
           <div class="listen-toolbar">
             <div>
               <h2 class="ui-section-title">监听</h2>
-              <p class="ui-section-desc">每个监听拥有独立端口、加密方式与账号；未生效的监听等待节点应用。</p>
+              <p class="ui-section-desc">每个监听是一个独立端口，含加密方式与账号；未生效的监听等节点应用后才能分享。</p>
             </div>
+            <label class="listen-filter" id="listen-filter-field" hidden>
+              <span class="ui-sr-only">筛选监听</span>
+              <input id="listen-filter" class="ui-input" type="search" autocomplete="off" spellcheck="false" placeholder="按名称、端口或用户筛选">
+            </label>
           </div>
 
           <div id="listen-loading" class="listen-loading" role="status" hidden>
@@ -147,16 +153,17 @@
           </div>
 
           <div id="listen-list" class="listen-grid"></div>
+          <p id="listen-filter-empty" class="ui-help-text listen-filter-empty" role="status" hidden>没有匹配的监听，换个关键词试试。</p>
         </section>
 
         <section id="routing-panel" class="panel" role="tabpanel" aria-labelledby="tab-btn-routing" hidden>
           <section class="ui-card routing-default">
             <div class="ui-card__head">
               <div>
-                <h2 class="ui-card__title">默认出口与数据集分流</h2>
-                <p class="ui-card__desc">按规则顺序匹配域名或 IP，命中即执行对应动作；未命中的流量走默认动作。上游失败不会回退直连。</p>
+                <h2 class="ui-card__title">默认出口</h2>
+                <p class="ui-card__desc">规则从上到下匹配域名或 IP，命中即执行对应动作；都未命中的流量走默认动作。上游失败时不会回退直连。</p>
               </div>
-              <span class="ui-badge ui-badge--success">全节点同步生效</span>
+              <span class="ui-badge ui-badge--plain" title="分流配置对所有部署了本插件的节点同时生效">所有节点共用</span>
             </div>
             <div class="routing-default__controls">
               <label class="ui-field">
@@ -171,8 +178,9 @@
                 <span class="ui-label">默认上游</span>
                 <select id="route-default-upstream" class="ui-select"></select>
               </label>
-              <button id="route-save-default" class="ui-btn ui-btn--secondary" type="button">保存默认路由</button>
+              <button id="route-save-default" class="ui-btn ui-btn--secondary" type="button" disabled>保存默认路由</button>
             </div>
+            <p id="route-default-hint" class="ui-help-text routing-default__hint" role="status"></p>
             <details class="ui-help routing-help">
               <summary>协议与域名嗅探说明</summary>
               <div class="ui-help__body">
@@ -205,11 +213,11 @@
 
               <div class="routing-presets" aria-label="快捷规则模板">
                 <span class="ui-help-text">快捷模板</span>
-                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="ai-upstream">AI 服务走上游</button>
-                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="cn-direct">国内域名直连</button>
-                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="cn-ip-direct">国内 IP 直连</button>
-                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="ads-reject">广告域名拒绝</button>
-                <button type="button" class="ui-btn ui-btn--ghost ui-btn--sm" data-preset="private-reject">私有网段拒绝</button>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm preset-chip" data-preset="ai-upstream">AI 服务走上游</button>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm preset-chip" data-preset="cn-direct">国内域名直连</button>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm preset-chip" data-preset="cn-ip-direct">国内 IP 直连</button>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm preset-chip" data-preset="ads-reject">广告域名拒绝</button>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm preset-chip" data-preset="private-reject">私有网段拒绝</button>
               </div>
 
               <div id="route-rules-empty" class="ui-empty routing-empty">
@@ -257,7 +265,7 @@
                     <tr>
                       <th scope="col">标识</th>
                       <th scope="col">地址</th>
-                      <th scope="col">能力</th>
+                      <th scope="col">加密与协议</th>
                       <th scope="col">状态</th>
                       <th scope="col" class="ui-table__num">操作</th>
                     </tr>
@@ -282,6 +290,11 @@
     </header>
     <div class="ui-dialog__body">
       <p id="detail-status" class="detail-status" role="status" hidden></p>
+      <div id="detail-summary" class="detail-summary" hidden></div>
+      <div class="detail-users-head">
+        <h3 class="detail-users-head__title">用户 <span id="detail-users-count" class="ui-badge ui-badge--plain tab-badge"></span></h3>
+        <p id="detail-users-hint" class="ui-help-text" hidden></p>
+      </div>
       <div id="detail-users" class="account-stack"></div>
     </div>
     <footer id="detail-actions" class="ui-dialog__footer"></footer>
@@ -421,7 +434,7 @@
       <header class="ui-dialog__head">
         <div>
           <h2 id="route-dialog-title" class="ui-dialog__title">添加分流规则</h2>
-          <p class="ui-dialog__desc">选择数据集分类与命中后的处理动作，支持一键套用常见场景。</p>
+          <p id="route-dialog-desc" class="ui-dialog__desc">选择数据集分类与命中后的处理动作，支持一键套用常见场景。</p>
         </div>
       </header>
       <div class="ui-dialog__body">
@@ -469,10 +482,12 @@
           <label class="ui-field" id="route-upstream-field">
             <span class="ui-label">目标上游</span>
             <select class="ui-select" name="upstream_id" id="route-upstream-select"></select>
+            <span id="route-upstream-hint" class="ui-help-text" hidden>还没有上游节点。请先在「上游节点」中添加，或把命中动作改为直连 / 拒绝。</span>
           </label>
           <label class="ui-field ui-field--full">
             <span class="ui-label">规则标识 (ID)</span>
             <input class="ui-input" name="id" id="route-id-input" required autocomplete="off" spellcheck="false" placeholder="例如 ai-not-cn">
+            <span class="ui-help-text">按分类与动作自动生成，可改成更好记的名字。</span>
           </label>
         </div>
       </div>

@@ -52,6 +52,10 @@
 
 /* ---------- 页头控制台 ---------- */
 
+.ui-page-head .ui-lede {
+  max-width: 46rem;
+}
+
 .workspace-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -72,10 +76,25 @@
   border: 0;
   font-family: inherit;
   cursor: pointer;
+  transition: color var(--ui-duration) var(--ui-ease), background var(--ui-duration) var(--ui-ease);
 }
 
 .metric-link:hover {
-  filter: brightness(1.04);
+  color: var(--ui-primary);
+  background: var(--ui-primary-soft);
+}
+
+.metric-link:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 2px;
+}
+
+.metric-link__arrow {
+  transition: transform var(--ui-duration) var(--ui-ease);
+}
+
+.metric-link:hover .metric-link__arrow {
+  transform: translateX(2px);
 }
 
 .page-console {
@@ -122,6 +141,11 @@
 .share-host-controls .ui-input {
   flex: 1 1 12rem;
   min-width: 0;
+}
+
+.share-host-note {
+  margin: var(--ui-space-1) 0 0;
+  line-height: 1.5;
 }
 
 /* ---------- 工作区与标签 ---------- */
@@ -175,6 +199,16 @@
 
 .listen-toolbar .ui-section-title {
   margin: 0;
+}
+
+.listen-filter {
+  flex: 0 1 18rem;
+  min-width: 0;
+}
+
+.listen-filter-empty {
+  margin: var(--ui-space-4) 0 0;
+  text-align: center;
 }
 
 /* ---------- 监听卡片 ---------- */
@@ -256,7 +290,9 @@
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-sm);
   color: var(--ui-text);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .listen-endpoint__protocol {
@@ -285,6 +321,11 @@
 .listen-share-hint {
   flex: 1 1 12rem;
   min-width: 0;
+  margin: 0;
+}
+
+.listen-card__manage {
+  margin-left: auto;
 }
 
 .listen-loading {
@@ -329,15 +370,33 @@
   margin-top: var(--ui-space-4);
 }
 
+.routing-default__hint {
+  margin: var(--ui-space-2) 0 0;
+}
+
+.routing-default__hint[data-dirty="true"] {
+  color: var(--ui-warning-text);
+}
+
 .routing-help .ui-help__body p {
   margin: 0;
 }
 
 .routing-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: var(--ui-space-5);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ui-space-6);
   align-items: start;
+}
+
+/* kit 的 .ui-table__actions 是 flex，放在 td 上会脱离表格行高；桌面端恢复成表格单元格。 */
+.routing-table td.ui-table__actions {
+  display: table-cell;
+  text-align: right;
+}
+
+.routing-table th:last-child {
+  text-align: right;
 }
 
 .routing-section {
@@ -363,6 +422,20 @@
   margin-bottom: var(--ui-space-3);
 }
 
+.preset-chip {
+  border-radius: var(--ui-radius-full);
+}
+
+.preset-chip[data-added="true"] {
+  color: var(--ui-text-tertiary);
+}
+
+.preset-chip[data-added="true"]::before {
+  content: "✓";
+  margin-right: var(--ui-space-1);
+  color: var(--ui-success-text);
+}
+
 .routing-empty {
   padding: var(--ui-space-6) var(--ui-space-4);
   margin: 0;
@@ -378,11 +451,11 @@
 }
 
 .routing-table--rules {
-  min-width: 42rem;
+  min-width: 40rem;
 }
 
 .routing-table--upstreams {
-  min-width: 29rem;
+  min-width: 30rem;
 }
 
 .routing-table .route-id {
@@ -390,12 +463,19 @@
 }
 
 .route-address {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .route-upstream-identity {
   display: grid;
   gap: 2px;
+}
+
+.route-usage {
+  white-space: nowrap;
 }
 
 .route-capability {
@@ -428,9 +508,15 @@
 }
 
 .route-match {
-  min-width: 10rem;
+  min-width: 9rem;
   color: var(--ui-text-secondary);
   font-size: var(--ui-text-xs);
+}
+
+.route-match__main {
+  display: block;
+  font-family: var(--ui-font-mono);
+  color: var(--ui-text);
   overflow-wrap: anywhere;
 }
 
@@ -447,8 +533,36 @@
   gap: var(--ui-space-1);
 }
 
-.route-action {
-  white-space: normal;
+.route-status__hint {
+  max-width: 14rem;
+  line-height: 1.45;
+}
+
+.route-action-cell {
+  white-space: nowrap;
+}
+
+.route-target {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+}
+
+.route-move {
+  min-width: var(--ui-control-height-sm);
+  padding: 0;
+  font-size: var(--ui-text-sm);
+}
+
+.btn-danger-text:not(:disabled) {
+  color: var(--ui-danger-text);
+}
+
+.btn-danger-text:hover:not(:disabled) {
+  background: var(--ui-danger-soft);
+  color: var(--ui-danger-text);
 }
 
 /* ---------- 对话框与表单 ---------- */
@@ -529,6 +643,82 @@
   flex-wrap: wrap;
 }
 
+#detail-actions {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ---------- 监听详情 ---------- */
+
+.detail-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-3);
+  margin-bottom: var(--ui-space-5);
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-sunken);
+}
+
+.detail-summary__list {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2) var(--ui-space-5);
+  min-width: 0;
+  margin: 0;
+}
+
+.detail-summary__item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-summary__item dt {
+  color: var(--ui-text-tertiary);
+  font-size: var(--ui-text-xs);
+}
+
+.detail-summary__item dd {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: var(--ui-text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-summary__item dd.ui-mono {
+  font-size: var(--ui-text-sm);
+}
+
+.detail-summary__note {
+  flex-basis: 100%;
+}
+
+.detail-users-head {
+  display: grid;
+  gap: var(--ui-space-1);
+  margin-bottom: var(--ui-space-3);
+}
+
+.detail-users-head__title {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin: 0;
+  color: var(--ui-text);
+  font-size: var(--ui-text-base);
+  font-weight: 650;
+}
+
+.detail-users-head .ui-help-text {
+  margin: 0;
+}
+
 /* ---------- 账号 ---------- */
 
 .account-stack {
@@ -557,20 +747,35 @@
   gap: var(--ui-space-2);
 }
 
-.account-head strong {
+.account-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.account-identity strong {
   color: var(--ui-text);
   overflow-wrap: anywhere;
 }
 
 .account-ops {
-  display: grid;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--ui-space-2);
+}
+
+.account-ops .listen-share-hint {
+  flex: 1 1 12rem;
 }
 
 .account-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ui-space-1);
+  margin-left: auto;
 }
 
 .share-strip {
@@ -863,8 +1068,8 @@
 /* ---------- 响应式 ---------- */
 
 @media (max-width: 1100px) {
-  .routing-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .routing-default__controls .ui-field {
+    max-width: none;
   }
 }
 
@@ -882,6 +1087,10 @@
 
   .listen-toolbar {
     align-items: flex-start;
+  }
+
+  .listen-filter {
+    flex: 1 1 100%;
   }
 }
 
@@ -977,6 +1186,34 @@
 
   .route-match {
     min-width: 0;
+  }
+
+  .route-address {
+    max-width: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .routing-table td.route-match,
+  .routing-table td.route-action-cell {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--ui-space-1) var(--ui-space-2);
+  }
+
+  .routing-table td.route-match::before,
+  .routing-table td.route-action-cell::before {
+    flex: 0 0 4.5rem;
+  }
+
+  .route-target {
+    display: inline;
+    margin-top: 0;
+  }
+
+  .account-actions {
+    margin-left: 0;
   }
 
   .route-upstream-identity {
