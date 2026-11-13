@@ -789,7 +789,7 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	if decision.Action == RouteUpstream {
 		target, err = b.wrapUpstreamTCP(ctx, target, *decision.Upstream, request)
 		if err != nil {
-			b.recordRouteFailure(decision, "upstream-auth-failed")
+			b.recordRouteFailure(decision, upstreamFailureReason(err))
 			return
 		}
 	} else if len(request.Payload) > 0 {
@@ -870,7 +870,7 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 		var upstreamErr error
 		responses, upstreamErr = b.roundTripUpstreamUDPResponses(ctx, conn, *decision.Upstream, request)
 		if upstreamErr != nil {
-			b.recordRouteFailure(decision, "upstream-auth-failed")
+			b.recordRouteFailure(decision, upstreamFailureReason(upstreamErr))
 			return
 		}
 	} else if len(request.Payload) > 0 {
@@ -915,6 +915,22 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 		if _, err := udp.WriteTo(sealed, clientAddr); err != nil {
 			return
 		}
+	}
+}
+
+func upstreamFailureReason(err error) string {
+	var networkError net.Error
+	switch {
+	case errors.Is(err, ErrAuthentication):
+		return "upstream-auth-failed"
+	case errors.Is(err, ErrProtocol):
+		return "upstream-protocol-error"
+	case errors.As(err, &networkError) && networkError.Timeout():
+		return "upstream-timeout"
+	case errors.Is(err, ErrRouteUpstreamUnavailable), errors.Is(err, ErrRevoked):
+		return "upstream-unavailable"
+	default:
+		return "upstream-connection-failed"
 	}
 }
 

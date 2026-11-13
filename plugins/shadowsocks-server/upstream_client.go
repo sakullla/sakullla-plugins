@@ -252,7 +252,14 @@ func (b *boundListen) wrapUpstreamTCP(ctx context.Context, connection net.Conn, 
 		engine.Destroy()
 		return nil, err
 	}
-	wire, err := engine.SealTCPRequest(salt, request.Target, request.Payload, time.Now(), nil)
+	// Clients may send the destination before any application bytes. SS2022
+	// requires padding when that initial payload is empty; do not reject a
+	// valid inbound handshake or invent application data for the upstream.
+	var padding []byte
+	if engine.modern && len(request.Payload) == 0 {
+		padding = []byte{0}
+	}
+	wire, err := engine.SealTCPRequest(salt, request.Target, request.Payload, time.Now(), padding)
 	if err != nil {
 		clear(salt)
 		engine.Destroy()
