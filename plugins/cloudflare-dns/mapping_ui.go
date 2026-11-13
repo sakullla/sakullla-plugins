@@ -172,7 +172,7 @@ func (service *Service) serveInternalDNSResolve(writer http.ResponseWriter, requ
 		writeMappingJSON(writer, http.StatusForbidden, internalDNSResolveResponse{Error: ErrAuthorizationDenied.Error()})
 		return
 	}
-	mapping, err := service.LookupMapping(request.Context(), identity, body.Domain)
+	mapping, err := service.lookupMapping(request.Context(), identity, body.Domain, false)
 	if err != nil {
 		status := http.StatusServiceUnavailable
 		if errors.Is(err, ErrMappingNotFound) || errors.Is(err, ErrTokenUnavailable) {

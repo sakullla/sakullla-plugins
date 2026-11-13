@@ -136,6 +136,63 @@ func TestInternalDNSResolveReturnsMappedTokenOnlyOnPrivateProviderPath(t *testin
 	}
 }
 
+func TestInternalDNSResolveUnmappedDoesNotEmitFailureTelemetry(t *testing.T) {
+	t.Parallel()
+	checks := 0
+	service, trace, _ := newUIHarness(t, func(ActionContext) error {
+		checks++
+		return nil
+	})
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, uiJSONRequest(http.MethodPost, internalDNSResolvePath, `{"domain":"unmapped.test"}`, "operation/internal-fallback"))
+	if response.Code != http.StatusNotFound || checks != 1 {
+		t.Fatalf("status=%d authorization checks=%d", response.Code, checks)
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	if len(trace.audit) != 0 || len(trace.logs) != 0 || len(trace.ui) != 0 {
+		t.Fatalf("normal provider miss emitted telemetry: audit=%v logs=%v ui=%v", trace.audit, trace.logs, trace.ui)
+	}
+}
+
+func TestInternalDNSResolvePreservesActualFailureTelemetry(t *testing.T) {
+	t.Parallel()
+	for _, failure := range []string{"authorization", "token"} {
+		t.Run(failure, func(t *testing.T) {
+			service, trace, runtime := newUIHarness(t, nil)
+			if failure == "authorization" {
+				service.runtime.Authorizer = AuthorizerFunc(func(context.Context, ActionContext) error { return ErrAuthorizationDenied })
+			} else {
+				mapping, err := service.CreateMapping(context.Background(), uiAction("operation/create-invalid-provider"), "example.com", []byte("test-provider-token"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				vault := runtime.Vault.(*uiFakeVault)
+				vault.mu.Lock()
+				vault.verifyErrors[mapping.SecretRef] = ErrTokenInvalid
+				vault.mu.Unlock()
+			}
+			trace.mu.Lock()
+			trace.audit, trace.logs, trace.ui = nil, nil, nil
+			trace.mu.Unlock()
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, uiJSONRequest(http.MethodPost, internalDNSResolvePath, `{"domain":"edge.example.com"}`, "operation/internal-actual-failure"))
+			if response.Code == http.StatusOK || response.Code == http.StatusNotFound {
+				t.Fatalf("real failure was treated as a provider miss: status=%d", response.Code)
+			}
+			trace.mu.Lock()
+			defer trace.mu.Unlock()
+			found := false
+			for _, record := range trace.logs {
+				found = found || record.Outcome == "failed"
+			}
+			if !found || len(trace.audit) == 0 {
+				t.Fatal("actual failure lost event or audit evidence")
+			}
+		})
+	}
+}
+
 func TestRotateMappingReplacesInvalidCurrentToken(t *testing.T) {
 	t.Parallel()
 	service, _, runtime := newUIHarness(t, nil)

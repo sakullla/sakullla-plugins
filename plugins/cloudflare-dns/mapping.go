@@ -430,6 +430,13 @@ func (service *Service) GetMapping(ctx context.Context, request ActionRequest, s
 }
 
 func (service *Service) LookupMapping(ctx context.Context, request ActionRequest, domain string) (TokenMapping, error) {
+	return service.lookupMapping(ctx, request, domain, true)
+}
+
+// Private provider discovery is a read-only probe. A missing suffix lets the
+// host try its environment credential and is not an operation failure. Keep
+// authorization and lifecycle failures observable, without auditing every probe.
+func (service *Service) lookupMapping(ctx context.Context, request ActionRequest, domain string, auditLookup bool) (TokenMapping, error) {
 	ctx, finish, err := service.begin(ctx)
 	if err != nil {
 		return TokenMapping{}, err
@@ -442,7 +449,12 @@ func (service *Service) LookupMapping(ctx context.Context, request ActionRequest
 	request.Domain = normalized
 	action := "mapping-lookup"
 	operation := service.mappingOperationKey(action, request, normalized, 0)
-	if err := service.authorizeBare(ctx, action, "", operation, request); err != nil {
+	if auditLookup {
+		err = service.authorizeBare(ctx, action, "", operation, request)
+	} else if err = service.validateAction(request); err == nil {
+		err = service.authorizeBareAccess(ctx, action, "", operation, request)
+	}
+	if err != nil {
 		return TokenMapping{}, err
 	}
 	mapping, ok := service.lookupStored(normalized)
@@ -450,7 +462,13 @@ func (service *Service) LookupMapping(ctx context.Context, request ActionRequest
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "revoked", err)
 	}
 	if !ok {
+		if !auditLookup {
+			return TokenMapping{}, ErrMappingNotFound
+		}
 		return TokenMapping{}, service.fail(ctx, action, operation, request, "unmapped", ErrMappingNotFound)
+	}
+	if !auditLookup {
+		return mapping.public(), nil
 	}
 	request.Suffix = mapping.Suffix
 	return service.finishMapping(ctx, action, operation, request, mapping.public())
@@ -538,6 +556,10 @@ func (service *Service) authorizeBare(ctx context.Context, action, permission, o
 	if err := service.audit(ctx, AuditRecord{Action: action, Outcome: "started", OperationKey: operation + ":started", Actor: request.Actor, ResourceGroupRef: request.ResourceGroupRef, ZoneID: request.ZoneID, Suffix: request.Suffix, Domain: request.Domain}); err != nil {
 		return err
 	}
+	return service.authorizeBareAccess(ctx, action, permission, operation, request)
+}
+
+func (service *Service) authorizeBareAccess(ctx context.Context, action, permission, operation string, request ActionRequest) error {
 	if request.ResourceGroupRef != service.configuration.ResourceGroupRef {
 		return service.fail(ctx, action, operation, request, "authorization", ErrAuthorizationDenied)
 	}

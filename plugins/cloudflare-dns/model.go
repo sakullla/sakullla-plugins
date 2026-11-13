@@ -14,7 +14,7 @@ import (
 
 const (
 	PluginID       = "cloudflare-dns"
-	PluginVersion  = "0.1.20"
+	PluginVersion  = "0.1.21"
 	MaxConfigBytes = 1 << 20
 	MaxZones       = 256
 	MaxRecords     = 1024
