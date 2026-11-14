@@ -144,6 +144,36 @@ var datasetDigestWirePattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // remove.
 var remoteSourceIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
+// upstreamIDPattern keeps panel-created upstream ids inside the same
+// URL-safe identifier set remoteSourceIDPattern uses. The wider refPattern
+// also admits "/" and ":", but the panel API embeds the id as a single path
+// segment (/api/upstreams/{id}/{action}); a "/" would split the route and a
+// ":" id created through the API would be unaddressable the same way, so a
+// laxer id would be creatable yet permanently unmanageable. Stored routing
+// state is not revalidated against this pattern on load, so an upstream
+// saved under the older bound still applies.
+var upstreamIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+// upstreamRequestError carries a readable rejection message for upstream
+// write input the generic "请求无效" text cannot explain, such as an id that
+// cannot appear inside the item route.
+type upstreamRequestError struct{ message string }
+
+func (err *upstreamRequestError) Error() string { return err.message }
+
+func upstreamRejected(message string) error {
+	return &upstreamRequestError{message: message}
+}
+
+func writeUpstreamError(writer http.ResponseWriter, err error) {
+	var rejected *upstreamRequestError
+	if errors.As(err, &rejected) {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: rejected.message})
+		return
+	}
+	writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+}
+
 // remoteDatasetURLError mirrors the early, readable half of the Host's remote
 // URL bound: literal https only, no credentials, no fragment. The Host still
 // re-authorizes private addresses, DNS, redirects and budgets on its side.
@@ -780,7 +810,7 @@ func (c *Controller) serveUpstreamCollection(writer http.ResponseWriter, request
 	}
 	routing, err := c.createUpstream(request.Context(), body)
 	if err != nil {
-		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		writeUpstreamError(writer, err)
 		return
 	}
 	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, Access: readWriteAccess()})
@@ -809,7 +839,7 @@ func (c *Controller) serveUpstreamItem(writer http.ResponseWriter, request *http
 	}
 	routing, err := c.mutateUpstream(request.Context(), id, action, body)
 	if err != nil {
-		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		writeUpstreamError(writer, err)
 		return
 	}
 	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, Access: readWriteAccess()})
@@ -1054,8 +1084,11 @@ func (c *Controller) importRouting(ctx context.Context, body routingImportReques
 	seen := make(map[string]bool, len(body.Upstreams))
 	missing := make([]string, 0)
 	for _, entry := range body.Upstreams {
+		if !upstreamIDPattern.MatchString(entry.ID) {
+			return fail(routingImportRejected(fmt.Sprintf("上游 %q 的标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ -", entry.ID)))
+		}
 		endpoint := pluginsdk.ManagedNetworkEndpoint{Host: entry.Host, Port: entry.Port}
-		if !refPattern.MatchString(entry.ID) || seen[entry.ID] || endpoint.Validate() != nil || !SupportedMethod(entry.Method) || (!entry.TCP && !entry.UDP) {
+		if seen[entry.ID] || endpoint.Validate() != nil || !SupportedMethod(entry.Method) || (!entry.TCP && !entry.UDP) {
 			return fail(ErrInvalid)
 		}
 		seen[entry.ID] = true
@@ -1121,7 +1154,10 @@ func (c *Controller) importRouting(ctx context.Context, body routingImportReques
 }
 
 func (c *Controller) createUpstream(ctx context.Context, body upstreamWriteRequest) (RoutingConfiguration, error) {
-	if c.managedRuntime == nil || !refPattern.MatchString(body.ID) || strings.TrimSpace(body.Password) == "" {
+	if !upstreamIDPattern.MatchString(body.ID) {
+		return RoutingConfiguration{}, upstreamRejected("上游标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ -")
+	}
+	if c.managedRuntime == nil || strings.TrimSpace(body.Password) == "" {
 		return RoutingConfiguration{}, ErrInvalid
 	}
 	engine, err := NewProtocolEngine(body.Method, []byte(body.Password))

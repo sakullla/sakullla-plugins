@@ -3343,6 +3343,13 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
     if (idInput) idInput.focus();
     return;
   }
+  // The id is embedded as a single path segment in /api/upstreams/{id}/{action};
+  // "/" or ":" ids would be creatable yet unmanageable, matching the backend bound.
+  if (!editing && !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id)) {
+    markFieldError(idInput, "上游标识需以小写字母或数字开头，仅含小写字母、数字与 . _ -。");
+    if (idInput) idInput.focus();
+    return;
+  }
   if (!editing && (routingCache.upstreams || []).some((item) => item && item.id === id)) {
     markFieldError(idInput, "该上游标识已存在，请换一个。");
     if (idInput) idInput.focus();

@@ -684,6 +684,59 @@ func TestRoutingImportEnforcesConfiguredLimits(t *testing.T) {
 	}
 }
 
+// The upstream id is embedded as a single path segment in
+// /api/upstreams/{id}/{action}. An id containing "/" or ":" was accepted at
+// creation yet could never be addressed again, trapping rule references and
+// the scoped secret; creation and import now enforce the URL-safe bound.
+func TestUpstreamIDRejectsUnsafePathCharacters(t *testing.T) {
+	controller, fake := importExportFixture(t)
+	for _, id := range []string{"hk/relay", "hk:relay", "BAD ID", "-lead"} {
+		body := fmt.Sprintf(`{"id":%q,"host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret","tcp":true,"udp":true}`, id)
+		response := uiJSON(t, controller, "POST", "/api/upstreams", body)
+		if response.Code != 400 {
+			t.Fatalf("create id=%q status=%d %s", id, response.Code, response.Body.String())
+		}
+		if message := decodeListenAPI(t, response).Error; message == "" || message == "请求无效" {
+			t.Fatalf("create id=%q error=%q", id, message)
+		}
+		importBody := fmt.Sprintf(`{"version":1,"rules":[],"default_action":"direct","upstreams":[{"id":%q,"host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret","tcp":true,"udp":true}]}`, id)
+		imported := uiJSON(t, controller, "POST", "/api/routing/import", importBody)
+		if imported.Code != 400 {
+			t.Fatalf("import id=%q status=%d %s", id, imported.Code, imported.Body.String())
+		}
+		if message := decodeListenAPI(t, imported).Error; message == "" || message == "请求无效" || !strings.Contains(message, id) {
+			t.Fatalf("import id=%q error=%q", id, message)
+		}
+	}
+	if fake.createCalls != 0 || fake.revokes != 0 {
+		t.Fatalf("rejected ids touched secrets: creates=%d revokes=%d", fake.createCalls, fake.revokes)
+	}
+	// A URL-safe id still creates and stays fully manageable.
+	created := uiJSON(t, controller, "POST", "/api/upstreams", `{"id":"hk-relay","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret","tcp":true,"udp":true}`)
+	if created.Code != 200 {
+		t.Fatalf("create hk-relay=%d %s", created.Code, created.Body.String())
+	}
+	for _, action := range []string{"disable", "enable"} {
+		if response := uiJSON(t, controller, "POST", "/api/upstreams/hk-relay/"+action, `{}`); response.Code != 200 {
+			t.Fatalf("%s hk-relay=%d %s", action, response.Code, response.Body.String())
+		}
+	}
+	updated := uiJSON(t, controller, "POST", "/api/upstreams/hk-relay/update", `{"id":"hk-relay","host":"198.51.100.30","port":8389,"method":"aes-256-gcm","tcp":true,"udp":false}`)
+	if updated.Code != 200 {
+		t.Fatalf("update hk-relay=%d %s", updated.Code, updated.Body.String())
+	}
+	if response := uiJSON(t, controller, "POST", "/api/upstreams/hk-relay/delete", `{}`); response.Code != 200 {
+		t.Fatalf("delete hk-relay=%d %s", response.Code, response.Body.String())
+	}
+	imported := uiJSON(t, controller, "POST", "/api/routing/import", `{"version":1,"rules":[],"default_action":"direct","upstreams":[{"id":"hk-relay","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret","tcp":true,"udp":true}]}`)
+	if imported.Code != 200 {
+		t.Fatalf("import hk-relay=%d %s", imported.Code, imported.Body.String())
+	}
+	if upstreams := decodeListenAPI(t, imported).Routing.Upstreams; len(upstreams) != 1 || upstreams[0].ID != "hk-relay" {
+		t.Fatalf("imported upstreams=%+v", upstreams)
+	}
+}
+
 func rollingSourceBody(sourceID string) string {
 	return fmt.Sprintf(`{"source_id":%q,"url":"https://datasets.example.com/geosite.dat","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/geosite.sha256","refresh_interval_seconds":86400}`, sourceID)
 }
