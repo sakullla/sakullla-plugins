@@ -6,11 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/png"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -729,5 +732,96 @@ func TestControlAPIRestoresShareFromPersistedCatalogNode(t *testing.T) {
 	user := listed.Listens[0].Users[0]
 	if !user.ShareAvailable || !strings.Contains(user.URI, "persist.example.com") || strings.Contains(user.URI, "other.example.com") || user.QRContent != user.URI {
 		t.Fatalf("restored override share=%#v", user)
+	}
+}
+
+// TestUpstreamSIP002ImportCreatesEquivalentUpstream covers the dialog flow's
+// server-visible half: ParseSIP002 yields the fields the paste box prefills,
+// and posting them through the normal create endpoint yields that upstream.
+// A URI that fails parsing never reaches the endpoint, so nothing is created.
+func TestUpstreamSIP002ImportCreatesEquivalentUpstream(t *testing.T) {
+	managed := newHostCapabilityRuntime(&managedRuntimeFake{})
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	state := &uiMemoryListenState{}
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a", ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(t.Context(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-1", RequiredFeatures: supportedFeatures()}); err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(Configuration{Generation: "generation-1"})
+	if response := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-1", Config: wire}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-1"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+
+	uri := "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:imported-secret@203.0.113.55:8488")) + "#relay"
+	method, password, parsedHost, port, err := ParseSIP002(uri)
+	if err != nil {
+		t.Fatalf("ParseSIP002 err=%v", err)
+	}
+	body := fmt.Sprintf(`{"id":"imported","host":%q,"port":%d,"method":%q,"password":%q,"tcp":true,"udp":true}`, parsedHost, port, method, password)
+	created := uiJSON(t, controller, http.MethodPost, "/api/upstreams", body)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	if bytes.Contains(created.Body.Bytes(), []byte("imported-secret")) {
+		t.Fatalf("create response echoed the upstream password: %s", created.Body.String())
+	}
+	payload := decodeListenAPI(t, created)
+	if payload.Routing == nil || len(payload.Routing.Upstreams) != 1 {
+		t.Fatalf("routing=%#v", payload.Routing)
+	}
+	upstream := payload.Routing.Upstreams[0]
+	if upstream.ID != "imported" || upstream.Host != "203.0.113.55" || upstream.Port != 8488 || upstream.Method != "aes-256-gcm" || !upstream.TCP || !upstream.UDP || !upstream.Enabled {
+		t.Fatalf("upstream=%+v", upstream)
+	}
+	if _, _, _, _, err := ParseSIP002("ss://" + base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:imported-secret@203.0.113.55"))); err == nil {
+		t.Fatal("incomplete ss:// URI parsed; the dialog must refuse it before create")
+	}
+}
+
+// TestUpstreamDialogSIP002ImportWiring asserts the create-upstream dialog
+// keeps the paste field, the in-dialog hint, and the client-side parser that
+// prefills without persisting anything.
+func TestUpstreamDialogSIP002ImportWiring(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(page)
+	source := string(script)
+	dialogStart := strings.Index(markup, `id="upstream-dialog"`)
+	if dialogStart < 0 {
+		t.Fatal("upstream dialog missing from index.html")
+	}
+	dialog := markup[dialogStart:]
+	for _, want := range []string{`id="upstream-import"`, `id="upstream-import-hint"`, "ss://"} {
+		if !strings.Contains(dialog, want) {
+			t.Fatalf("upstream dialog missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"parseSIP002URI",
+		"applySIP002Paste",
+		"fillUpstreamFromSIP002",
+		`params.has("plugin")`,
+		"METHOD_LABELS",
+		`upstreamImportInput.addEventListener("change"`,
+		"markFieldError(upstreamImportInput",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("app.js missing %q", want)
+		}
+	}
+	if !strings.Contains(source, "method: parsed.method") || !strings.Contains(source, "password: parsed.password") {
+		t.Fatal("prefill must cover method/password alongside host/port")
 	}
 }

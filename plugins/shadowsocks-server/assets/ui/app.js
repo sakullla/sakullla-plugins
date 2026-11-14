@@ -121,6 +121,8 @@ const routeDialogDesc = document.querySelector("#route-dialog-desc");
 const upstreamDialogTitle = document.querySelector("#upstream-dialog-title");
 const upstreamDialogDesc = document.querySelector("#upstream-dialog-desc");
 const upstreamPasswordHint = document.querySelector("#upstream-password-hint");
+const upstreamImportInput = document.querySelector("#upstream-import");
+const upstreamImportHint = document.querySelector("#upstream-import-hint");
 
 const LISTEN_FILTER_MIN = 4;
 
@@ -445,6 +447,15 @@ const markFieldError = (input, message) => {
   if (!input) return;
   if (window.NREUI && typeof window.NREUI.fieldError === "function") window.NREUI.fieldError(input, message);
   else input.setAttribute("aria-invalid", "true");
+};
+
+const clearFieldError = (input) => {
+  if (!input) return;
+  if (window.NREUI && typeof window.NREUI.clearFieldError === "function") window.NREUI.clearFieldError(input);
+  else {
+    input.removeAttribute("aria-invalid");
+    input.removeAttribute("aria-describedby");
+  }
 };
 
 const formField = (form, name) => (form ? form.querySelector(`[name="${name}"]`) : null);
@@ -1999,6 +2010,117 @@ const fillRoutePreset = (presetKey) => {
   syncRouteModalActionVisibility();
 };
 
+// parseSIP002URI mirrors ParseSIP002 in sip002.go: both SIP002 encodings
+// (base64 userinfo and the fully encoded legacy form), #tag dropped, any
+// query refused with plugin transports reported as unsupported.
+const sip002Base64Decode = (encoded) => {
+  if (!encoded || !/^[A-Za-z0-9+/\-_]+={0,2}$/.test(encoded)) return null;
+  let normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  while (normalized.length % 4 !== 0) normalized += "=";
+  try {
+    const binary = atob(normalized);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    return null;
+  }
+};
+
+const parseSIP002URI = (input) => {
+  const raw = String(input || "").trim();
+  if (!raw.startsWith("ss://")) return { error: "不是有效的 ss:// 链接。" };
+  let rest = raw.slice("ss://".length);
+  const hash = rest.indexOf("#");
+  if (hash >= 0) rest = rest.slice(0, hash);
+  const queryIndex = rest.indexOf("?");
+  if (queryIndex >= 0) {
+    const params = new URLSearchParams(rest.slice(queryIndex + 1));
+    rest = rest.slice(0, queryIndex);
+    if (params.has("plugin")) return { error: "该链接附带插件传输参数，本面板不支持此类 ss:// 链接。" };
+    if (Array.from(params.keys()).length > 0) return { error: "该链接带有不支持的查询参数。" };
+  }
+  if (!rest) return { error: "ss:// 链接内容为空。" };
+  let method = "";
+  let password = "";
+  let hostport = "";
+  if (rest.includes("@")) {
+    const at = rest.indexOf("@");
+    const decoded = sip002Base64Decode(rest.slice(0, at));
+    hostport = rest.slice(at + 1);
+    if (decoded === null) return { error: "链接的加密信息不是有效的 Base64。" };
+    const separator = decoded.indexOf(":");
+    if (separator <= 0 || separator === decoded.length - 1) return { error: "链接缺少加密方式或连接密钥。" };
+    method = decoded.slice(0, separator);
+    password = decoded.slice(separator + 1);
+  } else {
+    const decoded = sip002Base64Decode(rest);
+    if (decoded === null) return { error: "链接不是有效的 Base64 编码。" };
+    const separator = decoded.indexOf(":");
+    const at = decoded.lastIndexOf("@");
+    if (separator <= 0 || at <= separator || at === decoded.length - 1) return { error: "链接缺少加密方式、密钥或服务器地址。" };
+    method = decoded.slice(0, separator);
+    password = decoded.slice(separator + 1, at);
+    hostport = decoded.slice(at + 1);
+  }
+  let host = "";
+  let portText = "";
+  if (hostport.startsWith("[")) {
+    const close = hostport.indexOf("]");
+    if (close < 0 || hostport[close + 1] !== ":") return { error: "服务器地址或端口不完整。" };
+    host = hostport.slice(1, close);
+    portText = hostport.slice(close + 2);
+  } else {
+    const colon = hostport.lastIndexOf(":");
+    if (colon <= 0 || hostport.indexOf(":") !== colon) return { error: "服务器地址或端口不完整。" };
+    host = hostport.slice(0, colon);
+    portText = hostport.slice(colon + 1);
+  }
+  if (!host) return { error: "链接缺少服务器地址。" };
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "端口需为 1-65535 的整数。" };
+  if (!Object.prototype.hasOwnProperty.call(METHOD_LABELS, method)) return { error: `不支持的加密方式「${method}」。` };
+  return { method, password, host, port };
+};
+
+const showUpstreamImportHint = (message) => {
+  if (!upstreamImportHint) return;
+  upstreamImportHint.hidden = !message;
+  upstreamImportHint.textContent = message || "";
+};
+
+const fillUpstreamFromSIP002 = (parsed) => {
+  const assignments = { method: parsed.method, host: parsed.host, port: parsed.port, password: parsed.password };
+  Object.entries(assignments).forEach(([name, value]) => {
+    const input = formField(upstreamForm, name);
+    if (input) input.value = value;
+  });
+  if (upstreamImportInput) {
+    // The pasted URI embeds the password; clear it so the secret only lives
+    // in the password field until the admin submits the normal create flow.
+    upstreamImportInput.value = "";
+    clearFieldError(upstreamImportInput);
+  }
+  showUpstreamImportHint("已从 ss:// 链接填充加密方式、地址、端口与密钥，请核对后提交。");
+};
+
+const applySIP002Paste = () => {
+  if (!upstreamImportInput) return true;
+  const value = upstreamImportInput.value.trim();
+  if (!value) {
+    clearFieldError(upstreamImportInput);
+    showUpstreamImportHint("");
+    return true;
+  }
+  const parsed = parseSIP002URI(value);
+  if (parsed.error) {
+    markFieldError(upstreamImportInput, parsed.error);
+    showUpstreamImportHint("");
+    return false;
+  }
+  fillUpstreamFromSIP002(parsed);
+  return true;
+};
+
 const setUpstreamModalMode = (editing) => {
   if (upstreamDialogTitle) upstreamDialogTitle.textContent = editing ? "编辑上游节点" : "添加上游节点";
   if (upstreamDialogDesc) {
@@ -2040,6 +2162,7 @@ const openUpstreamModal = (upstream = null) => {
 const closeUpstreamModal = () => {
   releaseDraft(upstreamDialog);
   showModalError(upstreamError, "");
+  showUpstreamImportHint("");
   clearFormErrors(upstreamForm);
   if (upstreamForm) upstreamForm.reset();
   editingUpstreamID = "";
@@ -2489,6 +2612,15 @@ const mutateUpstream = async (id, action, control = null) => {
 
 if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", () => openUpstreamModal());
 if (upstreamCancel) upstreamCancel.addEventListener("click", requestCloseUpstreamModal);
+if (upstreamImportInput) {
+  upstreamImportInput.addEventListener("change", applySIP002Paste);
+  upstreamImportInput.addEventListener("input", () => {
+    if (!upstreamImportInput.value.trim()) {
+      clearFieldError(upstreamImportInput);
+      showUpstreamImportHint("");
+    }
+  });
+}
 if (upstreamDialog) {
   upstreamDialog.addEventListener("click", (event) => {
     if (event.target === upstreamDialog) closeUpstreamModal();
@@ -2519,6 +2651,12 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
   if (busy) return;
   clearFormErrors(upstreamForm);
   showModalError(upstreamError, "");
+  // A still-filled import field means the admin pasted a link and submitted
+  // before the change handler ran; a parse failure must not create anything.
+  if (!applySIP002Paste()) {
+    if (upstreamImportInput) upstreamImportInput.focus();
+    return;
+  }
   const form = new FormData(upstreamForm);
   const editing = editingUpstreamID !== "";
   const id = editing ? editingUpstreamID : String(form.get("id") || "").trim();

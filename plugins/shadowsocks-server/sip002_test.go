@@ -3,6 +3,7 @@ package shadowsocksserver
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -224,6 +225,188 @@ func TestSIP002LegacyURIIsImportableWithSinglePassword(t *testing.T) {
 			userinfo := sip002Userinfo(t, share.URI)
 			if string(decodeStandardUserinfo(t, userinfo)) != method+":"+password {
 				t.Fatalf("decoded userinfo=%q", userinfo)
+			}
+		})
+	}
+}
+
+func TestParseSIP002AcceptsBothSIP002Encodings(t *testing.T) {
+	std := base64.StdEncoding.EncodeToString
+	raw := base64.RawURLEncoding.EncodeToString
+	for _, test := range []struct {
+		name     string
+		uri      string
+		method   string
+		password string
+		host     string
+		port     int
+	}{
+		{
+			name:     "userinfo standard base64",
+			uri:      "ss://" + std([]byte("aes-128-gcm:correct-horse-battery")) + "@ss.example.com:8388",
+			method:   "aes-128-gcm",
+			password: "correct-horse-battery",
+			host:     "ss.example.com",
+			port:     8388,
+		},
+		{
+			name:     "userinfo url-safe unpadded base64",
+			uri:      "ss://" + raw([]byte("aes-256-gcm:p?ss+word/odd=")) + "@198.51.100.7:443",
+			method:   "aes-256-gcm",
+			password: "p?ss+word/odd=",
+			host:     "198.51.100.7",
+			port:     443,
+		},
+		{
+			name:     "legacy fully encoded",
+			uri:      "ss://" + std([]byte("aes-256-gcm:legacy-pass@203.0.113.9:10443")),
+			method:   "aes-256-gcm",
+			password: "legacy-pass",
+			host:     "203.0.113.9",
+			port:     10443,
+		},
+		{
+			name:     "tag fragment dropped",
+			uri:      "ss://" + std([]byte("aes-128-gcm:pw")) + "@ss.example.com:8388#" + url.QueryEscape("节点 one"),
+			method:   "aes-128-gcm",
+			password: "pw",
+			host:     "ss.example.com",
+			port:     8388,
+		},
+		{
+			name:     "legacy with tag",
+			uri:      "ss://" + raw([]byte("aes-128-gcm:pw@ss.example.com:8388")) + "#tokyo",
+			method:   "aes-128-gcm",
+			password: "pw",
+			host:     "ss.example.com",
+			port:     8388,
+		},
+		{
+			name:     "password keeps extra colons verbatim",
+			uri:      "ss://" + std([]byte("aes-128-gcm:pa:ss:extra")) + "@ss.example.com:8388",
+			method:   "aes-128-gcm",
+			password: "pa:ss:extra",
+			host:     "ss.example.com",
+			port:     8388,
+		},
+		{
+			name:     "bracketed IPv6",
+			uri:      "ss://" + std([]byte("aes-128-gcm:pw")) + "@[2001:db8::10]:8388",
+			method:   "aes-128-gcm",
+			password: "pw",
+			host:     "2001:db8::10",
+			port:     8388,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			method, password, host, port, err := ParseSIP002(test.uri)
+			if err != nil {
+				t.Fatalf("ParseSIP002(%q) err=%v", test.uri, err)
+			}
+			if method != test.method || password != test.password || host != test.host || port != test.port {
+				t.Fatalf("parsed method=%q password=%q host=%q port=%d", method, password, host, port)
+			}
+		})
+	}
+}
+
+func TestParseSIP002KeepsSS2022IdentityPasswordVerbatim(t *testing.T) {
+	server, identity, err := GenerateSS2022Identity("2022-blake3-aes-128-gcm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := server + ":" + identity
+	uri, err := EncodeSIP002("2022-blake3-aes-128-gcm", want, "ss.example.com", 8388, "导入")
+	if err != nil {
+		t.Fatal(err)
+	}
+	method, password, host, port, err := ParseSIP002(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "2022-blake3-aes-128-gcm" || password != want || host != "ss.example.com" || port != 8388 {
+		t.Fatalf("parsed method=%q password=%q host=%q port=%d", method, password, host, port)
+	}
+	if _, err = NewProtocolEngine(method, []byte(password)); err != nil {
+		t.Fatalf("parsed SS2022 password rejected: %v", err)
+	}
+	legacy := "ss://" + base64.StdEncoding.EncodeToString([]byte("2022-blake3-aes-256-gcm:"+want+"@ss.example.com:443"))
+	method, password, _, _, err = ParseSIP002(legacy)
+	if err != nil || method != "2022-blake3-aes-256-gcm" || password != want {
+		t.Fatalf("legacy parsed method=%q password=%q err=%v", method, password, err)
+	}
+}
+
+func TestParseSIP002RoundTripsEncodeSIP002(t *testing.T) {
+	uri, err := EncodeSIP002("aes-128-gcm", "correct-horse-battery", "ss.example.com", 8388, "tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	method, password, host, port, err := ParseSIP002(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "aes-128-gcm" || password != "correct-horse-battery" || host != "ss.example.com" || port != 8388 {
+		t.Fatalf("parsed method=%q password=%q host=%q port=%d", method, password, host, port)
+	}
+}
+
+func TestParseSIP002RejectsPluginAndUnknownQuery(t *testing.T) {
+	userinfo := base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pw"))
+	for _, test := range []struct {
+		name   string
+		uri    string
+		plugin bool
+	}{
+		{name: "plugin userinfo form", uri: "ss://" + userinfo + "@ss.example.com:8388?plugin=simple-obfs", plugin: true},
+		{name: "plugin empty value", uri: "ss://" + userinfo + "@ss.example.com:8388?plugin=", plugin: true},
+		{name: "plugin legacy form", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pw@ss.example.com:8388")) + "?plugin=v2ray", plugin: true},
+		{name: "plugin with tag", uri: "ss://" + userinfo + "@ss.example.com:8388?plugin=obfs#tag", plugin: true},
+		{name: "unknown query", uri: "ss://" + userinfo + "@ss.example.com:8388?outline=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, _, err := ParseSIP002(test.uri)
+			if err == nil {
+				t.Fatalf("ParseSIP002(%q) unexpectedly succeeded", test.uri)
+			}
+			if test.plugin && !errors.Is(err, ErrSIP002Plugin) {
+				t.Fatalf("err=%v must wrap ErrSIP002Plugin", err)
+			}
+		})
+	}
+}
+
+func TestParseSIP002RejectsMalformedAndUnsupported(t *testing.T) {
+	userinfo := base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pw"))
+	for _, test := range []struct {
+		name        string
+		uri         string
+		unsupported bool
+	}{
+		{name: "not ss scheme", uri: "http://example.com"},
+		{name: "empty payload", uri: "ss://"},
+		{name: "only tag", uri: "ss://#tag"},
+		{name: "truncated base64", uri: "ss://" + userinfo[:len(userinfo)-3] + "@ss.example.com:8388"},
+		{name: "non base64 payload", uri: "ss://!!!invalid!!!@ss.example.com:8388"},
+		{name: "non-base64 userinfo", uri: "ss://aes-128-gcm:pw@ss.example.com:8388"},
+		{name: "userinfo without password", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm")) + "@ss.example.com:8388"},
+		{name: "empty password", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:")) + "@ss.example.com:8388"},
+		{name: "legacy without host", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pw"))},
+		{name: "legacy truncated", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pw@"))},
+		{name: "missing port", uri: "ss://" + userinfo + "@ss.example.com"},
+		{name: "non numeric port", uri: "ss://" + userinfo + "@ss.example.com:http"},
+		{name: "port out of range", uri: "ss://" + userinfo + "@ss.example.com:99999"},
+		{name: "missing host", uri: "ss://" + userinfo + "@:8388"},
+		{name: "unsupported method", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("chacha20-ietf-poly1305:pw")) + "@ss.example.com:8388", unsupported: true},
+		{name: "unsupported method legacy", uri: "ss://" + base64.StdEncoding.EncodeToString([]byte("rc4-md5:pw@ss.example.com:8388")), unsupported: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			method, password, host, port, err := ParseSIP002(test.uri)
+			if err == nil {
+				t.Fatalf("ParseSIP002(%q) succeeded with %q %q %q %d", test.uri, method, password, host, port)
+			}
+			if test.unsupported && !errors.Is(err, ErrUnsupportedMethod) {
+				t.Fatalf("err=%v must wrap ErrUnsupportedMethod", err)
 			}
 		})
 	}

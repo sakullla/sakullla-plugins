@@ -5,14 +5,20 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 // SIP002Account is the share material for one client. Traditional SS uses a
@@ -132,6 +138,133 @@ func sip002URIHostPort(uri string) (string, int, error) {
 		host = host[1 : len(host)-1]
 	}
 	return host, port, nil
+}
+
+// ErrSIP002Plugin rejects an ss:// URI carrying a SIP003 plugin transport
+// query. This plugin cannot honour plugin= obfuscation, so the link is
+// refused instead of silently dropping the parameter.
+var ErrSIP002Plugin = errors.New("ss:// plugin parameter (SIP003) is not supported")
+
+// ParseSIP002 parses an ss:// share URI into upstream fields. Both SIP002
+// encodings are accepted: ss://base64(method:password)@host:port and the
+// legacy fully encoded ss://base64(method:password@host:port). The #tag
+// fragment is dropped; any query is refused, with ?plugin= reporting
+// ErrSIP002Plugin. The password is returned verbatim so an SS2022
+// serverPSK:userPSK credential stays intact for upstream validation.
+func ParseSIP002(uri string) (method, password, host string, port int, err error) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(uri), "ss://")
+	if !ok {
+		return "", "", "", 0, fmt.Errorf("not an ss:// URI: %w", ErrInvalid)
+	}
+	rest, _, _ = strings.Cut(rest, "#")
+	if base, query, found := strings.Cut(rest, "?"); found {
+		rest = base
+		if err := rejectSIP002Query(query); err != nil {
+			return "", "", "", 0, err
+		}
+	}
+	if rest == "" {
+		return "", "", "", 0, fmt.Errorf("ss:// URI has no payload: %w", ErrInvalid)
+	}
+	var hostport string
+	if userinfo, address, found := strings.Cut(rest, "@"); found {
+		hostport = address
+		method, password, err = sip002UserinfoParts(userinfo)
+	} else {
+		method, password, hostport, err = sip002LegacyParts(rest)
+	}
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	if !SupportedMethod(method) {
+		return "", "", "", 0, fmt.Errorf("method %q: %w", method, ErrUnsupportedMethod)
+	}
+	host, port, err = sip002ParseHostPort(hostport)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	return method, password, host, port, nil
+}
+
+func rejectSIP002Query(query string) error {
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return fmt.Errorf("invalid ss:// URI query: %w", ErrInvalid)
+	}
+	if _, ok := values["plugin"]; ok {
+		return ErrSIP002Plugin
+	}
+	if len(values) > 0 {
+		return fmt.Errorf("ss:// URI query parameters are not supported: %w", ErrInvalid)
+	}
+	return nil
+}
+
+// decodeSIP002Base64 accepts the padded/unpadded standard and URL-safe Base64
+// spellings different clients emit for SIP002 userinfo.
+func decodeSIP002Base64(encoded string) (string, error) {
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+		decoded, err := encoding.DecodeString(encoded)
+		if err != nil {
+			continue
+		}
+		if !utf8.Valid(decoded) {
+			return "", fmt.Errorf("ss:// payload is not text: %w", ErrInvalid)
+		}
+		text := string(decoded)
+		if strings.IndexFunc(text, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return "", fmt.Errorf("ss:// payload contains control characters: %w", ErrInvalid)
+		}
+		return text, nil
+	}
+	return "", fmt.Errorf("ss:// payload is not valid Base64: %w", ErrInvalid)
+}
+
+func sip002UserinfoParts(userinfo string) (method, password string, err error) {
+	decoded, err := decodeSIP002Base64(userinfo)
+	if err != nil {
+		return "", "", err
+	}
+	method, password, ok := strings.Cut(decoded, ":")
+	if !ok || method == "" || password == "" {
+		return "", "", fmt.Errorf("ss:// userinfo must decode to method:password: %w", ErrInvalid)
+	}
+	return method, password, nil
+}
+
+func sip002LegacyParts(encoded string) (method, password, hostport string, err error) {
+	decoded, err := decodeSIP002Base64(encoded)
+	if err != nil {
+		return "", "", "", err
+	}
+	method, remainder, ok := strings.Cut(decoded, ":")
+	if !ok || method == "" {
+		return "", "", "", fmt.Errorf("ss:// payload must decode to method:password@host:port: %w", ErrInvalid)
+	}
+	at := strings.LastIndex(remainder, "@")
+	if at <= 0 || at == len(remainder)-1 {
+		return "", "", "", fmt.Errorf("ss:// payload must decode to method:password@host:port: %w", ErrInvalid)
+	}
+	return method, remainder[:at], remainder[at+1:], nil
+}
+
+func sip002ParseHostPort(hostport string) (host string, port int, err error) {
+	rawHost, portText, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", 0, fmt.Errorf("ss:// URI needs a host:port endpoint: %w", ErrInvalid)
+	}
+	port, err = strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("ss:// URI port %q is invalid: %w", portText, ErrInvalid)
+	}
+	if strings.HasPrefix(rawHost, "[") && strings.HasSuffix(rawHost, "]") && len(rawHost) > 2 {
+		rawHost = rawHost[1 : len(rawHost)-1]
+	}
+	endpoint := pluginsdk.ManagedNetworkEndpoint{Host: rawHost, Port: port}
+	if endpoint.Validate() != nil {
+		return "", 0, fmt.Errorf("ss:// URI endpoint %q is invalid: %w", hostport, ErrInvalid)
+	}
+	return rawHost, port, nil
 }
 
 func sip002ClientPassword(account SIP002Account) (string, error) {

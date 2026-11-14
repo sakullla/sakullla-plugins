@@ -392,6 +392,11 @@
       <div class="ui-dialog__body">
         <p id="upstream-error" class="form-error" role="alert" hidden></p>
         <div class="ui-form-grid">
+          <label class="ui-field ui-field--full" id="upstream-import-field">
+            <span class="ui-label">粘贴 ss:// 链接导入（可选）</span>
+            <input class="ui-input" id="upstream-import" name="sip002" autocomplete="off" spellcheck="false" placeholder="ss://… 解析后自动填充加密方式、地址、端口与密钥">
+            <span id="upstream-import-hint" class="ui-help-text" hidden></span>
+          </label>
           <label class="ui-field">
             <span class="ui-label">上游标识 (ID)</span>
             <input class="ui-input" name="id" required autocomplete="off" spellcheck="false" placeholder="例如 hk-node 或 ai-upstream">
