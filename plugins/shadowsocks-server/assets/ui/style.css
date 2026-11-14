@@ -414,6 +414,21 @@
   gap: var(--ui-space-2);
 }
 
+.routing-head-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+}
+
+.route-refresh-status {
+  margin: calc(-1 * var(--ui-space-2)) 0 var(--ui-space-3);
+}
+
+.route-refresh-status[data-error="true"] {
+  color: var(--ui-danger-text);
+}
+
 .routing-presets {
   display: flex;
   align-items: center;

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -43,6 +44,199 @@ func decodeRoutingWrite(request *http.Request, target any) error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// ErrDatasetRefreshFailed reports that every issued Host refresh control
+// failed. In that case routing is never re-applied and the previously bound
+// immutable versions keep serving.
+var ErrDatasetRefreshFailed = errors.New("dataset refresh failed")
+
+type datasetRefreshSource struct {
+	SourceID     string `json:"source_id"`
+	BeforeDigest string `json:"before_digest,omitempty"`
+	AfterDigest  string `json:"after_digest,omitempty"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+}
+
+type datasetRefreshNode struct {
+	AgentID        string `json:"agent_id"`
+	RoutingApplied bool   `json:"routing_applied"`
+	RoutingError   string `json:"routing_error,omitempty"`
+}
+
+type datasetRefreshReport struct {
+	Mode    string                 `json:"mode"`
+	Message string                 `json:"message,omitempty"`
+	Sources []datasetRefreshSource `json:"sources"`
+	Nodes   []datasetRefreshNode   `json:"nodes,omitempty"`
+}
+
+func (c *Controller) serveRoutingRefresh(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "POST")
+		writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := c.uiIdentity(request); err != nil {
+		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
+		return
+	}
+	var body struct {
+		SourceID string `json:"source_id"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(request.Body, MaxConfigBytes+1))
+	if err != nil || len(raw) > MaxConfigBytes {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+		return
+	}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+			return
+		}
+	}
+	report, err := c.refreshDatasets(request.Context(), strings.TrimSpace(body.SourceID))
+	if err != nil {
+		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		return
+	}
+	sources := c.routeSourceStatuses(request.Context(), c.directory().Routing)
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Refresh: report, RouteSources: sources, Access: readWriteAccess()})
+}
+
+// refreshDatasets triggers the Host refresh control for every dataset source
+// referenced by routing rules (or only the requested source) and then
+// re-applies routing so Agents re-resolve the pinned immutable references to
+// the newest Host-prepared version. A denied dataset.manage grant degrades to
+// re-apply only; a failed refresh control never re-applies, keeping the old
+// version live. In-progress sessions keep their own snapshot either way.
+func (c *Controller) refreshDatasets(ctx context.Context, onlySource string) (*datasetRefreshReport, error) {
+	routing := c.directory().Routing
+	sources := make([]string, 0, len(routing.Rules))
+	referenced := false
+	seen := map[string]bool{}
+	for _, rule := range routing.Rules {
+		if rule.SourceID == onlySource {
+			referenced = true
+		}
+		if onlySource != "" && rule.SourceID != onlySource {
+			continue
+		}
+		if seen[rule.SourceID] {
+			continue
+		}
+		seen[rule.SourceID] = true
+		sources = append(sources, rule.SourceID)
+	}
+	if onlySource != "" && !referenced {
+		return nil, ErrInvalid
+	}
+	report := &datasetRefreshReport{Mode: "host-refresh", Sources: make([]datasetRefreshSource, 0, len(sources))}
+	manageable := c.managedRuntime != nil && c.managedRuntime.client != nil
+	failed := 0
+	succeeded := 0
+	for _, sourceID := range sources {
+		entry := datasetRefreshSource{SourceID: sourceID, BeforeDigest: c.resolveDatasetDigest(ctx, sourceID)}
+		switch {
+		case !manageable:
+			entry.Status = "skipped"
+		default:
+			err := c.managedRuntime.controlDatasetRefresh(ctx, sourceID)
+			switch {
+			case err == nil:
+				succeeded++
+			case datasetManageDenied(err):
+				manageable = false
+				entry.Status = "skipped"
+			default:
+				failed++
+				entry.Status = "error"
+				entry.Error = "refresh-failed"
+			}
+		}
+		report.Sources = append(report.Sources, entry)
+	}
+	if !manageable && len(sources) > 0 {
+		report.Mode = "reapply-only"
+		report.Message = "宿主未授予 dataset.manage 或刷新控制不可用，已重新应用当前绑定；未获取新版本。"
+	}
+	if failed > 0 && succeeded == 0 {
+		// Every issued refresh control failed: do not re-apply so no new
+		// dataset can be silently selected; the old versions keep working.
+		return nil, ErrDatasetRefreshFailed
+	}
+	agents := map[string]bool{}
+	for _, listener := range c.directory().Listeners {
+		agents[listener.AgentID] = true
+	}
+	ordered := make([]string, 0, len(agents))
+	for agentID := range agents {
+		ordered = append(ordered, agentID)
+	}
+	sort.Strings(ordered)
+	for _, agentID := range ordered {
+		node := datasetRefreshNode{AgentID: agentID}
+		if err := c.applyAgentListens(ctx, agentID); err != nil {
+			node.RoutingError = publicListenError(err)
+		} else {
+			node.RoutingApplied = true
+		}
+		report.Nodes = append(report.Nodes, node)
+	}
+	updated := 0
+	for index := range report.Sources {
+		entry := &report.Sources[index]
+		entry.AfterDigest = c.resolveDatasetDigest(ctx, entry.SourceID)
+		if entry.Status != "" {
+			continue
+		}
+		switch {
+		case entry.AfterDigest == "":
+			entry.Status = "unresolved"
+		case entry.AfterDigest != entry.BeforeDigest:
+			entry.Status = "updated"
+			updated++
+		default:
+			entry.Status = "latest"
+		}
+	}
+	if report.Message == "" {
+		switch {
+		case len(report.Sources) == 0:
+			report.Message = "没有引用数据集的分流规则，已重新应用当前路由。"
+		case failed > 0:
+			report.Message = "部分数据源刷新失败，已应用成功刷新的版本，失败源保留当前版本。"
+		case updated > 0:
+			report.Message = "数据源已更新到新版本并重新应用分流。"
+		default:
+			report.Message = "数据源已是最新版本，已重新应用分流。"
+		}
+	}
+	return report, nil
+}
+
+func (c *Controller) resolveDatasetDigest(ctx context.Context, sourceID string) string {
+	if c.managedRuntime == nil || c.managedRuntime.datasets == nil {
+		return ""
+	}
+	reference, err := c.managedRuntime.datasets.ResolveDataset(ctx, pluginsdk.DatasetResolveRequest{SourceID: sourceID})
+	if err != nil {
+		return ""
+	}
+	return reference.VersionDigest
+}
+
+func datasetManageDenied(err error) bool {
+	var runtimeError *pluginsdk.RuntimeError
+	return errors.As(err, &runtimeError) && runtimeError.Code == pluginsdk.ErrorPermissionDenied
 }
 
 func (c *Controller) serveRouting(writer http.ResponseWriter, request *http.Request) {

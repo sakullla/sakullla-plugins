@@ -72,6 +72,19 @@ Upstream endpoints are dialed directly and are never routed recursively.
 Diagnostics expose rule, source, classification, immutable version, selected
 exit, and stable failure codes. They never expose upstream secret material.
 
+The "刷新数据集" action (`POST /api/routing/refresh`, optionally scoped by
+`source_id`) asks the control plane to issue the `dataset.control` refresh
+operation for every source referenced by the rules. That call requires the
+`dataset.manage` grant. When the refresh succeeds the panel re-applies routing
+to every listening agent so each agent re-resolves the newest Host-prepared
+immutable reference; the response reports the before/after version digest per
+source (`updated`, `latest`, or `unresolved`) and `routing_applied` /
+`routing_error` per node. A failed refresh control never re-applies, so the
+last working version keeps serving. When `dataset.manage` is not granted the
+action degrades to re-apply only, the report says so, and no new version is
+silently selected. In-flight sessions keep their established immutable
+snapshot either way.
+
 Upstreams use separate host, port, method, and password fields, not an Xray
 outbound JSON object. For SS2022 multi-user upstreams, the password field holds
 the complete `serverPSK:userPSK` pair. An upstream can be edited in place

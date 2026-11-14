@@ -82,6 +82,8 @@ const routeDefaultAction = document.querySelector("#route-default-action");
 const routeDefaultUpstreamField = document.querySelector("#route-default-upstream-field");
 const routeDefaultUpstream = document.querySelector("#route-default-upstream");
 const routeSaveDefault = document.querySelector("#route-save-default");
+const routeRefreshBtn = document.querySelector("#route-refresh");
+const routeRefreshStatus = document.querySelector("#route-refresh-status");
 const appendDialog = document.querySelector("#append-dialog");
 const appendForm = document.querySelector("#append-form");
 const appendName = document.querySelector("#append-name");
@@ -2271,6 +2273,13 @@ const renderRouting = (routing, routeStatus = []) => {
       statusWrap.className = "route-status";
       const issueTone = PARTIAL_FAILURES.has(rawIssue) ? "warning" : "danger";
       statusWrap.append(renderStatusPill(issueLabel || "规则就绪", !issueLabel, issueLabel ? issueTone : "success"));
+      if (applied.version_digest) {
+        const version = document.createElement("span");
+        version.className = "ui-help-text route-status__hint";
+        version.textContent = `版本 ${shortDigest(applied.version_digest)}`;
+        version.title = applied.version_digest;
+        statusWrap.append(version);
+      }
       const hintText = rawIssue ? FAILURE_HINTS[rawIssue] || "" : "";
       if (hintText) {
         const hint = document.createElement("span");
@@ -2340,6 +2349,62 @@ const saveRoutingRules = async () => {
   renderRouting(payload.routing);
   await refreshRouteStatus();
 };
+
+const shortDigest = (digest) => {
+  const text = String(digest || "").trim();
+  if (!text) return "无";
+  const hex = text.includes(":") ? text.slice(text.lastIndexOf(":") + 1) : text;
+  return hex.length > 12 ? `${hex.slice(0, 12)}…` : hex;
+};
+
+const REFRESH_SOURCE_LABELS = {
+  updated: "已更新",
+  latest: "已是最新",
+  skipped: "未刷新",
+  unresolved: "版本未知",
+};
+
+const describeRefreshSource = (source) => {
+  const name = source.source_id || "?";
+  if (source.status === "error") return `${name} 刷新失败`;
+  const before = shortDigest(source.before_digest);
+  const after = shortDigest(source.after_digest);
+  const label = REFRESH_SOURCE_LABELS[source.status] || source.status || "未知";
+  if (source.status === "updated") return `${name} ${before} → ${after}（${label}）`;
+  return `${name} ${after}（${label}）`;
+};
+
+const showRouteRefreshStatus = (message, isError) => {
+  if (!routeRefreshStatus) return;
+  routeRefreshStatus.hidden = !message;
+  routeRefreshStatus.textContent = message || "";
+  routeRefreshStatus.dataset.error = isError ? "true" : "false";
+};
+
+const refreshDatasets = async (control = null) => {
+  if (busy) return;
+  setBusy(true, control, "刷新中…");
+  try {
+    const payload = await sendPluginJSON("api/routing/refresh", {});
+    const report = payload.refresh || {};
+    const parts = (report.sources || []).map(describeRefreshSource);
+    const failedNodes = (report.nodes || [])
+      .filter((node) => !node.routing_applied)
+      .map((node) => `${node.agent_id}：${node.routing_error || "应用失败"}`);
+    if (failedNodes.length) parts.push(`节点未应用 ${failedNodes.join("；")}`);
+    const detail = [report.message || "", ...parts].filter(Boolean).join(" ");
+    showRouteRefreshStatus(detail || "已刷新数据集。", report.mode === "reapply-only" || failedNodes.length > 0);
+    showStatus(report.mode === "reapply-only" ? "宿主未授予数据集刷新权限，已重新应用当前绑定。" : report.message || "已刷新数据集。", false);
+    await refreshRouteStatus();
+  } catch (error) {
+    showRouteRefreshStatus("", false);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (routeRefreshBtn) routeRefreshBtn.addEventListener("click", (event) => refreshDatasets(event.currentTarget));
 
 const moveRoute = async (index, delta, control = null) => {
   if (busy) return;

@@ -432,6 +432,40 @@ func (runtime *hostCapabilityRuntime) ApplyRouting(ctx context.Context, agentID 
 	return nil
 }
 
+// controlDatasetRefresh asks the Host to re-fetch and activate the newest
+// prepared version of sourceID through dataset.control refresh. The call
+// requires the dataset.manage grant; callers must map a permission denial to
+// a degraded re-apply instead of reporting it as a refresh failure. The
+// control-plane face issues it for all Agents; the Agent's go-agent runtime
+// does not implement dataset.control itself.
+func (runtime *hostCapabilityRuntime) controlDatasetRefresh(ctx context.Context, sourceID string) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	request := pluginsdk.DatasetControlRequest{Action: pluginsdk.DatasetControlRefresh, SourceID: sourceID}
+	if err := request.Validate(); err != nil {
+		return ErrInvalid
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	operationID := managedRequestID("dataset")
+	var raw json.RawMessage
+	call := pluginsdk.HostRuntimeCall{Operation: pluginsdk.HostRuntimeDatasetControl, OperationID: operationID, Payload: encoded}
+	if err := runtime.client.Call(ctx, call, &raw); err != nil {
+		return err
+	}
+	var response pluginsdk.DatasetControlResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	if response.Validate() != nil || response.SourceID != sourceID || response.OperationID != operationID {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
 func (runtime *hostCapabilityRuntime) refreshLive(ctx context.Context, agentID string) {
 	if runtime == nil {
 		return

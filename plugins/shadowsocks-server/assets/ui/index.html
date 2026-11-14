@@ -208,8 +208,12 @@
                   </div>
                   <p class="ui-section-desc">从上到下按优先级依次匹配，第一条命中的规则生效。</p>
                 </div>
-                <button id="open-route-dialog" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">添加规则</button>
+                <div class="routing-head-actions">
+                  <button id="route-refresh" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" title="重新拉取规则引用的数据集并应用到各节点">刷新数据集</button>
+                  <button id="open-route-dialog" class="ui-btn ui-btn--secondary ui-btn--sm" type="button">添加规则</button>
+                </div>
               </div>
+              <p id="route-refresh-status" class="ui-help-text route-refresh-status" role="status" hidden></p>
 
               <div class="routing-presets" aria-label="快捷规则模板">
                 <span class="ui-help-text">快捷模板</span>

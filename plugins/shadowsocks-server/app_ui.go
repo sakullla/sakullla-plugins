@@ -91,6 +91,7 @@ type listenAPIResponse struct {
 	RoutingError   string                `json:"routing_error,omitempty"`
 	RouteStatus    []RouteStatus         `json:"route_status,omitempty"`
 	RouteSources   []RouteSourceStatus   `json:"route_sources,omitempty"`
+	Refresh        *datasetRefreshReport `json:"refresh,omitempty"`
 	Error          string                `json:"error,omitempty"`
 	Access         struct {
 		CanRead  bool `json:"can_read"`
@@ -118,6 +119,10 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	}
 	if path == "/api/routing" {
 		c.serveRouting(writer, request)
+		return true
+	}
+	if path == "/api/routing/refresh" {
+		c.serveRoutingRefresh(writer, request)
 		return true
 	}
 	if path == "/api/upstreams" {
@@ -1424,7 +1429,7 @@ func readWriteAccess() struct {
 
 func listenStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrRevoked), errors.Is(err, ErrTypedHandlesUnavailable), errors.Is(err, ErrExecutionUnavailable):
+	case errors.Is(err, ErrRevoked), errors.Is(err, ErrTypedHandlesUnavailable), errors.Is(err, ErrExecutionUnavailable), errors.Is(err, ErrDatasetRefreshFailed):
 		return http.StatusServiceUnavailable
 	case errors.Is(err, ErrDenied):
 		return http.StatusNotFound
@@ -1459,6 +1464,8 @@ func publicListenError(err error) string {
 		return missingPublicHost
 	case errors.Is(err, ErrRouteDatasetUnavailable):
 		return "数据集或分类不可用"
+	case errors.Is(err, ErrDatasetRefreshFailed):
+		return "数据集刷新失败，已保留当前版本"
 	case errors.Is(err, ErrRouteUpstreamUnavailable):
 		return "上游不可用或协议未启用"
 	case errors.Is(err, ErrRouteRejected):
