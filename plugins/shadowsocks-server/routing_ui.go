@@ -138,14 +138,21 @@ var datasetDigestWirePattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // lowercase identifier style the built-in geosite/geoip ids use, so rules and
 // Host datasets refer to them consistently. The SDK identity bound only
 // rejects empty or delimitered text, which is too loose for a source name.
-var remoteSourceIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
+// "/" and ":" stay excluded because the id is embedded as a single URL path
+// segment in the panel API (for example /api/dataset-sources/{id}/delete);
+// a "/" would split the route and make a registered source impossible to
+// remove.
+var remoteSourceIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // remoteDatasetURLError mirrors the early, readable half of the Host's remote
 // URL bound: literal https only, no credentials, no fragment. The Host still
 // re-authorizes private addresses, DNS, redirects and budgets on its side.
 func remoteDatasetURLError(label, raw string) string {
-	if raw == "" || len(raw) > 2048 {
+	if raw == "" {
 		return label + "不能为空"
+	}
+	if len(raw) > 2048 {
+		return label + "长度不能超过 2048 字符"
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Hostname() == "" {
@@ -170,7 +177,7 @@ func datasetSourceRegisterRequest(body datasetSourceWriteRequest) (pluginsdk.Dat
 	var request pluginsdk.DatasetSourceRegisterRequest
 	sourceID := strings.TrimSpace(body.SourceID)
 	if pluginsdk.ValidatePolicyIdentity(sourceID) != nil || !remoteSourceIDPattern.MatchString(sourceID) {
-		return request, datasetSourceRejected("数据源标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ : / -")
+		return request, datasetSourceRejected("数据源标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ -")
 	}
 	name := strings.TrimSpace(body.Name)
 	if name == "" {

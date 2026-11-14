@@ -748,6 +748,10 @@ func TestDatasetSourceRegisterRejectsInvalidInput(t *testing.T) {
 		{"credential url", `{"source_id":"bad","url":"https://user:pass@datasets.example.com/x.dat","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
 		{"fragment url", `{"source_id":"bad","url":"https://datasets.example.com/x.dat#frag","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
 		{"bad id", `{"source_id":"BAD ID","url":"https://datasets.example.com/x.dat","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
+		// A "/" in the id would split the {id}/delete route segment and make
+		// the source unremovable; ":" is excluded for the same URL-safety set.
+		{"slash id", `{"source_id":"bad/id","url":"https://datasets.example.com/x.dat","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
+		{"colon id", `{"source_id":"bad:id","url":"https://datasets.example.com/x.dat","format":"geosite","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
 		{"bad format", `{"source_id":"bad","url":"https://datasets.example.com/x.dat","format":"yaml","mode":"rolling-sha256","checksum_url":"https://datasets.example.com/x.sha256"}`},
 		{"bad mode", `{"source_id":"bad","url":"https://datasets.example.com/x.dat","format":"geosite","mode":"latest","checksum_url":"https://datasets.example.com/x.sha256"}`},
 		{"rolling missing checksum", `{"source_id":"bad","url":"https://datasets.example.com/x.dat","format":"geosite","mode":"rolling-sha256"}`},
