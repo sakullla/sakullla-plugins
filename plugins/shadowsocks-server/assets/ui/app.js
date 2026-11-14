@@ -139,6 +139,28 @@ const routeImportSummary = document.querySelector("#route-import-summary");
 const routeImportList = document.querySelector("#route-import-upstreams");
 const routeImportCancel = document.querySelector("#route-import-cancel");
 const routeImportSubmit = document.querySelector("#route-import-submit");
+const remoteSourceFormWrap = document.querySelector("#remote-source-form-wrap");
+const remoteSourceForm = document.querySelector("#remote-source-form");
+const remoteSourceID = document.querySelector("#remote-source-id");
+const remoteSourceName = document.querySelector("#remote-source-name");
+const remoteSourceURL = document.querySelector("#remote-source-url");
+const remoteSourceFormat = document.querySelector("#remote-source-format");
+const remoteSourceMode = document.querySelector("#remote-source-mode");
+const remoteSourceChecksumField = document.querySelector("#remote-source-checksum-field");
+const remoteSourceChecksum = document.querySelector("#remote-source-checksum");
+const remoteSourceRevisionField = document.querySelector("#remote-source-revision-field");
+const remoteSourceRevision = document.querySelector("#remote-source-revision");
+const remoteSourceDigestField = document.querySelector("#remote-source-digest-field");
+const remoteSourceDigest = document.querySelector("#remote-source-digest");
+const remoteSourceInterval = document.querySelector("#remote-source-interval");
+const remoteSourceError = document.querySelector("#remote-source-error");
+const remoteSourceMessage = document.querySelector("#remote-source-message");
+const remoteSourceSubmit = document.querySelector("#remote-source-submit");
+const remoteSourceList = document.querySelector("#remote-sources");
+const remoteSourceEmpty = document.querySelector("#remote-sources-empty");
+const remoteSourceBadge = document.querySelector("#remote-sources-badge");
+const remoteSourcesTable = document.querySelector("#remote-sources-table");
+const routeSourceOptions = document.querySelector("#route-source-options");
 
 const LISTEN_FILTER_MIN = 4;
 
@@ -385,6 +407,7 @@ let agentsCache = [];
 let listensCache = [];
 let routingCache = { upstreams: [], rules: [], default_action: "direct" };
 let routeStatusCache = [];
+let remoteSourceCache = [];
 let openListenID = "";
 const selectedUserIDs = new Set();
 let pendingAppendListen = null;
@@ -2613,6 +2636,7 @@ const loadRouting = async () => {
     const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
     routeStatusCache = payload.route_status || [];
     renderRouting(payload.routing, routeStatusCache);
+    applyRemoteSources(payload);
   } catch (error) {
     if (error && error.denied) throw error;
     showRoutingError(errorText(error, "暂时无法读取规则与上游。刷新页面，或稍后重试。"));
@@ -2625,6 +2649,7 @@ const refreshRouteStatus = async () => {
     const payload = await panelJSON(`api/routing?agent_id=${encodeURIComponent(selectedAgentID || "")}`);
     routeStatusCache = payload.route_status || [];
     renderRouting(payload.routing, routeStatusCache);
+    applyRemoteSources(payload);
   } catch (_error) {
     // 配置已保存成功；状态刷新失败时保留现有显示，下次加载再更新。
   }
@@ -2633,6 +2658,7 @@ const refreshRouteStatus = async () => {
 const saveRoutingRules = async () => {
   const payload = await sendPluginJSON("api/routing", { rules: routingCache.rules, default_action: routingCache.default_action || "direct", default_upstream_id: routingCache.default_upstream_id || "" });
   renderRouting(payload.routing);
+  renderRemoteSources();
   await refreshRouteStatus();
 };
 
@@ -2672,6 +2698,7 @@ const refreshDatasets = async (control = null) => {
   setBusy(true, control, "刷新中…");
   try {
     const payload = await sendPluginJSON("api/routing/refresh", {});
+    applyRemoteSources(payload);
     const report = payload.refresh || {};
     const parts = (report.sources || []).map(describeRefreshSource);
     const failedNodes = (report.nodes || [])
@@ -2691,6 +2718,269 @@ const refreshDatasets = async (control = null) => {
 };
 
 if (routeRefreshBtn) routeRefreshBtn.addEventListener("click", (event) => refreshDatasets(event.currentTarget));
+
+const REMOTE_RETRIEVAL_LABELS = {
+  pinned: "固定版本",
+  "rolling-sha256": "滚动校验",
+};
+
+const formatFetchedAt = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return "—";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return date.toLocaleString();
+};
+
+const showRemoteSourceMessage = (message, isError) => {
+  if (!remoteSourceMessage) return;
+  remoteSourceMessage.hidden = !message;
+  remoteSourceMessage.textContent = message || "";
+  remoteSourceMessage.dataset.error = isError ? "true" : "false";
+};
+
+const referencedSourceIDs = () => new Set((routingCache.rules || []).map((rule) => rule && rule.source_id).filter(Boolean));
+
+// The registered IDs feed the rule dialog's source_id datalist together with
+// the built-in geosite/geoip sources; unknown IDs remain freely typable.
+const syncRouteSourceOptions = () => {
+  if (!routeSourceOptions) return;
+  const ids = new Set(["geosite", "geoip"]);
+  remoteSourceCache.forEach((view) => {
+    if (view && view.source_id) ids.add(view.source_id);
+  });
+  routeSourceOptions.replaceChildren(...[...ids].map((id) => {
+    const option = document.createElement("option");
+    option.value = id;
+    return option;
+  }));
+};
+
+const renderRemoteSources = () => {
+  const views = remoteSourceCache;
+  const referenced = referencedSourceIDs();
+  const count = views.length;
+  if (remoteSourceBadge) remoteSourceBadge.textContent = `${count} 个`;
+  if (remoteSourceEmpty) remoteSourceEmpty.hidden = count > 0;
+  if (remoteSourcesTable) remoteSourcesTable.hidden = count === 0;
+  if (!remoteSourceList) return;
+  remoteSourceList.replaceChildren();
+  views.forEach((view) => {
+    const row = document.createElement("tr");
+    row.dataset.id = view.source_id;
+
+    const identity = document.createElement("td");
+    identity.dataset.label = "规则集";
+    const idText = document.createElement("strong");
+    idText.className = "route-id";
+    idText.textContent = view.source_id;
+    const sub = document.createElement("span");
+    sub.className = "ui-help-text route-usage";
+    const inUse = referenced.has(view.source_id);
+    sub.textContent = [view.name || view.url, inUse ? "被规则引用" : ""].filter(Boolean).join(" · ");
+    sub.title = view.url || view.source_id;
+    identity.append(idText, sub);
+
+    const retrieval = document.createElement("td");
+    retrieval.dataset.label = "检索";
+    const modeText = document.createElement("span");
+    modeText.textContent = REMOTE_RETRIEVAL_LABELS[view.mode] || view.mode || "未知";
+    const retrievalSub = document.createElement("span");
+    retrievalSub.className = "ui-help-text";
+    const detail = view.mode === "pinned"
+      ? [view.revision, view.expected_digest ? shortDigest(view.expected_digest) : ""].filter(Boolean).join(" · ")
+      : view.checksum_url || "";
+    retrievalSub.textContent = detail || view.format || "";
+    if (detail) retrievalSub.title = detail;
+    retrieval.append(modeText, retrievalSub);
+
+    const version = tableCell(view.error ? "不可用" : shortDigest(view.version_digest), "ui-table__mono", "当前版本");
+    version.title = view.error || view.version_digest || "";
+    const fetched = tableCell(formatFetchedAt(view.fetched_at), "", "最近刷新");
+
+    const actions = document.createElement("td");
+    actions.className = "ui-table__actions";
+    actions.dataset.label = "操作";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "ui-btn ui-btn--ghost ui-btn--sm";
+    refresh.textContent = "刷新";
+    refresh.setAttribute("aria-label", `刷新规则集 ${view.source_id}`);
+    refresh.onclick = (event) => refreshRemoteSource(view.source_id, event.currentTarget);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ui-btn ui-btn--ghost ui-btn--sm btn-danger-text";
+    remove.textContent = "移除";
+    remove.setAttribute("aria-label", `移除规则集 ${view.source_id}`);
+    remove.title = inUse ? "仍被分流规则引用；移除后规则保持 fail-closed" : `移除规则集 ${view.source_id}`;
+    remove.onclick = (event) => removeRemoteSource(view, event.currentTarget);
+    actions.append(refresh, remove);
+
+    row.append(identity, retrieval, version, fetched, actions);
+    remoteSourceList.append(row);
+  });
+};
+
+const applyRemoteSources = (payload) => {
+  if (payload && Array.isArray(payload.remote_sources)) remoteSourceCache = payload.remote_sources;
+  renderRemoteSources();
+  syncRouteSourceOptions();
+};
+
+// Client-side HTTPS check only gives fast feedback; the plugin and Host still
+// re-validate scheme, credentials, fragments, and private-network literals.
+const remoteHTTPSCheck = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return "请填写 https 地址。";
+  let url;
+  try {
+    url = new URL(text);
+  } catch (_error) {
+    return "地址格式不正确。";
+  }
+  if (url.protocol !== "https:") return "仅支持 https 地址。";
+  if (url.username || url.password) return "暂不支持带凭据的地址。";
+  if (url.hash) return "地址中不能包含 # 片段。";
+  return "";
+};
+
+const syncRemoteSourceModeFields = () => {
+  const pinned = Boolean(remoteSourceMode && remoteSourceMode.value === "pinned");
+  if (remoteSourceChecksumField) remoteSourceChecksumField.hidden = pinned;
+  if (remoteSourceRevisionField) remoteSourceRevisionField.hidden = !pinned;
+  if (remoteSourceDigestField) remoteSourceDigestField.hidden = !pinned;
+};
+
+const submitRemoteSource = async (event) => {
+  event.preventDefault();
+  if (busy || !remoteSourceForm) return;
+  clearFormErrors(remoteSourceForm);
+  showModalError(remoteSourceError, "");
+  const sourceID = remoteSourceID.value.trim();
+  if (!sourceID) {
+    markFieldError(remoteSourceID, "请填写规则集 ID。");
+    return;
+  }
+  const urlError = remoteHTTPSCheck(remoteSourceURL.value);
+  if (urlError) {
+    markFieldError(remoteSourceURL, urlError);
+    showModalError(remoteSourceError, urlError);
+    return;
+  }
+  const pinned = remoteSourceMode.value === "pinned";
+  const checksum = remoteSourceChecksum.value.trim();
+  const revision = remoteSourceRevision.value.trim();
+  const digest = remoteSourceDigest.value.trim();
+  if (!pinned) {
+    const checksumError = remoteHTTPSCheck(checksum);
+    if (checksumError) {
+      markFieldError(remoteSourceChecksum, `校验和 URL：${checksumError}`);
+      showModalError(remoteSourceError, `校验和 URL：${checksumError}`);
+      return;
+    }
+  } else {
+    if (!revision) {
+      markFieldError(remoteSourceRevision, "固定版本需填写版本号。");
+      showModalError(remoteSourceError, "固定版本需填写版本号。");
+      return;
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
+      markFieldError(remoteSourceDigest, "期望摘要需为 sha256: 加 64 位小写十六进制。");
+      showModalError(remoteSourceError, "期望摘要需为 sha256: 加 64 位小写十六进制。");
+      return;
+    }
+  }
+  let interval = 0;
+  const intervalText = remoteSourceInterval.value.trim();
+  if (intervalText) {
+    interval = Number(intervalText);
+    if (!Number.isInteger(interval) || interval < 0) {
+      markFieldError(remoteSourceInterval, "刷新间隔需为不小于 0 的整数秒。");
+      showModalError(remoteSourceError, "刷新间隔需为不小于 0 的整数秒。");
+      return;
+    }
+  }
+  setBusy(true, remoteSourceSubmit, "注册中…");
+  try {
+    const payload = await sendPluginJSON("api/dataset-sources", {
+      source_id: sourceID,
+      name: remoteSourceName.value.trim(),
+      url: remoteSourceURL.value.trim(),
+      format: remoteSourceFormat.value,
+      mode: remoteSourceMode.value,
+      checksum_url: pinned ? "" : checksum,
+      revision: pinned ? revision : "",
+      expected_digest: pinned ? digest : "",
+      refresh_interval_seconds: interval,
+    });
+    applyRemoteSources(payload);
+    remoteSourceForm.reset();
+    syncRemoteSourceModeFields();
+    if (remoteSourceFormWrap) remoteSourceFormWrap.open = false;
+    showRemoteSourceMessage(`已注册规则集 ${sourceID}，可在分流规则中引用。`, false);
+    showStatus(`已注册规则集 ${sourceID}。`, false);
+  } catch (error) {
+    showModalError(remoteSourceError, errorText(error, "注册失败，请检查参数后重试。"));
+  } finally {
+    setBusy(false);
+  }
+};
+
+// A single source refresh reuses the routing refresh channel with a source_id;
+// the Host re-fetches and prepares the newest version just like a bulk refresh.
+const refreshRemoteSource = async (sourceID, control) => {
+  if (busy) return;
+  setBusy(true, control, "刷新中…");
+  try {
+    const payload = await sendPluginJSON("api/routing/refresh", { source_id: sourceID });
+    applyRemoteSources(payload);
+    const entry = ((payload.refresh || {}).sources || []).find((item) => item.source_id === sourceID) || {};
+    const failed = entry.status === "error";
+    const message = failed
+      ? `${sourceID} 刷新失败`
+      : `${sourceID} ${REFRESH_SOURCE_LABELS[entry.status] || "已刷新"} ${shortDigest(entry.after_digest)}`.trim();
+    showRemoteSourceMessage(message, failed);
+    showStatus(message, failed);
+  } catch (error) {
+    const message = errorText(error, "刷新失败，请稍后重试。");
+    showRemoteSourceMessage(message, true);
+    showStatus(message, true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const removeRemoteSource = async (view, control) => {
+  if (busy) return;
+  const inUse = referencedSourceIDs().has(view.source_id);
+  const confirmed = await askConfirm({
+    title: `移除规则集 ${view.source_id}？`,
+    body: inUse
+      ? "仍有分流规则引用该规则集。移除后这些规则会报「数据源不可用」并保持 fail-closed，不会回退直连。"
+      : "Host 会删除该源的本地版本与登记信息，此操作不可撤销。",
+    confirm: "移除",
+    cancel: "取消",
+    danger: true,
+  });
+  if (!confirmed) return;
+  setBusy(true, control, "移除中…");
+  try {
+    const payload = await sendPluginJSON(`api/dataset-sources/${encodeURIComponent(view.source_id)}/delete`, {});
+    applyRemoteSources(payload);
+    const message = `已移除规则集 ${view.source_id}。`;
+    showRemoteSourceMessage(message, false);
+    showStatus(message, false);
+  } catch (error) {
+    showRemoteSourceMessage(errorText(error, "移除失败，请稍后重试。"), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (remoteSourceForm) remoteSourceForm.addEventListener("submit", submitRemoteSource);
+if (remoteSourceMode) remoteSourceMode.addEventListener("change", syncRemoteSourceModeFields);
+syncRemoteSourceModeFields();
+renderRemoteSources();
 
 const ROUTING_EXPORT_VERSION = 1;
 const ROUTING_EXPORT_FILENAME = "shadowsocks-routing.json";

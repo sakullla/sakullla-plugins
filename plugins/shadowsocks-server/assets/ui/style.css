@@ -429,6 +429,26 @@
   color: var(--ui-danger-text);
 }
 
+.remote-source-message[data-error="true"] {
+  color: var(--ui-danger-text);
+}
+
+.remote-source-form-wrap {
+  margin-bottom: var(--ui-space-4);
+}
+
+.remote-source-form-wrap > summary {
+  cursor: pointer;
+}
+
+.remote-source-form {
+  margin-top: var(--ui-space-3);
+}
+
+.remote-source-form .routing-head-actions {
+  margin-top: var(--ui-space-2);
+}
+
 .routing-transfer-actions {
   display: flex;
   align-items: center;

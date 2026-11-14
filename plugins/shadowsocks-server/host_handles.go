@@ -11,12 +11,13 @@ import (
 )
 
 const (
-	pluginListensStateKey = "listens"
-	pluginSecretsStateKey = "secrets"
-	pluginNodesStateKey   = "agent-nodes"
-	pluginRoutingStateKey = "routing"
-	pluginNodeAddressesOp = "node.addresses"
-	maxAgentNodes         = 512
+	pluginListensStateKey       = "listens"
+	pluginSecretsStateKey       = "secrets"
+	pluginNodesStateKey         = "agent-nodes"
+	pluginRoutingStateKey       = "routing"
+	pluginRemoteSourcesStateKey = "remote-sources"
+	pluginNodeAddressesOp       = "node.addresses"
+	maxAgentNodes               = 512
 )
 
 type persistedSecret struct {
@@ -464,6 +465,161 @@ func (runtime *hostCapabilityRuntime) controlDatasetRefresh(ctx context.Context,
 		return ErrTypedHandlesUnavailable
 	}
 	return nil
+}
+
+// LoadRemoteSources restores the panel-side registry of remote dataset
+// sources. The Host owns the sources inside the plugin's resource group but
+// exposes no list operation to plugins, so the panel keeps the registration
+// parameters it issued under its own state key.
+func (runtime *hostCapabilityRuntime) LoadRemoteSources(ctx context.Context) ([]remoteSourceRecord, bool, error) {
+	if runtime == nil || runtime.client == nil {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Found bool            `json:"found"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := callHost(ctx, runtime.client, "state.get", map[string]any{"key": pluginRemoteSourcesStateKey}, &response); err != nil {
+		return nil, false, err
+	}
+	if !response.Found {
+		return nil, false, nil
+	}
+	var records []remoteSourceRecord
+	if len(response.Value) == 0 || json.Unmarshal(response.Value, &records) != nil || len(records) > maxRemoteSources {
+		return nil, false, ErrTypedHandlesUnavailable
+	}
+	for _, record := range records {
+		if record.validate() != nil {
+			return nil, false, ErrTypedHandlesUnavailable
+		}
+	}
+	return append([]remoteSourceRecord(nil), records...), true, nil
+}
+
+func (runtime *hostCapabilityRuntime) StoreRemoteSources(ctx context.Context, records []remoteSourceRecord) error {
+	if runtime == nil || runtime.client == nil || len(records) > maxRemoteSources {
+		return ErrTypedHandlesUnavailable
+	}
+	for _, record := range records {
+		if record.validate() != nil {
+			return ErrTypedHandlesUnavailable
+		}
+	}
+	value, err := json.Marshal(records)
+	if err != nil || len(value) > MaxConfigBytes {
+		return ErrTypedHandlesUnavailable
+	}
+	var response struct {
+		Stored bool `json:"stored"`
+	}
+	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginRemoteSourcesStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+		return err
+	}
+	if !response.Stored {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+// registerDatasetSource issues the plugin-facing dataset.source-register call.
+// The Host re-verifies every bound itself (https only, no private addresses,
+// no credentials, no redirect privileges); a missing dataset.source-register
+// grant surfaces as a permission error the caller must report honestly.
+func (runtime *hostCapabilityRuntime) registerDatasetSource(ctx context.Context, request pluginsdk.DatasetSourceRegisterRequest) (pluginsdk.DatasetSourceRegisterResponse, error) {
+	var response pluginsdk.DatasetSourceRegisterResponse
+	if runtime == nil || runtime.client == nil {
+		return response, ErrTypedHandlesUnavailable
+	}
+	if err := request.Validate(); err != nil {
+		return response, ErrInvalid
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return response, ErrTypedHandlesUnavailable
+	}
+	operationID := managedRequestID("dataset")
+	var raw json.RawMessage
+	call := pluginsdk.HostRuntimeCall{Operation: pluginsdk.HostRuntimeDatasetSourceRegister, OperationID: operationID, Payload: encoded}
+	if err := runtime.client.Call(ctx, call, &raw); err != nil {
+		return response, err
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return pluginsdk.DatasetSourceRegisterResponse{}, ErrTypedHandlesUnavailable
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return pluginsdk.DatasetSourceRegisterResponse{}, ErrTypedHandlesUnavailable
+	}
+	return response, nil
+}
+
+// controlDatasetDeleteSource asks the Host to remove a dataset source through
+// dataset.control delete-source. The Host may reject a source still referenced
+// by host-side consumers; plugin rules referencing a removed source simply
+// stop resolving and stay fail-closed.
+func (runtime *hostCapabilityRuntime) controlDatasetDeleteSource(ctx context.Context, sourceID string) error {
+	if runtime == nil || runtime.client == nil {
+		return ErrTypedHandlesUnavailable
+	}
+	request := pluginsdk.DatasetControlRequest{Action: pluginsdk.DatasetControlDeleteSource, SourceID: sourceID}
+	if err := request.Validate(); err != nil {
+		return ErrInvalid
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	operationID := managedRequestID("dataset")
+	var raw json.RawMessage
+	call := pluginsdk.HostRuntimeCall{Operation: pluginsdk.HostRuntimeDatasetControl, OperationID: operationID, Payload: encoded}
+	if err := runtime.client.Call(ctx, call, &raw); err != nil {
+		return err
+	}
+	var response pluginsdk.DatasetControlResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return ErrTypedHandlesUnavailable
+	}
+	if response.Validate() != nil || response.SourceID != sourceID || response.OperationID != operationID {
+		return ErrTypedHandlesUnavailable
+	}
+	return nil
+}
+
+// datasetSourceFetchedAt is a best-effort lookup of when the Host last fetched
+// a source's active version. dataset.catalog needs the dataset.manage grant;
+// a denied or unavailable catalog simply leaves the timestamp empty while the
+// version digest still comes from dataset.resolve.
+func (runtime *hostCapabilityRuntime) datasetSourceFetchedAt(ctx context.Context, sourceID, versionDigest string) string {
+	if runtime == nil || runtime.client == nil {
+		return ""
+	}
+	request := pluginsdk.DatasetCatalogRequest{SourceID: sourceID, Limit: pluginsdk.DatasetMaxCatalogPage}
+	if err := request.Validate(); err != nil {
+		return ""
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return ""
+	}
+	var raw json.RawMessage
+	call := pluginsdk.HostRuntimeCall{Operation: pluginsdk.HostRuntimeDatasetCatalog, Payload: encoded}
+	if err := runtime.client.Call(ctx, call, &raw); err != nil {
+		return ""
+	}
+	var response pluginsdk.DatasetCatalogResponse
+	if err := json.Unmarshal(raw, &response); err != nil || response.SourceID != sourceID {
+		return ""
+	}
+	latest := ""
+	for _, version := range response.Versions {
+		if versionDigest != "" && version.Digest == versionDigest {
+			return version.FetchedAt
+		}
+		if version.FetchedAt > latest {
+			latest = version.FetchedAt
+		}
+	}
+	return latest
 }
 
 func (runtime *hostCapabilityRuntime) refreshLive(ctx context.Context, agentID string) {

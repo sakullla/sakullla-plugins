@@ -59,6 +59,7 @@ type Controller struct {
 	instanceID     string
 	managedRuntime *hostCapabilityRuntime
 	reconcileStop  func()
+	remoteSources  []remoteSourceRecord
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {
@@ -272,6 +273,21 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 			configuration.Routing = routing
 		}
 	}
+	var restoredSources []remoteSourceRecord
+	if sourceStore, ok := c.listenState.(RemoteSourceCatalogStore); ok {
+		sources, found, sourceErr := sourceStore.LoadRemoteSources(ctx)
+		if sourceErr != nil {
+			return sourceErr
+		}
+		if found {
+			for _, record := range sources {
+				if record.validate() != nil {
+					return ErrTypedHandlesUnavailable
+				}
+			}
+			restoredSources = sources
+		}
+	}
 	if len(restoredSecrets) > 0 && c.managedRuntime != nil && c.listenState != nil {
 		base := configuration
 		if restoredListeners != nil {
@@ -324,6 +340,7 @@ func (c *Controller) prepare(ctx context.Context, generation *rpcplugin.Generati
 		c.mu.Lock()
 		c.configuration, c.epoch, c.commit = next, epoch, handle
 		c.service, c.published, c.transaction = nil, nil, nil
+		c.remoteSources = append([]remoteSourceRecord(nil), restoredSources...)
 		if restoredSecrets != nil {
 			c.controlSecrets = &issuedSecrets{items: cloneSecretMap(restoredSecrets)}
 		}
@@ -446,6 +463,7 @@ func (c *Controller) stop(ctx context.Context, _ *rpcplugin.Generation) error {
 	c.mu.Lock()
 	c.configuration = Configuration{}
 	c.epoch, c.commit, c.transaction = nil, nil, nil
+	c.remoteSources = nil
 	c.mu.Unlock()
 	return drainErr
 }

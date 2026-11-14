@@ -85,6 +85,30 @@ action degrades to re-apply only, the report says so, and no new version is
 silently selected. In-flight sessions keep their established immutable
 snapshot either way.
 
+The "远程规则集" section registers additional public HTTPS dataset sources
+through the `dataset.source-register` runtime grant (`POST
+/api/dataset-sources`). Each source has an id, a format (`geosite`, `geoip`,
+`community`, `cidr`, or `geo-mmdb`), an optional refresh interval, and a
+retrieval mode: `pinned` requires a revision plus a `sha256:` expected digest,
+while `rolling-sha256` requires an HTTPS checksum URL the Host polls for
+updated content. Only public `https://` addresses are accepted — no userinfo,
+fragments, or private-network literals — and authenticated subscription URLs
+with credentials are unsupported in this phase; nothing in the request,
+registry, or UI stores or echoes credentials. The Host performs every fetch,
+checksum validation, and version preparation; the plugin only keeps a bounded
+registry record of the registration parameters. Registered ids appear in the
+rule dialog's source-id suggestions alongside `geosite` and `geoip`, and the
+panel lists each source's retrieval parameters plus the current version digest
+and last-fetch time when the Host catalog exposes them (they stay blank when
+the catalog does not report them). Per-source and bulk refresh reuse the same
+`dataset.control` refresh channel described above; removal issues the Host
+`delete-source` operation (`POST /api/dataset-sources/{id}/delete`). If the
+Host refuses deletion — for example because consumers still reference the
+source — the readable error is shown and the registry entry is kept. If
+deletion succeeds while rules still reference the id, those rules stay in
+place and fail closed with `dataset-unavailable`; they never silently rebind
+to another source or fall back to direct.
+
 Upstreams use separate host, port, method, and password fields, not an Xray
 outbound JSON object. For SS2022 multi-user upstreams, the password field holds
 the complete `serverPSK:userPSK` pair. An upstream can be edited in place

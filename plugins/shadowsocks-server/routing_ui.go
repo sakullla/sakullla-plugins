@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -51,6 +53,387 @@ func decodeRoutingWrite(request *http.Request, target any) error {
 // failed. In that case routing is never re-applied and the previously bound
 // immutable versions keep serving.
 var ErrDatasetRefreshFailed = errors.New("dataset refresh failed")
+
+// maxRemoteSources bounds the panel-side registry of remote dataset sources.
+const maxRemoteSources = 32
+
+// remoteSourceRecord is the durable panel-side mirror of one remote dataset
+// source registration. The Host owns the source inside the plugin's resource
+// group but exposes no list operation to plugins, so the registration
+// parameters are kept under the plugin's own state key to render the list,
+// refresh, and remove entries. Records never carry credentials: the remote
+// URL cannot contain userinfo and no credential field exists.
+type remoteSourceRecord struct {
+	Source    pluginsdk.DatasetSource          `json:"source"`
+	Retrieval pluginsdk.DatasetSourceRetrieval `json:"retrieval"`
+}
+
+func (record remoteSourceRecord) validate() error {
+	if record.Source.Validate() != nil || record.Source.URL == "" || record.Retrieval.Validate() != nil {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// RemoteSourceCatalogStore persists the remote-source registry alongside the
+// other plugin catalogs.
+type RemoteSourceCatalogStore interface {
+	LoadRemoteSources(context.Context) ([]remoteSourceRecord, bool, error)
+	StoreRemoteSources(context.Context, []remoteSourceRecord) error
+}
+
+// remoteSourceView projects a registered remote source for the panel,
+// including the version the Host currently resolves and the fetch time the
+// catalog exposes. Referenced tells the panel a rule still names the source
+// so removal can warn about the resulting fail-closed state.
+type remoteSourceView struct {
+	SourceID               string `json:"source_id"`
+	Name                   string `json:"name"`
+	URL                    string `json:"url"`
+	Format                 string `json:"format"`
+	Mode                   string `json:"mode"`
+	ChecksumURL            string `json:"checksum_url,omitempty"`
+	Revision               string `json:"revision,omitempty"`
+	ExpectedDigest         string `json:"expected_digest,omitempty"`
+	RefreshIntervalSeconds int64  `json:"refresh_interval_seconds"`
+	VersionDigest          string `json:"version_digest,omitempty"`
+	FetchedAt              string `json:"fetched_at,omitempty"`
+	Referenced             bool   `json:"referenced"`
+	Error                  string `json:"error,omitempty"`
+}
+
+type datasetSourceWriteRequest struct {
+	SourceID               string `json:"source_id"`
+	Name                   string `json:"name,omitempty"`
+	URL                    string `json:"url"`
+	Format                 string `json:"format"`
+	Mode                   string `json:"mode"`
+	ChecksumURL            string `json:"checksum_url,omitempty"`
+	Revision               string `json:"revision,omitempty"`
+	ExpectedDigest         string `json:"expected_digest,omitempty"`
+	RefreshIntervalSeconds int64  `json:"refresh_interval_seconds,omitempty"`
+}
+
+// datasetSourceError carries a readable rejection or failure message for
+// registration input and Host answers the generic "请求无效" text cannot
+// explain; status overrides the default 400 when the cause is a denied grant.
+type datasetSourceError struct {
+	message string
+	status  int
+}
+
+func (err *datasetSourceError) Error() string { return err.message }
+
+func datasetSourceRejected(message string) error {
+	return &datasetSourceError{message: message}
+}
+
+func datasetSourceDenied(message string) error {
+	return &datasetSourceError{message: message, status: http.StatusForbidden}
+}
+
+var datasetDigestWirePattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// remoteSourceIDPattern keeps panel-registered source ids to the same
+// lowercase identifier style the built-in geosite/geoip ids use, so rules and
+// Host datasets refer to them consistently. The SDK identity bound only
+// rejects empty or delimitered text, which is too loose for a source name.
+var remoteSourceIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
+
+// remoteDatasetURLError mirrors the early, readable half of the Host's remote
+// URL bound: literal https only, no credentials, no fragment. The Host still
+// re-authorizes private addresses, DNS, redirects and budgets on its side.
+func remoteDatasetURLError(label, raw string) string {
+	if raw == "" || len(raw) > 2048 {
+		return label + "不能为空"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		return label + "不是合法 URL"
+	}
+	if parsed.Scheme != "https" {
+		return label + "必须使用 https"
+	}
+	if parsed.User != nil {
+		return label + "不能携带用户名或口令"
+	}
+	if parsed.Fragment != "" {
+		return label + "不能包含 # 片段"
+	}
+	return ""
+}
+
+// datasetSourceRegisterRequest turns the panel form into a validated SDK
+// request. Every rejection happens before the Host call so nothing is created
+// for invalid input; the SDK request validation still runs as the final gate.
+func datasetSourceRegisterRequest(body datasetSourceWriteRequest) (pluginsdk.DatasetSourceRegisterRequest, error) {
+	var request pluginsdk.DatasetSourceRegisterRequest
+	sourceID := strings.TrimSpace(body.SourceID)
+	if pluginsdk.ValidatePolicyIdentity(sourceID) != nil || !remoteSourceIDPattern.MatchString(sourceID) {
+		return request, datasetSourceRejected("数据源标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ : / -")
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = sourceID
+	}
+	if len(name) > 128 || strings.ContainsAny(name, "\r\n\x00") {
+		return request, datasetSourceRejected("显示名称过长或包含非法字符")
+	}
+	rawURL := strings.TrimSpace(body.URL)
+	if errText := remoteDatasetURLError("远程规则集地址", rawURL); errText != "" {
+		return request, datasetSourceRejected(errText)
+	}
+	format := pluginsdk.DatasetFormat(strings.TrimSpace(body.Format))
+	if format.Validate() != nil {
+		return request, datasetSourceRejected("内容格式不受支持，请选择 geosite、geoip、cidr、community 或 geo-mmdb")
+	}
+	interval := body.RefreshIntervalSeconds
+	if interval != 0 && (interval < 3600 || interval > 366*24*3600) {
+		return request, datasetSourceRejected("自动刷新间隔需为 0（仅手动刷新）或 3600–31622400 秒")
+	}
+	retrieval := pluginsdk.DatasetSourceRetrieval{Mode: strings.TrimSpace(body.Mode)}
+	switch retrieval.Mode {
+	case pluginsdk.DatasetRetrievalPinned:
+		retrieval.Revision = strings.TrimSpace(body.Revision)
+		retrieval.ExpectedDigest = strings.TrimSpace(body.ExpectedDigest)
+		if retrieval.Revision == "" || len(retrieval.Revision) > 256 || strings.ContainsAny(retrieval.Revision, "\r\n\x00") {
+			return request, datasetSourceRejected("固定版本模式需要填写版本标识（revision）")
+		}
+		if !datasetDigestWirePattern.MatchString(retrieval.ExpectedDigest) {
+			return request, datasetSourceRejected("固定版本模式需要 sha256: 前缀加 64 位十六进制的内容摘要")
+		}
+	case pluginsdk.DatasetRetrievalRollingSHA256:
+		retrieval.ChecksumURL = strings.TrimSpace(body.ChecksumURL)
+		if errText := remoteDatasetURLError("校验和地址", retrieval.ChecksumURL); errText != "" {
+			return request, datasetSourceRejected(errText)
+		}
+	default:
+		return request, datasetSourceRejected("更新方式需为 pinned（固定版本）或 rolling-sha256（滚动校验）")
+	}
+	request = pluginsdk.DatasetSourceRegisterRequest{
+		Source: pluginsdk.DatasetSource{
+			ID:                     sourceID,
+			Name:                   name,
+			URL:                    rawURL,
+			Format:                 format,
+			RefreshIntervalSeconds: interval,
+		},
+		Retrieval: retrieval,
+	}
+	if err := request.Validate(); err != nil {
+		return request, datasetSourceRejected("登记参数未通过校验，请核对地址、更新方式与刷新间隔")
+	}
+	return request, nil
+}
+
+func (c *Controller) remoteSourceRecords() []remoteSourceRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]remoteSourceRecord(nil), c.remoteSources...)
+}
+
+func (c *Controller) remoteSourceRegistered(sourceID string) bool {
+	for _, record := range c.remoteSourceRecords() {
+		if record.Source.ID == sourceID {
+			return true
+		}
+	}
+	return false
+}
+
+// commitRemoteSources validates and persists the registry before publishing it
+// to memory, matching the store-then-commit order used for routing.
+func (c *Controller) commitRemoteSources(ctx context.Context, next []remoteSourceRecord) error {
+	if len(next) > maxRemoteSources {
+		return ErrInvalid
+	}
+	seen := make(map[string]bool, len(next))
+	for _, record := range next {
+		if record.validate() != nil || seen[record.Source.ID] {
+			return ErrInvalid
+		}
+		seen[record.Source.ID] = true
+	}
+	c.mu.Lock()
+	state := c.listenState
+	c.mu.Unlock()
+	if store, ok := state.(RemoteSourceCatalogStore); ok {
+		if err := store.StoreRemoteSources(ctx, next); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.remoteSources = append([]remoteSourceRecord(nil), next...)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Controller) remoteSourceViews(ctx context.Context) []remoteSourceView {
+	records := c.remoteSourceRecords()
+	referenced := map[string]bool{}
+	for _, rule := range c.directory().Routing.Rules {
+		referenced[rule.SourceID] = true
+	}
+	views := make([]remoteSourceView, 0, len(records))
+	for _, record := range records {
+		source := record.Source
+		view := remoteSourceView{
+			SourceID:               source.ID,
+			Name:                   source.Name,
+			URL:                    source.URL,
+			Format:                 string(source.Format),
+			Mode:                   record.Retrieval.Mode,
+			ChecksumURL:            record.Retrieval.ChecksumURL,
+			Revision:               record.Retrieval.Revision,
+			ExpectedDigest:         record.Retrieval.ExpectedDigest,
+			RefreshIntervalSeconds: source.RefreshIntervalSeconds,
+			Referenced:             referenced[source.ID],
+		}
+		digest := c.resolveDatasetDigest(ctx, source.ID)
+		if digest == "" {
+			view.Error = "dataset-unavailable"
+		} else {
+			view.VersionDigest = digest
+			if c.managedRuntime != nil {
+				view.FetchedAt = c.managedRuntime.datasetSourceFetchedAt(ctx, source.ID, digest)
+			}
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+// registerRemoteSource validates the form, issues dataset.source-register on
+// the control-plane face, then records the registration locally. The Host
+// call is the single creation point: a rejected request or failed control
+// leaves both the Host state and the registry untouched. Registering the same
+// source ID again replaces the earlier registration, which is how a changed
+// URL or update policy is applied.
+func (c *Controller) registerRemoteSource(ctx context.Context, body datasetSourceWriteRequest) ([]remoteSourceView, error) {
+	request, err := datasetSourceRegisterRequest(body)
+	if err != nil {
+		return nil, err
+	}
+	if c.managedRuntime == nil || c.managedRuntime.client == nil {
+		return nil, ErrExecutionUnavailable
+	}
+	if !c.remoteSourceRegistered(request.Source.ID) && len(c.remoteSourceRecords()) >= maxRemoteSources {
+		return nil, datasetSourceRejected(fmt.Sprintf("远程规则集数量已达上限（%d 个）", maxRemoteSources))
+	}
+	if _, err := c.managedRuntime.registerDatasetSource(ctx, request); err != nil {
+		if datasetGrantDenied(err) {
+			return nil, datasetSourceDenied("宿主未授予远程规则集登记权限（dataset.source-register），请在插件授权中开启后重试")
+		}
+		return nil, datasetSourceRejected("远程规则集登记失败：宿主未能获取或校验该地址的内容，未确认创建数据源")
+	}
+	record := remoteSourceRecord{Source: request.Source, Retrieval: request.Retrieval}
+	next := make([]remoteSourceRecord, 0, len(c.remoteSourceRecords())+1)
+	replaced := false
+	for _, existing := range c.remoteSourceRecords() {
+		if existing.Source.ID == record.Source.ID {
+			next = append(next, record)
+			replaced = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	if !replaced {
+		next = append(next, record)
+	}
+	if err := c.commitRemoteSources(ctx, next); err != nil {
+		return nil, err
+	}
+	return c.remoteSourceViews(ctx), nil
+}
+
+// removeRemoteSource deletes the Host-side source then drops the local
+// registry record. Rules still referencing the source are not rewritten: they
+// lose resolution and report dataset-unavailable, which is the fail-closed
+// boundary the removal must keep.
+func (c *Controller) removeRemoteSource(ctx context.Context, sourceID string) ([]remoteSourceView, error) {
+	if c.managedRuntime == nil || c.managedRuntime.client == nil {
+		return nil, ErrExecutionUnavailable
+	}
+	records := c.remoteSourceRecords()
+	index := -1
+	for i, record := range records {
+		if record.Source.ID == sourceID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil, datasetSourceRejected("该远程规则集不存在或已被移除")
+	}
+	if err := c.managedRuntime.controlDatasetDeleteSource(ctx, sourceID); err != nil {
+		if datasetGrantDenied(err) {
+			return nil, datasetSourceDenied("宿主未授予数据集管理权限（dataset.manage），无法移除远程规则集")
+		}
+		return nil, datasetSourceRejected("远程规则集移除失败：宿主拒绝了删除请求，登记信息保持不变")
+	}
+	next := append(append([]remoteSourceRecord(nil), records[:index]...), records[index+1:]...)
+	if err := c.commitRemoteSources(ctx, next); err != nil {
+		return nil, err
+	}
+	return c.remoteSourceViews(ctx), nil
+}
+
+func (c *Controller) serveDatasetSources(writer http.ResponseWriter, request *http.Request) {
+	if _, err := c.uiIdentity(request); err != nil {
+		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
+		return
+	}
+	switch request.Method {
+	case http.MethodGet, http.MethodHead:
+		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, RemoteSources: c.remoteSourceViews(request.Context()), Access: readWriteAccess()})
+	case http.MethodPost:
+		var body datasetSourceWriteRequest
+		if err := decodeRoutingWrite(request, &body); err != nil {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(err)})
+			return
+		}
+		views, err := c.registerRemoteSource(request.Context(), body)
+		if err != nil {
+			writeDatasetSourceError(writer, err)
+			return
+		}
+		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, RemoteSources: views, Access: readWriteAccess()})
+	default:
+		writer.Header().Set("Allow", "GET, HEAD, POST")
+		writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+	}
+}
+
+func (c *Controller) serveDatasetSourceDelete(writer http.ResponseWriter, request *http.Request, sourceID string) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "POST")
+		writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := c.uiIdentity(request); err != nil {
+		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
+		return
+	}
+	views, err := c.removeRemoteSource(request.Context(), sourceID)
+	if err != nil {
+		writeDatasetSourceError(writer, err)
+		return
+	}
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, RemoteSources: views, Access: readWriteAccess()})
+}
+
+func writeDatasetSourceError(writer http.ResponseWriter, err error) {
+	var rejected *datasetSourceError
+	if errors.As(err, &rejected) {
+		status := rejected.status
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		writeListenJSON(writer, status, listenAPIResponse{Error: rejected.message})
+		return
+	}
+	writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+}
 
 type datasetRefreshSource struct {
 	SourceID     string `json:"source_id"`
@@ -110,7 +493,7 @@ func (c *Controller) serveRoutingRefresh(writer http.ResponseWriter, request *ht
 		return
 	}
 	sources := c.routeSourceStatuses(request.Context(), c.directory().Routing)
-	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Refresh: report, RouteSources: sources, Access: readWriteAccess()})
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Refresh: report, RouteSources: sources, RemoteSources: c.remoteSourceViews(request.Context()), Access: readWriteAccess()})
 }
 
 // refreshDatasets triggers the Host refresh control for every dataset source
@@ -137,6 +520,12 @@ func (c *Controller) refreshDatasets(ctx context.Context, onlySource string) (*d
 		seen[rule.SourceID] = true
 		sources = append(sources, rule.SourceID)
 	}
+	if onlySource != "" && !referenced && c.remoteSourceRegistered(onlySource) {
+		// A registered remote source can be refreshed before any rule cites it;
+		// the Host re-fetches and prepares its newest version the same way.
+		referenced = true
+		sources = append(sources, onlySource)
+	}
 	if onlySource != "" && !referenced {
 		return nil, ErrInvalid
 	}
@@ -154,7 +543,7 @@ func (c *Controller) refreshDatasets(ctx context.Context, onlySource string) (*d
 			switch {
 			case err == nil:
 				succeeded++
-			case datasetManageDenied(err):
+			case datasetGrantDenied(err):
 				manageable = false
 				entry.Status = "skipped"
 			default:
@@ -235,7 +624,9 @@ func (c *Controller) resolveDatasetDigest(ctx context.Context, sourceID string) 
 	return reference.VersionDigest
 }
 
-func datasetManageDenied(err error) bool {
+// datasetGrantDenied reports a refused Host capability grant on any dataset
+// operation (manage refresh/delete, catalog, or source-register).
+func datasetGrantDenied(err error) bool {
 	var runtimeError *pluginsdk.RuntimeError
 	return errors.As(err, &runtimeError) && runtimeError.Code == pluginsdk.ErrorPermissionDenied
 }
@@ -276,7 +667,7 @@ func (c *Controller) serveRouting(writer http.ResponseWriter, request *http.Requ
 			}
 		}
 		status = mergeRouteStatuses(routing, sources, status)
-		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, RoutingApplied: routingApplied, RoutingError: routingError, RouteStatus: status, RouteSources: sources, Access: readWriteAccess()})
+		writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, RoutingApplied: routingApplied, RoutingError: routingError, RouteStatus: status, RouteSources: sources, RemoteSources: c.remoteSourceViews(request.Context()), Access: readWriteAccess()})
 	case http.MethodPost:
 		var body routingWriteRequest
 		if err := decodeRoutingWrite(request, &body); err != nil {

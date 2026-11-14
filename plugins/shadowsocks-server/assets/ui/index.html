@@ -282,6 +282,97 @@
                 </table>
               </div>
             </section>
+
+            <section class="routing-section" aria-labelledby="remote-sources-section-title">
+              <div class="ui-section-head">
+                <div>
+                  <div class="routing-title-row">
+                    <h2 id="remote-sources-section-title" class="ui-section-title">远程规则集</h2>
+                    <span id="remote-sources-badge" class="ui-badge ui-badge--plain">0 个</span>
+                  </div>
+                  <p class="ui-section-desc">注册公开 HTTPS 数据集源后，可在分流规则中直接引用；下载与校验由 Host 完成。</p>
+                </div>
+              </div>
+
+              <details class="ui-help remote-source-form-wrap" id="remote-source-form-wrap">
+                <summary>注册新的规则集源</summary>
+                <form id="remote-source-form" method="post" class="remote-source-form">
+                  <p id="remote-source-error" class="form-error" role="alert" hidden></p>
+                  <div class="ui-form-grid">
+                    <label class="ui-field">
+                      <span class="ui-label">规则集 ID</span>
+                      <input class="ui-input" id="remote-source-id" required autocomplete="off" spellcheck="false" placeholder="例如 community-rules">
+                    </label>
+                    <label class="ui-field">
+                      <span class="ui-label">名称（可选）</span>
+                      <input class="ui-input" id="remote-source-name" autocomplete="off" spellcheck="false" placeholder="展示名称">
+                    </label>
+                    <label class="ui-field ui-field--full">
+                      <span class="ui-label">HTTPS URL</span>
+                      <input class="ui-input" id="remote-source-url" required autocomplete="off" spellcheck="false" placeholder="例如 example.com/geosite.dat">
+                    </label>
+                    <label class="ui-field">
+                      <span class="ui-label">格式</span>
+                      <select class="ui-select" id="remote-source-format">
+                        <option value="geosite">geosite</option>
+                        <option value="geoip">geoip</option>
+                        <option value="community">community</option>
+                        <option value="cidr">cidr</option>
+                        <option value="geo-mmdb">geo-mmdb</option>
+                      </select>
+                    </label>
+                    <label class="ui-field">
+                      <span class="ui-label">检索方式</span>
+                      <select class="ui-select" id="remote-source-mode">
+                        <option value="rolling-sha256">滚动校验 (rolling-sha256)</option>
+                        <option value="pinned">固定版本 (pinned)</option>
+                      </select>
+                    </label>
+                    <label class="ui-field ui-field--full" id="remote-source-checksum-field">
+                      <span class="ui-label">校验和 URL</span>
+                      <input class="ui-input" id="remote-source-checksum" autocomplete="off" spellcheck="false" placeholder="例如 example.com/geosite.sha256">
+                    </label>
+                    <label class="ui-field" id="remote-source-revision-field" hidden>
+                      <span class="ui-label">固定版本号</span>
+                      <input class="ui-input" id="remote-source-revision" autocomplete="off" spellcheck="false" placeholder="例如 v2026.11">
+                    </label>
+                    <label class="ui-field" id="remote-source-digest-field" hidden>
+                      <span class="ui-label">期望摘要</span>
+                      <input class="ui-input" id="remote-source-digest" autocomplete="off" spellcheck="false" placeholder="sha256:…">
+                    </label>
+                    <label class="ui-field">
+                      <span class="ui-label">刷新间隔（秒，0 为默认）</span>
+                      <input class="ui-input" id="remote-source-interval" type="number" min="0" inputmode="numeric" placeholder="86400">
+                    </label>
+                  </div>
+                  <p class="ui-help-text">仅支持公开 HTTPS 规则集；暂不支持需要登录凭据的地址，也不会存储任何凭据。</p>
+                  <div class="routing-head-actions">
+                    <button id="remote-source-submit" class="ui-btn" type="submit">注册规则集</button>
+                  </div>
+                </form>
+              </details>
+
+              <div id="remote-sources-empty" class="ui-empty routing-empty" hidden>
+                <h2 class="ui-empty__title">暂无远程规则集</h2>
+                <p class="ui-empty__desc">展开上方「注册新的规则集源」，填写 HTTPS 地址与检索方式后即可在规则中引用。</p>
+              </div>
+
+              <div id="remote-sources-table" class="ui-table-wrap" hidden>
+                <table class="ui-table routing-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">规则集</th>
+                      <th scope="col">检索</th>
+                      <th scope="col">当前版本</th>
+                      <th scope="col">最近刷新</th>
+                      <th scope="col" class="ui-table__num">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="remote-sources"></tbody>
+                </table>
+              </div>
+              <p id="remote-source-message" class="ui-help-text remote-source-message" role="status" hidden></p>
+            </section>
           </div>
         </section>
       </div>
@@ -488,7 +579,8 @@
           </label>
           <label class="ui-field">
             <span class="ui-label">数据源 ID</span>
-            <input class="ui-input" name="source_id" id="route-source-input" required autocomplete="off" spellcheck="false" value="geosite" placeholder="例如 geosite 或 geoip">
+            <input class="ui-input" name="source_id" id="route-source-input" required autocomplete="off" spellcheck="false" value="geosite" placeholder="例如 geosite 或 geoip" list="route-source-options">
+            <datalist id="route-source-options"></datalist>
           </label>
           <label class="ui-field">
             <span class="ui-label">分类名称</span>

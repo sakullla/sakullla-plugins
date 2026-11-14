@@ -182,6 +182,8 @@ type uiMemoryListenState struct {
 	found        bool
 	routing      RoutingConfiguration
 	routingFound bool
+	sources      []remoteSourceRecord
+	sourcesFound bool
 }
 
 func (state *uiMemoryListenState) LoadListens(context.Context) ([]ListenRule, bool, error) {
@@ -237,6 +239,20 @@ func (state *uiMemoryListenState) StoreRouting(_ context.Context, routing Routin
 	defer state.mu.Unlock()
 	state.routing = cloneRouting(routing)
 	state.routingFound = true
+	return nil
+}
+
+func (state *uiMemoryListenState) LoadRemoteSources(context.Context) ([]remoteSourceRecord, bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]remoteSourceRecord(nil), state.sources...), state.sourcesFound, nil
+}
+
+func (state *uiMemoryListenState) StoreRemoteSources(_ context.Context, records []remoteSourceRecord) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.sources = append([]remoteSourceRecord(nil), records...)
+	state.sourcesFound = true
 	return nil
 }
 

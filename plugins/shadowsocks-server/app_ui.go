@@ -91,6 +91,7 @@ type listenAPIResponse struct {
 	RoutingError   string                `json:"routing_error,omitempty"`
 	RouteStatus    []RouteStatus         `json:"route_status,omitempty"`
 	RouteSources   []RouteSourceStatus   `json:"route_sources,omitempty"`
+	RemoteSources  []remoteSourceView    `json:"remote_sources,omitempty"`
 	Refresh        *datasetRefreshReport `json:"refresh,omitempty"`
 	Test           *upstreamTestResult   `json:"test,omitempty"`
 	Error          string                `json:"error,omitempty"`
@@ -133,6 +134,18 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	if path == "/api/routing/import" {
 		c.serveRoutingImport(writer, request)
 		return true
+	}
+	if path == "/api/dataset-sources" {
+		c.serveDatasetSources(writer, request)
+		return true
+	}
+	if rest, found := strings.CutPrefix(path, "/api/dataset-sources/"); found {
+		id, action, cut := strings.Cut(rest, "/")
+		decoded, decodeErr := url.PathUnescape(id)
+		if cut && action == "delete" && decodeErr == nil && decoded != "" {
+			c.serveDatasetSourceDelete(writer, request, decoded)
+			return true
+		}
 	}
 	if path == "/api/upstreams" {
 		c.serveUpstreamCollection(writer, request)
