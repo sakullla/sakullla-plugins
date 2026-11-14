@@ -74,10 +74,13 @@ exit, and stable failure codes. They never expose upstream secret material.
 
 Upstreams use separate host, port, method, and password fields, not an Xray
 outbound JSON object. For SS2022 multi-user upstreams, the password field holds
-the complete `serverPSK:userPSK` pair. Select a classification present in the
-source catalog; `category-ai-!cn` is a literal classification name, not the
-`!cn` attribute on a different classification. Bind the dataset to each target
-node before applying the rule.
+the complete `serverPSK:userPSK` pair. An upstream can be edited in place
+without breaking rule references: endpoint, method, and protocol fields apply
+directly, a new password rotates its scoped secret, and a blank password keeps
+the existing credential. Select a classification present in the source catalog;
+`category-ai-!cn` is a literal classification name, not the `!cn` attribute on
+a different classification. Bind the dataset to each target node before
+applying the rule.
 
 Saving routing commits the desired configuration independently of node
 availability. A failed or removed node cannot roll back healthy nodes. The

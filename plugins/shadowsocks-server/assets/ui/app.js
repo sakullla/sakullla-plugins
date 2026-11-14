@@ -116,6 +116,9 @@ const routeDefaultHint = document.querySelector("#route-default-hint");
 const routeUpstreamHint = document.querySelector("#route-upstream-hint");
 const routeDialogTitle = document.querySelector("#route-dialog-title");
 const routeDialogDesc = document.querySelector("#route-dialog-desc");
+const upstreamDialogTitle = document.querySelector("#upstream-dialog-title");
+const upstreamDialogDesc = document.querySelector("#upstream-dialog-desc");
+const upstreamPasswordHint = document.querySelector("#upstream-password-hint");
 
 const LISTEN_FILTER_MIN = 4;
 
@@ -1969,6 +1972,7 @@ const uniqueRuleID = (base, ignoreIndex = -1) => {
 };
 
 let editingRuleIndex = -1;
+let editingUpstreamID = "";
 
 const autoRuleID = () => {
   if (!routeIdInput || routeIdInput.dataset.auto !== "true") return;
@@ -1993,9 +1997,37 @@ const fillRoutePreset = (presetKey) => {
   syncRouteModalActionVisibility();
 };
 
-const openUpstreamModal = () => {
+const setUpstreamModalMode = (editing) => {
+  if (upstreamDialogTitle) upstreamDialogTitle.textContent = editing ? "编辑上游节点" : "添加上游节点";
+  if (upstreamDialogDesc) {
+    upstreamDialogDesc.textContent = editing
+      ? "修改上游节点地址、端口、加密方式或协议；连接密钥留空则沿用现有值。"
+      : "配置远端 Shadowsocks 节点，供分流规则或默认路由转发使用。";
+  }
+  if (upstreamSubmit) upstreamSubmit.textContent = editing ? "保存上游" : "添加上游";
+  const idInput = formField(upstreamForm, "id");
+  if (idInput) idInput.disabled = editing;
+  const passwordInput = formField(upstreamForm, "password");
+  if (passwordInput) passwordInput.required = !editing;
+  if (upstreamPasswordHint) upstreamPasswordHint.hidden = !editing;
+};
+
+const openUpstreamModal = (upstream = null) => {
   if (!upstreamDialog) return;
   if (upstreamForm) upstreamForm.reset();
+  editingUpstreamID = upstream ? upstream.id : "";
+  setUpstreamModalMode(Boolean(upstream));
+  if (upstream) {
+    const fields = { id: upstream.id, host: upstream.host, port: upstream.port, method: upstream.method };
+    Object.entries(fields).forEach(([name, value]) => {
+      const input = formField(upstreamForm, name);
+      if (input && value !== undefined && value !== null) input.value = value;
+    });
+    const tcpInput = formField(upstreamForm, "tcp");
+    const udpInput = formField(upstreamForm, "udp");
+    if (tcpInput) tcpInput.checked = Boolean(upstream.tcp);
+    if (udpInput) udpInput.checked = Boolean(upstream.udp);
+  }
   clearFormErrors(upstreamForm);
   showModalError(upstreamError, "");
   trackDraft(upstreamDialog, upstreamForm, closeUpstreamModal);
@@ -2008,6 +2040,8 @@ const closeUpstreamModal = () => {
   showModalError(upstreamError, "");
   clearFormErrors(upstreamForm);
   if (upstreamForm) upstreamForm.reset();
+  editingUpstreamID = "";
+  setUpstreamModalMode(false);
   if (upstreamDialog && upstreamDialog.open) upstreamDialog.close();
 };
 
@@ -2150,6 +2184,12 @@ const renderRouting = (routing, routeStatus = []) => {
       const actions = document.createElement("td");
       actions.className = "ui-table__actions";
       actions.dataset.label = "操作";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "ui-btn ui-btn--ghost ui-btn--sm";
+      edit.textContent = "编辑";
+      edit.setAttribute("aria-label", `编辑上游 ${upstream.id}`);
+      edit.onclick = () => openUpstreamModal(upstream);
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "ui-btn ui-btn--ghost ui-btn--sm";
@@ -2162,7 +2202,7 @@ const renderRouting = (routing, routeStatus = []) => {
       remove.disabled = refs.total > 0;
       remove.title = refs.total ? "仍被分流规则或默认出口引用，先改掉引用再删除" : `删除上游 ${upstream.id}`;
       remove.onclick = (event) => mutateUpstream(upstream.id, "delete", event.currentTarget);
-      actions.append(toggle, remove);
+      actions.append(edit, toggle, remove);
 
       row.append(identity, address, capability, status, actions);
       upstreamList.append(row);
@@ -2382,7 +2422,7 @@ const mutateUpstream = async (id, action, control = null) => {
   }
 };
 
-if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", openUpstreamModal);
+if (openUpstreamDialogBtn) openUpstreamDialogBtn.addEventListener("click", () => openUpstreamModal());
 if (upstreamCancel) upstreamCancel.addEventListener("click", requestCloseUpstreamModal);
 if (upstreamDialog) {
   upstreamDialog.addEventListener("click", (event) => {
@@ -2415,7 +2455,8 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
   clearFormErrors(upstreamForm);
   showModalError(upstreamError, "");
   const form = new FormData(upstreamForm);
-  const id = String(form.get("id") || "").trim();
+  const editing = editingUpstreamID !== "";
+  const id = editing ? editingUpstreamID : String(form.get("id") || "").trim();
   const host = String(form.get("host") || "").trim();
   const port = Number(form.get("port") || 0);
   const method = String(form.get("method") || "");
@@ -2429,7 +2470,7 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
     if (idInput) idInput.focus();
     return;
   }
-  if ((routingCache.upstreams || []).some((item) => item && item.id === id)) {
+  if (!editing && (routingCache.upstreams || []).some((item) => item && item.id === id)) {
     markFieldError(idInput, "该上游标识已存在，请换一个。");
     if (idInput) idInput.focus();
     return;
@@ -2444,21 +2485,30 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
     if (portInput) portInput.focus();
     return;
   }
-  if (!password) {
+  if (!editing && !password) {
     markFieldError(passwordInput, "请填写连接密钥。");
     if (passwordInput) passwordInput.focus();
     return;
   }
-  setBusy(true, upstreamSubmit, "正在添加上游…");
+  setBusy(true, upstreamSubmit, editing ? "正在保存上游…" : "正在添加上游…");
   try {
-    const payload = await sendPluginJSON("api/upstreams", { id, host, port, method, password, tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" });
+    const request = { id, host, port, method, tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" };
+    let payload;
+    if (editing) {
+      // 密钥留空时后端沿用现有凭据；只在填写时随更新轮换。
+      if (password) request.password = password;
+      payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/update`, request);
+    } else {
+      request.password = password;
+      payload = await sendPluginJSON("api/upstreams", request);
+    }
     closeUpstreamModal();
     renderRouting(payload.routing);
     await refreshRouteStatus();
-    showStatus(`已添加上游节点「${id}」，现在可以在分流规则或默认出口中选用。`, false);
+    showStatus(editing ? `已保存上游节点「${id}」的修改。` : `已添加上游节点「${id}」，现在可以在分流规则或默认出口中选用。`, false);
   } catch (error) {
-    showModalError(upstreamError, errorText(error, "添加上游失败，请检查标识、地址和密钥后重试。"));
-    if (error && error.status === 400) markFieldError(idInput, "标识无效或已存在，请检查后重试。");
+    showModalError(upstreamError, errorText(error, editing ? "保存上游失败，请检查地址、端口和加密方式后重试。" : "添加上游失败，请检查标识、地址和密钥后重试。"));
+    if (error && error.status === 400) markFieldError(editing ? hostInput : idInput, editing ? "字段无效，请检查后重试。" : "标识无效或已存在，请检查后重试。");
     else if (/端口/.test(String((error && error.message) || ""))) markFieldError(portInput, errorText(error));
   } finally {
     setBusy(false);

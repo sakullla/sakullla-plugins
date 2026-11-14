@@ -126,7 +126,7 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	}
 	if rest, found := strings.CutPrefix(path, "/api/upstreams/"); found {
 		id, action, cut := strings.Cut(rest, "/")
-		if cut && (action == "enable" || action == "disable" || action == "delete") {
+		if cut && (action == "enable" || action == "disable" || action == "delete" || action == "update") {
 			c.serveUpstreamItem(writer, request, id, action)
 			return true
 		}

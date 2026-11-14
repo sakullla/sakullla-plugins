@@ -203,7 +203,14 @@ func (c *Controller) serveUpstreamItem(writer http.ResponseWriter, request *http
 		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
 		return
 	}
-	routing, err := c.mutateUpstream(request.Context(), id, action)
+	var body upstreamWriteRequest
+	if action == "update" {
+		if err := decodeRoutingWrite(request, &body); err != nil {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(err)})
+			return
+		}
+	}
+	routing, err := c.mutateUpstream(request.Context(), id, action, body)
 	if err != nil {
 		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
 		return
@@ -240,7 +247,7 @@ func (c *Controller) createUpstream(ctx context.Context, body upstreamWriteReque
 	return cloneRouting(current), nil
 }
 
-func (c *Controller) mutateUpstream(ctx context.Context, id, action string) (RoutingConfiguration, error) {
+func (c *Controller) mutateUpstream(ctx context.Context, id, action string, body upstreamWriteRequest) (RoutingConfiguration, error) {
 	current := cloneRouting(c.directory().Routing)
 	next := cloneRouting(current)
 	index := -1
@@ -253,7 +260,8 @@ func (c *Controller) mutateUpstream(ctx context.Context, id, action string) (Rou
 	if index < 0 {
 		return RoutingConfiguration{}, ErrInvalid
 	}
-	removed := next.Upstreams[index]
+	previous := next.Upstreams[index]
+	var minted pluginsdk.ScopedSecretReference
 	switch action {
 	case "enable":
 		next.Upstreams[index].Enabled = true
@@ -269,15 +277,72 @@ func (c *Controller) mutateUpstream(ctx context.Context, id, action string) (Rou
 			return RoutingConfiguration{}, ErrRouteUpstreamUnavailable
 		}
 		next.Upstreams = append(next.Upstreams[:index], next.Upstreams[index+1:]...)
+	case "update":
+		endpoint := pluginsdk.ManagedNetworkEndpoint{Host: body.Host, Port: body.Port}
+		if endpoint.Validate() != nil || !SupportedMethod(body.Method) || (!body.TCP && !body.UDP) {
+			return RoutingConfiguration{}, ErrInvalid
+		}
+		if strings.TrimSpace(body.Password) != "" {
+			if c.managedRuntime == nil {
+				return RoutingConfiguration{}, ErrInvalid
+			}
+			engine, err := NewProtocolEngine(body.Method, []byte(body.Password))
+			if err != nil {
+				return RoutingConfiguration{}, ErrInvalid
+			}
+			engine.Destroy()
+			material := []byte(body.Password)
+			reference, err := c.managedRuntime.importOpaqueSecret(ctx, "upstream", material)
+			clear(material)
+			if err != nil {
+				return RoutingConfiguration{}, err
+			}
+			minted = reference
+		} else if body.Method != previous.Method {
+			// A method change must still accept the kept credential.
+			if c.managedRuntime == nil {
+				return RoutingConfiguration{}, ErrInvalid
+			}
+			material, err := c.managedRuntime.Resolve(ctx, previous.SecretRef, previous.SecretVersion)
+			if err != nil {
+				return RoutingConfiguration{}, err
+			}
+			engine, err := NewProtocolEngine(body.Method, material)
+			clear(material)
+			if err != nil {
+				return RoutingConfiguration{}, ErrInvalid
+			}
+			engine.Destroy()
+		}
+		updated := &next.Upstreams[index]
+		updated.Host, updated.Port, updated.Method = body.Host, body.Port, body.Method
+		updated.TCP, updated.UDP = body.TCP, body.UDP
+		if minted.ID != "" {
+			updated.SecretRef, updated.SecretVersion = minted.ID, minted.Version
+		}
 	default:
 		return RoutingConfiguration{}, ErrInvalid
 	}
 	if err := c.replaceRouting(ctx, next); err != nil {
+		if minted.ID != "" {
+			c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{minted})
+		}
 		return RoutingConfiguration{}, err
 	}
-	if action == "delete" && c.managedRuntime != nil {
-		if err := c.managedRuntime.revokeSecret(ctx, removed.SecretRef, removed.SecretVersion); err != nil {
+	switch {
+	case action == "delete" && c.managedRuntime != nil:
+		if err := c.managedRuntime.revokeSecret(ctx, previous.SecretRef, previous.SecretVersion); err != nil {
 			return RoutingConfiguration{}, err
+		}
+	case action == "update" && minted.ID != "":
+		if err := c.managedRuntime.revokeSecret(ctx, previous.SecretRef, previous.SecretVersion); err != nil {
+			// Mirror finishSecretReplacement: restore the previous routing so
+			// the still-live secret keeps its consumer, then drop the minted ref.
+			if restoreErr := c.replaceRouting(ctx, current); restoreErr != nil {
+				return RoutingConfiguration{}, ErrExecutionUnavailable
+			}
+			c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{minted})
+			return RoutingConfiguration{}, ErrExecutionUnavailable
 		}
 	}
 	return cloneRouting(next), nil

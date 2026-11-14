@@ -473,6 +473,127 @@ func TestRoutingAPIManagesUpstreamOrderDefaultAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRoutingAPIUpstreamUpdateEditsEndpointAndRotatesSecret(t *testing.T) {
+	fake := &managedRuntimeFake{}
+	managed := newHostCapabilityRuntime(fake)
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	state := &uiMemoryListenState{}
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a", ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(t.Context(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-a", RequiredFeatures: supportedFeatures()}); err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(Configuration{Generation: "provider"})
+	if response := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a", Config: wire}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := uiJSON(t, controller, "POST", "/api/listens", `{"agent_id":"agent-1","method":"aes-256-gcm"}`); response.Code != 200 {
+		t.Fatalf("listen=%d %s", response.Code, response.Body.String())
+	}
+	created := uiJSON(t, controller, "POST", "/api/upstreams", `{"id":"ai-upstream","host":"192.0.2.20","port":8388,"method":"aes-256-gcm","password":"upstream-password","tcp":true,"udp":true}`)
+	if created.Code != 200 {
+		t.Fatalf("upstream=%d %s", created.Code, created.Body.String())
+	}
+	before := decodeListenAPI(t, created).Routing.Upstreams[0]
+	if before.SecretRef == "" || before.SecretVersion == "" {
+		t.Fatalf("created upstream=%+v", before)
+	}
+	rules := `{"rules":[{"id":"ai-not-cn","source_id":"geosite","classification":{"name":"category-ai","kind":"domain"},"action":"upstream","upstream_id":"ai-upstream"}],"default_action":"direct"}`
+	if response := uiJSON(t, controller, "POST", "/api/routing", rules); response.Code != 200 {
+		t.Fatalf("rules=%d %s", response.Code, response.Body.String())
+	}
+
+	// A referenced upstream stays editable; only delete is blocked.
+	updated := uiJSON(t, controller, "POST", "/api/upstreams/ai-upstream/update", `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"aes-256-gcm","tcp":true,"udp":false}`)
+	if updated.Code != 200 {
+		t.Fatalf("update=%d %s", updated.Code, updated.Body.String())
+	}
+	after := decodeListenAPI(t, updated).Routing.Upstreams[0]
+	if after.ID != "ai-upstream" || after.Host != "198.51.100.30" || after.Port != 8389 || after.UDP || !after.TCP || !after.Enabled {
+		t.Fatalf("updated upstream=%+v", after)
+	}
+	if after.SecretRef != before.SecretRef || after.SecretVersion != before.SecretVersion {
+		t.Fatalf("blank password rotated secret: %+v -> %+v", before, after)
+	}
+	snapshot, err := prepareRouteSnapshot(t.Context(), *decodeListenAPI(t, updated).Routing, &routeDatasetFake{matches: map[string]bool{"category-ai": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := snapshot.decide(t.Context(), "tcp", "chat.example.com:443")
+	if err != nil || decision.Upstream == nil || decision.Upstream.Host != "198.51.100.30" || decision.Upstream.Port != 8389 {
+		t.Fatalf("new-session decision=%+v err=%v", decision, err)
+	}
+	if _, err = snapshot.decide(t.Context(), "udp", "chat.example.com:53"); err != ErrRouteUpstreamUnavailable {
+		t.Fatalf("udp decision err=%v", err)
+	}
+	if response := uiJSON(t, controller, "POST", "/api/upstreams/ai-upstream/delete", `{}`); response.Code != 409 {
+		t.Fatalf("referenced delete=%d %s", response.Code, response.Body.String())
+	}
+
+	// Password rotation mints a new scoped secret and revokes the old version.
+	rotated := uiJSON(t, controller, "POST", "/api/upstreams/ai-upstream/update", `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"aes-256-gcm","password":"rotated-password","tcp":true,"udp":false}`)
+	if rotated.Code != 200 {
+		t.Fatalf("rotate=%d %s", rotated.Code, rotated.Body.String())
+	}
+	if bytes.Contains(rotated.Body.Bytes(), []byte("rotated-password")) {
+		t.Fatal("update response leaked upstream password")
+	}
+	rot := decodeListenAPI(t, rotated).Routing.Upstreams[0]
+	if rot.SecretRef == after.SecretRef && rot.SecretVersion == after.SecretVersion {
+		t.Fatal("rotation kept the same secret reference")
+	}
+	material, err := managed.Resolve(t.Context(), rot.SecretRef, rot.SecretVersion)
+	if err != nil || string(material) != "rotated-password" {
+		t.Fatalf("rotated material=%q err=%v", material, err)
+	}
+	if _, err = managed.Resolve(t.Context(), after.SecretRef, after.SecretVersion); err == nil {
+		t.Fatal("old upstream secret remained readable after rotation")
+	}
+
+	// Invalid input rejects the whole request without touching config or secrets.
+	stored := cloneRouting(state.routing)
+	secretsBefore := len(fake.secrets)
+	for name, body := range map[string]string{
+		"bad-endpoint":  `{"id":"ai-upstream","host":"","port":0,"method":"aes-256-gcm","tcp":true,"udp":true}`,
+		"no-protocol":   `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"aes-256-gcm","tcp":false,"udp":false}`,
+		"bad-method":    `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"rc4-md5","tcp":true,"udp":true}`,
+		"bad-ss2022key": `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"2022-blake3-aes-128-gcm","password":"not-a-ss2022-key","tcp":true,"udp":true}`,
+		"missing":       `{"id":"ai-upstream","host":"198.51.100.30","port":8389,"method":"aes-256-gcm","tcp":true,"udp":true}`,
+	} {
+		path := "/api/upstreams/ai-upstream/update"
+		if name == "missing" {
+			path = "/api/upstreams/no-such/update"
+		}
+		if response := uiJSON(t, controller, "POST", path, body); response.Code != 400 {
+			t.Fatalf("%s update=%d %s", name, response.Code, response.Body.String())
+		}
+	}
+	if routingDigest(controller.directory().Routing) != routingDigest(stored) || len(fake.secrets) != secretsBefore {
+		t.Fatalf("invalid updates changed routing=%+v secrets=%d->%d", controller.directory().Routing, secretsBefore, len(fake.secrets))
+	}
+
+	// A disabled upstream is still editable and stays disabled.
+	if response := uiJSON(t, controller, "POST", "/api/upstreams/ai-upstream/disable", `{}`); response.Code != 200 {
+		t.Fatalf("disable=%d %s", response.Code, response.Body.String())
+	}
+	disabledUpdate := uiJSON(t, controller, "POST", "/api/upstreams/ai-upstream/update", `{"id":"ai-upstream","host":"203.0.113.40","port":8390,"method":"aes-256-gcm","tcp":true,"udp":true}`)
+	if disabledUpdate.Code != 200 {
+		t.Fatalf("disabled update=%d %s", disabledUpdate.Code, disabledUpdate.Body.String())
+	}
+	disabled := decodeListenAPI(t, disabledUpdate).Routing.Upstreams[0]
+	if disabled.Enabled || disabled.Host != "203.0.113.40" || disabled.Port != 8390 || !disabled.UDP {
+		t.Fatalf("disabled upstream update=%+v", disabled)
+	}
+	if disabled.SecretRef != rot.SecretRef || disabled.SecretVersion != rot.SecretVersion {
+		t.Fatalf("disabled update changed secret: %+v -> %+v", rot, disabled)
+	}
+}
+
 func TestSS2022TCPClientRejectsResponseBoundToAnotherRequest(t *testing.T) {
 	method := "2022-blake3-aes-128-gcm"
 	serverPSK, userPSK, err := GenerateSS2022Identity(method)

@@ -382,7 +382,7 @@
       <header class="ui-dialog__head">
         <div>
           <h2 id="upstream-dialog-title" class="ui-dialog__title">添加上游节点</h2>
-          <p class="ui-dialog__desc">配置远端 Shadowsocks 节点，供分流规则或默认路由转发使用。</p>
+          <p id="upstream-dialog-desc" class="ui-dialog__desc">配置远端 Shadowsocks 节点，供分流规则或默认路由转发使用。</p>
         </div>
       </header>
       <div class="ui-dialog__body">
@@ -412,6 +412,7 @@
           <label class="ui-field ui-field--full">
             <span class="ui-label">连接密钥 / 客户端密码</span>
             <input class="ui-input" name="password" type="password" required autocomplete="new-password" placeholder="填写远端节点的连接密码或 SS2022 完整密钥">
+            <span id="upstream-password-hint" class="ui-help-text" hidden>不修改密钥则留空；填写新值会轮换连接密钥。</span>
           </label>
         </div>
         <fieldset class="ui-fieldset protocol-checks">
