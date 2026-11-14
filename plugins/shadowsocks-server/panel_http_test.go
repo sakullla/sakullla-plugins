@@ -77,6 +77,11 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		`id="listen-detail"`,
 		`id="detail-title"`,
 		`id="detail-meta"`,
+		`id="detail-batch"`,
+		`id="detail-select-all"`,
+		`id="detail-batch-enable"`,
+		`id="detail-batch-disable"`,
+		`id="detail-batch-delete"`,
 		`id="detail-users"`,
 		`id="detail-actions"`,
 		`id="create-dialog"`,
@@ -218,6 +223,10 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		"正在添加规则",
 		"停用用户",
 		"停用上游节点",
+		"batchMutateUsers",
+		"selectedUserIDs",
+		"syncBatchActions",
+		"已选",
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("panel script missing %q", required)
@@ -249,6 +258,8 @@ func TestControllerServesPanelAssetsFromManifestTree(t *testing.T) {
 		".agent-search-select",
 		".agent-search-select__status--offline",
 		".account-ops",
+		".account-batch",
+		".account-select",
 		".qr-image",
 		".form-error",
 		".detail-status",

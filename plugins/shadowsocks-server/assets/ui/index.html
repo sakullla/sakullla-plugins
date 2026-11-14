@@ -303,6 +303,19 @@
         <h3 class="detail-users-head__title">用户 <span id="detail-users-count" class="ui-badge ui-badge--plain tab-badge"></span></h3>
         <p id="detail-users-hint" class="ui-help-text" hidden></p>
       </div>
+      <div id="detail-batch" class="account-batch" hidden>
+        <label class="ui-check account-batch__all">
+          <input type="checkbox" id="detail-select-all" aria-label="全选用户">
+          <span>全选</span>
+        </label>
+        <span id="detail-batch-count" class="ui-help-text" role="status"></span>
+        <span class="ui-spacer" aria-hidden="true"></span>
+        <div class="account-batch__actions">
+          <button id="detail-batch-enable" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" data-mutate="true" disabled>启用</button>
+          <button id="detail-batch-disable" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" data-mutate="true" disabled>停用</button>
+          <button id="detail-batch-delete" class="ui-btn ui-btn--ghost ui-btn--sm btn-danger-text" type="button" data-mutate="true" disabled>删除</button>
+        </div>
+      </div>
       <div id="detail-users" class="account-stack"></div>
     </div>
     <footer id="detail-actions" class="ui-dialog__footer"></footer>

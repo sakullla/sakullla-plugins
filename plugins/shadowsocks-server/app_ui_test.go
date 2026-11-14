@@ -978,3 +978,189 @@ func TestControlAPIUpstreamTestClassifiesOfflineAndStaysReadOnly(t *testing.T) {
 		t.Fatalf("query fallback=%+v", payload.Test)
 	}
 }
+
+// TestDetailPanelBatchUserOpsWiring asserts the account list keeps the
+// multi-select controls and that batch operations loop the existing per-user
+// endpoints with a per-account summary — there is no bulk aggregate backend
+// route (R8/R10).
+func TestDetailPanelBatchUserOpsWiring(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(page)
+	source := string(script)
+	detailStart := strings.Index(markup, `id="listen-detail"`)
+	if detailStart < 0 {
+		t.Fatal("listen detail dialog missing from index.html")
+	}
+	detail := markup[detailStart:]
+	for _, want := range []string{
+		`id="detail-batch"`,
+		`id="detail-select-all"`,
+		`id="detail-batch-count"`,
+		`id="detail-batch-enable"`,
+		`id="detail-batch-disable"`,
+		`id="detail-batch-delete"`,
+		"全选",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail dialog missing batch control %q", want)
+		}
+	}
+	batch := jsConstFunction(source, "batchMutateUsers")
+	if batch == "" {
+		t.Fatal("batchMutateUsers is missing")
+	}
+	for _, want := range []string{
+		"for (const user of targets)",
+		"api/users/${encodeURIComponent(user.id)}/${action}",
+		"sendPluginJSON",
+		"selectedUserIDs",
+		"askConfirm",
+		"reportBatchResult",
+	} {
+		if !strings.Contains(batch, want) {
+			t.Fatalf("batchMutateUsers missing %q", want)
+		}
+	}
+	// Batch stays on the per-account primitives: no aggregate or bulk route.
+	for _, banned := range []string{"api/users/batch", "api/batch", "api/users\",", `"api/users"`} {
+		if strings.Contains(batch, banned) {
+			t.Fatalf("batchMutateUsers calls an aggregate endpoint %q", banned)
+		}
+	}
+	summary := jsConstFunction(source, "reportBatchResult")
+	if summary == "" || !strings.Contains(summary, "个失败") {
+		t.Fatal("reportBatchResult does not summarize per-account failures")
+	}
+	render := jsConstFunction(source, "renderUser")
+	if !strings.Contains(render, "selectedUserIDs") || !strings.Contains(render, `type = "checkbox"`) {
+		t.Fatal("renderUser does not render the per-account selection checkbox")
+	}
+	for _, want := range []string{"detailSelectAll", "syncBatchActions", "account-select", "已选"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("app.js missing %q", want)
+		}
+	}
+}
+
+// TestControlAPIBoundariesNoAggregateSubscriptionOrSecretEcho enforces the
+// R9/R10 static guards: no public multi-account aggregate endpoint in the
+// route table or backend offers, no subscription/share-aggregate UI surface,
+// no SIP003 plugin= field in share URIs, and no secret material echoed in
+// API responses.
+func TestControlAPIBoundariesNoAggregateSubscriptionOrSecretEcho(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := upstreamTestFixture(t, host)
+
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","method":"aes-256-gcm","password":"listen-secret-material"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	if bytes.Contains(created.Body.Bytes(), []byte("listen-secret-material")) {
+		t.Fatalf("create response echoed the account secret: %s", created.Body.String())
+	}
+	listen := decodeListenAPI(t, created).Listen
+	if listen == nil || len(listen.Users) != 1 {
+		t.Fatalf("listen=%#v", listen)
+	}
+	user := listen.Users[0]
+	for _, banned := range []string{"plugin=", "plugin%3D", "ss2022://"} {
+		if strings.Contains(user.URI, banned) || strings.Contains(user.QRContent, banned) {
+			t.Fatalf("share URI carries a forbidden field %q: %q", banned, user.URI)
+		}
+	}
+	upstream := uiJSON(t, controller, http.MethodPost, "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"upstream-secret-material","tcp":true,"udp":true}`)
+	if upstream.Code != http.StatusOK {
+		t.Fatalf("upstream create=%d %s", upstream.Code, upstream.Body.String())
+	}
+	if bytes.Contains(upstream.Body.Bytes(), []byte("upstream-secret-material")) {
+		t.Fatalf("upstream create response echoed the secret: %s", upstream.Body.String())
+	}
+
+	// Read surfaces never echo raw secret material.
+	for _, path := range []string{
+		"/api/listens?agent_id=agent-1",
+		"/api/routing",
+		"/api/routing/export",
+		"/api/execution?agent_id=agent-1",
+		"/api/defaults?agent_id=agent-1",
+		"/api/users/" + user.ID,
+	} {
+		response := uiJSON(t, controller, http.MethodGet, path, "")
+		for _, secret := range []string{"listen-secret-material", "upstream-secret-material"} {
+			if bytes.Contains(response.Body.Bytes(), []byte(secret)) {
+				t.Fatalf("%s echoed secret material: %s", path, response.Body.String())
+			}
+		}
+	}
+
+	// No public multi-account aggregate endpoint: collection-shaped and
+	// subscription-shaped paths stay unserved by the control API.
+	for _, path := range []string{
+		"/api/users",
+		"/api/users/",
+		"/api/accounts",
+		"/api/subscription",
+		"/api/subscribe",
+		"/api/share",
+		"/api/export",
+	} {
+		response := uiJSON(t, controller, http.MethodGet, path, "")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("aggregate path %s served: %d %s", path, response.Code, response.Body.String())
+		}
+	}
+
+	// Every control endpoint still requires the panel actor identity; nothing
+	// account-shaped can be pulled without it.
+	for _, path := range []string{
+		"/api/listens?agent_id=agent-1",
+		"/api/routing",
+		"/api/routing/export",
+		"/api/users/" + user.ID,
+		"/api/users/" + user.ID + "/qr.png",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		controller.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("unauthenticated %s = %d %s", path, response.Code, response.Body.String())
+		}
+	}
+
+	// The plugin offers no HTTP/L4 egress or backend provider surface.
+	services := runtimeServices()
+	if len(services.HTTPBackendProviderIDs) != 0 || len(services.HTTPBackendHandlers) != 0 || len(services.UnavailableHTTPBackendProviders) != 0 {
+		t.Fatalf("runtime services offer a backend provider surface: %+v", services)
+	}
+	manifest, err := os.ReadFile("plugin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"http.backend-provider", "http_backend_providers", "http.rule", "l4.accept"} {
+		if strings.Contains(string(manifest), banned) {
+			t.Fatalf("plugin.yaml declares forbidden surface %q", banned)
+		}
+	}
+
+	// The panel exposes no subscription or aggregate-share toggle.
+	page, err := os.ReadFile(filepath.Join("assets", "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join("assets", "ui", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"订阅", "subscription", "api/subscription"} {
+		if strings.Contains(string(page), banned) || strings.Contains(string(script), banned) {
+			t.Fatalf("panel exposes a subscription/share-aggregate surface %q", banned)
+		}
+	}
+}

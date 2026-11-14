@@ -109,6 +109,12 @@ const detailStatus = document.querySelector("#detail-status");
 const detailSummary = document.querySelector("#detail-summary");
 const detailUsersCount = document.querySelector("#detail-users-count");
 const detailUsersHint = document.querySelector("#detail-users-hint");
+const detailBatch = document.querySelector("#detail-batch");
+const detailSelectAll = document.querySelector("#detail-select-all");
+const detailBatchCount = document.querySelector("#detail-batch-count");
+const detailBatchEnable = document.querySelector("#detail-batch-enable");
+const detailBatchDisable = document.querySelector("#detail-batch-disable");
+const detailBatchDelete = document.querySelector("#detail-batch-delete");
 const metricPending = document.querySelector("#metric-pending");
 const metricPendingCount = document.querySelector("#metric-pending-count");
 const listenFilterField = document.querySelector("#listen-filter-field");
@@ -380,6 +386,7 @@ let listensCache = [];
 let routingCache = { upstreams: [], rules: [], default_action: "direct" };
 let routeStatusCache = [];
 let openListenID = "";
+const selectedUserIDs = new Set();
 let pendingAppendListen = null;
 let executionReady = false;
 let agentOnline = false;
@@ -611,6 +618,30 @@ const syncSelectionActions = () => {
     node.disabled = blocked;
   });
   syncDefaultRouteState();
+  syncBatchActions();
+};
+
+// 批量账号操作只复用单项端点；选中集保存在 selectedUserIDs，列表重渲染后按现存账号裁剪。
+const syncBatchActions = () => {
+  if (!detailBatch) return;
+  const listen = listensCache.find((item) => item && item.id === openListenID);
+  const users = (listen && listen.users) || [];
+  const known = new Set(users.map((user) => user && user.id));
+  selectedUserIDs.forEach((id) => {
+    if (!known.has(id)) selectedUserIDs.delete(id);
+  });
+  const count = selectedUserIDs.size;
+  const blocked = busy || !selectedAgentID || !agentOnline || executionReady !== true;
+  detailBatch.hidden = !users.length;
+  if (detailBatchCount) detailBatchCount.textContent = count ? `已选 ${count} 个` : "";
+  [detailBatchEnable, detailBatchDisable, detailBatchDelete].forEach((button) => {
+    if (button) button.disabled = blocked || !count;
+  });
+  if (detailSelectAll) {
+    detailSelectAll.checked = count > 0 && count === users.length;
+    detailSelectAll.indeterminate = count > 0 && count < users.length;
+    detailSelectAll.disabled = blocked || !users.length;
+  }
 };
 
 const setBusy = (next, control = null, label = "") => {
@@ -1200,6 +1231,13 @@ const resetDetailPrompt = () => {
     detailMeta.textContent = "";
     detailMeta.hidden = true;
   }
+  selectedUserIDs.clear();
+  if (detailBatch) detailBatch.hidden = true;
+  if (detailBatchCount) detailBatchCount.textContent = "";
+  if (detailSelectAll) {
+    detailSelectAll.checked = false;
+    detailSelectAll.indeterminate = false;
+  }
   if (detailUsers) detailUsers.replaceChildren();
   if (detailActions) detailActions.replaceChildren();
   if (detailSummary) {
@@ -1409,6 +1447,19 @@ const renderUser = (user, { manage = false, compact = false, listen = null } = {
   head.className = "account-head";
   const identity = document.createElement("div");
   identity.className = "account-identity";
+  if (manage) {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "account-select";
+    box.checked = selectedUserIDs.has(user.id);
+    box.setAttribute("aria-label", `选择 ${user.name || user.id}`);
+    box.addEventListener("change", () => {
+      if (box.checked) selectedUserIDs.add(user.id);
+      else selectedUserIDs.delete(user.id);
+      syncBatchActions();
+    });
+    identity.append(box);
+  }
   const name = document.createElement("strong");
   name.textContent = user.name || user.id;
   identity.append(name, renderStatusPill(user.enabled ? "启用" : "已停用", user.enabled));
@@ -1727,6 +1778,61 @@ const mutateUser = async (user, action, confirmDelete = false, control = null, {
   } finally {
     setBusy(false);
   }
+};
+
+const batchActionLabel = (action) => (action === "enable" ? "启用" : action === "disable" ? "停用" : "删除");
+
+// 批量操作复用单项原语逐账号执行：单个账号失败不阻断其余账号，结束后汇总报告每项结果。
+const batchMutateUsers = async (action, control = null) => {
+  if (busy || !canMutate()) return;
+  const listen = listensCache.find((item) => item && item.id === openListenID);
+  const targets = ((listen && listen.users) || []).filter((user) => user && selectedUserIDs.has(user.id));
+  if (!targets.length) return;
+  const label = batchActionLabel(action);
+  if (action === "disable" || action === "delete") {
+    const names = targets.map((user) => `「${user.name || user.id}」`).join("、");
+    const allUsers = action === "delete" && targets.length === (listen.users || []).length
+      ? "这是该监听的全部用户，删除后端口仍保留但没人能连接。"
+      : "";
+    const ok = await askConfirm({
+      title: `批量${label}用户`,
+      body: action === "delete"
+        ? `将删除 ${targets.length} 个用户：${names}。删除后不能恢复，对应 ss:// 链接一起失效。${allUsers}`
+        : `将停用 ${targets.length} 个用户：${names}。停用后这些 ss:// 链接立即无法连接，可随时再启用。`,
+      confirm: `${label} ${targets.length} 个用户`,
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  setBusy(true, control, `正在批量${label}…`);
+  const results = [];
+  try {
+    for (const user of targets) {
+      try {
+        await sendPluginJSON(`api/users/${encodeURIComponent(user.id)}/${action}`, mutateBody());
+        selectedUserIDs.delete(user.id);
+        results.push({ user, ok: true });
+      } catch (error) {
+        results.push({ user, ok: false, error });
+      }
+    }
+    await renderWorkspace();
+    reportBatchResult(action, results);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const reportBatchResult = (action, results) => {
+  const label = batchActionLabel(action);
+  const failed = results.filter((item) => !item.ok);
+  const succeeded = results.length - failed.length;
+  if (!failed.length) {
+    showFeedback(`已${label} ${succeeded} 个用户。`, false);
+    return;
+  }
+  const detail = failed.map((item) => `${item.user.name || item.user.id}（${errorText(item.error)}）`).join("；");
+  showFeedback(`已${label} ${succeeded} 个用户，${failed.length} 个失败：${detail}`, true);
 };
 
 const closeAppend = () => {
@@ -3245,6 +3351,29 @@ if (detailPanel) {
     markSelectedCards();
   });
 }
+if (detailSelectAll) {
+  detailSelectAll.addEventListener("change", () => {
+    const listen = listensCache.find((item) => item && item.id === openListenID);
+    const users = (listen && listen.users) || [];
+    if (detailSelectAll.checked) {
+      users.forEach((user) => {
+        if (user) selectedUserIDs.add(user.id);
+      });
+    } else {
+      selectedUserIDs.clear();
+    }
+    if (detailUsers) {
+      detailUsers.querySelectorAll(".account-select").forEach((box) => {
+        const article = box.closest(".account");
+        box.checked = Boolean(article) && selectedUserIDs.has(article.dataset.id);
+      });
+    }
+    syncBatchActions();
+  });
+}
+if (detailBatchEnable) detailBatchEnable.addEventListener("click", (event) => batchMutateUsers("enable", event.currentTarget));
+if (detailBatchDisable) detailBatchDisable.addEventListener("click", (event) => batchMutateUsers("disable", event.currentTarget));
+if (detailBatchDelete) detailBatchDelete.addEventListener("click", (event) => batchMutateUsers("delete", event.currentTarget));
 if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
 if (qrCopy) {
   qrCopy.addEventListener("click", async () => {

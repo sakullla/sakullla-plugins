@@ -824,6 +824,33 @@
   margin-left: auto;
 }
 
+.account-batch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+  margin-bottom: var(--ui-space-3);
+}
+
+.account-batch__all {
+  min-height: 0;
+  padding: 0;
+}
+
+.account-batch__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1);
+  margin-left: auto;
+}
+
+.account-select {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--ui-primary);
+}
+
 .share-strip {
   display: flex;
   align-items: center;
