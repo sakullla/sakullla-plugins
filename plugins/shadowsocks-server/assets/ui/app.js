@@ -2304,11 +2304,26 @@ const renderRouting = (routing, routeStatus = []) => {
 
       const status = document.createElement("td");
       status.dataset.label = "状态";
-      status.append(renderStatusPill(upstream.enabled ? "启用" : "停用", upstream.enabled));
+      const statusWrap = document.createElement("div");
+      statusWrap.className = "route-status";
+      statusWrap.append(renderStatusPill(upstream.enabled ? "启用" : "停用", upstream.enabled));
+      const testResult = document.createElement("span");
+      testResult.className = "ui-help-text route-status__hint route-test-result";
+      testResult.dataset.upstreamTest = upstream.id;
+      testResult.hidden = true;
+      statusWrap.append(testResult);
+      status.append(statusWrap);
 
       const actions = document.createElement("td");
       actions.className = "ui-table__actions";
       actions.dataset.label = "操作";
+      const probe = document.createElement("button");
+      probe.type = "button";
+      probe.className = "ui-btn ui-btn--ghost ui-btn--sm";
+      probe.textContent = "测试";
+      probe.setAttribute("aria-label", `测试上游 ${upstream.id} 连通性`);
+      probe.title = `从当前节点探测上游 ${upstream.id}`;
+      probe.onclick = (event) => testUpstream(upstream.id, event.currentTarget);
       const edit = document.createElement("button");
       edit.type = "button";
       edit.className = "ui-btn ui-btn--ghost ui-btn--sm";
@@ -2327,7 +2342,7 @@ const renderRouting = (routing, routeStatus = []) => {
       remove.disabled = refs.total > 0;
       remove.title = refs.total ? "仍被分流规则或默认出口引用，先改掉引用再删除" : `删除上游 ${upstream.id}`;
       remove.onclick = (event) => mutateUpstream(upstream.id, "delete", event.currentTarget);
-      actions.append(edit, toggle, remove);
+      actions.append(probe, edit, toggle, remove);
 
       row.append(identity, address, capability, status, actions);
       upstreamList.append(row);
@@ -2570,6 +2585,49 @@ const removeRoute = async (index, control = null) => {
   } catch (error) {
     routingCache.rules = previous;
     renderRouting(routingCache);
+    showStatus(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const UPSTREAM_TEST_LABELS = {
+  "tcp-unsupported": "仅 UDP 上游不支持 TCP 探测",
+  "upstream-auth-failed": "认证失败：密钥或加密方式与上游不匹配",
+  "upstream-protocol-error": "协议错误：上游未返回有效的 Shadowsocks 响应",
+  "upstream-timeout": "连接上游超时",
+  "upstream-unavailable": "上游凭据或配置不可用",
+  "upstream-connection-failed": "无法连接到上游地址",
+  "agent-offline": "节点离线，无法发起探测",
+  "probe-failed": "探测未能完成",
+};
+
+const showUpstreamTestResult = (id, message, isError) => {
+  const node = upstreamList ? upstreamList.querySelector(`[data-upstream-test="${CSS.escape(id)}"]`) : null;
+  if (!node) return;
+  node.hidden = !message;
+  node.textContent = message || "";
+  node.dataset.error = isError ? "true" : "false";
+};
+
+const testUpstream = async (id, control = null) => {
+  if (busy) return;
+  setBusy(true, control, "测试中…");
+  showUpstreamTestResult(id, "正在从节点探测上游…", false);
+  try {
+    const payload = await sendPluginJSON(`api/upstreams/${encodeURIComponent(id)}/test`, { agent_id: selectedAgentID });
+    const result = payload.test || {};
+    if (result.reachable) {
+      const latency = Number.isFinite(result.rtt_ms) ? `，往返约 ${result.rtt_ms} ms` : "";
+      showUpstreamTestResult(id, `可达${latency}`, false);
+      showStatus(`上游「${id}」从该节点可达${latency}。`, false);
+      return;
+    }
+    const label = UPSTREAM_TEST_LABELS[result.failure] || result.failure || "不可达";
+    showUpstreamTestResult(id, label, true);
+    showStatus(`上游「${id}」不可达：${label}`, true);
+  } catch (error) {
+    showUpstreamTestResult(id, errorText(error, "测试失败"), true);
     showStatus(errorText(error), true);
   } finally {
     setBusy(false);

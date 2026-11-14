@@ -95,6 +95,19 @@ the existing credential. Select a classification present in the source catalog;
 a different classification. Bind the dataset to each target node before
 applying the rule.
 
+The "测试" action (`POST /api/upstreams/{id}/test`, with `agent_id` in the
+request body or query) asks the selected Agent to run a read-only
+connectivity probe through the `upstream.test` plugin call. The Agent dials
+the saved endpoint over Host-managed networking, performs a Shadowsocks TCP
+handshake with the locally resolved scoped credential, and reports
+reachability, an optional round-trip time, and a stable failure code such as
+`upstream-auth-failed`, `upstream-timeout`, `upstream-connection-failed`,
+`upstream-protocol-error`, `upstream-unavailable`, `tcp-unsupported`,
+`agent-offline`, or `probe-failed`. UDP-only upstreams report
+`tcp-unsupported` and disabled upstreams stay testable. The probe never
+mutates saved routing, sessions, or listeners, and the request and result
+carry only the opaque secret reference, never key material.
+
 Saving routing commits the desired configuration independently of node
 availability. A failed or removed node cannot roll back healthy nodes. The
 reconciler compares routing digests as well as bound ports and retries pending

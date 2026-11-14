@@ -496,6 +496,16 @@ func (runtime *hostCapabilityRuntime) Stop(ctx context.Context, agentID string, 
 	return nil
 }
 
+// TestUpstream routes a read-only connectivity probe for one saved upstream
+// to the target Agent. The request carries only the opaque secret reference;
+// the Agent resolves the material locally and the result contains no secret
+// material.
+func (runtime *hostCapabilityRuntime) TestUpstream(ctx context.Context, agentID string, upstream Upstream) (upstreamTestResult, error) {
+	result := upstreamTestResult{AgentID: agentID, UpstreamID: upstream.ID}
+	err := runtime.pluginCall(ctx, agentID, pluginCallUpstreamTest, upstreamTestRequest{AgentID: agentID, Upstream: upstream}, &result)
+	return result, err
+}
+
 func (runtime *hostCapabilityRuntime) LiveListens(agentID string) []ListenPortStatus {
 	if runtime == nil {
 		return nil

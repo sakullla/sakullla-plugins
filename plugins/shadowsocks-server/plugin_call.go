@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
@@ -22,6 +23,7 @@ const (
 	pluginCallListenReport = "listen.report"
 	pluginCallListenApply  = "listen.apply"
 	pluginCallListenStop   = "listen.stop"
+	pluginCallUpstreamTest = "upstream.test"
 )
 
 var _ pluginsdk.RPCPluginCaller = (*Controller)(nil)
@@ -186,6 +188,8 @@ func (c *Controller) Call(ctx context.Context, generation, name string, payload 
 		return exec.apply(ctx, payload)
 	case pluginCallListenStop:
 		return exec.stop(payload)
+	case pluginCallUpstreamTest:
+		return exec.testUpstream(ctx, payload)
 	default:
 		return nil, fmt.Errorf("%w: plugin call name %q is unknown", ErrTypedHandlesUnavailable, name)
 	}
@@ -921,6 +925,177 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 		if _, err := udp.WriteTo(sealed, clientAddr); err != nil {
 			return
 		}
+	}
+}
+
+const (
+	upstreamProbeDialTimeout   = 5 * time.Second
+	upstreamProbeStreamTimeout = 3 * time.Second
+)
+
+// upstreamTestRequest carries the saved upstream to probe on one Agent. The
+// secret reference is opaque; the Agent resolves the material locally and the
+// result never echoes any key material back.
+type upstreamTestRequest struct {
+	AgentID  string   `json:"agent_id"`
+	Upstream Upstream `json:"upstream"`
+}
+
+// upstreamTestResult is the classified probe outcome for one upstream.
+// Failure reuses the upstreamFailureReason codes plus tcp-unsupported; the
+// control plane adds agent-offline/probe-failed when the call itself fails.
+type upstreamTestResult struct {
+	AgentID    string `json:"agent_id"`
+	UpstreamID string `json:"upstream_id"`
+	Reachable  bool   `json:"reachable"`
+	RTTMillis  int64  `json:"rtt_ms,omitempty"`
+	Failure    string `json:"failure,omitempty"`
+}
+
+func (exec *listenExecutor) testUpstream(ctx context.Context, payload []byte) ([]byte, error) {
+	agentID, err := agentIDFromListenPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	var request upstreamTestRequest
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return nil, errors.New("listen payload is invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("listen payload is invalid")
+	}
+	result := upstreamTestResult{AgentID: agentID, UpstreamID: request.Upstream.ID}
+	exec.probeUpstream(ctx, request.Upstream, &result)
+	return json.Marshal(result)
+}
+
+// probeUpstream performs a read-only connectivity check against one saved
+// upstream: a managed TCP dial followed by a Shadowsocks handshake addressed
+// back at the upstream's own listener. A reachable upstream that accepted the
+// handshake keeps the stream open while it dials the probe target, so a held
+// stream proves acceptance without depending on any third-party endpoint; a
+// credential or method mismatch is rejected by an early close and maps to the
+// stable upstream-auth-failed code. The probe never touches listen bindings,
+// sessions, or stored configuration, and disabled upstreams stay testable.
+func (exec *listenExecutor) probeUpstream(ctx context.Context, upstream Upstream, result *upstreamTestResult) {
+	if !upstream.TCP {
+		result.Failure = "tcp-unsupported"
+		return
+	}
+	exec.mu.Lock()
+	resolver, managed := exec.secrets, exec.managed
+	exec.mu.Unlock()
+	var dialer networkDialer = &nativeNetworkDialer{net.Dialer{Timeout: upstreamProbeDialTimeout}}
+	if managed != nil {
+		resolver = managed
+		dialer = managedNetworkDialer{runtime: managed}
+	}
+	valid := resolver != nil && refPattern.MatchString(upstream.ID) && refPattern.MatchString(upstream.SecretRef) &&
+		refPattern.MatchString(upstream.SecretVersion) && SupportedMethod(upstream.Method) &&
+		strings.TrimSpace(upstream.Host) != "" && upstream.Port >= 1 && upstream.Port <= 65535
+	if !valid {
+		result.Failure = "upstream-unavailable"
+		return
+	}
+	engine, err := upstreamProbeEngine(ctx, resolver, upstream)
+	if err != nil {
+		result.Failure = "upstream-unavailable"
+		return
+	}
+	started := time.Now()
+	dialCtx, cancel := context.WithTimeout(ctx, upstreamProbeDialTimeout)
+	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(upstream.Host, strconv.Itoa(upstream.Port)))
+	cancel()
+	if err != nil {
+		result.Failure = upstreamFailureReason(err)
+		return
+	}
+	// A successful dial measured a real round trip; failures stay at zero so
+	// rtt_ms is omitted rather than reporting a time-to-error as latency.
+	result.RTTMillis = time.Since(started).Milliseconds()
+	defer conn.Close()
+	salt := make([]byte, engine.SaltSize())
+	if _, err := rand.Read(salt); err != nil {
+		engine.Destroy()
+		result.Failure = "upstream-unavailable"
+		return
+	}
+	var padding []byte
+	if engine.modern {
+		padding = []byte{0}
+	}
+	wire, err := engine.SealTCPRequest(salt, net.JoinHostPort(upstream.Host, strconv.Itoa(upstream.Port)), nil, time.Now(), padding)
+	if err != nil {
+		clear(salt)
+		engine.Destroy()
+		result.Failure = upstreamFailureReason(err)
+		return
+	}
+	session, err := newTCPClientSession(engine, salt)
+	clear(salt)
+	if err != nil {
+		engine.Destroy()
+		result.Failure = upstreamFailureReason(err)
+		return
+	}
+	defer session.Close()
+	if _, err := conn.Write(wire); err != nil {
+		result.Failure = upstreamFailureReason(err)
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(upstreamProbeStreamTimeout))
+	if _, err := session.OpenPayload(conn, time.Now()); err != nil {
+		if upstreamProbeHeld(err) {
+			result.Reachable = true
+			return
+		}
+		result.Failure = upstreamProbeFailure(err)
+		return
+	}
+	result.Reachable = true
+	result.RTTMillis = time.Since(started).Milliseconds()
+}
+
+func upstreamProbeEngine(ctx context.Context, resolver SecretVerifier, upstream Upstream) (*ProtocolEngine, error) {
+	if resolver == nil {
+		return nil, ErrRouteUpstreamUnavailable
+	}
+	material, err := resolver.Resolve(ctx, upstream.SecretRef, upstream.SecretVersion)
+	if err != nil {
+		return nil, ErrRouteUpstreamUnavailable
+	}
+	engine, err := NewProtocolEngine(upstream.Method, material)
+	clear(material)
+	if err != nil {
+		return nil, ErrRouteUpstreamUnavailable
+	}
+	return engine, nil
+}
+
+// upstreamProbeHeld reports a read that ended because the upstream kept the
+// stream open past the response window: the handshake was accepted, so the
+// probe counts as reachable.
+func upstreamProbeHeld(err error) bool {
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || isManagedDeadline(err)
+}
+
+// upstreamProbeFailure maps a handshake or first-response failure to the
+// stable reason codes. An EOF or reset while waiting for the first response
+// means the peer dropped the stream after receiving the handshake, which is
+// the signature of a credential or method mismatch.
+func upstreamProbeFailure(err error) string {
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET):
+		return "upstream-auth-failed"
+	default:
+		return upstreamFailureReason(err)
 	}
 }
 

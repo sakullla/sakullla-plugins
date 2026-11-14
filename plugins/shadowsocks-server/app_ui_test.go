@@ -32,6 +32,9 @@ type uiListenHost struct {
 	hideReportNode bool
 	routingDigest  string
 	routes         []RouteStatus
+	tests          []upstreamTestRequest
+	testResult     upstreamTestResult
+	testErr        error
 }
 
 func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
@@ -83,6 +86,21 @@ func (h *uiListenHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, t
 			h.live = kept
 		}
 		return copyHostResult(listenApplyResult{Accepted: true, AgentID: request.AgentID, Listens: append([]ListenPortStatus(nil), h.live...)}, target)
+	case pluginCallUpstreamTest:
+		var body upstreamTestRequest
+		_ = json.Unmarshal(request.Payload, &body)
+		h.tests = append(h.tests, body)
+		if h.testErr != nil {
+			return h.testErr
+		}
+		result := h.testResult
+		if result.AgentID == "" {
+			result.AgentID = request.AgentID
+		}
+		if result.UpstreamID == "" {
+			result.UpstreamID = body.Upstream.ID
+		}
+		return copyHostResult(result, target)
 	default:
 		return ErrTypedHandlesUnavailable
 	}
@@ -823,5 +841,140 @@ func TestUpstreamDialogSIP002ImportWiring(t *testing.T) {
 	}
 	if !strings.Contains(source, "method: parsed.method") || !strings.Contains(source, "password: parsed.password") {
 		t.Fatal("prefill must cover method/password alongside host/port")
+	}
+}
+
+// upstreamTestFixture mirrors routingRefreshFixture: the control plane needs
+// the managed runtime to mint opaque upstream references.
+func upstreamTestFixture(t *testing.T, host *uiListenHost) *Controller {
+	t.Helper()
+	if host == nil {
+		host = &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	}
+	managed := newHostCapabilityRuntime(&managedRuntimeFake{})
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a", ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: &uiMemoryListenState{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(t.Context(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-a", RequiredFeatures: supportedFeatures()}); err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(Configuration{Generation: "provider"})
+	if response := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a", Config: wire}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	return controller
+}
+
+func TestControlAPIUpstreamTestRoutesProbeWithoutSecrets(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := upstreamTestFixture(t, host)
+	created := uiJSON(t, controller, http.MethodPost, "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret-material","tcp":true,"udp":true}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	upstream := decodeListenAPI(t, created).Routing.Upstreams[0]
+	if upstream.SecretRef == "" || strings.Contains(upstream.SecretRef, "edge-secret-material") {
+		t.Fatalf("upstream=%+v", upstream)
+	}
+	host.mu.Lock()
+	host.testResult = upstreamTestResult{Reachable: true, RTTMillis: 12}
+	host.mu.Unlock()
+
+	response := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{"agent_id":"agent-1"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("test=%d %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("edge-secret-material")) {
+		t.Fatalf("test response echoed secret material: %s", response.Body.String())
+	}
+	payload := decodeListenAPI(t, response)
+	if payload.Test == nil || !payload.Test.Reachable || payload.Test.RTTMillis != 12 || payload.Test.AgentID != "agent-1" || payload.Test.UpstreamID != "edge" || payload.Test.Failure != "" {
+		t.Fatalf("test=%+v", payload.Test)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.tests) != 1 {
+		t.Fatalf("probe calls=%d", len(host.tests))
+	}
+	sent, err := json.Marshal(host.tests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sent, []byte("edge-secret-material")) || !bytes.Contains(sent, []byte(upstream.SecretRef)) {
+		t.Fatalf("probe request=%s", sent)
+	}
+	if host.tests[0].Upstream.ID != "edge" || !host.tests[0].Upstream.Enabled {
+		t.Fatalf("probe upstream=%+v", host.tests[0].Upstream)
+	}
+}
+
+func TestControlAPIUpstreamTestClassifiesOfflineAndStaysReadOnly(t *testing.T) {
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller := upstreamTestFixture(t, host)
+	created := uiJSON(t, controller, http.MethodPost, "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-secret-material","tcp":true,"udp":true}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	host.mu.Lock()
+	host.testErr = ErrAgentOffline
+	host.mu.Unlock()
+	offline := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{"agent_id":"agent-1"}`)
+	if offline.Code != http.StatusOK {
+		t.Fatalf("offline=%d %s", offline.Code, offline.Body.String())
+	}
+	payload := decodeListenAPI(t, offline)
+	if payload.Test == nil || payload.Test.Reachable || payload.Test.Failure != "agent-offline" {
+		t.Fatalf("offline test=%+v", payload.Test)
+	}
+	host.mu.Lock()
+	host.testErr = errors.New("plugin.call transport lost")
+	host.mu.Unlock()
+	failed := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{"agent_id":"agent-1"}`)
+	payload = decodeListenAPI(t, failed)
+	if payload.Test == nil || payload.Test.Failure != "probe-failed" {
+		t.Fatalf("call failure test=%+v", payload.Test)
+	}
+	host.mu.Lock()
+	host.testErr = nil
+	host.testResult = upstreamTestResult{Reachable: true, RTTMillis: 4}
+	host.mu.Unlock()
+	// A disabled upstream stays testable and the probe does not re-enable it.
+	if disabled := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/disable", `{}`); disabled.Code != http.StatusOK {
+		t.Fatalf("disable=%d %s", disabled.Code, disabled.Body.String())
+	}
+	retested := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{"agent_id":"agent-1"}`)
+	payload = decodeListenAPI(t, retested)
+	if payload.Test == nil || !payload.Test.Reachable {
+		t.Fatalf("disabled test=%+v", payload.Test)
+	}
+	get := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, "/api/routing", ""))
+	if get.Routing == nil || len(get.Routing.Upstreams) != 1 || get.Routing.Upstreams[0].Enabled {
+		t.Fatalf("test mutated routing=%+v", get.Routing)
+	}
+	host.mu.Lock()
+	probes := len(host.tests)
+	host.mu.Unlock()
+	if probes != 3 {
+		t.Fatalf("probe calls=%d", probes)
+	}
+	for _, rejected := range []*httptest.ResponseRecorder{
+		uiJSON(t, controller, http.MethodGet, "/api/upstreams/edge/test", ""),
+		uiJSON(t, controller, http.MethodPost, "/api/upstreams/ghost/test", `{"agent_id":"agent-1"}`),
+		uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{}`),
+		uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test", `{"agent_id":`),
+	} {
+		if rejected.Code == http.StatusOK {
+			t.Fatalf("rejected request returned 200: %s", rejected.Body.String())
+		}
+	}
+	// The query-parameter fallback carries the same target node.
+	query := uiJSON(t, controller, http.MethodPost, "/api/upstreams/edge/test?agent_id=agent-2", "")
+	payload = decodeListenAPI(t, query)
+	if payload.Test == nil || payload.Test.AgentID != "agent-2" {
+		t.Fatalf("query fallback=%+v", payload.Test)
 	}
 }

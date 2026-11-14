@@ -397,6 +397,10 @@ func (c *Controller) serveUpstreamItem(writer http.ResponseWriter, request *http
 		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
 		return
 	}
+	if action == "test" {
+		c.serveUpstreamTest(writer, request, id)
+		return
+	}
 	var body upstreamWriteRequest
 	if action == "update" {
 		if err := decodeRoutingWrite(request, &body); err != nil {
@@ -410,6 +414,84 @@ func (c *Controller) serveUpstreamItem(writer http.ResponseWriter, request *http
 		return
 	}
 	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Routing: &routing, Access: readWriteAccess()})
+}
+
+// serveUpstreamTest probes one saved upstream from the selected Agent. The
+// target node comes from the request body (agent_id) or the agent_id query
+// parameter; the probe is read-only against the saved configuration.
+func (c *Controller) serveUpstreamTest(writer http.ResponseWriter, request *http.Request, id string) {
+	var body struct {
+		AgentID string `json:"agent_id"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(request.Body, MaxConfigBytes+1))
+	if err != nil || len(raw) > MaxConfigBytes {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+		return
+	}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
+			return
+		}
+	}
+	agentID := strings.TrimSpace(body.AgentID)
+	if agentID == "" {
+		agentID = strings.TrimSpace(request.URL.Query().Get("agent_id"))
+	}
+	if !validAgentID(agentID) {
+		writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: agentRequiredText})
+		return
+	}
+	result, err := c.testUpstream(request.Context(), id, agentID)
+	if err != nil {
+		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		return
+	}
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Test: result, Access: readWriteAccess()})
+}
+
+// testUpstream routes a read-only connectivity probe for the saved upstream
+// to the selected Agent. Disabled upstreams stay testable because the probe
+// does not depend on routing decisions. An offline node or a failed plugin
+// call degrades to a classified failure in the result instead of an HTTP
+// error, keeping the routing_error-style reporting; saved configuration and
+// in-flight sessions are never touched.
+func (c *Controller) testUpstream(ctx context.Context, id, agentID string) (*upstreamTestResult, error) {
+	if c.listenHost == nil {
+		return nil, ErrExecutionUnavailable
+	}
+	var upstream *Upstream
+	routing := c.directory().Routing
+	for index := range routing.Upstreams {
+		if routing.Upstreams[index].ID == id {
+			upstream = &routing.Upstreams[index]
+			break
+		}
+	}
+	if upstream == nil {
+		return nil, ErrInvalid
+	}
+	result, err := c.listenHost.TestUpstream(ctx, agentID, *upstream)
+	if err != nil {
+		result.Failure = "probe-failed"
+		if errors.Is(err, ErrAgentOffline) {
+			result.Failure = "agent-offline"
+		}
+	}
+	if result.AgentID == "" {
+		result.AgentID = agentID
+	}
+	if result.UpstreamID == "" {
+		result.UpstreamID = upstream.ID
+	}
+	return &result, nil
 }
 
 func (c *Controller) createUpstream(ctx context.Context, body upstreamWriteRequest) (RoutingConfiguration, error) {

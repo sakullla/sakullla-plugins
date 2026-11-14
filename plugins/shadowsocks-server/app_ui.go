@@ -92,6 +92,7 @@ type listenAPIResponse struct {
 	RouteStatus    []RouteStatus         `json:"route_status,omitempty"`
 	RouteSources   []RouteSourceStatus   `json:"route_sources,omitempty"`
 	Refresh        *datasetRefreshReport `json:"refresh,omitempty"`
+	Test           *upstreamTestResult   `json:"test,omitempty"`
 	Error          string                `json:"error,omitempty"`
 	Access         struct {
 		CanRead  bool `json:"can_read"`
@@ -131,7 +132,7 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	}
 	if rest, found := strings.CutPrefix(path, "/api/upstreams/"); found {
 		id, action, cut := strings.Cut(rest, "/")
-		if cut && (action == "enable" || action == "disable" || action == "delete" || action == "update") {
+		if cut && (action == "enable" || action == "disable" || action == "delete" || action == "update" || action == "test") {
 			c.serveUpstreamItem(writer, request, id, action)
 			return true
 		}

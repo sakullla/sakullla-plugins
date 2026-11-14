@@ -553,6 +553,10 @@
   line-height: 1.45;
 }
 
+.route-test-result[data-error="true"] {
+  color: var(--ui-danger-text);
+}
+
 .route-action-cell {
   white-space: nowrap;
 }

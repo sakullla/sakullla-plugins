@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	pluginsdk "github.com/sakullla/nginx-reverse-emby/plugin-sdk/go"
 )
 
 type countingListenBinder struct {
@@ -945,4 +947,309 @@ func decodeListenReport(raw []byte) (ListenReport, error) {
 		return ListenReport{}, err
 	}
 	return report, nil
+}
+
+// serveProbeUpstream accepts TCP connections and answers each valid
+// Shadowsocks handshake with one sealed response. A material mismatch fails
+// the open and closes the stream, mirroring a wrong-credential upstream.
+func serveProbeUpstream(t *testing.T, method, material string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	engine, err := NewProtocolEngine(method, []byte(material))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(engine.Destroy)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+				_, session, err := readTCPHandshake(conn, []*ProtocolEngine{engine})
+				if err != nil || session == nil {
+					return
+				}
+				defer session.Close()
+				salt := make([]byte, engine.SaltSize())
+				if _, err := rand.Read(salt); err != nil {
+					return
+				}
+				wire, err := session.SealResponse(salt, []byte("ok"), time.Now())
+				if err != nil {
+					return
+				}
+				_, _ = conn.Write(wire)
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+func splitProbeAddress(t *testing.T, address string) (string, int) {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host, port
+}
+
+func putProbeSecret(t *testing.T, controller *Controller, ref, version, material string) {
+	t.Helper()
+	issued, ok := controller.listenExec.secrets.(*issuedSecrets)
+	if !ok {
+		t.Fatal("listen executor has no issued secret store")
+	}
+	issued.put(ref, version, material)
+}
+
+func callUpstreamTest(t *testing.T, controller *Controller, upstream map[string]any) ([]byte, error) {
+	t.Helper()
+	return callListen(t, controller, pluginCallUpstreamTest, map[string]any{
+		"agent_id": "agent-1",
+		"upstream": upstream,
+	})
+}
+
+func TestPluginCallUpstreamTestReachableUpstream(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		method string
+	}{
+		{name: "legacy", method: "aes-256-gcm"},
+		{name: "ss2022", method: "2022-blake3-aes-128-gcm"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			material := "edge-secret-material"
+			if strings.HasPrefix(test.method, "2022-") {
+				mapped, err := MapSS2022PSK(test.method, material)
+				if err != nil {
+					t.Fatal(err)
+				}
+				material = mapped
+			}
+			host, port := splitProbeAddress(t, serveProbeUpstream(t, test.method, material))
+			controller := newCallController(t, nil)
+			putProbeSecret(t, controller, "secret/edge", "v1", material)
+			// A disabled upstream stays testable: the probe only needs the
+			// saved endpoint and credential, not a routing decision.
+			raw, err := callUpstreamTest(t, controller, map[string]any{
+				"id": "edge", "host": host, "port": port, "method": test.method,
+				"secret_ref": "secret/edge", "secret_version": "v1",
+				"tcp": true, "udp": false, "enabled": false,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), material) {
+				t.Fatalf("probe result leaked secret material: %s", raw)
+			}
+			var result upstreamTestResult
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.Reachable || result.Failure != "" || result.AgentID != "agent-1" || result.UpstreamID != "edge" {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestPluginCallUpstreamTestHeldStreamCountsReachable(t *testing.T) {
+	t.Parallel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Discard whatever the probe sends and keep the stream open; a held
+		// stream after a complete handshake proves the upstream accepted it.
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	host, port := splitProbeAddress(t, listener.Addr().String())
+	controller := newCallController(t, nil)
+	putProbeSecret(t, controller, "secret/edge", "v1", "edge-secret-material")
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": host, "port": port, "method": "aes-256-gcm",
+		"secret_ref": "secret/edge", "secret_version": "v1", "tcp": true, "udp": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Reachable || result.Failure != "" {
+		t.Fatalf("held stream result=%+v", result)
+	}
+}
+
+func TestPluginCallUpstreamTestWrongPasswordClassifiesAuth(t *testing.T) {
+	t.Parallel()
+	host, port := splitProbeAddress(t, serveProbeUpstream(t, "aes-256-gcm", "server-side-secret"))
+	controller := newCallController(t, nil)
+	putProbeSecret(t, controller, "secret/edge", "v1", "client-side-mismatch")
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": host, "port": port, "method": "aes-256-gcm",
+		"secret_ref": "secret/edge", "secret_version": "v1", "tcp": true, "udp": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Reachable || result.Failure != "upstream-auth-failed" {
+		t.Fatalf("wrong password result=%+v", result)
+	}
+}
+
+func TestPluginCallUpstreamTestUnreachablePortClassifiesConnection(t *testing.T) {
+	t.Parallel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port := splitProbeAddress(t, listener.Addr().String())
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	controller := newCallController(t, nil)
+	putProbeSecret(t, controller, "secret/edge", "v1", "edge-secret-material")
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": host, "port": port, "method": "aes-256-gcm",
+		"secret_ref": "secret/edge", "secret_version": "v1", "tcp": true, "udp": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Reachable || result.Failure != "upstream-connection-failed" {
+		t.Fatalf("unreachable port result=%+v", result)
+	}
+}
+
+func TestPluginCallUpstreamTestUDPOnlyReturnsTCPUnsupported(t *testing.T) {
+	t.Parallel()
+	controller := newCallController(t, nil)
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": "203.0.113.10", "port": 8388, "method": "aes-256-gcm",
+		"secret_ref": "secret/edge", "secret_version": "v1", "tcp": false, "udp": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Reachable || result.Failure != "tcp-unsupported" {
+		t.Fatalf("udp-only result=%+v", result)
+	}
+}
+
+func TestPluginCallUpstreamTestValidation(t *testing.T) {
+	t.Parallel()
+	controller := newCallController(t, nil)
+	if _, err := callListen(t, controller, pluginCallUpstreamTest, map[string]any{
+		"upstream": map[string]any{"id": "edge", "host": "203.0.113.10", "port": 8388, "method": "aes-256-gcm", "secret_ref": "secret/edge", "secret_version": "v1", "tcp": true},
+	}); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("missing agent err=%v", err)
+	}
+	if _, err := callListen(t, controller, pluginCallUpstreamTest, nil); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("empty payload err=%v", err)
+	}
+	if _, err := controller.Call(context.Background(), "generation-1", pluginCallUpstreamTest, []byte(`{"agent_id":`)); err == nil {
+		t.Fatal("malformed payload accepted")
+	}
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": "203.0.113.10", "port": 8388, "method": "aes-256-gcm",
+		"secret_ref": "", "secret_version": "", "tcp": true, "udp": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Reachable || result.Failure != "upstream-unavailable" {
+		t.Fatalf("missing credential result=%+v", result)
+	}
+}
+
+// A production Agent dials through the Host managed-network capability, so
+// the probe must send the request over managedNetworkDialer and never put
+// plaintext material on the wire.
+func TestPluginCallUpstreamTestUsesManagedDial(t *testing.T) {
+	t.Parallel()
+	fake := &managedRuntimeFake{}
+	runtime := newHostCapabilityRuntime(fake)
+	if err := runtime.bind("instance-a", "generation-a"); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.secrets = map[string][]byte{issuedSecretKey("secret/edge", "v1"): []byte("edge-secret-material")}
+	fake.mu.Unlock()
+	controller := newCallController(t, nil)
+	controller.listenExec.managed = runtime
+	raw, err := callUpstreamTest(t, controller, map[string]any{
+		"id": "edge", "host": "203.0.113.10", "port": 8388, "method": "aes-256-gcm",
+		"secret_ref": "secret/edge", "secret_version": "v1", "tcp": true, "udp": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result upstreamTestResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	// The fake closes every managed stream before the first response, which is
+	// the abrupt-drop signature the probe maps to a credential rejection.
+	if result.Reachable || result.Failure != "upstream-auth-failed" {
+		t.Fatalf("managed probe result=%+v", result)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	dialed := false
+	for _, request := range fake.network {
+		if request.Action == pluginsdk.ManagedNetworkDial && request.Endpoint != nil && request.Endpoint.Host == "203.0.113.10" && request.Endpoint.Port == 8388 {
+			dialed = true
+		}
+	}
+	if !dialed {
+		t.Fatalf("managed dial missing from network calls: %+v", fake.network)
+	}
+	joined := []byte{}
+	for _, value := range fake.writes {
+		joined = append(joined, value...)
+	}
+	if len(joined) == 0 || bytes.Contains(joined, []byte("edge-secret-material")) {
+		t.Fatalf("managed wire=%d bytes leaked=%v", len(joined), bytes.Contains(joined, []byte("edge-secret-material")))
+	}
 }
