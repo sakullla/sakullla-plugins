@@ -126,6 +126,14 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 		c.serveRoutingRefresh(writer, request)
 		return true
 	}
+	if path == "/api/routing/export" {
+		c.serveRoutingExport(writer, request)
+		return true
+	}
+	if path == "/api/routing/import" {
+		c.serveRoutingImport(writer, request)
+		return true
+	}
 	if path == "/api/upstreams" {
 		c.serveUpstreamCollection(writer, request)
 		return true

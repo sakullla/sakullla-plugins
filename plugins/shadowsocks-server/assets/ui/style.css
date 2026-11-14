@@ -429,6 +429,33 @@
   color: var(--ui-danger-text);
 }
 
+.routing-transfer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+  margin-left: auto;
+}
+
+.route-import-upstreams {
+  display: grid;
+  gap: var(--ui-space-3);
+  margin-top: var(--ui-space-3);
+}
+
+.route-import-upstream__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+}
+
+.route-import-upstream__target {
+  font-family: var(--ui-font-mono, monospace);
+  font-size: var(--ui-text-xs, 0.75rem);
+  color: var(--ui-text-secondary);
+}
+
 .routing-presets {
   display: flex;
   align-items: center;

@@ -108,6 +108,23 @@ reachability, an optional round-trip time, and a stable failure code such as
 mutates saved routing, sessions, or listeners, and the request and result
 carry only the opaque secret reference, never key material.
 
+The "导出配置" action (`GET /api/routing/export`) downloads the routing
+configuration as a JSON document: the ordered rules, the default action,
+and each upstream's non-secret fields (id, host, port, method, enabled,
+tcp, udp). The file never carries secret references, secret versions, or
+key material, so it is safe to keep as a backup or move between
+instances. The "导入配置" action (`POST /api/routing/import`) validates
+the whole file — document version, field shapes, the 16-upstream and
+64-rule limits, and every rule's upstream reference — before replacing
+the current configuration through the same `replaceRouting` commit and
+per-node apply path. Each imported upstream needs its connection
+password re-entered, except that a same-ID existing upstream may reuse
+its stored scoped credential when that material still fits the imported
+method. A missing or incompatible credential fails with a readable
+per-upstream message and leaves the running configuration untouched;
+secrets minted for a rejected attempt are revoked, and secrets orphaned
+by a successful import are revoked after commit.
+
 Saving routing commits the desired configuration independently of node
 availability. A failed or removed node cannot roll back healthy nodes. The
 reconciler compares routing digests as well as bound ports and retries pending

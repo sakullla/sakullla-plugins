@@ -123,6 +123,16 @@ const upstreamDialogDesc = document.querySelector("#upstream-dialog-desc");
 const upstreamPasswordHint = document.querySelector("#upstream-password-hint");
 const upstreamImportInput = document.querySelector("#upstream-import");
 const upstreamImportHint = document.querySelector("#upstream-import-hint");
+const routeExportBtn = document.querySelector("#route-export");
+const openRouteImportBtn = document.querySelector("#open-route-import");
+const routeImportDialog = document.querySelector("#route-import-dialog");
+const routeImportForm = document.querySelector("#route-import-form");
+const routeImportFile = document.querySelector("#route-import-file");
+const routeImportError = document.querySelector("#route-import-error");
+const routeImportSummary = document.querySelector("#route-import-summary");
+const routeImportList = document.querySelector("#route-import-upstreams");
+const routeImportCancel = document.querySelector("#route-import-cancel");
+const routeImportSubmit = document.querySelector("#route-import-submit");
 
 const LISTEN_FILTER_MIN = 4;
 
@@ -627,7 +637,7 @@ const setBusy = (next, control = null, label = "") => {
     busyScope = null;
   }
   // 只锁住原本可用的控件，解锁时原样还原；本身禁用的（如首条规则的上移）保持禁用。
-  const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel, upstreamDialog, routeDialog].filter(Boolean);
+  const roots = [workspaceNode, contextNode, createDialog, appendDialog, detailPanel, upstreamDialog, routeDialog, routeImportDialog].filter(Boolean);
   roots.forEach((root) => {
     root.querySelectorAll("button, input, textarea, select").forEach((node) => {
       if (node === agentSelect) return;
@@ -2233,10 +2243,42 @@ const closeRouteModal = () => {
 
 const requestCloseRouteModal = () => requestCloseDraft(routeDialog, closeRouteModal);
 
+let routeImportDocument = null;
+
+const resetRouteImportDialog = () => {
+  routeImportDocument = null;
+  showModalError(routeImportError, "");
+  clearFormErrors(routeImportForm);
+  if (routeImportForm) routeImportForm.reset();
+  if (routeImportList) routeImportList.replaceChildren();
+  if (routeImportSummary) {
+    routeImportSummary.hidden = true;
+    routeImportSummary.textContent = "";
+  }
+  if (routeImportSubmit) routeImportSubmit.disabled = true;
+};
+
+const closeRouteImportModal = () => {
+  releaseDraft(routeImportDialog);
+  resetRouteImportDialog();
+  if (routeImportDialog && routeImportDialog.open) routeImportDialog.close();
+};
+
+const requestCloseRouteImportModal = () => requestCloseDraft(routeImportDialog, closeRouteImportModal);
+
+const openRouteImportModal = () => {
+  if (!routeImportDialog) return;
+  resetRouteImportDialog();
+  trackDraft(routeImportDialog, routeImportForm, closeRouteImportModal);
+  if (routeImportDialog.open) routeImportDialog.close();
+  if (typeof routeImportDialog.showModal === "function") routeImportDialog.showModal();
+};
+
 bindDraftDialog(createDialog, createForm, closeCreate);
 bindDraftDialog(appendDialog, appendForm, closeAppend);
 bindDraftDialog(upstreamDialog, upstreamForm, closeUpstreamModal);
 bindDraftDialog(routeDialog, routeForm, closeRouteModal);
+bindDraftDialog(routeImportDialog, routeImportForm, closeRouteImportModal);
 
 const tableCell = (text, className = "", label = "") => {
   const cell = document.createElement("td");
@@ -2543,6 +2585,180 @@ const refreshDatasets = async (control = null) => {
 };
 
 if (routeRefreshBtn) routeRefreshBtn.addEventListener("click", (event) => refreshDatasets(event.currentTarget));
+
+const ROUTING_EXPORT_VERSION = 1;
+const ROUTING_EXPORT_FILENAME = "shadowsocks-routing.json";
+
+// The export endpoint answers a plain JSON document (not the API envelope);
+// the browser turns it into a download. It never contains secret fields.
+const exportRouting = async (control = null) => {
+  if (busy) return;
+  setBusy(true, control, "导出中…");
+  try {
+    const document_ = await panelJSON("api/routing/export");
+    const blob = new Blob([JSON.stringify(document_, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = ROUTING_EXPORT_FILENAME;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    showStatus("已导出分流配置（文件不含任何密钥）。", false);
+  } catch (error) {
+    showStatus(errorText(error, "导出失败，请稍后重试。"), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+// 同 ID 的现有上游可沿用已保存凭据；其余上游必须补填连接密钥。
+const routeImportReusable = (id) => (routingCache.upstreams || []).some((item) => item && item.id === id);
+
+const renderRouteImportUpstreams = (document_) => {
+  if (!routeImportList) return;
+  routeImportList.replaceChildren();
+  (document_.upstreams || []).forEach((upstream) => {
+    const reusable = routeImportReusable(upstream.id);
+    const row = document.createElement("div");
+    row.className = "ui-field route-import-upstream";
+    const head = document.createElement("div");
+    head.className = "route-import-upstream__head";
+    const title = document.createElement("span");
+    title.className = "ui-label";
+    title.textContent = `上游「${upstream.id}」连接密钥`;
+    const target = document.createElement("span");
+    target.className = "route-import-upstream__target";
+    target.textContent = `${upstream.host}:${upstream.port}`;
+    head.append(title, target);
+    if (reusable) {
+      const badge = document.createElement("span");
+      badge.className = "ui-badge ui-badge--info";
+      badge.textContent = "可沿用现有凭据";
+      head.append(badge);
+    }
+    const input = document.createElement("input");
+    input.className = "ui-input";
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.dataset.upstreamId = upstream.id;
+    input.required = !reusable;
+    input.placeholder = reusable ? "留空则沿用现有凭据" : "必填：该上游的连接密钥";
+    const hint = document.createElement("span");
+    hint.className = "ui-help-text";
+    hint.textContent = reusable
+      ? "同 ID 上游已存在，留空将复用已保存的凭据；填写则以新密钥替换。"
+      : "导出的文件不含密钥，导入时必须补填该上游的连接密钥。";
+    row.append(head, input, hint);
+    routeImportList.append(row);
+  });
+};
+
+const readRouteImportFile = async () => {
+  routeImportDocument = null;
+  if (routeImportSubmit) routeImportSubmit.disabled = true;
+  if (routeImportSummary) {
+    routeImportSummary.hidden = true;
+    routeImportSummary.textContent = "";
+  }
+  if (routeImportList) routeImportList.replaceChildren();
+  clearFieldError(routeImportFile);
+  const file = routeImportFile && routeImportFile.files ? routeImportFile.files[0] : null;
+  if (!file) return;
+  let document_ = null;
+  try {
+    document_ = JSON.parse(await file.text());
+  } catch (_error) {
+    markFieldError(routeImportFile, "文件不是有效的 JSON，请选择本页面导出的配置文件。");
+    return;
+  }
+  const valid =
+    document_ &&
+    document_.version === ROUTING_EXPORT_VERSION &&
+    Array.isArray(document_.rules) &&
+    Array.isArray(document_.upstreams) &&
+    typeof document_.default_action === "string" &&
+    document_.upstreams.every((item) => item && typeof item.id === "string" && typeof item.host === "string" && typeof item.method === "string");
+  if (!valid) {
+    markFieldError(routeImportFile, "文件版本不兼容或结构不完整，请重新导出后再试。");
+    return;
+  }
+  routeImportDocument = document_;
+  renderRouteImportUpstreams(document_);
+  const actionLabel = ACTION_LABELS[document_.default_action] || document_.default_action;
+  if (routeImportSummary) {
+    routeImportSummary.hidden = false;
+    routeImportSummary.textContent = `文件包含 ${document_.rules.length} 条规则、${document_.upstreams.length} 个上游，默认动作「${actionLabel}」。导入会整体替换当前分流配置。`;
+  }
+  if (routeImportSubmit) routeImportSubmit.disabled = false;
+};
+
+const submitRouteImport = async () => {
+  if (!routeImportDocument) return;
+  const inputs = routeImportList ? Array.from(routeImportList.querySelectorAll("input[data-upstream-id]")) : [];
+  const passwords = new Map(inputs.map((input) => [input.dataset.upstreamId, String(input.value || "")]));
+  let missingInput = null;
+  const upstreams = routeImportDocument.upstreams.map((upstream) => {
+    const password = passwords.get(upstream.id) || "";
+    if (!password.trim() && !routeImportReusable(upstream.id)) {
+      missingInput = missingInput || inputs.find((input) => input.dataset.upstreamId === upstream.id) || null;
+    }
+    return {
+      id: upstream.id,
+      host: upstream.host,
+      port: upstream.port,
+      method: upstream.method,
+      enabled: Boolean(upstream.enabled),
+      tcp: Boolean(upstream.tcp),
+      udp: Boolean(upstream.udp),
+      password,
+    };
+  });
+  if (missingInput) {
+    markFieldError(missingInput, "新上游必须填写连接密钥。");
+    missingInput.focus();
+    return;
+  }
+  setBusy(true, routeImportSubmit, "正在导入…");
+  try {
+    const payload = await sendPluginJSON("api/routing/import", {
+      version: routeImportDocument.version,
+      rules: routeImportDocument.rules,
+      default_action: routeImportDocument.default_action,
+      default_upstream_id: routeImportDocument.default_upstream_id || "",
+      upstreams,
+    });
+    releaseDraft(routeImportDialog);
+    closeRouteImportModal();
+    renderRouting(payload.routing);
+    await refreshRouteStatus();
+    showStatus("已导入分流配置并应用到各节点。", false);
+  } catch (error) {
+    showModalError(routeImportError, errorText(error, "导入失败，请检查文件与各上游密钥后重试。"));
+  } finally {
+    setBusy(false);
+  }
+};
+
+if (routeExportBtn) routeExportBtn.addEventListener("click", (event) => exportRouting(event.currentTarget));
+if (openRouteImportBtn) openRouteImportBtn.addEventListener("click", openRouteImportModal);
+if (routeImportCancel) routeImportCancel.addEventListener("click", requestCloseRouteImportModal);
+if (routeImportFile) routeImportFile.addEventListener("change", readRouteImportFile);
+if (routeImportDialog) {
+  routeImportDialog.addEventListener("click", (event) => {
+    if (event.target === routeImportDialog) requestCloseRouteImportModal();
+  });
+}
+if (routeImportForm) {
+  routeImportForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (busy) return;
+    clearFormErrors(routeImportForm);
+    showModalError(routeImportError, "");
+    submitRouteImport();
+  });
+}
 
 const moveRoute = async (index, delta, control = null) => {
   if (busy) return;

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -283,5 +285,320 @@ func TestRoutingRefreshPerSourcePartialFailure(t *testing.T) {
 	}
 	if statusBySource["geosite"].Status != "updated" || statusBySource["geoip"].Status != "error" {
 		t.Fatalf("partial sources=%+v", payload.Refresh.Sources)
+	}
+}
+
+// importExportFixture mirrors upstreamTestFixture but exposes the managed fake
+// so import tests can observe secret mints and revocations.
+func importExportFixture(t *testing.T) (*Controller, *managedRuntimeFake) {
+	t.Helper()
+	fake := &managedRuntimeFake{}
+	managed := newHostCapabilityRuntime(fake)
+	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "ss.example.com"}}
+	controller, err := NewController(ControllerConfig{PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a", ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: &uiMemoryListenState{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Handshake(t.Context(), pluginsdk.RPCHandshakeRequest{ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion, PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(), Generation: "generation-a", RequiredFeatures: supportedFeatures()}); err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(Configuration{Generation: "provider"})
+	if response := controller.Prepare(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a", Config: wire}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	if response := controller.Activate(t.Context(), pluginsdk.LifecycleRequest{Generation: "generation-a"}); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	return controller, fake
+}
+
+func exportRoutingDoc(t *testing.T, controller *Controller) routingExportDocument {
+	t.Helper()
+	response := uiJSON(t, controller, "GET", "/api/routing/export", "")
+	if response.Code != 200 {
+		t.Fatalf("export=%d %s", response.Code, response.Body.String())
+	}
+	var document routingExportDocument
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
+		t.Fatalf("export json=%s err=%v", response.Body.String(), err)
+	}
+	return document
+}
+
+func importRequest(document routingExportDocument, passwords map[string]string) routingImportRequest {
+	request := routingImportRequest{Version: document.Version, Rules: document.Rules, DefaultAction: document.DefaultAction, DefaultUpstreamID: document.DefaultUpstreamID}
+	for _, upstream := range document.Upstreams {
+		request.Upstreams = append(request.Upstreams, upstreamImportEntry{
+			ID: upstream.ID, Host: upstream.Host, Port: upstream.Port, Method: upstream.Method,
+			Enabled: upstream.Enabled, TCP: upstream.TCP, UDP: upstream.UDP, Password: passwords[upstream.ID],
+		})
+	}
+	return request
+}
+
+func postRoutingImport(t *testing.T, controller *Controller, request any) int {
+	t.Helper()
+	response := uiJSON(t, controller, "POST", "/api/routing/import", marshalTestJSON(t, request))
+	return response.Code
+}
+
+func marshalTestJSON(t *testing.T, value any) string {
+	t.Helper()
+	wire, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(wire)
+}
+
+func TestRoutingExportOmitsSecretFields(t *testing.T) {
+	controller, _ := importExportFixture(t)
+	created := uiJSON(t, controller, "POST", "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-export-secret","tcp":true,"udp":true}`)
+	if created.Code != 200 {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	upstream := decodeListenAPI(t, created).Routing.Upstreams[0]
+	rules := `{"rules":[{"id":"ai","source_id":"geosite","classification":{"name":"category-ai","kind":"domain"},"action":"upstream","upstream_id":"edge"}],"default_action":"upstream","default_upstream_id":"edge"}`
+	if response := uiJSON(t, controller, "POST", "/api/routing", rules); response.Code != 200 {
+		t.Fatalf("rules=%d %s", response.Code, response.Body.String())
+	}
+
+	response := uiJSON(t, controller, "GET", "/api/routing/export", "")
+	if response.Code != 200 {
+		t.Fatalf("export=%d %s", response.Code, response.Body.String())
+	}
+	if disposition := response.Header().Get("Content-Disposition"); !strings.Contains(disposition, "attachment") || !strings.Contains(disposition, ".json") {
+		t.Fatalf("export disposition=%q", disposition)
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"secret_ref", "secret_version", "password", "edge-export-secret", upstream.SecretRef, upstream.SecretVersion} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("export leaked %q: %s", forbidden, body)
+		}
+	}
+	document := exportRoutingDoc(t, controller)
+	if document.Version != routingExportVersion || document.DefaultAction != "upstream" || document.DefaultUpstreamID != "edge" || len(document.Rules) != 1 || len(document.Upstreams) != 1 {
+		t.Fatalf("export document=%+v", document)
+	}
+	entry := document.Upstreams[0]
+	if entry.ID != "edge" || entry.Host != "203.0.113.10" || entry.Port != 8388 || entry.Method != "aes-256-gcm" || !entry.Enabled || !entry.TCP || !entry.UDP {
+		t.Fatalf("export upstream=%+v", entry)
+	}
+	if response := uiJSON(t, controller, "POST", "/api/routing/export", `{}`); response.Code != 405 {
+		t.Fatalf("export post=%d", response.Code)
+	}
+	if response := uiJSON(t, controller, "GET", "/api/routing/import", ""); response.Code != 405 {
+		t.Fatalf("import get=%d", response.Code)
+	}
+}
+
+func TestRoutingImportExportRoundTripAcrossInstances(t *testing.T) {
+	source, _ := importExportFixture(t)
+	passwords := map[string]string{"edge": "edge-roundtrip-secret", "backup": "MDEyMzQ1Njc4OWFiY2RlZg=="}
+	for _, body := range []string{
+		`{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-roundtrip-secret","tcp":true,"udp":true}`,
+		`{"id":"backup","host":"198.51.100.20","port":8389,"method":"2022-blake3-aes-128-gcm","password":"MDEyMzQ1Njc4OWFiY2RlZg==","tcp":true,"udp":false}`,
+	} {
+		if response := uiJSON(t, source, "POST", "/api/upstreams", body); response.Code != 200 {
+			t.Fatalf("create=%d %s", response.Code, response.Body.String())
+		}
+	}
+	rules := `{"rules":[{"id":"ai","source_id":"geosite","classification":{"name":"category-ai","kind":"domain"},"action":"upstream","upstream_id":"edge"},{"id":"cn","source_id":"geoip","classification":{"name":"cn","kind":"country"},"action":"direct"}],"default_action":"upstream","default_upstream_id":"backup"}`
+	if response := uiJSON(t, source, "POST", "/api/routing", rules); response.Code != 200 {
+		t.Fatalf("rules=%d %s", response.Code, response.Body.String())
+	}
+	document := exportRoutingDoc(t, source)
+
+	target, targetFake := importExportFixture(t)
+	if code := postRoutingImport(t, target, importRequest(document, passwords)); code != 200 {
+		t.Fatalf("import=%d", code)
+	}
+	reexported := exportRoutingDoc(t, target)
+	if !reflect.DeepEqual(document, reexported) {
+		t.Fatalf("round trip mismatch:\nsource=%+v\ntarget=%+v", document, reexported)
+	}
+	routing := decodeListenAPI(t, uiJSON(t, target, "GET", "/api/routing", "")).Routing
+	if routing == nil || len(routing.Upstreams) != 2 {
+		t.Fatalf("target routing=%+v", routing)
+	}
+	// Secrets were re-minted on the target instance through the scoped-secret
+	// path; nothing references the source instance's opaque IDs.
+	sourceSecrets := map[string]bool{}
+	for _, upstream := range decodeListenAPI(t, uiJSON(t, source, "GET", "/api/routing", "")).Routing.Upstreams {
+		sourceSecrets[upstream.SecretRef] = true
+	}
+	for _, upstream := range routing.Upstreams {
+		if upstream.SecretRef == "" || upstream.SecretVersion == "" {
+			t.Fatalf("target upstream missing secret ref=%+v", upstream)
+		}
+		if sourceSecrets[upstream.SecretRef] {
+			t.Fatalf("target reused source secret ref=%+v", upstream)
+		}
+	}
+	if targetFake.createCalls != 2 || targetFake.revokes != 0 {
+		t.Fatalf("target secrets creates=%d revokes=%d", targetFake.createCalls, targetFake.revokes)
+	}
+}
+
+func TestRoutingImportRejectsMalformedAndTamperedFiles(t *testing.T) {
+	controller, fake := importExportFixture(t)
+	if response := uiJSON(t, controller, "POST", "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-tamper-secret","tcp":true,"udp":true}`); response.Code != 200 {
+		t.Fatalf("create=%d %s", response.Code, response.Body.String())
+	}
+	before := exportRoutingDoc(t, controller)
+	creates, revokes := fake.createCalls, fake.revokes
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"not json", `{`, 400},
+		{"wrong version", `{"version":2,"rules":[],"default_action":"direct","upstreams":[]}`, 400},
+		{"unknown field", `{"version":1,"rules":[],"default_action":"direct","upstreams":[],"bogus":true}`, 400},
+		{"rule references missing upstream", `{"version":1,"rules":[{"id":"r1","source_id":"geosite","classification":{"name":"category-ai","kind":"domain"},"action":"upstream","upstream_id":"ghost"}],"default_action":"direct","upstreams":[]}`, 409},
+		{"default upstream missing", `{"version":1,"rules":[],"default_action":"upstream","default_upstream_id":"ghost","upstreams":[]}`, 409},
+		{"unsupported method", `{"version":1,"rules":[],"default_action":"direct","upstreams":[{"id":"x","host":"203.0.113.9","port":8388,"method":"rc4-md5","password":"p","tcp":true,"udp":false}]}`, 400},
+		{"invalid upstream port", `{"version":1,"rules":[],"default_action":"direct","upstreams":[{"id":"x","host":"203.0.113.9","port":0,"method":"aes-256-gcm","password":"p","tcp":true,"udp":false}]}`, 400},
+	}
+	for _, testcase := range cases {
+		t.Run(testcase.name, func(t *testing.T) {
+			if response := uiJSON(t, controller, "POST", "/api/routing/import", testcase.body); response.Code != testcase.want {
+				t.Fatalf("import=%d want=%d %s", response.Code, testcase.want, response.Body.String())
+			}
+		})
+	}
+	// A duplicate upstream id is rejected after the first entry already minted
+	// a secret; the minted reference must be rolled back with the attempt.
+	duplicate := `{"version":1,"rules":[],"default_action":"direct","upstreams":[` +
+		`{"id":"fresh","host":"203.0.113.9","port":8388,"method":"aes-256-gcm","password":"fresh-secret","tcp":true,"udp":false},` +
+		`{"id":"fresh","host":"203.0.113.9","port":8389,"method":"aes-256-gcm","password":"fresh-secret","tcp":true,"udp":false}]}`
+	if response := uiJSON(t, controller, "POST", "/api/routing/import", duplicate); response.Code != 400 {
+		t.Fatalf("duplicate import=%d", response.Code)
+	}
+	if fake.createCalls-creates != fake.revokes-revokes {
+		t.Fatalf("rejected imports leaked secrets: creates=%d revokes=%d", fake.createCalls-creates, fake.revokes-revokes)
+	}
+	if after := exportRoutingDoc(t, controller); !reflect.DeepEqual(before, after) {
+		t.Fatalf("routing changed after rejected imports:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestRoutingImportReusesSameIDCredential(t *testing.T) {
+	controller, fake := importExportFixture(t)
+	for _, body := range []string{
+		`{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-reuse-secret","tcp":true,"udp":true}`,
+		`{"id":"retire","host":"203.0.113.11","port":8389,"method":"aes-256-gcm","password":"retire-secret","tcp":true,"udp":false}`,
+	} {
+		if response := uiJSON(t, controller, "POST", "/api/upstreams", body); response.Code != 200 {
+			t.Fatalf("create=%d %s", response.Code, response.Body.String())
+		}
+	}
+	routing := decodeListenAPI(t, uiJSON(t, controller, "GET", "/api/routing", "")).Routing
+	refs := map[string]Upstream{}
+	for _, upstream := range routing.Upstreams {
+		refs[upstream.ID] = upstream
+	}
+	document := exportRoutingDoc(t, controller)
+
+	// Reuse validates the stored material against the imported method: a
+	// legacy password cannot serve a 2022 upstream, so the file is rejected
+	// with a readable per-upstream error before anything is minted.
+	incompatible := routingImportRequest{Version: document.Version, Rules: document.Rules, DefaultAction: document.DefaultAction, Upstreams: []upstreamImportEntry{
+		{ID: "edge", Host: "203.0.113.10", Port: 8388, Method: "2022-blake3-aes-128-gcm", Enabled: true, TCP: true, UDP: true},
+	}}
+	response := uiJSON(t, controller, "POST", "/api/routing/import", marshalTestJSON(t, incompatible))
+	if response.Code != 400 || !strings.Contains(response.Body.String(), "edge") {
+		t.Fatalf("incompatible reuse=%d %s", response.Code, response.Body.String())
+	}
+	if fake.createCalls != 2 || fake.revokes != 0 {
+		t.Fatalf("rejected reuse minted or revoked secrets: creates=%d revokes=%d", fake.createCalls, fake.revokes)
+	}
+
+	// "edge" reuses its stored credential, "retire" is dropped, "remote" is
+	// minted fresh. The retired secret is revoked only after a successful
+	// commit.
+	request := routingImportRequest{Version: document.Version, Rules: document.Rules, DefaultAction: document.DefaultAction, Upstreams: []upstreamImportEntry{
+		{ID: "edge", Host: "203.0.113.10", Port: 8388, Method: "aes-256-gcm", Enabled: true, TCP: true, UDP: true},
+		{ID: "remote", Host: "198.51.100.30", Port: 8390, Method: "aes-256-gcm", Password: "remote-secret", Enabled: true, TCP: true, UDP: true},
+	}}
+	if code := postRoutingImport(t, controller, request); code != 200 {
+		t.Fatalf("import=%d", code)
+	}
+	after := decodeListenAPI(t, uiJSON(t, controller, "GET", "/api/routing", "")).Routing
+	if len(after.Upstreams) != 2 {
+		t.Fatalf("imported upstreams=%+v", after.Upstreams)
+	}
+	var edge, remote Upstream
+	for _, upstream := range after.Upstreams {
+		switch upstream.ID {
+		case "edge":
+			edge = upstream
+		case "remote":
+			remote = upstream
+		}
+	}
+	if edge.SecretRef != refs["edge"].SecretRef || edge.SecretVersion != refs["edge"].SecretVersion {
+		t.Fatalf("edge credential not reused: %+v", edge)
+	}
+	if remote.SecretRef == "" || remote.SecretRef == refs["edge"].SecretRef || remote.SecretRef == refs["retire"].SecretRef {
+		t.Fatalf("remote credential=%+v", remote)
+	}
+	if fake.createCalls != 3 || fake.revokes != 1 {
+		t.Fatalf("import secrets creates=%d revokes=%d", fake.createCalls, fake.revokes)
+	}
+}
+
+func TestRoutingImportMissingCredentialIsAtomic(t *testing.T) {
+	controller, fake := importExportFixture(t)
+	if response := uiJSON(t, controller, "POST", "/api/upstreams", `{"id":"edge","host":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"edge-atomic-secret","tcp":true,"udp":true}`); response.Code != 200 {
+		t.Fatalf("create=%d %s", response.Code, response.Body.String())
+	}
+	before := exportRoutingDoc(t, controller)
+	request := routingImportRequest{Version: before.Version, Rules: before.Rules, DefaultAction: before.DefaultAction, Upstreams: []upstreamImportEntry{
+		{ID: "fresh", Host: "203.0.113.9", Port: 8388, Method: "aes-256-gcm", Password: "fresh-secret", Enabled: true, TCP: true, UDP: true},
+		{ID: "edge", Host: "203.0.113.10", Port: 8388, Method: "aes-256-gcm", Enabled: true, TCP: true, UDP: true},
+		{ID: "ghost", Host: "198.51.100.40", Port: 8391, Method: "aes-256-gcm", Enabled: true, TCP: true, UDP: true},
+	}}
+	response := uiJSON(t, controller, "POST", "/api/routing/import", marshalTestJSON(t, request))
+	if response.Code != 400 {
+		t.Fatalf("import=%d %s", response.Code, response.Body.String())
+	}
+	if body := response.Body.String(); !strings.Contains(body, "ghost") {
+		t.Fatalf("missing credential error=%s", body)
+	}
+	// "fresh" minted a secret before "ghost" was found; the whole attempt is
+	// rolled back and the stored configuration keeps only "edge".
+	if fake.createCalls != 2 || fake.revokes != 1 {
+		t.Fatalf("atomic rollback creates=%d revokes=%d", fake.createCalls, fake.revokes)
+	}
+	if after := exportRoutingDoc(t, controller); !reflect.DeepEqual(before, after) {
+		t.Fatalf("routing changed after rejected import:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestRoutingImportEnforcesConfiguredLimits(t *testing.T) {
+	controller, fake := importExportFixture(t)
+	upstreams := make([]upstreamImportEntry, 0, MaxUpstreams+1)
+	for index := 0; index < MaxUpstreams+1; index++ {
+		upstreams = append(upstreams, upstreamImportEntry{ID: fmt.Sprintf("u%02d", index), Host: "203.0.113.9", Port: 8388, Method: "aes-256-gcm", Password: "p", Enabled: true, TCP: true})
+	}
+	request := routingImportRequest{Version: routingExportVersion, DefaultAction: "direct", Rules: []RouteRule{}, Upstreams: upstreams}
+	if code := postRoutingImport(t, controller, request); code != 400 {
+		t.Fatalf("upstream limit import=%d", code)
+	}
+	rules := make([]RouteRule, 0, MaxRouteRules+1)
+	for index := 0; index < MaxRouteRules+1; index++ {
+		rules = append(rules, RouteRule{ID: fmt.Sprintf("r%d", index), SourceID: "geosite", Classification: pluginsdk.DatasetClassification{Name: "n", Kind: pluginsdk.DatasetClassificationDomain}, Action: "direct"})
+	}
+	request = routingImportRequest{Version: routingExportVersion, DefaultAction: "direct", Rules: rules, Upstreams: []upstreamImportEntry{}}
+	if code := postRoutingImport(t, controller, request); code != 400 {
+		t.Fatalf("rule limit import=%d", code)
+	}
+	if fake.createCalls != 0 || fake.revokes != 0 {
+		t.Fatalf("limit rejection touched secrets: creates=%d revokes=%d", fake.createCalls, fake.revokes)
+	}
+	if document := exportRoutingDoc(t, controller); len(document.Upstreams) != 0 || len(document.Rules) != 0 {
+		t.Fatalf("routing changed after limit rejection=%+v", document)
 	}
 }

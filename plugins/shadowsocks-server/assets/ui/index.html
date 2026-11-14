@@ -179,6 +179,10 @@
                 <select id="route-default-upstream" class="ui-select"></select>
               </label>
               <button id="route-save-default" class="ui-btn ui-btn--secondary" type="button" disabled>保存默认路由</button>
+              <div class="routing-transfer-actions">
+                <button id="route-export" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" title="下载分流配置 JSON，不含任何密钥">导出配置</button>
+                <button id="open-route-import" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" title="选择导出的 JSON 文件整体替换当前分流配置">导入配置</button>
+              </div>
             </div>
             <p id="route-default-hint" class="ui-help-text routing-default__hint" role="status"></p>
             <details class="ui-help routing-help">
@@ -504,6 +508,31 @@
       <footer class="ui-dialog__footer">
         <button id="route-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
         <button id="route-submit" class="ui-btn" type="submit">添加规则</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="route-import-dialog" class="ui-dialog" data-ui-dialog aria-labelledby="route-import-title">
+    <form id="route-import-form" method="post">
+      <header class="ui-dialog__head">
+        <div>
+          <h2 id="route-import-title" class="ui-dialog__title">导入分流配置</h2>
+          <p id="route-import-desc" class="ui-dialog__desc">选择导出的 JSON 文件，校验后整体替换当前规则、默认出口与上游；连接密钥不随文件携带。</p>
+        </div>
+      </header>
+      <div class="ui-dialog__body">
+        <p id="route-import-error" class="form-error" role="alert" hidden></p>
+        <label class="ui-field ui-field--full">
+          <span class="ui-label">配置文件</span>
+          <input class="ui-input" id="route-import-file" name="file" type="file" accept="application/json,.json" required>
+          <span id="route-import-file-hint" class="ui-help-text">仅接受本页面导出的 JSON 文件；密钥需逐个上游补填或沿用同 ID 现有凭据。</span>
+        </label>
+        <p id="route-import-summary" class="ui-help-text" role="status" hidden></p>
+        <div id="route-import-upstreams" class="route-import-upstreams"></div>
+      </div>
+      <footer class="ui-dialog__footer">
+        <button id="route-import-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
+        <button id="route-import-submit" class="ui-btn" type="submit" disabled>导入并替换</button>
       </footer>
     </form>
   </dialog>
