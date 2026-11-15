@@ -428,6 +428,13 @@
             <input class="ui-input" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 笔记本 / alice（留空自动生成）">
           </label>
           <label class="ui-field">
+            <span class="ui-label">协议</span>
+            <select class="ui-select" name="protocol" id="create-protocol">
+              <option value="shadowsocks" selected>Shadowsocks</option>
+              <option value="anytls">AnyTLS</option>
+            </select>
+          </label>
+          <label class="ui-field" id="create-method-field">
             <span class="ui-label">加密方式</span>
             <select class="ui-select" name="method">
               <option value="2022-blake3-aes-128-gcm" selected>SS2022 · AES-128（推荐 · 支持多用户）</option>
@@ -436,11 +443,33 @@
               <option value="aes-256-gcm">AES-256-GCM（传统单用户）</option>
             </select>
           </label>
+          <label class="ui-field" id="create-certificate-field" hidden>
+            <span class="ui-label">公网证书</span>
+            <select class="ui-select" name="certificate_id" id="create-certificate"></select>
+          </label>
           <label class="ui-field">
-            <span class="ui-label">监听端口（TCP + UDP）</span>
+            <span class="ui-label" id="create-port-label">监听端口（TCP + UDP）</span>
             <input class="ui-input" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="自动分配空闲端口">
           </label>
         </div>
+        <details class="ui-help advanced" id="anytls-padding" hidden>
+          <summary>AnyTLS 高级配置</summary>
+          <div class="ui-help__body">
+            <label class="ui-field">
+              <span class="ui-label">Padding Scheme</span>
+              <textarea class="ui-input" name="padding_scheme" id="create-padding" rows="8" spellcheck="false">stop=8
+0=30-30
+1=100-400
+2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000
+3=9-9,500-1000
+4=500-1000
+5=500-1000
+6=500-1000
+7=500-1000</textarea>
+            </label>
+            <p class="ui-help-text">同一监听的用户共用这段填充。留空或保持默认即保存 Default Padding Scheme。</p>
+          </div>
+        </details>
         <details class="ui-help advanced" id="advanced-keys">
           <summary>自行填写密钥（可选）</summary>
           <div class="ui-help__body">
@@ -480,7 +509,7 @@
           <span class="ui-label">显示名称</span>
           <input id="append-name" class="ui-input" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 平板">
         </label>
-        <p class="form-note">每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。</p>
+        <p class="form-note" id="append-note">每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。</p>
       </div>
       <footer class="ui-dialog__footer">
         <button id="append-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
@@ -510,6 +539,13 @@
             <input class="ui-input" name="id" required autocomplete="off" spellcheck="false" placeholder="例如 hk-node 或 ai-upstream">
           </label>
           <label class="ui-field">
+            <span class="ui-label">协议</span>
+            <select class="ui-select" name="protocol" id="upstream-protocol">
+              <option value="shadowsocks" selected>Shadowsocks</option>
+              <option value="anytls">AnyTLS</option>
+            </select>
+          </label>
+          <label class="ui-field" id="upstream-method-field">
             <span class="ui-label">加密方式</span>
             <select class="ui-select" name="method">
               <option value="2022-blake3-aes-128-gcm">SS2022 · AES-128</option>
@@ -532,6 +568,29 @@
             <span id="upstream-password-hint" class="ui-help-text" hidden>不修改密钥则留空；填写新值会轮换连接密钥。</span>
           </label>
         </div>
+        <details class="ui-help advanced" id="upstream-anytls" hidden>
+          <summary>高级配置</summary>
+          <div class="ui-help__body">
+            <div class="ui-form-grid">
+              <label class="ui-field">
+                <span class="ui-label">SNI</span>
+                <input class="ui-input" name="sni" id="upstream-sni" autocomplete="off" spellcheck="false" placeholder="域名地址默认使用该域名">
+              </label>
+              <label class="ui-field ui-field--full">
+                <span class="ui-label">初始 Padding Scheme</span>
+                <textarea class="ui-input" name="padding_scheme" id="upstream-padding" rows="8" spellcheck="false">stop=8
+0=30-30
+1=100-400
+2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000
+3=9-9,500-1000
+4=500-1000
+5=500-1000
+6=500-1000
+7=500-1000</textarea>
+              </label>
+            </div>
+          </div>
+        </details>
         <fieldset class="ui-fieldset protocol-checks">
           <legend class="ui-legend">支持转发协议</legend>
           <div class="protocol-checks-row">

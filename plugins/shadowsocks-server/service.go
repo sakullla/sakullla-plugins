@@ -1164,6 +1164,16 @@ func (s *Service) ShareAccount(ctx context.Context, userID string) (AccountShare
 		out.Reason = "share unavailable"
 		return out, nil
 	}
+	if listener.AnyTLS() {
+		share, shareErr := BuildAnyTLSShare(AnyTLSShareAccount{Password: password, Host: endpoint.Host, Port: listener.Port, SNI: listener.CertificateDomain, Name: user.Name})
+		if shareErr != nil {
+			out.Reason = "share unavailable"
+			return out, nil
+		}
+		out.Share = share
+		out.Available = true
+		return out, nil
+	}
 	account := SIP002Account{Method: method, Host: endpoint.Host, Port: listener.Port, Name: user.Name}
 	if SS2022Method(method) {
 		server, identity, ok := splitSS2022ClientPassword([]byte(password))

@@ -56,6 +56,23 @@ const qrCaption = document.querySelector("#qr-caption");
 const qrImage = document.querySelector("#qr-image");
 const qrCopy = document.querySelector("#qr-copy");
 const advancedKeys = document.querySelector("#advanced-keys");
+const createProtocol = document.querySelector("#create-protocol");
+const createMethodField = document.querySelector("#create-method-field");
+const createCertificateField = document.querySelector("#create-certificate-field");
+const createCertificate = document.querySelector("#create-certificate");
+const createPortLabel = document.querySelector("#create-port-label");
+const anytlsPadding = document.querySelector("#anytls-padding");
+const createPadding = document.querySelector("#create-padding");
+const appendNote = document.querySelector("#append-note");
+const upstreamProtocol = document.querySelector("#upstream-protocol");
+const upstreamMethodField = document.querySelector("#upstream-method-field");
+const upstreamImportField = document.querySelector("#upstream-import-field");
+const upstreamAnyTLS = document.querySelector("#upstream-anytls");
+const upstreamSNI = document.querySelector("#upstream-sni");
+const upstreamPadding = document.querySelector("#upstream-padding");
+const DEFAULT_ANYTLS_PADDING = "stop=8\n0=30-30\n1=100-400\n2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000\n3=9-9,500-1000\n4=500-1000\n5=500-1000\n6=500-1000\n7=500-1000";
+let publicCertificates = [];
+let upstreamSNITouched = false;
 const upstreamDialog = document.querySelector("#upstream-dialog");
 const upstreamForm = document.querySelector("#upstream-form");
 const upstreamCancel = document.querySelector("#upstream-cancel");
@@ -1104,6 +1121,13 @@ const agentPicker = mountAgentSearchSelect(agentPickerRoot, agentSelect, "选择
 const selectedAgent = () => agentsCache.find((agent) => agent.id === selectedAgentID) || null;
 
 const isSS2022 = (method) => String(method || "").startsWith("2022-");
+const isAnyTLSListen = (listen) => Boolean(listen && (listen.protocol === "anytls" || listen.family === "anytls"));
+const isIPAddress = (value) => {
+  const host = String(value || "").trim().replace(/^\[|\]$/g, "");
+  if (!host) return false;
+  if (host.includes(":")) return true;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+};
 
 const notify = (message, tone = "success") => {
   if (!message) return;
@@ -1189,6 +1213,7 @@ const hideRoutingError = () => {
 };
 
 const methodLabel = (method) => METHOD_LABELS[String(method || "")] || String(method || "");
+const listenMethodLabel = (listen) => (isAnyTLSListen(listen) ? "AnyTLS" : methodLabel(listen && listen.method));
 
 const defaultUserName = (id) => {
   const value = String(id || "");
@@ -1301,6 +1326,57 @@ const syncServerPskField = () => {
   if (serverPskField) serverPskField.hidden = !isSS2022(method);
 };
 
+const renderCertificateOptions = () => {
+  if (!createCertificate) return;
+  createCertificate.replaceChildren();
+  const usable = publicCertificates.filter((item) => item && item.enabled && item.material_available);
+  if (!usable.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "没有可选公网证书";
+    createCertificate.append(option);
+    return;
+  }
+  usable.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = String(item.id);
+    option.textContent = `${item.domain} (#${item.id})`;
+    createCertificate.append(option);
+  });
+};
+
+const loadPublicCertificates = async () => {
+  publicCertificates = [];
+  if (!selectedAgentID) {
+    renderCertificateOptions();
+    return;
+  }
+  try {
+    const payload = await panelJSON(`api/public-certificates?agent_id=${encodeURIComponent(selectedAgentID)}`);
+    publicCertificates = payload.certificates || [];
+  } catch (_error) {
+    publicCertificates = [];
+  }
+  renderCertificateOptions();
+};
+
+const syncCreateProtocol = () => {
+  const anytls = createProtocol && createProtocol.value === "anytls";
+  if (createMethodField) createMethodField.hidden = anytls;
+  if (createCertificateField) createCertificateField.hidden = !anytls;
+  if (anytlsPadding) {
+    anytlsPadding.hidden = !anytls;
+    if (!anytls) anytlsPadding.open = false;
+  }
+  if (advancedKeys) advancedKeys.hidden = anytls;
+  if (createPortLabel) createPortLabel.textContent = anytls ? "监听端口（仅 TCP）" : "监听端口（TCP + UDP）";
+  if (!anytls) syncServerPskField();
+};
+
+const resetAnyTLSPadding = (node) => {
+  if (node && node.value !== DEFAULT_ANYTLS_PADDING) node.value = DEFAULT_ANYTLS_PADDING;
+};
+
 const fillDefaults = (defaults) => {
   if (!createForm || !defaults) return;
   createForm.querySelector('input[name="name"]').value = "";
@@ -1309,6 +1385,9 @@ const fillDefaults = (defaults) => {
   createForm.querySelector('input[name="password"]').value = "";
   createForm.querySelector('input[name="server_psk"]').value = "";
   if (advancedKeys) advancedKeys.open = false;
+  if (createProtocol) createProtocol.value = "shadowsocks";
+  resetAnyTLSPadding(createPadding);
+  syncCreateProtocol();
   syncServerPskField();
 };
 
@@ -1317,6 +1396,7 @@ const openCreate = async () => {
   try {
     const payload = await panelJSON(`api/defaults?agent_id=${encodeURIComponent(selectedAgentID)}`);
     fillDefaults(payload.defaults);
+    await loadPublicCertificates();
   } catch (error) {
     showStatus(errorText(error, "暂时无法读取默认值，请稍后重试。"), true);
     return;
@@ -1344,7 +1424,7 @@ let pendingQRURI = "";
 
 const bindQRImage = (img, user) => {
   if (!img) return;
-  img.alt = "ss:// 二维码";
+  img.alt = String(user && user.uri || "").startsWith("anytls://") ? "anytls:// 二维码" : "ss:// 二维码";
   img.hidden = false;
   const data = qrDataURL(user);
   const fallback = qrFallbackURL(user);
@@ -1387,6 +1467,7 @@ const openQR = (user) => {
     delete qrImage.dataset.fallbackUsed;
     bindQRImage(qrImage, user);
   }
+  if (qrCopy) qrCopy.textContent = pendingQRURI.startsWith("anytls://") ? "复制 anytls://" : "复制 ss://";
   if (qrDialog.open) qrDialog.close();
   qrDialog.showModal();
 };
@@ -1403,7 +1484,7 @@ const copyURIButton = (user) => {
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "ui-btn ui-btn--sm";
-  copy.textContent = "复制 ss://";
+  copy.textContent = String(user && user.uri || "").startsWith("anytls://") ? "复制 anytls://" : "复制 ss://";
   copy.addEventListener("click", async () => {
     try {
       await copyText(user.uri);
@@ -1527,6 +1608,8 @@ const listenFooterActions = (listen) => {
     rotateServer.textContent = "轮换 Server PSK";
     rotateServer.addEventListener("click", (event) => rotateServerPSK(listen, event.currentTarget));
     actions.append(rotateServer);
+  }
+  if (isSS2022(listen.method) || isAnyTLSListen(listen)) {
     const append = document.createElement("button");
     append.type = "button";
     append.className = "ui-btn ui-btn--sm";
@@ -1564,7 +1647,7 @@ const renderListen = (listen) => {
     : enabledUsers === users.length
       ? `${users.length} 个用户`
       : `${enabledUsers}/${users.length} 个用户启用`;
-  meta.textContent = [methodLabel(listen.method), userText].filter(Boolean).join(" · ");
+  meta.textContent = [listenMethodLabel(listen), userText].filter(Boolean).join(" · ");
   head.append(titleRow, meta);
   card.append(head);
 
@@ -1576,7 +1659,7 @@ const renderListen = (listen) => {
   address.title = address.textContent;
   const protocol = document.createElement("span");
   protocol.className = "ui-badge ui-badge--plain listen-endpoint__protocol";
-  protocol.textContent = "TCP + UDP";
+  protocol.textContent = isAnyTLSListen(listen) ? "仅 TCP" : "TCP + UDP";
   endpoint.append(address, protocol);
   card.append(endpoint);
 
@@ -1601,7 +1684,7 @@ const renderListen = (listen) => {
   } else if (!first) {
     const hint = document.createElement("p");
     hint.className = "ui-help-text listen-share-hint";
-    hint.textContent = isSS2022(listen.method) ? "还没有用户，打开管理追加。" : "没有可用账号，可删除后重建。";
+    hint.textContent = isSS2022(listen.method) || isAnyTLSListen(listen) ? "还没有用户，打开管理追加。" : "没有可用账号，可删除后重建。";
     actions.append(hint);
   }
   const open = document.createElement("button");
@@ -1636,7 +1719,7 @@ const renderDetailSummary = (listen) => {
   const hostPort = listenHostPort(listen) || `0.0.0.0:${listen.port}`;
   const rows = [
     ["连接地址", hostPort, true],
-    ["协议", "TCP + UDP", false],
+    ["协议", isAnyTLSListen(listen) ? "仅 TCP" : "TCP + UDP", false],
   ];
   const list = document.createElement("dl");
   list.className = "detail-summary__list";
@@ -1679,7 +1762,7 @@ const renderDetail = (listen) => {
   openListenID = listen.id;
   if (detailTitle) detailTitle.textContent = listenTitle(listen);
   if (detailMeta) {
-    const parts = [methodLabel(listen.method), listenShareHost(listen), listen.bound ? "运行中" : "未生效"].filter(Boolean);
+    const parts = [listenMethodLabel(listen), listenShareHost(listen), listen.bound ? "运行中" : "未生效"].filter(Boolean);
     detailMeta.textContent = parts.join(" · ");
     detailMeta.hidden = !detailMeta.textContent;
   }
@@ -1688,8 +1771,8 @@ const renderDetail = (listen) => {
   if (detailUsersCount) detailUsersCount.textContent = String(users.length);
   if (detailUsersHint) {
     detailUsersHint.textContent = users.length
-      ? (isSS2022(listen.method) ? "每个用户有独立密钥与链接，停用或轮换只影响该用户。" : "传统加密方式只支持单用户；需要多人共用请新建 SS2022 监听。")
-      : (isSS2022(listen.method) ? "还没有用户，追加后即可分享 ss:// 链接。" : "该监听没有可用账号，可删除后重新创建。");
+      ? (isAnyTLSListen(listen) ? "同一端口的用户共用证书与填充方案，停用或轮换只影响该用户。" : isSS2022(listen.method) ? "每个用户有独立密钥与链接，停用或轮换只影响该用户。" : "传统加密方式只支持单用户；需要多人共用请新建 SS2022 监听。")
+      : (isSS2022(listen.method) || isAnyTLSListen(listen) ? "还没有用户，追加后即可分享链接。" : "该监听没有可用账号，可删除后重新创建。");
     detailUsersHint.hidden = false;
   }
   if (detailUsers) {
@@ -1722,7 +1805,7 @@ const listenSearchText = (listen) => [
   listenTitle(listen),
   listen && listen.port,
   listenHostPort(listen),
-  methodLabel(listen && listen.method),
+  listenMethodLabel(listen),
   ...((listen && listen.users) || []).map((user) => user && (user.name || user.id)),
 ].filter(Boolean).join(" ").toLowerCase();
 
@@ -1873,8 +1956,13 @@ const openAppend = (listen) => {
   if (!canMutate() || !listen) return;
   pendingAppendListen = listen;
   if (appendMeta) {
-    appendMeta.textContent = `端口 ${listen.port} · ${methodLabel(listen.method)}`;
+    appendMeta.textContent = `端口 ${listen.port} · ${listenMethodLabel(listen)}`;
     appendMeta.hidden = !appendMeta.textContent;
+  }
+  if (appendNote) {
+    appendNote.textContent = isAnyTLSListen(listen)
+      ? "每个用户拥有独立密码，名称会写入 anytls:// 链接备注。留空则自动生成。"
+      : "每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。";
   }
   if (appendForm) appendForm.reset();
   clearFormErrors(appendForm);
@@ -2243,6 +2331,10 @@ const fillUpstreamFromSIP002 = (parsed) => {
 };
 
 const applySIP002Paste = () => {
+  if (upstreamProtocol && upstreamProtocol.value === "anytls") {
+    if (upstreamImportInput) upstreamImportInput.value = "";
+    return true;
+  }
   if (!upstreamImportInput) return true;
   const value = upstreamImportInput.value.trim();
   if (!value) {
@@ -2258,6 +2350,23 @@ const applySIP002Paste = () => {
   }
   fillUpstreamFromSIP002(parsed);
   return true;
+};
+
+const syncUpstreamProtocol = () => {
+  const anytls = upstreamProtocol && upstreamProtocol.value === "anytls";
+  if (upstreamMethodField) upstreamMethodField.hidden = anytls;
+  if (upstreamImportField) upstreamImportField.hidden = anytls;
+  if (upstreamAnyTLS) {
+    upstreamAnyTLS.hidden = !anytls;
+    if (!anytls) upstreamAnyTLS.open = false;
+  }
+  if (!anytls && upstreamImportInput) upstreamImportInput.value = "";
+};
+
+const rememberUpstreamSNI = () => {
+  if (!upstreamSNI || !upstreamForm || upstreamSNITouched) return;
+  const host = String(new FormData(upstreamForm).get("host") || "").trim().replace(/^\[|\]$/g, "");
+  if (upstreamProtocol && upstreamProtocol.value === "anytls" && host && !isIPAddress(host)) upstreamSNI.value = host;
 };
 
 const setUpstreamModalMode = (editing) => {
@@ -2280,8 +2389,11 @@ const openUpstreamModal = (upstream = null) => {
   if (upstreamForm) upstreamForm.reset();
   editingUpstreamID = upstream ? upstream.id : "";
   setUpstreamModalMode(Boolean(upstream));
+  if (upstreamProtocol) upstreamProtocol.value = upstream && upstream.protocol === "anytls" ? "anytls" : "shadowsocks";
+  resetAnyTLSPadding(upstreamPadding);
+  upstreamSNITouched = false;
   if (upstream) {
-    const fields = { id: upstream.id, host: upstream.host, port: upstream.port, method: upstream.method };
+    const fields = { id: upstream.id, host: upstream.host, port: upstream.port, method: upstream.method || "2022-blake3-aes-128-gcm" };
     Object.entries(fields).forEach(([name, value]) => {
       const input = formField(upstreamForm, name);
       if (input && value !== undefined && value !== null) input.value = value;
@@ -2290,7 +2402,13 @@ const openUpstreamModal = (upstream = null) => {
     const udpInput = formField(upstreamForm, "udp");
     if (tcpInput) tcpInput.checked = Boolean(upstream.tcp);
     if (udpInput) udpInput.checked = Boolean(upstream.udp);
+    if (upstreamSNI) upstreamSNI.value = upstream.sni || "";
+    if (upstreamPadding && upstream.padding_scheme) upstreamPadding.value = upstream.padding_scheme;
+    const host = String(upstream.host || "").trim().replace(/^\[|\]$/g, "");
+    upstreamSNITouched = Boolean(upstream.sni) && upstream.sni !== host;
   }
+  syncUpstreamProtocol();
+  if (!upstreamSNITouched) rememberUpstreamSNI();
   clearFormErrors(upstreamForm);
   showModalError(upstreamError, "");
   trackDraft(upstreamDialog, upstreamForm, closeUpstreamModal);
@@ -2305,6 +2423,9 @@ const closeUpstreamModal = () => {
   clearFormErrors(upstreamForm);
   if (upstreamForm) upstreamForm.reset();
   editingUpstreamID = "";
+  upstreamSNITouched = false;
+  if (upstreamProtocol) upstreamProtocol.value = "shadowsocks";
+  syncUpstreamProtocol();
   setUpstreamModalMode(false);
   if (upstreamDialog && upstreamDialog.open) upstreamDialog.close();
 };
@@ -2467,7 +2588,7 @@ const renderRouting = (routing, routeStatus = []) => {
       capability.dataset.label = "加密与协议";
       const methodText = document.createElement("span");
       methodText.className = "route-method";
-      methodText.textContent = methodLabel(upstream.method);
+      methodText.textContent = upstream.protocol === "anytls" ? "AnyTLS" : methodLabel(upstream.method);
       const protocolText = document.createElement("span");
       protocolText.className = "ui-help-text";
       protocolText.textContent = [upstream.tcp ? "TCP" : "", upstream.udp ? "UDP" : ""].filter(Boolean).join(" + ") || "未开启协议";
@@ -3075,7 +3196,7 @@ const readRouteImportFile = async () => {
     Array.isArray(document_.rules) &&
     Array.isArray(document_.upstreams) &&
     typeof document_.default_action === "string" &&
-    document_.upstreams.every((item) => item && typeof item.id === "string" && typeof item.host === "string" && typeof item.method === "string");
+    document_.upstreams.every((item) => item && typeof item.id === "string" && typeof item.host === "string" && (typeof item.method === "string" || item.protocol === "anytls"));
   if (!valid) {
     markFieldError(routeImportFile, "文件版本不兼容或结构不完整，请重新导出后再试。");
     return;
@@ -3104,7 +3225,10 @@ const submitRouteImport = async () => {
       id: upstream.id,
       host: upstream.host,
       port: upstream.port,
-      method: upstream.method,
+      method: upstream.method || "",
+      protocol: upstream.protocol || "",
+      sni: upstream.sni || "",
+      padding_scheme: upstream.padding_scheme || "",
       enabled: Boolean(upstream.enabled),
       tcp: Boolean(upstream.tcp),
       udp: Boolean(upstream.udp),
@@ -3332,8 +3456,12 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
   const id = editing ? editingUpstreamID : String(form.get("id") || "").trim();
   const host = String(form.get("host") || "").trim();
   const port = Number(form.get("port") || 0);
-  const method = String(form.get("method") || "");
+  const protocol = String(form.get("protocol") || "shadowsocks");
+  const anytls = protocol === "anytls";
+  const method = anytls ? "" : String(form.get("method") || "");
   const password = String(form.get("password") || "").trim();
+  const sni = String(form.get("sni") || "").trim();
+  const padding = String(form.get("padding_scheme") || "");
   const idInput = formField(upstreamForm, "id");
   const hostInput = formField(upstreamForm, "host");
   const portInput = formField(upstreamForm, "port");
@@ -3370,9 +3498,20 @@ if (upstreamForm) upstreamForm.addEventListener("submit", async (event) => {
     if (passwordInput) passwordInput.focus();
     return;
   }
+  if (anytls && isIPAddress(host) && !sni) {
+    markFieldError(upstreamSNI, "地址是 IP 时必须填写 SNI。");
+    if (upstreamAnyTLS) upstreamAnyTLS.open = true;
+    if (upstreamSNI) upstreamSNI.focus();
+    return;
+  }
   setBusy(true, upstreamSubmit, editing ? "正在保存上游…" : "正在添加上游…");
   try {
     const request = { id, host, port, method, tcp: form.get("tcp") === "on", udp: form.get("udp") === "on" };
+    if (anytls) {
+      request.protocol = "anytls";
+      request.sni = sni || (!isIPAddress(host) ? host.replace(/^\[|\]$/g, "") : "");
+      request.padding_scheme = padding;
+    }
     let payload;
     if (editing) {
       // 密钥留空时后端沿用现有凭据；只在填写时随更新轮换。
@@ -3672,6 +3811,16 @@ if (detailBatchEnable) detailBatchEnable.addEventListener("click", (event) => ba
 if (detailBatchDisable) detailBatchDisable.addEventListener("click", (event) => batchMutateUsers("disable", event.currentTarget));
 if (detailBatchDelete) detailBatchDelete.addEventListener("click", (event) => batchMutateUsers("delete", event.currentTarget));
 if (methodInput()) methodInput().addEventListener("change", syncServerPskField);
+if (createProtocol) createProtocol.addEventListener("change", syncCreateProtocol);
+if (upstreamProtocol) upstreamProtocol.addEventListener("change", () => {
+  syncUpstreamProtocol();
+  rememberUpstreamSNI();
+});
+if (upstreamSNI) upstreamSNI.addEventListener("input", () => { upstreamSNITouched = true; });
+const upstreamHost = formField(upstreamForm, "host");
+if (upstreamHost) upstreamHost.addEventListener("input", rememberUpstreamSNI);
+syncCreateProtocol();
+syncUpstreamProtocol();
 if (qrCopy) {
   qrCopy.addEventListener("click", async () => {
     try {
@@ -3754,7 +3903,7 @@ if (appendForm) {
       await renderWorkspace();
       const updated = listensCache.find((item) => item && item.id === listenID);
       if (updated) openDetail(updated);
-      showFeedback("已追加用户，新的 ss:// 链接已生成。", false);
+      showFeedback(isAnyTLSListen(listen) ? "已追加用户，新的 anytls:// 链接已生成。" : "已追加用户，新的 ss:// 链接已生成。", false);
     } catch (error) {
       showModalError(appendError, errorText(error, "追加用户失败，请稍后重试。"));
     } finally {
@@ -3778,18 +3927,31 @@ if (createForm) {
       if (portInput) portInput.focus();
       return;
     }
+    const protocol = String(data.get("protocol") || "shadowsocks");
+    const anytls = protocol === "anytls";
     const body = mutateBody({
       name: String(data.get("name") || "").trim(),
-      method: String(data.get("method") || "").trim(),
       password: String(data.get("password") || "").trim(),
-      server_psk: String(data.get("server_psk") || "").trim(),
     });
+    if (anytls) {
+      const certificateID = Number(data.get("certificate_id") || 0);
+      if (!certificateID) {
+        showModalError(createError, "没有可选公网证书或未选择证书");
+        return;
+      }
+      body.protocol = "anytls";
+      body.certificate_id = certificateID;
+      body.padding_scheme = String(data.get("padding_scheme") || "");
+    } else {
+      body.method = String(data.get("method") || "").trim();
+      body.server_psk = String(data.get("server_psk") || "").trim();
+    }
     if (portValue) body.port = port;
     setBusy(true, createSubmit, "正在保存…");
     try {
       await sendPluginJSON("api/listens", body);
       closeCreate();
-      showStatus("已保存监听，可在卡片上复制 ss:// 或查看二维码。", false);
+      showStatus(anytls ? "已保存监听，可在卡片上复制 anytls:// 或查看二维码。" : "已保存监听，可在卡片上复制 ss:// 或查看二维码。", false);
       await renderWorkspace();
     } catch (error) {
       showModalError(createError, errorText(error, "新增监听失败，请检查端口和密钥后重试。"));

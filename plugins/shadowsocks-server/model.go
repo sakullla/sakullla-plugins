@@ -26,6 +26,7 @@ const (
 	DefaultSS2022Method  = "2022-blake3-aes-128-gcm"
 	AccountFamilyLegacy  = "ss"
 	AccountFamily2022    = "ss2022"
+	AccountFamilyAnyTLS  = "anytls"
 	ServerPSKID          = "server-psk"
 	defaultSecretVersion = "v1"
 	accountIDPrefix      = "acct-"
@@ -54,6 +55,7 @@ var (
 	ErrPortConflict            = errors.New("该节点已使用此端口")
 	ErrExecutionUnavailable    = errors.New("该节点暂时无法执行监听")
 	ErrTraditionalMultiUser    = errors.New("传统方法不能在同一端口追加用户")
+	ErrPublicCertificate       = errors.New("没有可选公网证书或未选择证书")
 )
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 
@@ -69,7 +71,11 @@ type ListenRule struct {
 	ID                  string `json:"id"`
 	AgentID             string `json:"agent_id"`
 	Port                int    `json:"port"`
-	Method              string `json:"method"`
+	Protocol            string `json:"protocol,omitempty"`
+	Method              string `json:"method,omitempty"`
+	CertificateID       int    `json:"certificate_id,omitempty"`
+	CertificateDomain   string `json:"certificate_domain,omitempty"`
+	PaddingScheme       string `json:"padding_scheme,omitempty"`
 	ServerSecretRef     string `json:"server_secret_ref,omitempty"`
 	ServerSecretVersion string `json:"server_secret_version,omitempty"`
 	Users               []User `json:"users"`
@@ -93,14 +99,18 @@ type AccountSpec struct {
 
 // ListenSpec creates a listen or appends a user on a selected Agent.
 type ListenSpec struct {
-	AgentID   string `json:"agent_id,omitempty"`
-	ListenID  string `json:"listen_id,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Method    string `json:"method,omitempty"`
-	Port      int    `json:"port,omitempty"`
-	Password  string `json:"password,omitempty"`
-	ServerPSK string `json:"server_psk,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	ListenID          string `json:"listen_id,omitempty"`
+	UserID            string `json:"user_id,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Protocol          string `json:"protocol,omitempty"`
+	Method            string `json:"method,omitempty"`
+	Port              int    `json:"port,omitempty"`
+	Password          string `json:"password,omitempty"`
+	ServerPSK         string `json:"server_psk,omitempty"`
+	CertificateID     int    `json:"certificate_id,omitempty"`
+	CertificateDomain string `json:"certificate_domain,omitempty"`
+	PaddingScheme     string `json:"padding_scheme,omitempty"`
 }
 
 // AccountRecord is the plugin account API projection. It never includes
@@ -163,15 +173,30 @@ func (c Configuration) Validate() error {
 }
 
 func (l ListenRule) Validate() error {
-	if !refPattern.MatchString(l.ID) || !validAgentID(l.AgentID) || l.Port < 1 || l.Port > 65535 || !SupportedMethod(l.Method) {
+	if !refPattern.MatchString(l.ID) || !validAgentID(l.AgentID) || l.Port < 1 || l.Port > 65535 {
 		return ErrInvalid
 	}
-	if l.ServerSecretRef != "" || l.ServerSecretVersion != "" {
-		if !SS2022Method(l.Method) || !refPattern.MatchString(l.ServerSecretRef) || !refPattern.MatchString(l.ServerSecretVersion) {
+	switch l.Protocol {
+	case ProtocolAnyTLS:
+		if l.Method != "" || l.ServerSecretRef != "" || l.ServerSecretVersion != "" || l.CertificateID <= 0 || !validCertificateDomain(l.CertificateDomain) {
 			return ErrInvalid
 		}
-	}
-	if !SS2022Method(l.Method) && len(l.Users) > 1 {
+		if err := validatePaddingScheme(l.PaddingScheme); err != nil {
+			return err
+		}
+	case "", ProtocolShadowsocks:
+		if !SupportedMethod(l.Method) || l.CertificateID != 0 || l.CertificateDomain != "" || l.PaddingScheme != "" {
+			return ErrInvalid
+		}
+		if l.ServerSecretRef != "" || l.ServerSecretVersion != "" {
+			if !SS2022Method(l.Method) || !refPattern.MatchString(l.ServerSecretRef) || !refPattern.MatchString(l.ServerSecretVersion) {
+				return ErrInvalid
+			}
+		}
+		if !SS2022Method(l.Method) && len(l.Users) > 1 {
+			return ErrInvalid
+		}
+	default:
 		return ErrInvalid
 	}
 	if len(l.Users) > MaxUsers {
@@ -213,6 +238,14 @@ func AccountFamilyOf(method string) string {
 		return AccountFamily2022
 	}
 	return AccountFamilyLegacy
+}
+
+func validCertificateDomain(domain string) bool {
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\r\n\x00 ") {
+		return false
+	}
+	upper := strings.ToUpper(domain)
+	return !strings.Contains(upper, "PRIVATE KEY") && !strings.Contains(upper, "BEGIN ")
 }
 
 func (spec AccountSpec) resolveMethod(defaultMethod string) (string, error) {
@@ -485,6 +518,15 @@ func (spec ListenSpec) resolveMethod() (string, error) {
 // CreateListen adds one listen with one enabled user. Duplicate ports on the
 // same agent are rejected. Traditional methods cannot share a port.
 func (c Configuration) CreateListen(spec ListenSpec, user User, serverRef, serverVersion string) (Configuration, ListenRule, User, error) {
+	if spec.Protocol == ProtocolAnyTLS {
+		return c.createAnyTLSListen(spec, user)
+	}
+	if spec.Protocol != "" && spec.Protocol != ProtocolShadowsocks {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if spec.CertificateID != 0 || spec.CertificateDomain != "" || spec.PaddingScheme != "" {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
 	next := clone(c)
 	if !validAgentID(spec.AgentID) {
 		return Configuration{}, ListenRule{}, User{}, ErrAgentOffline
@@ -561,15 +603,88 @@ func (c Configuration) CreateListen(spec ListenSpec, user User, serverRef, serve
 	return next, created, user, nil
 }
 
-// AppendListenUser adds one user to an existing SS2022 listen. Traditional
-// methods reject a second user. Method, port, and server PSK are reused.
+func (c Configuration) createAnyTLSListen(spec ListenSpec, user User) (Configuration, ListenRule, User, error) {
+	next := clone(c)
+	if !validAgentID(spec.AgentID) {
+		return Configuration{}, ListenRule{}, User{}, ErrAgentOffline
+	}
+	if spec.Method != "" || spec.ServerPSK != "" || spec.CertificateID <= 0 || !validCertificateDomain(spec.CertificateDomain) {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	scheme, err := canonicalPaddingScheme(spec.PaddingScheme)
+	if err != nil {
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	listenID := spec.ListenID
+	if listenID == "" {
+		listenID, err = NewListenID()
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	port := spec.Port
+	if port == 0 {
+		port, err = next.NextListenPort(spec.AgentID)
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	if port < 1 || port > 65535 {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if next.PortConflict(spec.AgentID, port, "") {
+		return Configuration{}, ListenRule{}, User{}, ErrPortConflict
+	}
+	if _, exists := next.Listen(listenID); exists {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	if user.ID == "" {
+		user.ID, err = NewAccountID()
+		if err != nil {
+			return Configuration{}, ListenRule{}, User{}, err
+		}
+	}
+	if user.Name == "" {
+		user.Name = DefaultUserName(user.ID)
+	}
+	if user.SecretRef == "" {
+		user.SecretRef = AccountSecretRef(user.ID)
+	}
+	if user.SecretVersion == "" {
+		user.SecretVersion = defaultSecretVersion
+	}
+	user.Enabled = true
+	if err = user.Validate(); err != nil {
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	if _, _, _, exists := next.lookupUser(user.ID); exists {
+		return Configuration{}, ListenRule{}, User{}, ErrInvalid
+	}
+	listener := ListenRule{
+		ID: listenID, AgentID: spec.AgentID, Port: port, Protocol: ProtocolAnyTLS,
+		CertificateID: spec.CertificateID, CertificateDomain: spec.CertificateDomain,
+		PaddingScheme: scheme, Users: []User{user},
+	}
+	next.Listeners = append(next.Listeners, listener)
+	if err = next.Validate(); err != nil {
+		if next.PortConflict(spec.AgentID, port, listenID) {
+			return Configuration{}, ListenRule{}, User{}, ErrPortConflict
+		}
+		return Configuration{}, ListenRule{}, User{}, err
+	}
+	created, _ := next.Listen(listenID)
+	return next, created, user, nil
+}
+
+// AppendListenUser adds one user to an existing SS2022 or AnyTLS listen.
+// Traditional methods reject a second user. Method, port, certificate, and padding stay shared.
 func (c Configuration) AppendListenUser(listenID string, user User) (Configuration, ListenRule, User, error) {
 	next := clone(c)
 	listener, ok := next.Listen(listenID)
 	if !ok {
 		return Configuration{}, ListenRule{}, User{}, ErrDenied
 	}
-	if !SS2022Method(listener.Method) {
+	if !SS2022Method(listener.Method) && !listener.AnyTLS() {
 		return Configuration{}, ListenRule{}, User{}, ErrTraditionalMultiUser
 	}
 	if user.ID == "" {
@@ -641,10 +756,15 @@ func (c Configuration) AccountRecord(user User) AccountRecord {
 		current = user
 	}
 	method := listener.Method
+	family := AccountFamilyOf(method)
+	if listener.AnyTLS() {
+		family = AccountFamilyAnyTLS
+		method = ""
+	}
 	return AccountRecord{
 		ID:            current.ID,
 		Name:          current.Name,
-		Family:        AccountFamilyOf(method),
+		Family:        family,
 		Method:        method,
 		Enabled:       current.Enabled,
 		SecretVersion: current.SecretVersion,
@@ -655,14 +775,7 @@ func (c Configuration) ListAccounts() []AccountRecord {
 	accounts := make([]AccountRecord, 0)
 	for _, listener := range clone(c).Listeners {
 		for _, user := range listener.Users {
-			accounts = append(accounts, AccountRecord{
-				ID:            user.ID,
-				Name:          user.Name,
-				Family:        AccountFamilyOf(listener.Method),
-				Method:        listener.Method,
-				Enabled:       user.Enabled,
-				SecretVersion: user.SecretVersion,
-			})
+			accounts = append(accounts, c.AccountRecord(user))
 		}
 	}
 	return accounts

@@ -484,7 +484,7 @@ func safeControllerError(err error) error {
 const generationHandleScope = "service.revocable-resource-handle"
 
 func requiredGrants() []string {
-	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite, string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve)}
+	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite, string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve), pluginsdk.PermissionPublicCertificateRead, pluginsdk.PermissionPublicCertificateTerminate}
 }
 
 func supportedFeatures() []string {

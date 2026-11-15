@@ -28,9 +28,29 @@ type managedRuntimeFake struct {
 	writes          map[string][]byte
 	nextRead        []byte
 	datasetError    bool
+	certificates    []pluginsdk.PublicCertificateProjection
+	tlsTerminateErr error
 }
 
 func (*managedRuntimeFake) Call(context.Context, pluginsdk.HostRuntimeCall, any) error { return nil }
+
+func (fake *managedRuntimeFake) ListPublicCertificates(context.Context, string) (pluginsdk.PublicCertificateListResponse, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.certificates == nil {
+		return pluginsdk.PublicCertificateListResponse{Certificates: []pluginsdk.PublicCertificateProjection{}}, nil
+	}
+	return pluginsdk.PublicCertificateListResponse{Certificates: append([]pluginsdk.PublicCertificateProjection(nil), fake.certificates...)}, nil
+}
+
+func (fake *managedRuntimeFake) TerminatePublicCertificateTLS(_ context.Context, request pluginsdk.PublicCertificateTLSRequest) (pluginsdk.PublicCertificateTLSResponse, error) {
+	if fake.tlsTerminateErr != nil {
+		return pluginsdk.PublicCertificateTLSResponse{}, fake.tlsTerminateErr
+	}
+	handle := request.Handle
+	handle.Token = handle.Token + "-tls"
+	return pluginsdk.PublicCertificateTLSResponse{Handle: handle}, nil
+}
 
 func (fake *managedRuntimeFake) ResolveDataset(_ context.Context, request pluginsdk.DatasetResolveRequest) (pluginsdk.DatasetReference, error) {
 	if fake.datasetError {

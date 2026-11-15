@@ -81,7 +81,7 @@ func wire(t *testing.T) []byte {
 	return b
 }
 func grants() []string {
-	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite, string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve)}
+	return []string{"storage.read", "storage.write", "event.emit", "service.revocable-resource-handle", "agent.read", pluginsdk.PermissionRuntimeIdentity, pluginsdk.PermissionManagedNetworkListen, pluginsdk.PermissionManagedNetworkDial, pluginsdk.PermissionScopedSecretRead, pluginsdk.PermissionScopedSecretWrite, string(pluginsdk.CapabilityDatasetQuery), string(pluginsdk.CapabilityDatasetResolve), pluginsdk.PermissionPublicCertificateRead, pluginsdk.PermissionPublicCertificateTerminate}
 }
 func handshake(scopes []string) pluginsdk.RPCHandshakeRequest {
 	features := pluginsdk.RPCFeaturesWithExecutionScope(pluginsdk.RequiredRPCFeatures(grants()))

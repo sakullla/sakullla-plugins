@@ -140,6 +140,42 @@ func sip002URIHostPort(uri string) (string, int, error) {
 	return host, port, nil
 }
 
+// AnyTLSShareAccount is the share material for one AnyTLS user. SNI is the
+// certificate domain. The URI never carries insecure or REALITY parameters.
+type AnyTLSShareAccount struct {
+	Password string
+	Host     string
+	Port     int
+	SNI      string
+	Name     string
+}
+
+// BuildAnyTLSShare projects an anytls:// URI and a QR whose payload equals that URI.
+func BuildAnyTLSShare(account AnyTLSShareAccount) (SIP002Share, error) {
+	if account.Password == "" || strings.ContainsAny(account.Password, "\r\n\x00") || !validCertificateDomain(account.SNI) || account.Port < 1 || account.Port > 65535 {
+		return SIP002Share{}, ErrInvalid
+	}
+	host := strings.TrimSpace(account.Host)
+	if host == "" || strings.ContainsAny(host, "\r\n\x00 /?#") {
+		return SIP002Share{}, ErrInvalid
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		host = "[" + ip.String() + "]"
+	}
+	uri := "anytls://" + url.PathEscape(account.Password) + "@" + host + ":" + strconv.Itoa(account.Port) + "/?sni=" + url.QueryEscape(account.SNI)
+	if account.Name != "" {
+		uri += "#" + url.PathEscape(account.Name)
+	}
+	if strings.Contains(uri, "insecure=") || strings.Contains(strings.ToLower(uri), "reality") {
+		return SIP002Share{}, ErrInvalid
+	}
+	qr, err := encodeSIP002QR(uri)
+	if err != nil || qr.Content != uri {
+		return SIP002Share{}, ErrInvalid
+	}
+	return SIP002Share{Host: account.Host, Port: account.Port, URI: uri, QR: qr, Password: account.Password}, nil
+}
+
 // ErrSIP002Plugin rejects an ss:// URI carrying a SIP003 plugin transport
 // query. This plugin cannot honour plugin= obfuscation, so the link is
 // refused instead of silently dropping the parameter.

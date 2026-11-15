@@ -25,7 +25,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "agent_id", "port", "method", "users"],
+        "required": ["id", "agent_id", "port", "users"],
         "properties": {
           "id": {
             "type": "string",
@@ -41,6 +41,10 @@
             "hostInjected": true
           },
           "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "protocol": {"enum": ["shadowsocks", "anytls"]},
+          "certificate_id": {"type": "integer", "minimum": 1},
+          "certificate_domain": {"type": "string", "minLength": 1, "maxLength": 253},
+          "padding_scheme": {"type": "string", "minLength": 1, "maxLength": 4096},
           "method": {
             "enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"],
             "default": "2022-blake3-aes-128-gcm"
@@ -102,12 +106,15 @@
           "type": "array", "maxItems": 16,
           "items": {
             "type": "object", "additionalProperties": false,
-            "required": ["id", "host", "port", "method", "secret_ref", "secret_version", "enabled", "tcp", "udp"],
+            "required": ["id", "host", "port", "secret_ref", "secret_version", "enabled", "tcp", "udp"],
             "properties": {
               "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"},
               "host": {"type": "string", "minLength": 1, "maxLength": 253},
               "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+              "protocol": {"enum": ["shadowsocks", "anytls"]},
               "method": {"enum": ["aes-128-gcm", "aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]},
+              "sni": {"type": "string", "minLength": 1, "maxLength": 253},
+              "padding_scheme": {"type": "string", "minLength": 1, "maxLength": 4096},
               "secret_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$", "hostInjected": true},
               "secret_version": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$", "hostInjected": true},
               "enabled": {"type": "boolean"}, "tcp": {"type": "boolean"}, "udp": {"type": "boolean"}

@@ -33,7 +33,10 @@ type Upstream struct {
 	ID            string `json:"id"`
 	Host          string `json:"host"`
 	Port          int    `json:"port"`
-	Method        string `json:"method"`
+	Protocol      string `json:"protocol,omitempty"`
+	Method        string `json:"method,omitempty"`
+	SNI           string `json:"sni,omitempty"`
+	PaddingScheme string `json:"padding_scheme,omitempty"`
 	SecretRef     string `json:"secret_ref"`
 	SecretVersion string `json:"secret_version"`
 	Enabled       bool   `json:"enabled"`
@@ -76,9 +79,12 @@ func (configuration RoutingConfiguration) Validate() error {
 	upstreams := make(map[string]Upstream, len(configuration.Upstreams))
 	for _, upstream := range configuration.Upstreams {
 		endpoint := pluginsdk.ManagedNetworkEndpoint{Host: upstream.Host, Port: upstream.Port}
-		if !refPattern.MatchString(upstream.ID) || endpoint.Validate() != nil || !SupportedMethod(upstream.Method) ||
+		if !refPattern.MatchString(upstream.ID) || endpoint.Validate() != nil ||
 			!refPattern.MatchString(upstream.SecretRef) || !refPattern.MatchString(upstream.SecretVersion) || (!upstream.TCP && !upstream.UDP) {
 			return ErrInvalid
+		}
+		if err := upstream.validateProtocol(); err != nil {
+			return err
 		}
 		if _, duplicate := upstreams[upstream.ID]; duplicate {
 			return ErrInvalid
@@ -96,6 +102,69 @@ func (configuration RoutingConfiguration) Validate() error {
 		}
 	}
 	return validateRouteAction(configuration.effectiveDefault(), configuration.DefaultUpstreamID, upstreams)
+}
+
+func (upstream Upstream) validateProtocol() error {
+	switch upstream.Protocol {
+	case "", ProtocolShadowsocks:
+		if !SupportedMethod(upstream.Method) || upstream.SNI != "" || upstream.PaddingScheme != "" {
+			return ErrInvalid
+		}
+	case ProtocolAnyTLS:
+		if upstream.Method != "" {
+			return ErrInvalid
+		}
+		if err := validatePaddingScheme(upstream.PaddingScheme); err != nil {
+			return err
+		}
+		host := strings.Trim(strings.TrimSpace(upstream.Host), "[]")
+		sni := strings.TrimSpace(upstream.SNI)
+		if sni == "" {
+			if _, err := netip.ParseAddr(host); err == nil || host == "" {
+				return ErrInvalid
+			}
+		} else if !validCertificateDomain(sni) {
+			return ErrInvalid
+		}
+	default:
+		return ErrInvalid
+	}
+	return nil
+}
+
+// normalizeUpstream fills the saved SNI and padding for an AnyTLS upstream.
+// A domain with an untouched SNI stores that domain. An IP with an empty SNI cannot be saved.
+func normalizeUpstream(upstream *Upstream) error {
+	if upstream == nil {
+		return ErrInvalid
+	}
+	if upstream.Protocol == ProtocolShadowsocks {
+		upstream.Protocol = ""
+	}
+	if upstream.Protocol == ProtocolAnyTLS {
+		scheme, err := canonicalPaddingScheme(upstream.PaddingScheme)
+		if err != nil {
+			return err
+		}
+		upstream.PaddingScheme = scheme
+		upstream.Method = ""
+		host := strings.Trim(strings.TrimSpace(upstream.Host), "[]")
+		if strings.TrimSpace(upstream.SNI) == "" {
+			if _, err = netip.ParseAddr(host); err == nil || host == "" {
+				return ErrInvalid
+			}
+			upstream.SNI = host
+		} else {
+			upstream.SNI = strings.TrimSpace(upstream.SNI)
+		}
+		return upstream.validateProtocol()
+	}
+	if upstream.Protocol != "" {
+		return ErrInvalid
+	}
+	upstream.SNI = ""
+	upstream.PaddingScheme = ""
+	return upstream.validateProtocol()
 }
 
 func validateRouteAction(action, upstreamID string, upstreams map[string]Upstream) error {

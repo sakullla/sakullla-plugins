@@ -17,13 +17,16 @@ import (
 )
 
 type upstreamWriteRequest struct {
-	ID       string `json:"id"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Method   string `json:"method"`
-	Password string `json:"password"`
-	TCP      bool   `json:"tcp"`
-	UDP      bool   `json:"udp"`
+	ID            string `json:"id"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol,omitempty"`
+	Method        string `json:"method"`
+	SNI           string `json:"sni,omitempty"`
+	PaddingScheme string `json:"padding_scheme,omitempty"`
+	Password      string `json:"password"`
+	TCP           bool   `json:"tcp"`
+	UDP           bool   `json:"udp"`
 }
 
 type routingWriteRequest struct {
@@ -932,13 +935,16 @@ const routingExportVersion = 1
 // references stay inside the instance: they are meaningless elsewhere and the
 // export must not reveal which scoped-secret IDs exist.
 type upstreamExportEntry struct {
-	ID      string `json:"id"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	Method  string `json:"method"`
-	Enabled bool   `json:"enabled"`
-	TCP     bool   `json:"tcp"`
-	UDP     bool   `json:"udp"`
+	ID            string `json:"id"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol,omitempty"`
+	Method        string `json:"method"`
+	SNI           string `json:"sni,omitempty"`
+	PaddingScheme string `json:"padding_scheme,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	TCP           bool   `json:"tcp"`
+	UDP           bool   `json:"udp"`
 }
 
 type routingExportDocument struct {
@@ -953,14 +959,17 @@ type routingExportDocument struct {
 // the admin fills in the import dialog. The password is never echoed back; it
 // only flows into the scoped-secret mint path.
 type upstreamImportEntry struct {
-	ID       string `json:"id"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Method   string `json:"method"`
-	Password string `json:"password,omitempty"`
-	Enabled  bool   `json:"enabled"`
-	TCP      bool   `json:"tcp"`
-	UDP      bool   `json:"udp"`
+	ID            string `json:"id"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol,omitempty"`
+	Method        string `json:"method"`
+	SNI           string `json:"sni,omitempty"`
+	PaddingScheme string `json:"padding_scheme,omitempty"`
+	Password      string `json:"password,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	TCP           bool   `json:"tcp"`
+	UDP           bool   `json:"udp"`
 }
 
 type routingImportRequest struct {
@@ -1001,7 +1010,7 @@ func (c *Controller) serveRoutingExport(writer http.ResponseWriter, request *htt
 		Upstreams:         make([]upstreamExportEntry, 0, len(routing.Upstreams)),
 	}
 	for _, upstream := range routing.Upstreams {
-		document.Upstreams = append(document.Upstreams, upstreamExportEntry{ID: upstream.ID, Host: upstream.Host, Port: upstream.Port, Method: upstream.Method, Enabled: upstream.Enabled, TCP: upstream.TCP, UDP: upstream.UDP})
+		document.Upstreams = append(document.Upstreams, upstreamExportEntry{ID: upstream.ID, Host: upstream.Host, Port: upstream.Port, Protocol: upstream.Protocol, Method: upstream.Method, SNI: upstream.SNI, PaddingScheme: upstream.PaddingScheme, Enabled: upstream.Enabled, TCP: upstream.TCP, UDP: upstream.UDP})
 	}
 	wire, err := json.Marshal(document)
 	if err != nil {
@@ -1088,17 +1097,25 @@ func (c *Controller) importRouting(ctx context.Context, body routingImportReques
 			return fail(routingImportRejected(fmt.Sprintf("上游 %q 的标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ -", entry.ID)))
 		}
 		endpoint := pluginsdk.ManagedNetworkEndpoint{Host: entry.Host, Port: entry.Port}
-		if seen[entry.ID] || endpoint.Validate() != nil || !SupportedMethod(entry.Method) || (!entry.TCP && !entry.UDP) {
+		if seen[entry.ID] || endpoint.Validate() != nil || (!entry.TCP && !entry.UDP) {
 			return fail(ErrInvalid)
 		}
 		seen[entry.ID] = true
-		upstream := Upstream{ID: entry.ID, Host: entry.Host, Port: entry.Port, Method: entry.Method, Enabled: entry.Enabled, TCP: entry.TCP, UDP: entry.UDP}
+		upstream := Upstream{ID: entry.ID, Host: entry.Host, Port: entry.Port, Protocol: entry.Protocol, Method: entry.Method, SNI: entry.SNI, PaddingScheme: entry.PaddingScheme, Enabled: entry.Enabled, TCP: entry.TCP, UDP: entry.UDP}
+		if err := normalizeUpstream(&upstream); err != nil {
+			return fail(err)
+		}
 		if password := strings.TrimSpace(entry.Password); password != "" {
-			engine, err := NewProtocolEngine(entry.Method, []byte(entry.Password))
-			if err != nil {
-				return fail(routingImportRejected(fmt.Sprintf("上游 %q 的连接密钥与加密方式不匹配，请核对后重试", entry.ID)))
+			if strings.ContainsAny(password, "\r\n\x00") {
+				return fail(ErrInvalid)
 			}
-			engine.Destroy()
+			if !upstream.AnyTLS() {
+				engine, err := NewProtocolEngine(upstream.Method, []byte(entry.Password))
+				if err != nil {
+					return fail(routingImportRejected(fmt.Sprintf("上游 %q 的连接密钥与加密方式不匹配，请核对后重试", entry.ID)))
+				}
+				engine.Destroy()
+			}
 			material := []byte(entry.Password)
 			reference, err := c.managedRuntime.importOpaqueSecret(ctx, "upstream", material)
 			clear(material)
@@ -1112,12 +1129,19 @@ func (c *Controller) importRouting(ctx context.Context, body routingImportReques
 			if err != nil {
 				return fail(routingImportRejected(fmt.Sprintf("上游 %q 无法沿用现有凭据，请补填连接密钥", entry.ID)))
 			}
-			engine, err := NewProtocolEngine(entry.Method, material)
-			clear(material)
-			if err != nil {
-				return fail(routingImportRejected(fmt.Sprintf("上游 %q 的现有凭据与加密方式不兼容，请补填连接密钥", entry.ID)))
+			if !upstream.AnyTLS() {
+				engine, err := NewProtocolEngine(upstream.Method, material)
+				clear(material)
+				if err != nil {
+					return fail(routingImportRejected(fmt.Sprintf("上游 %q 的现有凭据与加密方式不兼容，请补填连接密钥", entry.ID)))
+				}
+				engine.Destroy()
+			} else if len(material) == 0 || strings.ContainsAny(string(material), "\r\n\x00") {
+				clear(material)
+				return fail(routingImportRejected(fmt.Sprintf("上游 %q 无法沿用现有凭据，请补填连接密钥", entry.ID)))
+			} else {
+				clear(material)
 			}
-			engine.Destroy()
 			upstream.SecretRef, upstream.SecretVersion = previous.SecretRef, previous.SecretVersion
 		} else {
 			missing = append(missing, fmt.Sprintf("%q", entry.ID))
@@ -1157,17 +1181,23 @@ func (c *Controller) createUpstream(ctx context.Context, body upstreamWriteReque
 	if !upstreamIDPattern.MatchString(body.ID) {
 		return RoutingConfiguration{}, upstreamRejected("上游标识无效：需以小写字母或数字开头，仅含小写字母、数字与 . _ -")
 	}
-	if c.managedRuntime == nil || strings.TrimSpace(body.Password) == "" {
+	if c.managedRuntime == nil || strings.TrimSpace(body.Password) == "" || strings.ContainsAny(body.Password, "\r\n\x00") {
 		return RoutingConfiguration{}, ErrInvalid
 	}
-	engine, err := NewProtocolEngine(body.Method, []byte(body.Password))
-	if err != nil {
-		return RoutingConfiguration{}, ErrInvalid
+	upstream := Upstream{ID: body.ID, Host: body.Host, Port: body.Port, Protocol: body.Protocol, Method: body.Method, SNI: body.SNI, PaddingScheme: body.PaddingScheme, Enabled: true, TCP: body.TCP, UDP: body.UDP}
+	if err := normalizeUpstream(&upstream); err != nil {
+		return RoutingConfiguration{}, err
 	}
-	engine.Destroy()
+	if !upstream.AnyTLS() {
+		engine, err := NewProtocolEngine(upstream.Method, []byte(body.Password))
+		if err != nil {
+			return RoutingConfiguration{}, ErrInvalid
+		}
+		engine.Destroy()
+	}
 	current := cloneRouting(c.directory().Routing)
-	for _, upstream := range current.Upstreams {
-		if upstream.ID == body.ID {
+	for _, existing := range current.Upstreams {
+		if existing.ID == body.ID {
 			return RoutingConfiguration{}, ErrInvalid
 		}
 	}
@@ -1177,7 +1207,8 @@ func (c *Controller) createUpstream(ctx context.Context, body upstreamWriteReque
 	if err != nil {
 		return RoutingConfiguration{}, err
 	}
-	current.Upstreams = append(current.Upstreams, Upstream{ID: body.ID, Host: body.Host, Port: body.Port, Method: body.Method, SecretRef: reference.ID, SecretVersion: reference.Version, Enabled: true, TCP: body.TCP, UDP: body.UDP})
+	upstream.SecretRef, upstream.SecretVersion = reference.ID, reference.Version
+	current.Upstreams = append(current.Upstreams, upstream)
 	if err := c.replaceRouting(ctx, current); err != nil {
 		c.managedRuntime.revokeReferences(ctx, []pluginsdk.ScopedSecretReference{reference})
 		return RoutingConfiguration{}, err
@@ -1217,18 +1248,24 @@ func (c *Controller) mutateUpstream(ctx context.Context, id, action string, body
 		next.Upstreams = append(next.Upstreams[:index], next.Upstreams[index+1:]...)
 	case "update":
 		endpoint := pluginsdk.ManagedNetworkEndpoint{Host: body.Host, Port: body.Port}
-		if endpoint.Validate() != nil || !SupportedMethod(body.Method) || (!body.TCP && !body.UDP) {
+		if endpoint.Validate() != nil || (!body.TCP && !body.UDP) {
 			return RoutingConfiguration{}, ErrInvalid
 		}
+		updated := Upstream{ID: previous.ID, Host: body.Host, Port: body.Port, Protocol: body.Protocol, Method: body.Method, SNI: body.SNI, PaddingScheme: body.PaddingScheme, SecretRef: previous.SecretRef, SecretVersion: previous.SecretVersion, Enabled: previous.Enabled, TCP: body.TCP, UDP: body.UDP}
+		if err := normalizeUpstream(&updated); err != nil {
+			return RoutingConfiguration{}, err
+		}
 		if strings.TrimSpace(body.Password) != "" {
-			if c.managedRuntime == nil {
+			if c.managedRuntime == nil || strings.ContainsAny(body.Password, "\r\n\x00") {
 				return RoutingConfiguration{}, ErrInvalid
 			}
-			engine, err := NewProtocolEngine(body.Method, []byte(body.Password))
-			if err != nil {
-				return RoutingConfiguration{}, ErrInvalid
+			if !updated.AnyTLS() {
+				engine, err := NewProtocolEngine(updated.Method, []byte(body.Password))
+				if err != nil {
+					return RoutingConfiguration{}, ErrInvalid
+				}
+				engine.Destroy()
 			}
-			engine.Destroy()
 			material := []byte(body.Password)
 			reference, err := c.managedRuntime.importOpaqueSecret(ctx, "upstream", material)
 			clear(material)
@@ -1236,8 +1273,8 @@ func (c *Controller) mutateUpstream(ctx context.Context, id, action string, body
 				return RoutingConfiguration{}, err
 			}
 			minted = reference
-		} else if body.Method != previous.Method {
-			// A method change must still accept the kept credential.
+			updated.SecretRef, updated.SecretVersion = minted.ID, minted.Version
+		} else if !updated.AnyTLS() && (body.Method != previous.Method || previous.AnyTLS()) {
 			if c.managedRuntime == nil {
 				return RoutingConfiguration{}, ErrInvalid
 			}
@@ -1245,19 +1282,14 @@ func (c *Controller) mutateUpstream(ctx context.Context, id, action string, body
 			if err != nil {
 				return RoutingConfiguration{}, err
 			}
-			engine, err := NewProtocolEngine(body.Method, material)
+			engine, err := NewProtocolEngine(updated.Method, material)
 			clear(material)
 			if err != nil {
 				return RoutingConfiguration{}, ErrInvalid
 			}
 			engine.Destroy()
 		}
-		updated := &next.Upstreams[index]
-		updated.Host, updated.Port, updated.Method = body.Host, body.Port, body.Method
-		updated.TCP, updated.UDP = body.TCP, body.UDP
-		if minted.ID != "" {
-			updated.SecretRef, updated.SecretVersion = minted.ID, minted.Version
-		}
+		next.Upstreams[index] = updated
 	default:
 		return RoutingConfiguration{}, ErrInvalid
 	}

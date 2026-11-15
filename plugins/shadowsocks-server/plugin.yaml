@@ -55,6 +55,8 @@ permissions:
   - name: dataset.resolve
   - name: dataset.manage
   - name: dataset.source-register
+  - name: certificate.public.read
+  - name: certificate.public.terminate
 config_schema: config.schema.json
 resource_budget:
   timeout_ms: 30000

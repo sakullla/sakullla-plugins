@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,7 +83,11 @@ type ListenApplyUser struct {
 type ListenApplyItem struct {
 	ID                  string            `json:"id"`
 	Port                int               `json:"port"`
-	Method              string            `json:"method"`
+	Protocol            string            `json:"protocol,omitempty"`
+	Method              string            `json:"method,omitempty"`
+	CertificateID       int               `json:"certificate_id,omitempty"`
+	CertificateDomain   string            `json:"certificate_domain,omitempty"`
+	PaddingScheme       string            `json:"padding_scheme,omitempty"`
 	ServerSecretRef     string            `json:"server_secret_ref,omitempty"`
 	ServerSecretVersion string            `json:"server_secret_version,omitempty"`
 	Users               []ListenApplyUser `json:"users"`
@@ -106,12 +111,17 @@ type listenApplyResult struct {
 }
 
 type listenExecutor struct {
-	mu       sync.Mutex
-	binder   listenBinder
-	managed  *hostCapabilityRuntime
-	secrets  SecretVerifier
-	bound    map[string]*boundListen
-	bindHost string
+	mu              sync.Mutex
+	binder          listenBinder
+	managed         *hostCapabilityRuntime
+	secrets         SecretVerifier
+	bound           map[string]*boundListen
+	bindHost        string
+	certReady       func(context.Context, string, int) bool
+	tlsTerminate    func(context.Context, int, net.Conn) (net.Conn, error)
+	clientRoots     *x509.CertPool
+	paddingMu       sync.Mutex
+	upstreamPadding map[string]string
 }
 
 type boundUserEngine struct {
@@ -124,6 +134,12 @@ type boundListen struct {
 	closed        bool
 	id            string
 	port          int
+	protocol      string
+	certificateID int
+	agentID       string
+	paddingScheme string
+	anytlsUsers   []ListenApplyUser
+	exec          *listenExecutor
 	tcp           net.Listener
 	udp           net.PacketConn
 	engines       []*boundUserEngine
@@ -146,6 +162,7 @@ type preparedListen struct {
 	engines  []*boundUserEngine
 	ctx      context.Context
 	routes   *routeSnapshot
+	agentID  string
 }
 
 type prefixConn struct {
@@ -264,7 +281,7 @@ func (exec *listenExecutor) apply(ctx context.Context, payload []byte) ([]byte, 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		candidate, err := exec.prepareOneLocked(ctx, item, route)
+		candidate, err := exec.prepareOneLocked(ctx, agentID, item, route)
 		if err != nil {
 			exec.abortPrepared(prepared)
 			return nil, err
@@ -323,19 +340,30 @@ func (exec *listenExecutor) stopAllLocked() {
 func (exec *listenExecutor) viewsLocked() []ListenPortStatus {
 	out := make([]ListenPortStatus, 0, len(exec.bound))
 	for _, item := range exec.bound {
-		out = append(out, ListenPortStatus{ID: item.id, Port: item.port, TCP: true, UDP: true})
+		out = append(out, ListenPortStatus{ID: item.id, Port: item.port, TCP: item.tcp != nil, UDP: item.udp != nil})
 	}
 	return out
 }
 
-func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApplyItem, routes *routeSnapshot) (preparedListen, error) {
-	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 || !SupportedMethod(item.Method) {
+func (exec *listenExecutor) prepareOneLocked(ctx context.Context, agentID string, item ListenApplyItem, routes *routeSnapshot) (preparedListen, error) {
+	if !refPattern.MatchString(item.ID) || item.Port < 1 || item.Port > 65535 {
+		return preparedListen{}, ErrInvalid
+	}
+	if item.Protocol == ProtocolAnyTLS {
+		return exec.prepareAnyTLSLocked(ctx, agentID, item, routes)
+	}
+	if item.Protocol != "" && item.Protocol != ProtocolShadowsocks {
+		return preparedListen{}, ErrInvalid
+	}
+	if item.CertificateID != 0 || item.CertificateDomain != "" || item.PaddingScheme != "" || !SupportedMethod(item.Method) {
 		return preparedListen{}, ErrInvalid
 	}
 	existing := exec.bound[item.ID]
 	var current []*boundUserEngine
-	if existing != nil && existing.port == item.Port {
+	if existing != nil && existing.port == item.Port && !existing.isAnyTLS() {
 		current = existing.snapshotUserEngines()
+	} else if existing != nil && existing.port == item.Port {
+		existing = nil
 	}
 	resolver := exec.secrets
 	if exec.managed != nil {
@@ -346,7 +374,7 @@ func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApp
 		return preparedListen{}, err
 	}
 	if existing != nil && existing.port == item.Port {
-		return preparedListen{item: item, existing: existing, engines: engines, routes: routes}, nil
+		return preparedListen{item: item, existing: existing, engines: engines, routes: routes, agentID: agentID}, nil
 	}
 	host := exec.bindHost
 	if host == "" {
@@ -380,30 +408,104 @@ func (exec *listenExecutor) prepareOneLocked(ctx context.Context, item ListenApp
 		return preparedListen{}, ErrListenBind
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	bound := &boundListen{id: item.ID, port: item.Port, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, routeSources: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
-	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx, routes: routes}, nil
+	bound := &boundListen{id: item.ID, port: item.Port, exec: exec, agentID: agentID, tcp: tcp, udp: udp, engines: engines, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, routeSources: map[string]string{}, flowRoutes: map[string]*routeSnapshot{}, cancel: cancel}
+	return preparedListen{item: item, existing: existing, bound: bound, ctx: ctx, routes: routes, agentID: agentID}, nil
+}
+
+func (exec *listenExecutor) prepareAnyTLSLocked(ctx context.Context, agentID string, item ListenApplyItem, routes *routeSnapshot) (preparedListen, error) {
+	if item.Method != "" || item.ServerSecretRef != "" || item.ServerSecretVersion != "" || item.CertificateID <= 0 || !validCertificateDomain(item.CertificateDomain) || validatePaddingScheme(item.PaddingScheme) != nil || len(item.Users) == 0 {
+		return preparedListen{}, ErrInvalid
+	}
+	for _, user := range item.Users {
+		if !refPattern.MatchString(user.ID) || (user.Enabled && (!refPattern.MatchString(user.SecretRef) || !refPattern.MatchString(user.SecretVersion))) {
+			return preparedListen{}, ErrInvalid
+		}
+	}
+	resolver := exec.secrets
+	if exec.managed != nil {
+		resolver = exec.managed
+	}
+	existing := exec.bound[item.ID]
+	if existing != nil && existing.port == item.Port && existing.isAnyTLS() {
+		return preparedListen{item: item, existing: existing, routes: routes, agentID: agentID}, nil
+	}
+	host := exec.bindHost
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(item.Port))
+	var tcp net.Listener
+	var dialer networkDialer
+	var err error
+	if exec.managed != nil {
+		tcp, err = exec.managed.listenTCP(ctx, item.Port)
+		dialer = managedNetworkDialer{runtime: exec.managed}
+	} else if exec.binder != nil {
+		tcp, err = exec.binder.Listen("tcp", address)
+		dialer = &nativeNetworkDialer{net.Dialer{Timeout: 5 * time.Second}}
+	} else {
+		err = ErrTypedHandlesUnavailable
+	}
+	if err != nil {
+		return preparedListen{}, ErrListenBind
+	}
+	listenCtx, cancel := context.WithCancel(context.Background())
+	bound := &boundListen{
+		id: item.ID, port: item.Port, protocol: ProtocolAnyTLS, certificateID: item.CertificateID, agentID: agentID,
+		paddingScheme: item.PaddingScheme, anytlsUsers: append([]ListenApplyUser(nil), item.Users...), exec: exec,
+		tcp: tcp, dialer: dialer, secrets: resolver, routes: routes, routeFailures: map[string]string{}, routeSources: map[string]string{},
+		flowRoutes: map[string]*routeSnapshot{}, cancel: cancel,
+	}
+	return preparedListen{item: item, existing: existing, bound: bound, ctx: listenCtx, routes: routes, agentID: agentID}, nil
 }
 
 func (exec *listenExecutor) commitPrepared(candidate preparedListen) {
 	if candidate.bound == nil {
 		candidate.existing.replaceUserEngines(candidate.engines)
 		candidate.existing.replaceRoutes(candidate.routes)
+		candidate.existing.applyAnyTLSDesired(candidate.item, candidate.agentID, exec)
 		return
 	}
 	if candidate.existing != nil {
 		exec.unbindLocked(candidate.item.ID)
 	}
 	bound := candidate.bound
-	bound.wg.Add(2)
+	bound.wg.Add(1)
 	go func() {
 		defer bound.wg.Done()
 		bound.serveTCP(candidate.ctx)
 	}()
-	go func() {
-		defer bound.wg.Done()
-		bound.serveUDP(candidate.ctx)
-	}()
+	if bound.udp != nil {
+		bound.wg.Add(1)
+		go func() {
+			defer bound.wg.Done()
+			bound.serveUDP(candidate.ctx)
+		}()
+	}
 	exec.bound[candidate.item.ID] = bound
+}
+
+func (b *boundListen) isAnyTLS() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.protocol == ProtocolAnyTLS
+}
+
+func (b *boundListen) applyAnyTLSDesired(item ListenApplyItem, agentID string, exec *listenExecutor) {
+	if b == nil || item.Protocol != ProtocolAnyTLS {
+		return
+	}
+	b.mu.Lock()
+	b.protocol = ProtocolAnyTLS
+	b.certificateID = item.CertificateID
+	b.agentID = agentID
+	b.paddingScheme = item.PaddingScheme
+	b.anytlsUsers = append([]ListenApplyUser(nil), item.Users...)
+	b.exec = exec
+	b.mu.Unlock()
 }
 
 func (b *boundListen) replaceRoutes(routes *routeSnapshot) {
@@ -734,6 +836,10 @@ func (b *boundListen) serveUDP(ctx context.Context) {
 }
 
 func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
+	if b.isAnyTLS() {
+		b.handleAnyTLS(ctx, conn)
+		return
+	}
 	defer conn.Close()
 	handshakeDeadline := time.Now().Add(5 * time.Second)
 	_ = conn.SetDeadline(handshakeDeadline)
@@ -791,7 +897,11 @@ func (b *boundListen) handleTCP(ctx context.Context, conn net.Conn) {
 	}
 	defer target.Close()
 	if decision.Action == RouteUpstream {
-		target, err = b.wrapUpstreamTCP(ctx, target, *decision.Upstream, request)
+		if decision.Upstream.AnyTLS() {
+			target, err = b.wrapAnyTLSUpstream(ctx, target, *decision.Upstream, request.Target, request.Payload)
+		} else {
+			target, err = b.wrapUpstreamTCP(ctx, target, *decision.Upstream, request)
+		}
 		if err != nil {
 			b.recordRouteFailure(decision, upstreamFailureReason(err))
 			return
@@ -862,6 +972,10 @@ func (b *boundListen) handleUDP(ctx context.Context, wire []byte, clientAddr net
 		return
 	}
 	if b.dialer == nil {
+		return
+	}
+	if decision.Action == RouteUpstream && decision.Upstream.AnyTLS() {
+		b.handleShadowsocksUDPOverAnyTLS(ctx, matched, request, clientAddr, decision)
 		return
 	}
 	dialTarget := request.Target
@@ -981,6 +1095,10 @@ func (exec *listenExecutor) testUpstream(ctx context.Context, payload []byte) ([
 // stable upstream-auth-failed code. The probe never touches listen bindings,
 // sessions, or stored configuration, and disabled upstreams stay testable.
 func (exec *listenExecutor) probeUpstream(ctx context.Context, upstream Upstream, result *upstreamTestResult) {
+	if upstream.AnyTLS() {
+		exec.probeAnyTLSUpstream(ctx, upstream, result)
+		return
+	}
 	if !upstream.TCP {
 		result.Failure = "tcp-unsupported"
 		return

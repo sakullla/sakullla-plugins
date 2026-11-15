@@ -47,14 +47,25 @@ type listenUserView struct {
 }
 
 type listenAPIView struct {
-	ID       string           `json:"id"`
-	AgentID  string           `json:"agent_id"`
-	Port     int              `json:"port"`
-	Method   string           `json:"method"`
-	Family   string           `json:"family"`
-	Bound    bool             `json:"bound"`
-	HostPort string           `json:"host_port,omitempty"`
-	Users    []listenUserView `json:"users"`
+	ID                string           `json:"id"`
+	AgentID           string           `json:"agent_id"`
+	Port              int              `json:"port"`
+	Protocol          string           `json:"protocol,omitempty"`
+	Method            string           `json:"method"`
+	Family            string           `json:"family"`
+	CertificateID     int              `json:"certificate_id,omitempty"`
+	CertificateDomain string           `json:"certificate_domain,omitempty"`
+	PaddingScheme     string           `json:"padding_scheme,omitempty"`
+	Bound             bool             `json:"bound"`
+	HostPort          string           `json:"host_port,omitempty"`
+	Users             []listenUserView `json:"users"`
+}
+
+type publicCertificateView struct {
+	ID                int    `json:"id"`
+	Domain            string `json:"domain"`
+	Enabled           bool   `json:"enabled"`
+	MaterialAvailable bool   `json:"material_available"`
 }
 
 type listenDefaultsView struct {
@@ -66,35 +77,39 @@ type listenDefaultsView struct {
 }
 
 type listenWriteRequest struct {
-	AgentID   string `json:"agent_id"`
-	ListenID  string `json:"listen_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Method    string `json:"method,omitempty"`
-	Port      int    `json:"port,omitempty"`
-	Password  string `json:"password,omitempty"`
-	ServerPSK string `json:"server_psk,omitempty"`
-	DDNS      string `json:"ddns_domain,omitempty"`
-	IPv4      string `json:"ipv4,omitempty"`
-	IPv6      string `json:"ipv6,omitempty"`
-	Host      string `json:"host,omitempty"`
+	AgentID       string `json:"agent_id"`
+	ListenID      string `json:"listen_id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
+	Method        string `json:"method,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	Password      string `json:"password,omitempty"`
+	ServerPSK     string `json:"server_psk,omitempty"`
+	CertificateID int    `json:"certificate_id,omitempty"`
+	PaddingScheme string `json:"padding_scheme,omitempty"`
+	DDNS          string `json:"ddns_domain,omitempty"`
+	IPv4          string `json:"ipv4,omitempty"`
+	IPv6          string `json:"ipv6,omitempty"`
+	Host          string `json:"host,omitempty"`
 }
 
 type listenAPIResponse struct {
-	Ready          bool                  `json:"ready"`
-	Listens        []listenAPIView       `json:"listens,omitempty"`
-	Listen         *listenAPIView        `json:"listen,omitempty"`
-	User           *listenUserView       `json:"user,omitempty"`
-	Defaults       *listenDefaultsView   `json:"defaults,omitempty"`
-	Execution      *executionView        `json:"execution,omitempty"`
-	Routing        *RoutingConfiguration `json:"routing,omitempty"`
-	RoutingApplied *bool                 `json:"routing_applied,omitempty"`
-	RoutingError   string                `json:"routing_error,omitempty"`
-	RouteStatus    []RouteStatus         `json:"route_status,omitempty"`
-	RouteSources   []RouteSourceStatus   `json:"route_sources,omitempty"`
-	RemoteSources  []remoteSourceView    `json:"remote_sources,omitempty"`
-	Refresh        *datasetRefreshReport `json:"refresh,omitempty"`
-	Test           *upstreamTestResult   `json:"test,omitempty"`
-	Error          string                `json:"error,omitempty"`
+	Ready          bool                    `json:"ready"`
+	Listens        []listenAPIView         `json:"listens,omitempty"`
+	Listen         *listenAPIView          `json:"listen,omitempty"`
+	User           *listenUserView         `json:"user,omitempty"`
+	Defaults       *listenDefaultsView     `json:"defaults,omitempty"`
+	Execution      *executionView          `json:"execution,omitempty"`
+	Routing        *RoutingConfiguration   `json:"routing,omitempty"`
+	RoutingApplied *bool                   `json:"routing_applied,omitempty"`
+	RoutingError   string                  `json:"routing_error,omitempty"`
+	RouteStatus    []RouteStatus           `json:"route_status,omitempty"`
+	RouteSources   []RouteSourceStatus     `json:"route_sources,omitempty"`
+	RemoteSources  []remoteSourceView      `json:"remote_sources,omitempty"`
+	Refresh        *datasetRefreshReport   `json:"refresh,omitempty"`
+	Test           *upstreamTestResult     `json:"test,omitempty"`
+	Certificates   []publicCertificateView `json:"certificates,omitempty"`
+	Error          string                  `json:"error,omitempty"`
 	Access         struct {
 		CanRead  bool `json:"can_read"`
 		CanWrite bool `json:"can_write"`
@@ -113,6 +128,10 @@ func (c *Controller) serveControlAPI(writer http.ResponseWriter, request *http.R
 	}
 	if path == "/api/defaults" {
 		c.serveDefaults(writer, request)
+		return true
+	}
+	if path == "/api/public-certificates" {
+		c.servePublicCertificates(writer, request)
 		return true
 	}
 	if path == "/api/listens" {
@@ -530,7 +549,11 @@ func (c *Controller) rotateUserSecret(ctx context.Context, userID, agentID strin
 	if err := c.requireMutableAgent(ctx, agentID); err != nil {
 		return listenUserView{}, err
 	}
-	reference, err := c.managedRuntime.createReplacementSecret(ctx, "user", listener.Method)
+	secretMethod := listener.Method
+	if listener.AnyTLS() {
+		secretMethod = DefaultLegacyMethod
+	}
+	reference, err := c.managedRuntime.createReplacementSecret(ctx, "user", secretMethod)
 	if err != nil {
 		return listenUserView{}, err
 	}
@@ -798,9 +821,67 @@ func (c *Controller) listenDefaults(agentID, method string) (listenDefaultsView,
 	return view, nil
 }
 
+func (c *Controller) servePublicCertificates(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", "GET, HEAD")
+		writeListenJSON(writer, http.StatusMethodNotAllowed, listenAPIResponse{Error: "method not allowed"})
+		return
+	}
+	if _, err := c.uiIdentity(request); err != nil {
+		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
+		return
+	}
+	agentID := strings.TrimSpace(request.URL.Query().Get("agent_id"))
+	certificates, err := c.publicCertificates(request.Context(), agentID)
+	if err != nil {
+		writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+		return
+	}
+	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Certificates: certificates, Access: readWriteAccess()})
+}
+
+func (c *Controller) publicCertificates(ctx context.Context, agentID string) ([]publicCertificateView, error) {
+	if !validAgentID(agentID) {
+		return nil, ErrAgentOffline
+	}
+	if c.managedRuntime == nil {
+		return nil, ErrPublicCertificate
+	}
+	listed, err := c.managedRuntime.listCertificates(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]publicCertificateView, 0, len(listed))
+	for _, certificate := range listed {
+		if certificate.ID <= 0 || !validCertificateDomain(certificate.Domain) {
+			continue
+		}
+		views = append(views, publicCertificateView{ID: certificate.ID, Domain: certificate.Domain, Enabled: certificate.Enabled, MaterialAvailable: certificate.MaterialAvailable})
+	}
+	return views, nil
+}
+
+func selectableCertificate(certificates []publicCertificateView, id int) (publicCertificateView, error) {
+	if id <= 0 {
+		return publicCertificateView{}, ErrPublicCertificate
+	}
+	for _, certificate := range certificates {
+		if certificate.ID == id && certificate.Enabled && certificate.MaterialAvailable {
+			return certificate, nil
+		}
+	}
+	return publicCertificateView{}, ErrPublicCertificate
+}
+
 func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
 		return listenAPIView{}, err
+	}
+	if body.Protocol == ProtocolAnyTLS {
+		return c.createAnyTLSListen(ctx, body)
+	}
+	if body.CertificateID != 0 || strings.TrimSpace(body.PaddingScheme) != "" || (body.Protocol != "" && body.Protocol != ProtocolShadowsocks) {
+		return listenAPIView{}, ErrInvalid
 	}
 	c.rememberRequestNode(ctx, body.AgentID, requestNode(body))
 	spec := ListenSpec{AgentID: body.AgentID, Name: strings.TrimSpace(body.Name), Method: strings.TrimSpace(body.Method), Port: body.Port, Password: body.Password, ServerPSK: body.ServerPSK}
@@ -870,6 +951,64 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 	return c.projectListen(ctx, listener.ID)
 }
 
+func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
+	c.rememberRequestNode(ctx, body.AgentID, requestNode(body))
+	if strings.TrimSpace(body.Password) != "" && strings.ContainsAny(body.Password, "\r\n\x00") {
+		return listenAPIView{}, ErrInvalid
+	}
+	certificates, err := c.publicCertificates(ctx, body.AgentID)
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	selected, err := selectableCertificate(certificates, body.CertificateID)
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	scheme, err := canonicalPaddingScheme(body.PaddingScheme)
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	password := strings.TrimSpace(body.Password)
+	if password == "" {
+		password, err = GenerateLegacyPassword()
+		if err != nil {
+			return listenAPIView{}, err
+		}
+	}
+	userID, err := NewAccountID()
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	user := User{ID: userID, Name: strings.TrimSpace(body.Name), SecretRef: AccountSecretRef(userID), SecretVersion: InitialSecretVersion(), Enabled: true}
+	if user.Name == "" {
+		user.Name = DefaultUserName(userID)
+	}
+	spec := ListenSpec{AgentID: body.AgentID, Protocol: ProtocolAnyTLS, Port: body.Port, CertificateID: selected.ID, CertificateDomain: selected.Domain, PaddingScheme: scheme}
+	current := c.directory()
+	next, listener, user, err := current.CreateListen(spec, user, "", "")
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	if err != nil {
+		return listenAPIView{}, err
+	}
+	if userVersion != user.SecretVersion {
+		next, err = next.ReplaceUserSecret(user.ID, user.SecretVersion, user.SecretRef, userVersion)
+		if err != nil {
+			return listenAPIView{}, err
+		}
+	}
+	if err = c.commitDirectory(ctx, next); err != nil {
+		return listenAPIView{}, err
+	}
+	if err = c.applyAgentListens(ctx, body.AgentID); err != nil {
+		_ = c.commitDirectory(ctx, current)
+		return listenAPIView{}, err
+	}
+	return c.projectListen(ctx, listener.ID)
+}
+
 func (c *Controller) appendListenUser(ctx context.Context, listenID string, body listenWriteRequest) (listenAPIView, error) {
 	current := c.directory()
 	listener, ok := current.Listen(listenID)
@@ -887,7 +1026,7 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 		return listenAPIView{}, err
 	}
 	c.rememberRequestNode(ctx, agentID, requestNode(body))
-	if !SS2022Method(listener.Method) {
+	if !SS2022Method(listener.Method) && !listener.AnyTLS() {
 		return listenAPIView{}, ErrTraditionalMultiUser
 	}
 	userID, err := NewAccountID()
@@ -898,11 +1037,25 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 	if user.Name == "" {
 		user.Name = DefaultUserName(userID)
 	}
-	serverPSK, err := c.resolveMappedPSK(ctx, listener.Method, listener.ServerSecretRef, listener.ServerSecretVersion)
-	if err != nil {
-		return listenAPIView{}, err
+	var password string
+	if listener.AnyTLS() {
+		if strings.TrimSpace(body.Password) != "" && strings.ContainsAny(body.Password, "\r\n\x00") {
+			return listenAPIView{}, ErrInvalid
+		}
+		password = strings.TrimSpace(body.Password)
+		if password == "" {
+			password, err = GenerateLegacyPassword()
+			if err != nil {
+				return listenAPIView{}, err
+			}
+		}
+	} else {
+		serverPSK, resolveErr := c.resolveMappedPSK(ctx, listener.Method, listener.ServerSecretRef, listener.ServerSecretVersion)
+		if resolveErr != nil {
+			return listenAPIView{}, resolveErr
+		}
+		password, _, err = mintListenSecrets(listener.Method, serverPSK, body.Password)
 	}
-	password, _, err := mintListenSecrets(listener.Method, serverPSK, body.Password)
 	if err != nil {
 		return listenAPIView{}, err
 	}
@@ -1061,7 +1214,7 @@ func (c *Controller) listenApplyItems(ctx context.Context, agentID string) ([]Li
 		if listener.AgentID != agentID {
 			continue
 		}
-		item := ListenApplyItem{ID: listener.ID, Port: listener.Port, Method: listener.Method, ServerSecretRef: listener.ServerSecretRef, ServerSecretVersion: listener.ServerSecretVersion}
+		item := ListenApplyItem{ID: listener.ID, Port: listener.Port, Protocol: listener.Protocol, Method: listener.Method, CertificateID: listener.CertificateID, CertificateDomain: listener.CertificateDomain, PaddingScheme: listener.PaddingScheme, ServerSecretRef: listener.ServerSecretRef, ServerSecretVersion: listener.ServerSecretVersion}
 		for _, user := range listener.Users {
 			applyUser := ListenApplyUser{ID: user.ID, Enabled: user.Enabled, SecretRef: user.SecretRef, SecretVersion: user.SecretVersion}
 			item.Users = append(item.Users, applyUser)
@@ -1179,7 +1332,7 @@ func listenRuntimeMatchesDesired(desired []ListenRule, live []ListenPortStatus) 
 	}
 	for _, listener := range desired {
 		item, ok := byID[listener.ID]
-		if !ok || item.Port != listener.Port || !item.TCP || !item.UDP {
+		if !ok || item.Port != listener.Port || !item.TCP || item.UDP == listener.AnyTLS() {
 			return false
 		}
 	}
@@ -1212,24 +1365,40 @@ func (c *Controller) projectListenView(ctx context.Context, listener ListenRule,
 		bound = c.listenHost.HasLiveListen(listener.AgentID, listener.ID)
 	}
 	endpoint := ProjectShareEndpoint(ListenBinding{Port: listener.Port, TCP: true, UDP: true}, node)
+	family := AccountFamilyOf(listener.Method)
+	protocol := listener.Protocol
+	if listener.AnyTLS() {
+		family = AccountFamilyAnyTLS
+		protocol = ProtocolAnyTLS
+	}
 	return listenAPIView{
-		ID:       listener.ID,
-		AgentID:  listener.AgentID,
-		Port:     listener.Port,
-		Method:   listener.Method,
-		Family:   AccountFamilyOf(listener.Method),
-		Bound:    bound,
-		HostPort: endpoint.HostPort,
-		Users:    users,
+		ID:                listener.ID,
+		AgentID:           listener.AgentID,
+		Port:              listener.Port,
+		Protocol:          protocol,
+		Method:            listener.Method,
+		Family:            family,
+		CertificateID:     listener.CertificateID,
+		CertificateDomain: listener.CertificateDomain,
+		PaddingScheme:     listener.PaddingScheme,
+		Bound:             bound,
+		HostPort:          endpoint.HostPort,
+		Users:             users,
 	}
 }
 
 func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, user User, node NodeAddresses) listenUserView {
+	family := AccountFamilyOf(listener.Method)
+	method := listener.Method
+	if listener.AnyTLS() {
+		family = AccountFamilyAnyTLS
+		method = ""
+	}
 	view := listenUserView{
 		ID:      user.ID,
 		Name:    user.Name,
-		Family:  AccountFamilyOf(listener.Method),
-		Method:  listener.Method,
+		Family:  family,
+		Method:  method,
 		Enabled: user.Enabled,
 	}
 	if !user.Enabled {
@@ -1247,6 +1416,19 @@ func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, u
 	password, err := c.sharePassword(ctx, listener, user)
 	if err != nil {
 		view.Reason = shareUnavailable
+		return view
+	}
+	if listener.AnyTLS() {
+		share, shareErr := BuildAnyTLSShare(AnyTLSShareAccount{Password: password, Host: endpoint.Host, Port: listener.Port, SNI: listener.CertificateDomain, Name: user.Name})
+		if shareErr != nil || share.URI == "" || share.QR.Content != share.URI || len(share.QR.PNG) == 0 || strings.Contains(share.URI, "insecure=1") {
+			view.Reason = shareUnavailable
+			return view
+		}
+		view.ShareAvailable = true
+		view.URI = share.URI
+		view.QRContent = share.QR.Content
+		view.QRPNGBase64 = base64.StdEncoding.EncodeToString(share.QR.PNG)
+		view.HostPort = endpoint.HostPort
 		return view
 	}
 	account := SIP002Account{Method: listener.Method, Host: endpoint.Host, Port: listener.Port, Name: user.Name}
@@ -1459,7 +1641,7 @@ func listenStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrRouteDatasetUnavailable), errors.Is(err, ErrRouteUpstreamUnavailable):
 		return http.StatusConflict
-	case errors.Is(err, ErrInvalid), errors.Is(err, ErrTraditionalMultiUser):
+	case errors.Is(err, ErrInvalid), errors.Is(err, ErrTraditionalMultiUser), errors.Is(err, ErrPublicCertificate), errors.Is(err, ErrPaddingScheme):
 		return http.StatusBadRequest
 	default:
 		return http.StatusBadRequest
@@ -1492,6 +1674,10 @@ func publicListenError(err error) string {
 		return "上游不可用或协议未启用"
 	case errors.Is(err, ErrRouteRejected):
 		return "路由已拒绝"
+	case errors.Is(err, ErrPublicCertificate):
+		return ErrPublicCertificate.Error()
+	case errors.Is(err, ErrPaddingScheme):
+		return ErrPaddingScheme.Error()
 	case errors.Is(err, ErrInvalid):
 		return "请求无效"
 	default:

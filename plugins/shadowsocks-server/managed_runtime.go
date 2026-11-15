@@ -25,6 +25,11 @@ type managedHostClient interface {
 	ScopedSecret(context.Context, pluginsdk.ScopedSecretRequest) (pluginsdk.ScopedSecretResponse, error)
 }
 
+type publicCertificateAPI interface {
+	ListPublicCertificates(context.Context, string) (pluginsdk.PublicCertificateListResponse, error)
+	TerminatePublicCertificateTLS(context.Context, pluginsdk.PublicCertificateTLSRequest) (pluginsdk.PublicCertificateTLSResponse, error)
+}
+
 func managedRequestID(prefix string) string {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -128,6 +133,57 @@ func (runtime *hostCapabilityRuntime) revokeReferences(ctx context.Context, refe
 	for _, reference := range references {
 		_ = runtime.revokeSecret(ctx, reference.ID, reference.Version)
 	}
+}
+
+func (runtime *hostCapabilityRuntime) listCertificates(ctx context.Context, agentID string) ([]pluginsdk.PublicCertificateProjection, error) {
+	if runtime == nil || runtime.managed == nil {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	api, ok := runtime.managed.(publicCertificateAPI)
+	if !ok {
+		return nil, ErrPublicCertificate
+	}
+	response, err := api.ListPublicCertificates(ctx, agentID)
+	if err != nil {
+		return nil, ErrPublicCertificate
+	}
+	return response.Certificates, nil
+}
+
+func (runtime *hostCapabilityRuntime) certificateUsable(ctx context.Context, agentID string, certificateID int) bool {
+	if certificateID <= 0 {
+		return false
+	}
+	certificates, err := runtime.listCertificates(ctx, agentID)
+	if err != nil {
+		return false
+	}
+	for _, certificate := range certificates {
+		if certificate.ID == certificateID && certificate.Enabled && certificate.MaterialAvailable {
+			return true
+		}
+	}
+	return false
+}
+
+func (runtime *hostCapabilityRuntime) terminateCertificate(ctx context.Context, certificateID int, conn net.Conn) (net.Conn, error) {
+	managed, ok := conn.(*managedConn)
+	if !ok || runtime == nil || runtime.managed == nil || certificateID <= 0 {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	api, ok := runtime.managed.(publicCertificateAPI)
+	if !ok {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	response, err := api.TerminatePublicCertificateTLS(ctx, pluginsdk.PublicCertificateTLSRequest{
+		CertificateID: certificateID,
+		Handle:        managed.handle,
+		RequestID:     managedRequestID("tls"),
+	})
+	if err != nil || response.Handle.Token == "" || response.Handle.Token == managed.handle.Token {
+		return nil, ErrTypedHandlesUnavailable
+	}
+	return newManagedConn(runtime, response.Handle, nil), nil
 }
 
 func (runtime *hostCapabilityRuntime) Resolve(ctx context.Context, ref, version string) ([]byte, error) {
