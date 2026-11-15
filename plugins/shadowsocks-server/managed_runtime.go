@@ -150,20 +150,12 @@ func (runtime *hostCapabilityRuntime) listCertificates(ctx context.Context, agen
 	return response.Certificates, nil
 }
 
-func (runtime *hostCapabilityRuntime) certificateUsable(ctx context.Context, agentID string, certificateID int) bool {
-	if certificateID <= 0 {
-		return false
-	}
-	certificates, err := runtime.listCertificates(ctx, agentID)
-	if err != nil {
-		return false
-	}
-	for _, certificate := range certificates {
-		if certificate.ID == certificateID && certificate.Enabled && certificate.MaterialAvailable {
-			return true
-		}
-	}
-	return false
+// certificateUsable is the Agent accept check. The Agent host does not serve
+// certificate.public, so a new connection is usable when the saved certificate
+// id is set. TerminatePublicCertificateTLS closes it when that certificate is
+// missing, disabled, or has no material.
+func (runtime *hostCapabilityRuntime) certificateUsable(_ context.Context, _ string, certificateID int) bool {
+	return runtime != nil && certificateID > 0
 }
 
 func (runtime *hostCapabilityRuntime) terminateCertificate(ctx context.Context, certificateID int, conn net.Conn) (net.Conn, error) {

@@ -9,12 +9,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -170,9 +172,6 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 	exec := newListenExecutor(netListenBinder{})
 	exec.bindHost = "127.0.0.1"
 	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password", "secret/bob\x00v1": "disabled-password"}
-	exec.certReady = func(_ context.Context, agentID string, id int) bool {
-		return agentID == "agent-1" && id == 7
-	}
 	exec.tlsTerminate = func(_ context.Context, id int, conn net.Conn) (net.Conn, error) {
 		if id != 7 {
 			return nil, ErrTypedHandlesUnavailable
@@ -206,20 +205,53 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 		t.Fatalf("auth failure dialed %+v", calls)
 	}
 
-	exec.certReady = func(context.Context, string, int) bool { return false }
-	if err := dialAnyTLS(t, pool, port, "correct-password", "example.com:80", nil); err == nil {
-		t.Fatal("unavailable certificate accepted")
-	}
-	if calls := dialer.snapshot(); len(calls) != 0 {
-		t.Fatalf("certificate failure dialed %+v", calls)
-	}
-	exec.certReady = func(_ context.Context, agentID string, id int) bool { return agentID == "agent-1" && id == 7 }
 	exec.tlsTerminate = func(context.Context, int, net.Conn) (net.Conn, error) { return nil, ErrTypedHandlesUnavailable }
 	if err := dialAnyTLS(t, pool, port, "correct-password", "example.com:80", nil); err == nil {
 		t.Fatal("tls failure accepted")
 	}
 	if calls := dialer.snapshot(); len(calls) != 0 {
 		t.Fatalf("tls failure dialed %+v", calls)
+	}
+}
+
+func TestAnyTLSAcceptTerminatesWithoutCertificateList(t *testing.T) {
+	cert, pool := testAnyTLSCertificate(t)
+	port := freePort(t)
+	fake := &managedRuntimeFake{listErr: errors.New("unsupported")}
+	runtime := newHostCapabilityRuntime(fake)
+	if err := runtime.bind("instance-a", "generation-a"); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &anytlsRecordingDialer{}
+	exec := newListenExecutor(netListenBinder{})
+	exec.bindHost = "127.0.0.1"
+	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password"}
+	var terminated atomic.Int32
+	exec.tlsTerminate = func(_ context.Context, id int, conn net.Conn) (net.Conn, error) {
+		if id != 7 {
+			return nil, ErrTypedHandlesUnavailable
+		}
+		terminated.Add(1)
+		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
+	}
+	t.Cleanup(exec.stopAll)
+	applyAnyTLS(t, exec, port, []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "v1"}})
+	exec.mu.Lock()
+	exec.managed = runtime
+	exec.bound["listen-any"].dialer = dialerDial{dialer}
+	exec.mu.Unlock()
+
+	if err := dialAnyTLS(t, pool, port, "correct-password", "example.com:80", nil); err != nil && !isTimeout(err) {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	listed := fake.listCalls
+	fake.mu.Unlock()
+	if terminated.Load() != 1 || listed != 0 {
+		t.Fatalf("terminated=%d listCalls=%d", terminated.Load(), listed)
+	}
+	if calls := dialer.snapshot(); len(calls) == 0 {
+		t.Fatal("authenticated connection did not reach decide")
 	}
 }
 
@@ -293,7 +325,6 @@ func TestAnyTLSRoutesTCPAndUoT(t *testing.T) {
 	exec := newListenExecutor(netListenBinder{})
 	exec.bindHost = "127.0.0.1"
 	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password"}
-	exec.certReady = func(context.Context, string, int) bool { return true }
 	exec.tlsTerminate = func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) {
 		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
 	}
@@ -546,7 +577,6 @@ func TestAnyTLSUoTShadowsocksUpstreamWritesReplyOnSameStream(t *testing.T) {
 	exec := newListenExecutor(netListenBinder{})
 	exec.bindHost = "127.0.0.1"
 	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password", "secret/edge\x00v1": "upstream-password"}
-	exec.certReady = func(context.Context, string, int) bool { return true }
 	exec.tlsTerminate = func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) {
 		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
 	}

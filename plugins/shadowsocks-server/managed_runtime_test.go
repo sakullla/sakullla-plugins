@@ -29,6 +29,8 @@ type managedRuntimeFake struct {
 	nextRead        []byte
 	datasetError    bool
 	certificates    []pluginsdk.PublicCertificateProjection
+	listErr         error
+	listCalls       int
 	tlsTerminateErr error
 }
 
@@ -37,6 +39,10 @@ func (*managedRuntimeFake) Call(context.Context, pluginsdk.HostRuntimeCall, any)
 func (fake *managedRuntimeFake) ListPublicCertificates(context.Context, string) (pluginsdk.PublicCertificateListResponse, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
+	fake.listCalls++
+	if fake.listErr != nil {
+		return pluginsdk.PublicCertificateListResponse{}, fake.listErr
+	}
 	if fake.certificates == nil {
 		return pluginsdk.PublicCertificateListResponse{Certificates: []pluginsdk.PublicCertificateProjection{}}, nil
 	}

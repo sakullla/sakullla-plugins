@@ -117,7 +117,6 @@ type listenExecutor struct {
 	secrets         SecretVerifier
 	bound           map[string]*boundListen
 	bindHost        string
-	certReady       func(context.Context, string, int) bool
 	tlsTerminate    func(context.Context, int, net.Conn) (net.Conn, error)
 	clientRoots     *x509.CertPool
 	paddingMu       sync.Mutex

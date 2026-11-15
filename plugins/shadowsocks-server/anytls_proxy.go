@@ -85,13 +85,10 @@ func (b *boundListen) certificateReady(ctx context.Context) bool {
 	if b == nil || b.certificateID <= 0 {
 		return false
 	}
-	if b.exec != nil && b.exec.certReady != nil {
-		return b.exec.certReady(ctx, b.agentID, b.certificateID)
-	}
 	if b.exec != nil && b.exec.managed != nil {
 		return b.exec.managed.certificateUsable(ctx, b.agentID, b.certificateID)
 	}
-	return false
+	return true
 }
 
 func (b *boundListen) terminateAnyTLS(ctx context.Context, conn net.Conn) (net.Conn, error) {
