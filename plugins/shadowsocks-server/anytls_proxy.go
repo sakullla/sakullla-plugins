@@ -275,6 +275,8 @@ func (b *boundListen) serveAnyTLSUoTConnect(ctx context.Context, stream *anytlsS
 	}
 	b.recordRouteFailure(decision, "")
 	if decision.Action == RouteUpstream {
+		// Match handleUDP: bound the association read so a received datagram is written back on this UoT stream.
+		_ = remote.SetDeadline(time.Now().Add(500 * time.Millisecond))
 		b.relayUoTToShadowsocks(ctx, stream, request, remote, *decision.Upstream)
 		return
 	}
@@ -330,6 +332,7 @@ func (b *boundListen) forwardUDPDatagram(ctx context.Context, destination string
 	}
 	defer remote.Close()
 	if decision.Action == RouteUpstream {
+		_ = remote.SetDeadline(time.Now().Add(500 * time.Millisecond))
 		responses, err := b.roundTripUpstreamUDPResponses(ctx, remote, *decision.Upstream, ProxyRequest{Target: destination, Payload: payload})
 		if err != nil || len(responses) == 0 {
 			b.recordRouteFailure(decision, upstreamFailureReason(err))
@@ -359,8 +362,10 @@ func (b *boundListen) relayUoTToShadowsocks(ctx context.Context, stream *anytlsS
 		if err != nil {
 			return
 		}
+		// Each datagram gets a fresh 500ms read deadline. Replies already received are written back on this UoT stream.
+		_ = remote.SetDeadline(time.Now().Add(500 * time.Millisecond))
 		responses, err := b.roundTripUpstreamUDPResponses(ctx, remote, upstream, ProxyRequest{Target: request.destination, Payload: payload})
-		if err != nil {
+		if err != nil || len(responses) == 0 {
 			b.recordRouteFailure(routeDecision{Action: RouteUpstream, Upstream: &upstream}, upstreamFailureReason(err))
 			return
 		}

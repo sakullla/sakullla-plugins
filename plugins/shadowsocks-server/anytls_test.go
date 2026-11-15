@@ -493,3 +493,106 @@ func TestAnyTLSUpstreamFailureDoesNotChangeEnabled(t *testing.T) {
 		t.Fatal("failure changed enabled")
 	}
 }
+
+// udpUpstreamDialer sends every UDP dial to one local Shadowsocks peer and
+// leaves that association open after the first datagram.
+type udpUpstreamDialer struct{ address string }
+
+func (d udpUpstreamDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	if network != "udp" {
+		return nil, ErrDenied
+	}
+	return (&net.Dialer{}).DialContext(ctx, "udp", d.address)
+}
+
+func TestAnyTLSUoTShadowsocksUpstreamWritesReplyOnSameStream(t *testing.T) {
+	cert, pool := testAnyTLSCertificate(t)
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = packet.Close() })
+	engine, err := NewProtocolEngine("aes-128-gcm", []byte("upstream-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer engine.Destroy()
+		buffer := make([]byte, 65535)
+		for {
+			n, addr, readErr := packet.ReadFrom(buffer)
+			if readErr != nil {
+				return
+			}
+			request, openErr := engine.OpenUDPPacket(append([]byte(nil), buffer[:n]...), time.Now())
+			if openErr != nil {
+				continue
+			}
+			salt := make([]byte, engine.SaltSize())
+			if _, saltErr := rand.Read(salt); saltErr != nil {
+				return
+			}
+			wire, sealErr := engine.SealUDPResponse(salt, 0, 0, request.Target, append([]byte("reply:"), request.Payload...), time.Now(), nil)
+			if sealErr != nil {
+				continue
+			}
+			if _, writeErr := packet.WriteTo(wire, addr); writeErr != nil {
+				return
+			}
+		}
+	}()
+
+	port := freePort(t)
+	exec := newListenExecutor(netListenBinder{})
+	exec.bindHost = "127.0.0.1"
+	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password", "secret/edge\x00v1": "upstream-password"}
+	exec.certReady = func(context.Context, string, int) bool { return true }
+	exec.tlsTerminate = func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) {
+		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
+	}
+	t.Cleanup(exec.stopAll)
+	routing := RoutingConfiguration{DefaultAction: RouteUpstream, DefaultUpstreamID: "edge", Upstreams: []Upstream{{
+		ID: "edge", Host: "203.0.113.10", Port: 8388, Method: "aes-128-gcm", SecretRef: "secret/edge", SecretVersion: "v1", Enabled: true, TCP: true, UDP: true,
+	}}}
+	payload, err := json.Marshal(listenApplyRequest{AgentID: "agent-1", Routing: routing, Listens: []ListenApplyItem{{
+		ID: "listen-any", Port: port, Protocol: ProtocolAnyTLS, CertificateID: 7, CertificateDomain: "anytls.example",
+		PaddingScheme: defaultAnyTLSPaddingScheme, Users: []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "v1"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = exec.apply(context.Background(), payload); err != nil {
+		t.Fatal(err)
+	}
+	exec.mu.Lock()
+	exec.bound["listen-any"].dialer = udpUpstreamDialer{address: packet.LocalAddr().String()}
+	exec.mu.Unlock()
+
+	exchange := func(connect bool, query []byte) {
+		t.Helper()
+		target := "203.0.113.8:53"
+		if err := dialAnyTLS(t, pool, port, "correct-password", net.JoinHostPort(uotMagicV2, "443"), func(stream net.Conn) error {
+			if err := writeUoTRequest(stream, connect, target); err != nil {
+				return err
+			}
+			if err := writeUoTPacket(stream, connect, target, query); err != nil {
+				return err
+			}
+			// The old association read waits out the idle socket, so a reply
+			// that already arrived never reaches this stream inside two seconds.
+			_ = stream.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, got, err := readUoTPacket(stream, uotRequest{isConnect: connect, destination: target})
+			if err != nil {
+				return err
+			}
+			if string(got) != "reply:"+string(query) {
+				return io.ErrUnexpectedEOF
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exchange(true, []byte("connect-ping"))
+	exchange(false, []byte("packet-ping"))
+}
