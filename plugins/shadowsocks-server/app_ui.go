@@ -1238,7 +1238,7 @@ func (c *Controller) projectListens(ctx context.Context, agentID string) ([]list
 // listenReconcileInterval is how often a running control-plane plugin checks
 // that each saved listen is still bound. Agent restarts drop the sockets
 // without telling this process; the panel list path is not the only trigger.
-var listenReconcileInterval = 15 * time.Second
+const listenReconcileInterval = 15 * time.Second
 
 func (c *Controller) startListenReconciler() {
 	if c == nil || c.listenHost == nil {
@@ -1266,11 +1266,7 @@ func (c *Controller) stopListenReconciler() {
 }
 
 func (c *Controller) reconcileListensUntilStopped(ctx context.Context) {
-	interval := listenReconcileInterval
-	if interval <= 0 {
-		interval = 15 * time.Second
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(listenReconcileInterval)
 	defer ticker.Stop()
 	for {
 		select {

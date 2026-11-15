@@ -118,15 +118,19 @@ func callListen(t *testing.T, controller *Controller, name string, payload map[s
 
 func freeTCPUDPPort(t *testing.T) int {
 	t.Helper()
-	for attempt := 0; attempt < 16; attempt++ {
-		tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	var lastErr error
+	for attempt := 0; attempt < 64; attempt++ {
+		// Windows can allocate consecutive TCP ports inside a UDP exclusion
+		// range. Let UDP choose an allowed port before checking TCP as well.
+		udp, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		port := tcp.Addr().(*net.TCPAddr).Port
-		udp, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		port := udp.LocalAddr().(*net.UDPAddr).Port
+		tcp, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err != nil {
-			_ = tcp.Close()
+			lastErr = err
+			_ = udp.Close()
 			continue
 		}
 		if err := tcp.Close(); err != nil {
@@ -137,7 +141,7 @@ func freeTCPUDPPort(t *testing.T) int {
 		}
 		return port
 	}
-	t.Fatal("no free tcp/udp port")
+	t.Fatalf("no free tcp/udp port: %v", lastErr)
 	return 0
 }
 

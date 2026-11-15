@@ -1290,6 +1290,7 @@ func writeTCPClientChunks(conn net.Conn, session *TCPServerSession, payload []by
 		}
 		var wire []byte
 		var err error
+		var buffer *streamWriteBuffer
 		if startResponse {
 			saltSize := 0
 			if session != nil && session.engine != nil {
@@ -1302,13 +1303,24 @@ func writeTCPClientChunks(conn net.Conn, session *TCPServerSession, payload []by
 			wire, err = session.SealResponse(salt, chunk, time.Now())
 			startResponse = false
 		} else {
-			wire, err = session.SealPayloadChunk(chunk)
+			buffer = borrowStreamWriteBuffer(len(chunk) + tcpPayloadOverhead)
+			wire, err = session.sealPayloadChunkInto(buffer.data, chunk)
+		}
+		if err != nil {
+			if buffer != nil {
+				buffer.release()
+			}
+			return startResponse, err
+		}
+		n, err := conn.Write(wire)
+		if buffer != nil {
+			buffer.release()
 		}
 		if err != nil {
 			return startResponse, err
 		}
-		if _, err := conn.Write(wire); err != nil {
-			return startResponse, err
+		if n != len(wire) {
+			return startResponse, io.ErrShortWrite
 		}
 		payload = payload[len(chunk):]
 	}

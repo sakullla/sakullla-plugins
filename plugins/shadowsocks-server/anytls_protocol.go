@@ -1,6 +1,7 @@
 package shadowsocksserver
 
 import (
+	"bufio"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
@@ -287,6 +288,7 @@ type anytlsStream struct {
 	sess         *anytlsSession
 	incoming     chan []byte
 	readBuf      []byte
+	readMu       sync.Mutex
 	readDeadline time.Time
 	mu           sync.Mutex
 	closed       bool
@@ -300,9 +302,17 @@ func (deadlineError) Timeout() bool   { return true }
 func (deadlineError) Temporary() bool { return true }
 
 func (s *anytlsStream) Read(p []byte) (int, error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if len(s.readBuf) > 0 {
 		n := copy(p, s.readBuf)
 		s.readBuf = s.readBuf[n:]
+		if len(s.readBuf) == 0 {
+			s.readBuf = nil
+		}
 		return n, nil
 	}
 	chunk, err := s.readChunk()
@@ -311,9 +321,43 @@ func (s *anytlsStream) Read(p []byte) (int, error) {
 	}
 	n := copy(p, chunk)
 	if n < len(chunk) {
-		s.readBuf = append([]byte(nil), chunk[n:]...)
+		s.readBuf = chunk[n:]
 	}
 	return n, nil
+}
+
+// WriteTo forwards owned frames directly, including any tail left by a target
+// address read. io.Copy can avoid a separate 32 KiB buffer for every stream.
+func (s *anytlsStream) WriteTo(w io.Writer) (int64, error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	var total int64
+	for {
+		if len(s.readBuf) == 0 {
+			chunk, err := s.readChunk()
+			if err == io.EOF {
+				return total, nil
+			}
+			if err != nil {
+				return total, err
+			}
+			s.readBuf = chunk
+		}
+		n, err := w.Write(s.readBuf)
+		if n < 0 || n > len(s.readBuf) {
+			return total, io.ErrShortWrite
+		}
+		total += int64(n)
+		s.readBuf = s.readBuf[n:]
+		if len(s.readBuf) == 0 {
+			s.readBuf = nil
+		} else if err == nil {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return total, err
+		}
+	}
 }
 
 func (s *anytlsStream) readChunk() ([]byte, error) {
@@ -399,9 +443,9 @@ func (s *anytlsStream) deliver(data []byte) {
 	if closed {
 		return
 	}
-	copied := append([]byte(nil), data...)
+	// recvLoop transfers ownership of this frame; it never reuses its payload.
 	defer func() { _ = recover() }()
-	s.incoming <- copied
+	s.incoming <- data
 }
 
 func newServerAnyTLSSession(conn net.Conn, padding string, onStream func(*anytlsStream)) *anytlsSession {
@@ -475,8 +519,11 @@ func (s *anytlsSession) Close() error {
 
 func (s *anytlsSession) recvLoop() {
 	defer s.Close()
+	// Header-sized reads otherwise become individual managed-network RPCs.
+	reader := bufio.NewReaderSize(s.conn, 4<<10)
+	var header [anytlsHeaderSize]byte
 	for {
-		cmd, sid, data, err := readAnyTLSFrame(s.conn)
+		cmd, sid, data, err := readAnyTLSFrameHeader(reader, header[:])
 		if err != nil {
 			return
 		}
@@ -615,7 +662,9 @@ func (s *anytlsSession) writeFrame(cmd byte, sid uint32, data []byte) error {
 	if len(data) > 65535 {
 		return ErrProtocol
 	}
-	frame := make([]byte, anytlsHeaderSize+len(data))
+	buffer := borrowStreamWriteBuffer(anytlsHeaderSize + len(data))
+	defer buffer.release()
+	frame := buffer.data
 	frame[0] = cmd
 	binary.BigEndian.PutUint32(frame[1:], sid)
 	binary.BigEndian.PutUint16(frame[5:], uint16(len(data)))
@@ -705,7 +754,11 @@ func (s *anytlsSession) writePadded(payload []byte, sizes []int) (int, error) {
 
 func readAnyTLSFrame(r io.Reader) (byte, uint32, []byte, error) {
 	var header [anytlsHeaderSize]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+	return readAnyTLSFrameHeader(r, header[:])
+}
+
+func readAnyTLSFrameHeader(r io.Reader, header []byte) (byte, uint32, []byte, error) {
+	if _, err := io.ReadFull(r, header); err != nil {
 		return 0, 0, nil, err
 	}
 	length := int(binary.BigEndian.Uint16(header[5:]))

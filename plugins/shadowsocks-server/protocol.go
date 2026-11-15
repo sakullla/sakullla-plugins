@@ -20,10 +20,12 @@ import (
 )
 
 const (
-	maxLegacyPayload      = 0x3fff
-	max2022Payload        = 0xffff
-	max2022Padding        = 900
-	maxUDPPacket          = 65507
+	maxLegacyPayload = 0x3fff
+	max2022Payload   = 0xffff
+	max2022Padding   = 900
+	maxUDPPacket     = 65507
+	// All supported methods use AES-GCM: a two-byte length and two tags.
+	tcpPayloadOverhead    = 2 + 2*16
 	ss2022IdentitySize    = 16
 	ss2022KDFContext      = "shadowsocks 2022 session subkey"
 	ss2022IdentityContext = "shadowsocks 2022 identity subkey"
@@ -426,6 +428,10 @@ func (s *TCPServerSession) SealResponse(responseSalt, payload []byte, now time.T
 }
 
 func (s *TCPServerSession) SealPayloadChunk(payload []byte) ([]byte, error) {
+	return s.sealPayloadChunkInto(nil, payload)
+}
+
+func (s *TCPServerSession) sealPayloadChunkInto(dst, payload []byte) ([]byte, error) {
 	if s == nil {
 		return nil, ErrRevoked
 	}
@@ -441,13 +447,21 @@ func (s *TCPServerSession) SealPayloadChunk(payload []byte) ([]byte, error) {
 	if len(payload) > maximum {
 		return nil, ErrProtocol
 	}
-	return sealPayloadChunk(s.outbound, payload), nil
+	return sealPayloadChunkInto(dst, s.outbound, payload), nil
 }
 
 func sealPayloadChunk(session *streamCipher, payload []byte) []byte {
+	return sealPayloadChunkInto(nil, session, payload)
+}
+
+func sealPayloadChunkInto(dst []byte, session *streamCipher, payload []byte) []byte {
 	// Both authenticated records fit in one owned output buffer. Sealing the
 	// length in place avoids retaining a second full-sized payload allocation.
-	wire := make([]byte, 2, 2+len(payload)+2*session.aead.Overhead())
+	size := 2 + len(payload) + 2*session.aead.Overhead()
+	if cap(dst) < size {
+		dst = make([]byte, size)
+	}
+	wire := dst[:2]
 	binary.BigEndian.PutUint16(wire, uint16(len(payload)))
 	wire = session.aead.Seal(wire[:0], session.nonce[:], wire, nil)
 	incrementNonce(&session.nonce)

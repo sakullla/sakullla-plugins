@@ -172,8 +172,9 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 	exec := newListenExecutor(netListenBinder{})
 	exec.bindHost = "127.0.0.1"
 	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password", "secret/bob\x00v1": "disabled-password"}
+	var failTLS atomic.Bool
 	exec.tlsTerminate = func(_ context.Context, id int, conn net.Conn) (net.Conn, error) {
-		if id != 7 {
+		if id != 7 || failTLS.Load() {
 			return nil, ErrTypedHandlesUnavailable
 		}
 		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
@@ -205,7 +206,7 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 		t.Fatalf("auth failure dialed %+v", calls)
 	}
 
-	exec.tlsTerminate = func(context.Context, int, net.Conn) (net.Conn, error) { return nil, ErrTypedHandlesUnavailable }
+	failTLS.Store(true)
 	if err := dialAnyTLS(t, pool, port, "correct-password", "example.com:80", nil); err == nil {
 		t.Fatal("tls failure accepted")
 	}
@@ -235,11 +236,23 @@ func TestAnyTLSAcceptTerminatesWithoutCertificateList(t *testing.T) {
 		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
 	}
 	t.Cleanup(exec.stopAll)
-	applyAnyTLS(t, exec, port, []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "v1"}})
-	exec.mu.Lock()
+	// Prepare the native test listener before attaching the managed certificate
+	// API. Publish only after all dependencies are configured.
+	routes, err := prepareRouteSnapshot(t.Context(), RoutingConfiguration{DefaultAction: RouteDirect}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := exec.prepareAnyTLSLocked(t.Context(), "agent-1", ListenApplyItem{
+		ID: "listen-any", Port: port, Protocol: ProtocolAnyTLS, CertificateID: 7, CertificateDomain: "anytls.example",
+		PaddingScheme: defaultAnyTLSPaddingScheme,
+		Users:         []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "v1"}},
+	}, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	exec.managed = runtime
-	exec.bound["listen-any"].dialer = dialerDial{dialer}
-	exec.mu.Unlock()
+	prepared.bound.dialer = dialerDial{dialer}
+	exec.commitPrepared(prepared)
 
 	if err := dialAnyTLS(t, pool, port, "correct-password", "example.com:80", nil); err != nil && !isTimeout(err) {
 		t.Fatal(err)

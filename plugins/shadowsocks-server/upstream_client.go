@@ -46,6 +46,10 @@ func newTCPClientSession(engine *ProtocolEngine, requestSalt []byte) (*TCPClient
 }
 
 func (session *TCPClientSession) SealPayload(payload []byte) ([]byte, error) {
+	return session.sealPayloadInto(nil, payload)
+}
+
+func (session *TCPClientSession) sealPayloadInto(dst, payload []byte) ([]byte, error) {
 	session.writeMu.Lock()
 	defer session.writeMu.Unlock()
 	session.mu.RLock()
@@ -60,7 +64,7 @@ func (session *TCPClientSession) SealPayload(payload []byte) ([]byte, error) {
 	if len(payload) == 0 || len(payload) > maximum {
 		return nil, ErrProtocol
 	}
-	return sealPayloadChunk(session.outbound, payload), nil
+	return sealPayloadChunkInto(dst, session.outbound, payload), nil
 }
 
 func (session *TCPClientSession) openFirstResponse(reader io.Reader, now time.Time) ([]byte, error) {
@@ -207,12 +211,19 @@ func (connection *upstreamTCPConn) Write(value []byte) (int, error) {
 		if len(chunk) > maximum {
 			chunk = chunk[:maximum]
 		}
-		wire, err := connection.session.SealPayload(chunk)
+		buffer := borrowStreamWriteBuffer(len(chunk) + tcpPayloadOverhead)
+		wire, err := connection.session.sealPayloadInto(buffer.data, chunk)
+		if err != nil {
+			buffer.release()
+			return total, err
+		}
+		n, err := connection.Conn.Write(wire)
+		buffer.release()
 		if err != nil {
 			return total, err
 		}
-		if _, err := connection.Conn.Write(wire); err != nil {
-			return total, err
+		if n != len(wire) {
+			return total, io.ErrShortWrite
 		}
 		total += len(chunk)
 	}
