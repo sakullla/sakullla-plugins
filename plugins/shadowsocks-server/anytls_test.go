@@ -642,7 +642,7 @@ func newAnyTLSUIController(t *testing.T, managed *hostCapabilityRuntime, host *u
 	return startManagedUIController(t, managed, host, state, "generation-a")
 }
 
-func startManagedUIController(t *testing.T, managed *hostCapabilityRuntime, host *uiListenHost, state ListenCatalogStore, generation string) *Controller {
+func startManagedUIController(t *testing.T, managed *hostCapabilityRuntime, host hostRuntimeCaller, state ListenCatalogStore, generation string) *Controller {
 	t.Helper()
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a",

@@ -57,6 +57,13 @@ func (c *Controller) stageListenerSecrets(ctx context.Context, intents []listene
 	return c.saveListenerSecretIntents(ctx, pending)
 }
 
+func (c *Controller) stageUserMutation(ctx context.Context, agentID string, user User) error {
+	if c.managedRuntime == nil {
+		return nil
+	}
+	return c.stageListenerSecrets(ctx, []listenerSecretIntent{{AgentID: agentID, Ref: user.SecretRef, Version: user.SecretVersion}})
+}
+
 func (intent listenerSecretIntent) retainedBy(config Configuration) bool {
 	matches := func(ref, version string) bool {
 		return intent.Ref == ref && (intent.Version == "" || intent.Version == version)
@@ -98,7 +105,7 @@ func (c *Controller) retireListenerSecret(ctx context.Context, intent listenerSe
 	return c.managedRuntime.revokeSecret(ctx, intent.Ref, intent.Version)
 }
 
-func (c *Controller) recoverListenerSecrets(ctx context.Context, reconcile bool) error {
+func (c *Controller) recoverListenerSecrets(ctx context.Context, confirmedAgent string) error {
 	if c.managedRuntime == nil {
 		return nil
 	}
@@ -123,21 +130,32 @@ func (c *Controller) recoverListenerSecrets(ctx context.Context, reconcile bool)
 		if err := c.publishDirectory(config); err != nil {
 			return err
 		}
-		reconcile = true
+		confirmedAgent = ""
 	}
 	c.directoryUnconfirmed = false
-	seen := map[string]bool{}
+	// A port report cannot confirm user additions, disablement or deletion. Only
+	// skip the full apply for the Agent which acknowledged this exact directory.
+	applied := map[string]error{}
+	if confirmedAgent != "" {
+		applied[confirmedAgent] = nil
+	}
 	var firstErr error
 	for i := 0; i < len(pending); {
 		intent := pending[i]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if reconcile && !seen[intent.AgentID] {
-			// The process may have exited between directory commit and Agent apply,
-			// including when the removed listener was the last on this Agent.
-			c.reconcileAgentListens(ctx, intent.AgentID)
-			seen[intent.AgentID] = true
+		applyErr, attempted := applied[intent.AgentID]
+		if !attempted {
+			applyErr = c.applyAgentListens(ctx, intent.AgentID)
+			applied[intent.AgentID] = applyErr
+		}
+		if applyErr != nil {
+			if firstErr == nil {
+				firstErr = applyErr
+			}
+			i++
+			continue
 		}
 		if !intent.retainedBy(config) {
 			if err := c.retireListenerSecret(ctx, intent); err != nil {

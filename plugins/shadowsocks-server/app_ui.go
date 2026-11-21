@@ -955,8 +955,14 @@ func selectableCertificate(certificates []publicCertificateView, id int) (public
 	return publicCertificateView{}, ErrPublicCertificate
 }
 
-func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
-	defer c.recoverListenerSecrets(ctx, false)
+func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) (view listenAPIView, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			_ = c.recoverListenerSecrets(ctx, "")
+		} else {
+			_ = c.recoverListenerSecrets(ctx, body.AgentID)
+		}
+	}()
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
 		return listenAPIView{}, err
 	}
@@ -1124,7 +1130,8 @@ func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteReq
 }
 
 func (c *Controller) appendListenUser(ctx context.Context, listenID string, body listenWriteRequest) (listenAPIView, error) {
-	defer c.recoverListenerSecrets(ctx, false)
+	confirmedAgent := ""
+	defer func() { _ = c.recoverListenerSecrets(ctx, confirmedAgent) }()
 	current := c.directory()
 	listener, ok := current.Listen(listenID)
 	if !ok {
@@ -1190,12 +1197,13 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 		_ = c.commitDirectory(ctx, previous)
 		return listenAPIView{}, err
 	}
+	confirmedAgent = agentID
 	return c.projectListen(ctx, listenID)
 }
 
 func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string, enabled bool) error {
 	current := c.directory()
-	listener, _, ok := current.userListener(userID)
+	listener, user, ok := current.userListener(userID)
 	if !ok {
 		return ErrDenied
 	}
@@ -1213,6 +1221,9 @@ func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string,
 		return err
 	}
 	previous := current
+	if err := c.stageUserMutation(ctx, agentID, user); err != nil {
+		return err
+	}
 	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
@@ -1220,7 +1231,7 @@ func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string,
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	return nil
+	return c.recoverListenerSecrets(ctx, agentID)
 }
 
 func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) error {
@@ -1243,6 +1254,9 @@ func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) err
 		return err
 	}
 	previous := current
+	if err := c.stageUserMutation(ctx, agentID, user); err != nil {
+		return err
+	}
 	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
@@ -1250,10 +1264,7 @@ func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) err
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	if c.managedRuntime != nil {
-		return c.managedRuntime.revokeSecret(ctx, user.SecretRef, user.SecretVersion)
-	}
-	return nil
+	return c.recoverListenerSecrets(ctx, agentID)
 }
 
 func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string) error {
@@ -1295,7 +1306,7 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	return c.recoverListenerSecrets(ctx, false)
+	return c.recoverListenerSecrets(ctx, agentID)
 }
 
 func (c *Controller) applyAgentListens(ctx context.Context, agentID string) error {
@@ -1387,7 +1398,7 @@ func (c *Controller) reconcileListensUntilStopped(ctx context.Context) {
 			c.directoryMu.Lock()
 			if c.confirmDirectory(ctx) == nil {
 				c.reconcileStoredListens(ctx)
-				_ = c.recoverListenerSecrets(ctx, true)
+				_ = c.recoverListenerSecrets(ctx, "")
 			}
 			c.directoryMu.Unlock()
 		}

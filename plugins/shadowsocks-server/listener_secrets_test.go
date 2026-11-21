@@ -2,7 +2,12 @@ package shadowsocksserver
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,6 +20,7 @@ import (
 type faultListenStore struct {
 	uiMemoryListenState
 	beforeStore func()
+	afterStore  func()
 	deny        bool
 	lostReply   bool
 	denyRead    bool
@@ -29,6 +35,9 @@ func (s *faultListenStore) StoreListens(ctx context.Context, listens []ListenRul
 	}
 	if err := s.uiMemoryListenState.StoreListens(ctx, listens); err != nil {
 		return err
+	}
+	if s.afterStore != nil {
+		s.afterStore()
 	}
 	if s.lostReply {
 		return ErrTypedHandlesUnavailable
@@ -84,7 +93,7 @@ func TestManagedListenCreateAndAppendReadBackBeforeRetiringSecrets(t *testing.T)
 						t.Fatalf("a second write proceeded while the directory was unconfirmed: %d", other.Code)
 					}
 					state.denyRead = false
-					if err := c.recoverListenerSecrets(t.Context(), true); err != nil {
+					if err := c.recoverListenerSecrets(t.Context(), ""); err != nil {
 						t.Fatal(err)
 					}
 					listens := c.directory().Listeners
@@ -228,5 +237,147 @@ func TestUIConcurrentAppendPersistsBothUsers(t *testing.T) {
 	saved, _, err := state.LoadListens(t.Context())
 	if err != nil || len(saved) != 1 || len(saved[0].Users) != 3 || len(c.directory().Listeners[0].Users) != 3 {
 		t.Errorf("concurrent append lost a user: %v", err)
+	}
+}
+
+type executorListenHost struct {
+	*uiListenHost
+	exec *listenExecutor
+}
+
+func (h *executorListenHost) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	if err := h.uiListenHost.Call(ctx, call, target); err != nil {
+		return err
+	}
+	request := decodePluginCallRequestFromCall(call)
+	if request.Name == pluginCallListenApply {
+		_, err := h.exec.apply(ctx, request.Payload)
+		return err
+	}
+	return nil
+}
+
+func TestAnyTLSCommittedUserChangeRetriesFullApplyOnSamePort(t *testing.T) {
+	for _, action := range []string{"append", "delete", "disable"} {
+		t.Run(action, func(t *testing.T) {
+			cert, roots := testAnyTLSCertificate(t)
+			store := &faultListenStore{}
+			fake := &interruptedSecretHost{}
+			fake.certificates = []pluginsdk.PublicCertificateProjection{{ID: 7, Domain: "anytls.example", Enabled: true, MaterialAvailable: true}}
+			managed := newHostCapabilityRuntime(fake)
+			exec := newListenExecutor(netListenBinder{})
+			exec.bindHost, exec.secrets = "127.0.0.1", managed
+			exec.tlsTerminate = func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) {
+				return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
+			}
+			t.Cleanup(exec.stopAll)
+			host := &executorListenHost{&uiListenHost{online: true, node: NodeAddresses{IPv4: "203.0.113.5"}}, exec}
+			current := startManagedUIController(t, managed, host, store, "generation-a")
+			port := freePort(t)
+			create := fmt.Sprintf(`{"agent_id":"agent-1","port":%d,"protocol":"anytls","certificate_id":7,"name":"owner","password":"owner-pass"}`, port)
+			listen := decodeListenAPI(t, uiJSON(t, current, "POST", "/api/listens", create)).Listen
+			if listen == nil {
+				t.Fatal("original listener failed")
+			}
+			target := "/api/listens/" + listen.ID + "/users"
+			body := `{"agent_id":"agent-1","name":"second","password":"second-pass"}`
+			if action != "append" {
+				updated := decodeListenAPI(t, uiJSON(t, current, "POST", target, body)).Listen
+				if updated == nil || len(updated.Users) != 2 {
+					t.Fatal("missing original second user")
+				}
+				target = "/api/users/" + updated.Users[1].ID + "/" + action
+				body = `{"agent_id":"agent-1"}`
+			}
+			echo, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer echo.Close()
+			go func() {
+				for {
+					conn, err := echo.Accept()
+					if err != nil {
+						return
+					}
+					go func() { defer conn.Close(); _, _ = io.Copy(conn, conn) }()
+				}
+			}()
+			auth := func(password string, want bool) {
+				t.Helper()
+				err := dialAnyTLS(t, roots, port, password, echo.Addr().String(), func(conn net.Conn) error {
+					if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+						return err
+					}
+					if _, err := conn.Write([]byte("x")); err != nil {
+						return err
+					}
+					var buf [1]byte
+					if _, err := io.ReadFull(conn, buf[:]); err != nil {
+						return err
+					}
+					if buf[0] != 'x' {
+						return errors.New("unexpected echo")
+					}
+					return nil
+				})
+				if (err == nil) != want || isTimeout(err) {
+					t.Fatalf("login should succeed=%v, err=%v", want, err)
+				}
+			}
+			auth("owner-pass", true)
+			auth("second-pass", action != "append")
+
+			// Stop precisely after the durable directory commit, before Agent apply
+			// or retirement. No calls to the old generation's host can complete.
+			stopAfterCommit := errors.New("generation stopped after state.put")
+			store.afterStore = func() { host.online = false; fake.offline = true; panic(stopAfterCommit) }
+			func() {
+				defer func() {
+					if got := recover(); got != stopAfterCommit {
+						t.Fatalf("missed crash window: %v", got)
+					}
+				}()
+				uiJSON(t, current, "POST", target, body)
+			}()
+			current.stopListenReconciler()
+			store.afterStore = nil
+			fake.offline = false
+			successor := startManagedUIController(t, newHostCapabilityRuntime(fake), host, store, "generation-b")
+			defer successor.stopListenReconciler()
+			checkPending := func(want int) {
+				t.Helper()
+				pending, err := successor.loadListenerSecretIntents(t.Context())
+				if err != nil || len(pending) != want {
+					t.Fatalf("pending=%d want=%d err=%v", len(pending), want, err)
+				}
+			}
+			checkPending(1)
+			if err := successor.recoverListenerSecrets(t.Context(), ""); !errors.Is(err, ErrAgentOffline) {
+				t.Fatalf("offline retry = %v", err)
+			}
+			checkPending(1)
+			auth("second-pass", action != "append")
+			host.online = true
+			host.applyErr = ErrExecutionUnavailable
+			if err := successor.recoverListenerSecrets(t.Context(), ""); err == nil {
+				t.Fatal("failed Agent apply was acknowledged")
+			}
+			checkPending(1)
+			host.applyErr = nil
+			if err := successor.recoverListenerSecrets(t.Context(), ""); err != nil {
+				t.Fatal(err)
+			}
+			checkPending(0)
+			auth("owner-pass", true)
+			auth("second-pass", action == "append")
+			wantSecrets := 2
+			if action == "delete" {
+				wantSecrets = 1
+			}
+			if len(fake.secrets) != wantSecrets {
+				t.Fatalf("live secrets=%d want=%d", len(fake.secrets), wantSecrets)
+			}
+		})
 	}
 }
