@@ -958,9 +958,9 @@ func selectableCertificate(certificates []publicCertificateView, id int) (public
 func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) (view listenAPIView, resultErr error) {
 	defer func() {
 		if resultErr != nil {
-			_ = c.recoverListenerSecrets(ctx, "")
+			_ = c.completeListenerSecretMutation(ctx, "")
 		} else {
-			_ = c.recoverListenerSecrets(ctx, body.AgentID)
+			_ = c.completeListenerSecretMutation(ctx, body.AgentID)
 		}
 	}()
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
@@ -1131,7 +1131,7 @@ func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteReq
 
 func (c *Controller) appendListenUser(ctx context.Context, listenID string, body listenWriteRequest) (listenAPIView, error) {
 	confirmedAgent := ""
-	defer func() { _ = c.recoverListenerSecrets(ctx, confirmedAgent) }()
+	defer func() { _ = c.completeListenerSecretMutation(ctx, confirmedAgent) }()
 	current := c.directory()
 	listener, ok := current.Listen(listenID)
 	if !ok {
@@ -1231,7 +1231,8 @@ func (c *Controller) setUserEnabled(ctx context.Context, userID, agentID string,
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	return c.recoverListenerSecrets(ctx, agentID)
+	_ = c.completeListenerSecretMutation(ctx, agentID)
+	return nil
 }
 
 func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) error {
@@ -1264,7 +1265,8 @@ func (c *Controller) deleteUser(ctx context.Context, userID, agentID string) err
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	return c.recoverListenerSecrets(ctx, agentID)
+	_ = c.completeListenerSecretMutation(ctx, agentID)
+	return nil
 }
 
 func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string) error {
@@ -1306,7 +1308,8 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	return c.recoverListenerSecrets(ctx, agentID)
+	_ = c.completeListenerSecretMutation(ctx, agentID)
+	return nil
 }
 
 func (c *Controller) applyAgentListens(ctx context.Context, agentID string) error {
@@ -1398,7 +1401,7 @@ func (c *Controller) reconcileListensUntilStopped(ctx context.Context) {
 			c.directoryMu.Lock()
 			if c.confirmDirectory(ctx) == nil {
 				c.reconcileStoredListens(ctx)
-				_ = c.recoverListenerSecrets(ctx, "")
+				_ = c.recoverListenerSecrets(ctx)
 			}
 			c.directoryMu.Unlock()
 		}

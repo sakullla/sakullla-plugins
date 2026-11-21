@@ -105,7 +105,18 @@ func (c *Controller) retireListenerSecret(ctx context.Context, intent listenerSe
 	return c.managedRuntime.revokeSecret(ctx, intent.Ref, intent.Version)
 }
 
-func (c *Controller) recoverListenerSecrets(ctx context.Context, confirmedAgent string) error {
+// completeListenerSecretMutation clears intents for credentials still in use.
+// A retired credential can stop the current plugin generation. Only the
+// background reconciler should start its revocation.
+func (c *Controller) completeListenerSecretMutation(ctx context.Context, confirmedAgent string) error {
+	return c.reconcileListenerSecrets(ctx, confirmedAgent, false)
+}
+
+func (c *Controller) recoverListenerSecrets(ctx context.Context) error {
+	return c.reconcileListenerSecrets(ctx, "", true)
+}
+
+func (c *Controller) reconcileListenerSecrets(ctx context.Context, confirmedAgent string, revokeRemoved bool) error {
 	if c.managedRuntime == nil {
 		return nil
 	}
@@ -145,6 +156,11 @@ func (c *Controller) recoverListenerSecrets(ctx context.Context, confirmedAgent 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		retained := intent.retainedBy(config)
+		if !retained && !revokeRemoved {
+			i++
+			continue
+		}
 		applyErr, attempted := applied[intent.AgentID]
 		if !attempted {
 			applyErr = c.applyAgentListens(ctx, intent.AgentID)
@@ -157,7 +173,7 @@ func (c *Controller) recoverListenerSecrets(ctx context.Context, confirmedAgent 
 			i++
 			continue
 		}
-		if !intent.retainedBy(config) {
+		if !retained {
 			if err := c.retireListenerSecret(ctx, intent); err != nil {
 				if firstErr == nil {
 					firstErr = err

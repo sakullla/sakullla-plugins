@@ -78,6 +78,12 @@ func TestManagedListenCreateAndAppendReadBackBeforeRetiringSecrets(t *testing.T)
 				reply := uiJSON(t, c, "POST", target, body)
 				switch mode {
 				case "rejected":
+					if fake.revokes != 0 {
+						t.Fatal("request started revocation")
+					}
+					if err := c.recoverListenerSecrets(t.Context()); err != nil {
+						t.Fatal(err)
+					}
 					if reply.Code == http.StatusOK || len(fake.secrets) != original || fake.revokes != added {
 						t.Fatalf("code=%d remaining=%d retired=%d", reply.Code, len(fake.secrets), fake.revokes)
 					}
@@ -93,7 +99,7 @@ func TestManagedListenCreateAndAppendReadBackBeforeRetiringSecrets(t *testing.T)
 						t.Fatalf("a second write proceeded while the directory was unconfirmed: %d", other.Code)
 					}
 					state.denyRead = false
-					if err := c.recoverListenerSecrets(t.Context(), ""); err != nil {
+					if err := c.recoverListenerSecrets(t.Context()); err != nil {
 						t.Fatal(err)
 					}
 					listens := c.directory().Listeners
@@ -168,8 +174,17 @@ func TestManagedListenerCleanupAfterGenerationStops(t *testing.T) {
 				}
 				fake.interrupt = action
 				reply := uiJSON(t, current, "POST", path, body)
-				if !fake.offline || reply.Code == 200 {
-					t.Fatalf("interrupt=%v code=%d", fake.offline, reply.Code)
+				if action == pluginsdk.ScopedSecretRevoke {
+					if reply.Code != http.StatusOK || fake.offline || fake.revokes != 0 || len(host.live) != 1 || host.live[0].ID != keep.ID {
+						t.Fatalf("delete response=%d, stopped=%v, revokes=%d, listeners=%v", reply.Code, fake.offline, fake.revokes, host.live)
+					}
+					time.Sleep(listenReconcileInterval + time.Second)
+					synctest.Wait()
+				} else if reply.Code == http.StatusOK {
+					t.Fatal("interrupted create reported success")
+				}
+				if !fake.offline {
+					t.Fatal("host did not interrupt the generation")
 				}
 				var pending []listenerSecretIntent
 				if err := json.Unmarshal(fake.listenerIntents, &pending); err != nil || len(pending) != wantIntents || strings.Contains(string(fake.listenerIntents), "test-secret-no-plaintext") {
@@ -353,19 +368,19 @@ func TestAnyTLSCommittedUserChangeRetriesFullApplyOnSamePort(t *testing.T) {
 				}
 			}
 			checkPending(1)
-			if err := successor.recoverListenerSecrets(t.Context(), ""); !errors.Is(err, ErrAgentOffline) {
+			if err := successor.recoverListenerSecrets(t.Context()); !errors.Is(err, ErrAgentOffline) {
 				t.Fatalf("offline retry = %v", err)
 			}
 			checkPending(1)
 			auth("second-pass", action != "append")
 			host.online = true
 			host.applyErr = ErrExecutionUnavailable
-			if err := successor.recoverListenerSecrets(t.Context(), ""); err == nil {
+			if err := successor.recoverListenerSecrets(t.Context()); err == nil {
 				t.Fatal("failed Agent apply was acknowledged")
 			}
 			checkPending(1)
 			host.applyErr = nil
-			if err := successor.recoverListenerSecrets(t.Context(), ""); err != nil {
+			if err := successor.recoverListenerSecrets(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			checkPending(0)

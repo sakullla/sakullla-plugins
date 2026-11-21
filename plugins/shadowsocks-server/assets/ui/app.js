@@ -550,11 +550,21 @@ const fetchPanel = async (path, options) => {
 };
 
 const panelJSON = async (path, options = {}) => {
-  const response = await fetchPanel(path, {
+  const request = {
     credentials: "same-origin",
     ...options,
     headers: { ...panelAuthHeaders(), ...(options.headers || {}) },
-  });
+  };
+  let response = await fetchPanel(path, request);
+  // Password revocation can briefly replace the plugin generation.
+  if (path.startsWith("api/") && (!options.method || options.method === "GET")) {
+    for (const delay of [250, 500, 1000, 2000, 4000, 5000, 5000, 5000, 5000]) {
+      if (response.status !== 503) break;
+      await response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      response = await fetchPanel(path, request);
+    }
+  }
   const payload = await response.json().catch(() => ({}));
   if (response.status === 403) {
     throw Object.assign(new Error(payload.error || payload.message || "无权访问"), { denied: true, status: 403 });
@@ -2005,11 +2015,11 @@ const deleteListen = async (listen, control = null) => {
       const status = await panelJSON(`api/listens?agent_id=${encodeURIComponent(body.agent_id)}`);
       const listens = status.listens === undefined ? [] : status.listens;
       if (status.ready !== true || !Array.isArray(listens) || !listens.every((item) => item && item.id && item.id !== listen.id)) throw error;
-      await renderWorkspace();
-      showFeedback("监听已从节点配置中删除，凭据清理结果尚未确认。", false);
+      if (selectedAgentID === body.agent_id) renderListens(listens);
+      showFeedback("已删除监听。凭据清理由后台继续。", false);
       return;
     }
-    await renderWorkspace();
+    if (selectedAgentID === body.agent_id) renderListens(listensCache.filter((item) => item.id !== listen.id));
     showFeedback("已删除监听。", false);
   } catch (error) {
     showFeedback(errorText(error), true);

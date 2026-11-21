@@ -16,7 +16,7 @@ import (
 
 const (
 	PluginID             = "shadowsocks-server"
-	PluginVersion        = "0.1.33"
+	PluginVersion        = "0.1.34"
 	MaxConfigBytes       = 1 << 20
 	MaxListeners         = 256
 	MaxUsers             = 256
