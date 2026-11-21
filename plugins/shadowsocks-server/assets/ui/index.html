@@ -444,12 +444,16 @@
             </select>
           </label>
           <label class="ui-field" id="create-certificate-field" hidden>
-            <span class="ui-label">公网证书</span>
+            <span class="ui-label">服务端证书</span>
             <select class="ui-select" name="certificate_id" id="create-certificate"></select>
           </label>
           <label class="ui-field">
             <span class="ui-label" id="create-port-label">监听端口（TCP + UDP）</span>
             <input class="ui-input" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="自动分配空闲端口">
+          </label>
+          <label class="ui-field" id="create-anytls-password-field" hidden>
+            <span class="ui-label">用户密码</span>
+            <input class="ui-input" name="anytls_password" type="password" autocomplete="new-password" spellcheck="false" placeholder="留空自动生成">
           </label>
         </div>
         <details class="ui-help advanced" id="anytls-padding" hidden>
@@ -486,7 +490,7 @@
             </div>
           </div>
         </details>
-        <p class="form-note">同一节点上端口不能重复。推荐使用 SS2022，支持在同端口下追加多个独立用户。</p>
+        <p class="form-note" id="create-listen-note">同一节点上端口不能重复。推荐使用 SS2022，支持在同端口下追加多个独立用户。</p>
       </div>
       <footer class="ui-dialog__footer">
         <button id="create-cancel" class="ui-btn ui-btn--ghost" type="button">取消</button>
@@ -508,6 +512,10 @@
         <label class="ui-field">
           <span class="ui-label">显示名称</span>
           <input id="append-name" class="ui-input" name="name" autocomplete="off" spellcheck="false" placeholder="例如 手机 / 平板">
+        </label>
+        <label class="ui-field" id="append-anytls-password-field" hidden>
+          <span class="ui-label">用户密码</span>
+          <input class="ui-input" name="password" type="password" autocomplete="new-password" spellcheck="false" placeholder="留空自动生成">
         </label>
         <p class="form-note" id="append-note">每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。</p>
       </div>

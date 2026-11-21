@@ -16,7 +16,7 @@ import (
 
 const (
 	PluginID             = "shadowsocks-server"
-	PluginVersion        = "0.1.32"
+	PluginVersion        = "0.1.33"
 	MaxConfigBytes       = 1 << 20
 	MaxListeners         = 256
 	MaxUsers             = 256
@@ -55,7 +55,7 @@ var (
 	ErrPortConflict            = errors.New("该节点已使用此端口")
 	ErrExecutionUnavailable    = errors.New("该节点暂时无法执行监听")
 	ErrTraditionalMultiUser    = errors.New("传统方法不能在同一端口追加用户")
-	ErrPublicCertificate       = errors.New("没有可选公网证书或未选择证书")
+	ErrPublicCertificate       = errors.New("没有可选服务端证书或未选择证书")
 )
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)
 

@@ -153,6 +153,7 @@ export async function startPreview({ root = moduleRoot } = {}) {
       if (url.pathname === "/panel-api/plugins/shadowsocks-server") return json(200, { instances: [{ targets: ["edge"] }] });
       if (url.pathname === "/api/execution") return json(200, { ready: true, execution, access: { can_read: true, can_write: true } });
       if (url.pathname === "/api/defaults") return json(200, { defaults: { method: "2022-blake3-aes-128-gcm", port: 8388 } });
+      if (url.pathname === "/api/public-certificates") return json(200, { ready: true, certificates: [{ id: 7, domain: "*.example.test", enabled: true, material_available: true }] });
       if (url.pathname === "/api/listens") return json(200, { ready: true, listens, access: { can_read: true, can_write: true } });
       if (url.pathname === "/api/routing") return json(200, { ready: true, routing, route_status: routeStatus, access: { can_read: true, can_write: true } });
       const relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));

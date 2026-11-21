@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,25 @@ func TestAnyTLSUpstreamSNIRules(t *testing.T) {
 	}
 	if !isUoTv2Target("sp.v2.udp-over-tcp.arpa") || isUoTv2Target("sp.udp-over-tcp.arpa") || isUoTv2Target("not-sp.v2.udp-over-tcp.arpa.example") {
 		t.Fatal("uot magic comparison changed")
+	}
+}
+
+func TestAnyTLSWildcardShareWithExplicitPassword(t *testing.T) {
+	const password = " reality:@/#?&=% 中文 "
+	for _, tt := range []struct{ host, sni string }{
+		{"203.0.113.5", "anytls.example.org"},
+		{"2001:db8::1", "anytls.example.org"},
+		{"edge.example.org", "edge.example.org"},
+		{"other.edge.example.org", "anytls.example.org"},
+	} {
+		share, err := BuildAnyTLSShare(AnyTLSShareAccount{Host: tt.host, SNI: "*.example.org", Port: 8443, Password: password})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := url.Parse(share.URI)
+		if err != nil || parsed.Hostname() != tt.host || parsed.User.Username() != password || parsed.Query().Get("sni") != tt.sni || len(parsed.Query()) != 1 || share.QR.Content != share.URI {
+			t.Fatalf("invalid share for %s: %v", tt.host, err)
+		}
 	}
 }
 
@@ -198,9 +218,10 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 	}
 	_ = packet.Close()
 
-	reject := dialAnyTLS(t, pool, port, "disabled-password", "example.com:80", nil)
-	if reject == nil {
-		t.Fatal("disabled user authenticated")
+	for _, password := range []string{"unknown-password", "disabled-password"} {
+		if err := dialAnyTLS(t, pool, port, password, "example.com:80", nil); err == nil || isTimeout(err) {
+			t.Fatalf("expected immediate auth rejection, got %v", err)
+		}
 	}
 	if calls := dialer.snapshot(); len(calls) != 0 {
 		t.Fatalf("auth failure dialed %+v", calls)
@@ -213,6 +234,55 @@ func TestAnyTLSListenIsTCPOnlyAndFailClosed(t *testing.T) {
 	if calls := dialer.snapshot(); len(calls) != 0 {
 		t.Fatalf("tls failure dialed %+v", calls)
 	}
+}
+
+func TestAnyTLSRemoveListenerWithIdleAuthenticatedClient(t *testing.T) {
+	cert, roots := testAnyTLSCertificate(t)
+	exec := newListenExecutor(netListenBinder{})
+	exec.bindHost = "127.0.0.1"
+	exec.secrets = staticSecrets{"secret/alice\x00v1": "correct-password"}
+	exec.tlsTerminate = func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) {
+		return tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
+	}
+	t.Cleanup(exec.stopAll)
+	port := freePort(t)
+	applyAnyTLS(t, exec, port, []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "secret/alice", SecretVersion: "v1"}})
+	address := net.JoinHostPort(exec.bindHost, itoa(port))
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", address, &tls.Config{RootCAs: roots, ServerName: "anytls.example", MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := writeAnyTLSClientHello(conn, []byte("correct-password"), defaultAnyTLSPaddingScheme); err != nil {
+		t.Fatal(err)
+	}
+	client := &anytlsSession{conn: conn}
+	if err := client.writeFrame(anytlsCmdSettings, 0, []byte("v=2\npadding-md5="+paddingMD5(defaultAnyTLSPaddingScheme))); err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _, _, err := readAnyTLSFrame(conn); cmd != anytlsCmdServerSettings || err != nil {
+		t.Fatalf("client settings were not acknowledged: cmd=%d, err=%v", cmd, err)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	stopped := make(chan error, 1)
+	go func() {
+		_, err := exec.stop([]byte(`{"agent_id":"agent-1","listen_ids":["listen-any"]}`))
+		stopped <- err
+	}()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener removal waited for the idle client")
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("port was not released: %v", err)
+	}
+	_ = listener.Close()
 }
 
 func TestAnyTLSAcceptTerminatesWithoutCertificateList(t *testing.T) {
@@ -265,6 +335,40 @@ func TestAnyTLSAcceptTerminatesWithoutCertificateList(t *testing.T) {
 	}
 	if calls := dialer.snapshot(); len(calls) == 0 {
 		t.Fatal("authenticated connection did not reach decide")
+	}
+}
+
+func TestAnyTLSCancellationReleasesIdleDestination(t *testing.T) {
+	destination, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	_ = destination.(*net.TCPListener).SetDeadline(time.Now().Add(2 * time.Second))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session := newServerAnyTLSSession(&frameInputConn{}, defaultAnyTLSPaddingScheme, nil)
+	stream, err := session.openStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := &boundListen{dialer: &nativeNetworkDialer{}}
+	ended := make(chan struct{})
+	go func() {
+		bound.serveAnyTLSTCP(ctx, stream, destination.Addr().String())
+		close(ended)
+	}()
+	peer, err := destination.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	cancel()
+	_ = session.Close()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("relay retained the idle destination after listener cancellation")
 	}
 }
 
@@ -464,11 +568,8 @@ func TestAnyTLSProbeStaysReadOnly(t *testing.T) {
 	}
 }
 
-func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
-	fake := &managedRuntimeFake{certificates: []pluginsdk.PublicCertificateProjection{{ID: 7, Domain: "cert.example", Enabled: true, MaterialAvailable: true}}}
-	host := &uiListenHost{online: true, node: NodeAddresses{DDNS: "share.example"}}
-	state := &uiMemoryListenState{}
-	managed := newHostCapabilityRuntime(fake)
+func newAnyTLSUIController(t *testing.T, managed *hostCapabilityRuntime, host *uiListenHost, state ListenCatalogStore) *Controller {
+	t.Helper()
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a",
 		ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: state,
@@ -490,11 +591,19 @@ func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
 	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-a"}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
+	t.Cleanup(controller.stopListenReconciler)
+	return controller
+}
+
+func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
+	fake := &managedRuntimeFake{certificates: []pluginsdk.PublicCertificateProjection{{ID: 7, Domain: "cert.example", Enabled: true, MaterialAvailable: true}}}
+	host := &uiListenHost{online: true, node: NodeAddresses{IPv4: "203.0.113.9"}}
+	controller := newAnyTLSUIController(t, newHostCapabilityRuntime(fake), host, &uiMemoryListenState{})
 	missing := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","protocol":"anytls","name":"alice"}`)
 	if missing.Code != http.StatusBadRequest || !strings.Contains(missing.Body.String(), ErrPublicCertificate.Error()) {
 		t.Fatalf("missing certificate = %d %s", missing.Code, missing.Body.String())
 	}
-	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","protocol":"anytls","certificate_id":7,"name":"alice"}`)
+	created := uiJSON(t, controller, http.MethodPost, "/api/listens", `{"agent_id":"agent-1","protocol":"anytls","certificate_id":7,"name":"alice","password":" a:@b/c "}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create = %d %s", created.Code, created.Body.String())
 	}
@@ -504,6 +613,38 @@ func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
 	}
 	if len(listen.Users) != 1 || !strings.HasPrefix(listen.Users[0].URI, "anytls://") || listen.Users[0].QRContent != listen.Users[0].URI || !strings.Contains(listen.Users[0].URI, "sni=cert.example") || !strings.HasSuffix(listen.Users[0].URI, "#alice") {
 		t.Fatalf("share = %+v", listen.Users)
+	}
+	parseShare := func(view listenUserView) *url.URL {
+		t.Helper()
+		result, err := url.Parse(view.URI)
+		if err != nil || result.Scheme != "anytls" || result.User == nil || result.Hostname() != host.node.IPv4 {
+			t.Fatalf("invalid share for %s: %v", view.Name, err)
+		}
+		return result
+	}
+	if parseShare(listen.Users[0]).User.Username() != " a:@b/c " {
+		t.Fatal("first password changed")
+	}
+	for _, tt := range []struct{ name, password string }{{"explicit", " @:/?# "}, {"generated", ""}} {
+		body, err := json.Marshal(map[string]string{"agent_id": "agent-1", "name": tt.name, "password": tt.password})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply := uiJSON(t, controller, http.MethodPost, "/api/listens/"+listen.ID+"/users", string(body))
+		result := decodeListenAPI(t, reply).Listen
+		if reply.Code != http.StatusOK || result == nil {
+			t.Fatalf("append %s = %d", tt.name, reply.Code)
+		}
+		found := false
+		for _, user := range result.Users {
+			if user.Name == tt.name {
+				got := parseShare(user).User.Username()
+				found = got != "" && (tt.password == "" || tt.password == got)
+			}
+		}
+		if !found {
+			t.Fatalf("appended %s password missing or changed", tt.name)
+		}
 	}
 	host.mu.Lock()
 	applied := append([]listenApplyRequest(nil), host.apply...)
@@ -518,6 +659,81 @@ func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
 	ss := decodeListenAPI(t, shadow).Listen
 	if ss == nil || ss.Protocol != "" || ss.Method != "aes-256-gcm" || ss.PaddingScheme != "" || !strings.HasPrefix(ss.Users[0].URI, "ss://") {
 		t.Fatalf("shadowsocks listen = %+v user=%+v", ss, ss.Users)
+	}
+}
+
+type listenerStateRequest struct {
+	Key   string
+	Grant string `json:"listener_grant"`
+	Value json.RawMessage
+}
+
+type listenerGrantTestHost struct {
+	managedRuntimeFake
+	ready  bool
+	writes []listenerStateRequest
+}
+
+func (host *listenerGrantTestHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	var request listenerStateRequest
+	if err := json.Unmarshal(call.Payload, &request); err != nil {
+		return err
+	}
+	switch call.Operation {
+	case "state.put":
+		if request.Key == pluginListensStateKey {
+			host.writes = append(host.writes, request)
+		}
+		return copyHostResult(map[string]bool{"stored": true}, target)
+	case "state.get":
+		if request.Key == "listener-certificate-ready/listen-granted" {
+			return copyHostResult(map[string]bool{"found": true, "value": host.ready}, target)
+		}
+		return copyHostResult(map[string]bool{"found": false}, target)
+	}
+	return nil
+}
+
+func TestAnyTLSListenerGrantAndCertificateReadiness(t *testing.T) {
+	fake := &listenerGrantTestHost{}
+	managed := newHostCapabilityRuntime(fake)
+	host := &uiListenHost{online: true, node: NodeAddresses{IPv4: "203.0.113.5"}}
+	controller := newAnyTLSUIController(t, managed, host, managed)
+	grant := func(id, domain, token string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Header.Set("X-NRE-Listener-ID", id)
+			r.Header.Set("X-NRE-Listener-Grant", token)
+			r.Header.Set("X-NRE-Listener-Certificate-Domain", domain)
+			controller.ServeHTTP(w, r)
+		})
+	}
+	const create = `{"agent_id":"agent-1","protocol":"anytls","name":"alice","certificate_id":42,"password":"test-password"}`
+	const agent = `{"agent_id":"agent-1"}`
+	const path = "/api/listens/listen-granted"
+	partial := uiJSON(t, grant("listen-granted", "", "short-lived"), http.MethodPost, "/api/listens", create)
+	if partial.Code != http.StatusNotFound || len(fake.writes) != 0 || fake.createCalls != 0 {
+		t.Fatalf("partial grant = %d", partial.Code)
+	}
+	created := uiJSON(t, grant("listen-granted", "*.self.example", "short-lived"), http.MethodPost, "/api/listens", create)
+	listen := decodeListenAPI(t, created).Listen
+	if created.Code != http.StatusOK || listen == nil || listen.ID != "listen-granted" || listen.CertificateID != 42 || listen.CertificateDomain != "*.self.example" || !listen.CertificatePending || listen.Bound || len(listen.Users) != 1 || listen.Users[0].ShareAvailable || listen.Users[0].URI != "" || fake.listCalls != 0 {
+		t.Fatalf("pending = %d %+v, catalog reads=%d", created.Code, listen, fake.listCalls)
+	}
+	if len(fake.writes) != 1 || fake.writes[0].Grant != "short-lived" || strings.Contains(string(fake.writes[0].Value), "short-lived") {
+		t.Fatal("create grant missing from state request or persisted with listeners")
+	}
+	fake.ready = true
+	active := decodeListenAPI(t, uiJSON(t, controller, http.MethodGet, path, "")).Listen
+	if active == nil || active.CertificatePending || !active.Bound || !active.Users[0].ShareAvailable || !strings.Contains(active.Users[0].URI, "sni=anytls.self.example") {
+		t.Fatalf("ready = %+v", active)
+	}
+	wrong := uiJSON(t, grant("listen-other", "", "delete-token"), http.MethodPost, path+"/delete", agent)
+	if wrong.Code != http.StatusNotFound || len(fake.writes) != 1 {
+		t.Fatalf("wrong deletion = %d, writes=%d", wrong.Code, len(fake.writes))
+	}
+	removed := uiJSON(t, grant("listen-granted", "", "delete-token"), http.MethodPost, path+"/delete", agent)
+	if removed.Code != http.StatusOK || len(fake.writes) != 2 || fake.writes[1].Grant != "delete-token" || len(controller.directory().Listeners) != 0 {
+		t.Fatalf("delete = %d writes=%d", removed.Code, len(fake.writes))
 	}
 }
 

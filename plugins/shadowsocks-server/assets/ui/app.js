@@ -59,6 +59,8 @@ const advancedKeys = document.querySelector("#advanced-keys");
 const createProtocol = document.querySelector("#create-protocol");
 const createMethodField = document.querySelector("#create-method-field");
 const createCertificateField = document.querySelector("#create-certificate-field");
+const createAnyTLSPasswordField = document.querySelector("#create-anytls-password-field");
+const createListenNote = document.querySelector("#create-listen-note");
 const createCertificate = document.querySelector("#create-certificate");
 const createPortLabel = document.querySelector("#create-port-label");
 const anytlsPadding = document.querySelector("#anytls-padding");
@@ -104,6 +106,7 @@ const routeRefreshStatus = document.querySelector("#route-refresh-status");
 const appendDialog = document.querySelector("#append-dialog");
 const appendForm = document.querySelector("#append-form");
 const appendName = document.querySelector("#append-name");
+const appendAnyTLSPasswordField = document.querySelector("#append-anytls-password-field");
 const appendMeta = document.querySelector("#append-meta");
 const appendCancel = document.querySelector("#append-cancel");
 const listenLoading = document.querySelector("#listen-loading");
@@ -1326,17 +1329,14 @@ const syncServerPskField = () => {
   if (serverPskField) serverPskField.hidden = !isSS2022(method);
 };
 
-const renderCertificateOptions = () => {
+const renderCertificateOptions = (errorMessage = "") => {
   if (!createCertificate) return;
   createCertificate.replaceChildren();
   const usable = publicCertificates.filter((item) => item && item.enabled && item.material_available);
-  if (!usable.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "没有可选公网证书";
-    createCertificate.append(option);
-    return;
-  }
+  const prompt = document.createElement("option");
+  prompt.value = "";
+  prompt.textContent = usable.length ? "请选择服务端证书" : errorMessage || "没有可选服务端证书";
+  createCertificate.append(prompt);
   usable.forEach((item) => {
     const option = document.createElement("option");
     option.value = String(item.id);
@@ -1352,10 +1352,11 @@ const loadPublicCertificates = async () => {
     return;
   }
   try {
-    const payload = await panelJSON(`api/public-certificates?agent_id=${encodeURIComponent(selectedAgentID)}`);
+    const payload = await panelJSON(`api/public-certificates?agent_id=${encodeURIComponent(selectedAgentID)}&listener_binding=1`);
     publicCertificates = payload.certificates || [];
-  } catch (_error) {
-    publicCertificates = [];
+  } catch (error) {
+    renderCertificateOptions(errorText(error, "暂时无法读取服务端证书，请重新打开对话框重试。"));
+    return;
   }
   renderCertificateOptions();
 };
@@ -1364,6 +1365,10 @@ const syncCreateProtocol = () => {
   const anytls = createProtocol && createProtocol.value === "anytls";
   if (createMethodField) createMethodField.hidden = anytls;
   if (createCertificateField) createCertificateField.hidden = !anytls;
+  if (createAnyTLSPasswordField) createAnyTLSPasswordField.hidden = !anytls;
+  if (createListenNote) createListenNote.textContent = anytls
+    ? "每个用户使用自己的密码连接。选择自签证书时，客户端需信任该证书。"
+    : "同一节点上端口不能重复。推荐使用 SS2022，支持在同端口下追加多个独立用户。";
   if (anytlsPadding) {
     anytlsPadding.hidden = !anytls;
     if (!anytls) anytlsPadding.open = false;
@@ -1666,7 +1671,7 @@ const renderListen = (listen) => {
   if (!listen.bound) {
     const note = document.createElement("p");
     note.className = "listen-binding-note";
-    note.textContent = "未生效：端口尚未绑定，等节点应用后再分享。";
+    note.textContent = listen.certificate_pending ? "等待节点确认证书，确认后即可分享。" : "未生效：端口尚未绑定，等节点应用后再分享。";
     card.append(note);
   }
 
@@ -1751,7 +1756,7 @@ const renderDetailSummary = (listen) => {
   if (!listen.bound) {
     const note = document.createElement("p");
     note.className = "listen-binding-note detail-summary__note";
-    note.textContent = "未生效：端口尚未在节点上绑定，客户端暂时连不上；节点应用后自动生效。";
+    note.textContent = listen.certificate_pending ? "等待节点确认证书，确认后即可分享。" : "未生效：端口尚未在节点上绑定，客户端暂时连不上；节点应用后自动生效。";
     detailSummary.append(note);
   }
   detailSummary.hidden = false;
@@ -1955,6 +1960,7 @@ const requestCloseAppend = () => requestCloseDraft(appendDialog, closeAppend);
 const openAppend = (listen) => {
   if (!canMutate() || !listen) return;
   pendingAppendListen = listen;
+  if (appendAnyTLSPasswordField) appendAnyTLSPasswordField.hidden = !isAnyTLSListen(listen);
   if (appendMeta) {
     appendMeta.textContent = `端口 ${listen.port} · ${listenMethodLabel(listen)}`;
     appendMeta.hidden = !appendMeta.textContent;
@@ -1988,10 +1994,21 @@ const deleteListen = async (listen, control = null) => {
     danger: true,
   });
   if (!ok) return;
+  const body = mutateBody();
   setBusy(true, control);
   try {
     if (openListenID === listen.id) closeDetail();
-    await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, mutateBody());
+    try {
+      await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/delete`, body);
+    } catch (error) {
+      if (!error.network && !(error.status >= 500)) throw error;
+      const status = await panelJSON(`api/listens?agent_id=${encodeURIComponent(body.agent_id)}`);
+      const listens = status.listens === undefined ? [] : status.listens;
+      if (status.ready !== true || !Array.isArray(listens) || !listens.every((item) => item && item.id && item.id !== listen.id)) throw error;
+      await renderWorkspace();
+      showFeedback("监听已从节点配置中删除，凭据清理结果尚未确认。", false);
+      return;
+    }
     await renderWorkspace();
     showFeedback("已删除监听。", false);
   } catch (error) {
@@ -3894,10 +3911,12 @@ if (appendForm) {
     if (!listen || !canMutate()) return;
     clearFormErrors(appendForm);
     showModalError(appendError, "");
-    const name = String(new FormData(appendForm).get("name") || "").trim();
+    const data = new FormData(appendForm);
+    const body = mutateBody({ name: String(data.get("name") || "").trim() });
+    if (isAnyTLSListen(listen)) body.password = String(data.get("password") || "");
     setBusy(true, appendSubmit, "正在追加用户…");
     try {
-      await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, mutateBody({ name }));
+      await sendPluginJSON(`api/listens/${encodeURIComponent(listen.id)}/users`, body);
       const listenID = listen.id;
       closeAppend();
       await renderWorkspace();
@@ -3931,12 +3950,12 @@ if (createForm) {
     const anytls = protocol === "anytls";
     const body = mutateBody({
       name: String(data.get("name") || "").trim(),
-      password: String(data.get("password") || "").trim(),
+      password: anytls ? String(data.get("anytls_password") || "") : String(data.get("password") || "").trim(),
     });
     if (anytls) {
       const certificateID = Number(data.get("certificate_id") || 0);
       if (!certificateID) {
-        showModalError(createError, "没有可选公网证书或未选择证书");
+        showModalError(createError, "没有可选服务端证书或未选择证书");
         return;
       }
       body.protocol = "anytls";
@@ -3949,10 +3968,10 @@ if (createForm) {
     if (portValue) body.port = port;
     setBusy(true, createSubmit, "正在保存…");
     try {
-      await sendPluginJSON("api/listens", body);
+      const result = await sendPluginJSON("api/listens", body);
       closeCreate();
-      showStatus(anytls ? "已保存监听，可在卡片上复制 anytls:// 或查看二维码。" : "已保存监听，可在卡片上复制 ss:// 或查看二维码。", false);
       await renderWorkspace();
+      showStatus(result.listen?.certificate_pending ? "已保存监听，等待节点确认证书后即可分享。" : "已保存监听，可在卡片上复制链接或查看二维码。", false);
     } catch (error) {
       showModalError(createError, errorText(error, "新增监听失败，请检查端口和密钥后重试。"));
       if (/端口/.test(String((error && error.message) || ""))) {

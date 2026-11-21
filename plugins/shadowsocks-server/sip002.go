@@ -162,12 +162,19 @@ func BuildAnyTLSShare(account AnyTLSShareAccount) (SIP002Share, error) {
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		host = "[" + ip.String() + "]"
 	}
-	uri := "anytls://" + url.PathEscape(account.Password) + "@" + host + ":" + strconv.Itoa(account.Port) + "/?sni=" + url.QueryEscape(account.SNI)
+	serverName := account.SNI
+	if suffix, wildcard := strings.CutPrefix(serverName, "*."); wildcard {
+		// The client verifies a concrete name even when it dials the Agent by IP.
+		prefix, matches := strings.CutSuffix(strings.ToLower(account.Host), "."+strings.ToLower(suffix))
+		if matches && prefix != "" && !strings.ContainsAny(prefix, ".*") {
+			serverName = account.Host
+		} else {
+			serverName = "anytls." + suffix
+		}
+	}
+	uri := "anytls://" + url.User(account.Password).String() + "@" + host + ":" + strconv.Itoa(account.Port) + "/?sni=" + url.QueryEscape(serverName)
 	if account.Name != "" {
 		uri += "#" + url.PathEscape(account.Name)
-	}
-	if strings.Contains(uri, "insecure=") || strings.Contains(strings.ToLower(uri), "reality") {
-		return SIP002Share{}, ErrInvalid
 	}
 	qr, err := encodeSIP002QR(uri)
 	if err != nil || qr.Content != uri {

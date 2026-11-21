@@ -163,7 +163,11 @@ func (runtime *hostCapabilityRuntime) StoreListens(ctx context.Context, listener
 	var response struct {
 		Stored bool `json:"stored"`
 	}
-	if err := callHost(ctx, runtime.client, "state.put", map[string]any{"key": pluginListensStateKey, "value": json.RawMessage(value)}, &response); err != nil {
+	payload := map[string]any{"key": pluginListensStateKey, "value": json.RawMessage(value)}
+	if grant, ok := ctx.Value(listenerGrantContextKey{}).(listenerGrant); ok {
+		payload["listener_grant"] = grant.token
+	}
+	if err := callHost(ctx, runtime.client, "state.put", payload, &response); err != nil {
 		return err
 	}
 	if !response.Stored {

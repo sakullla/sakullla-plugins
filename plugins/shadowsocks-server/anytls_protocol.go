@@ -287,6 +287,8 @@ type anytlsStream struct {
 	id           uint32
 	sess         *anytlsSession
 	incoming     chan []byte
+	done         chan struct{}
+	deliveryMu   sync.Mutex
 	readBuf      []byte
 	readMu       sync.Mutex
 	readDeadline time.Time
@@ -412,8 +414,8 @@ func (s *anytlsStream) Close() error {
 		s.sess.mu.Lock()
 		delete(s.sess.streams, s.id)
 		s.sess.mu.Unlock()
+		s.closeIncoming()
 		err = s.sess.writeFrame(anytlsCmdFIN, s.id, nil)
-		close(s.incoming)
 	})
 	return err
 }
@@ -437,15 +439,31 @@ func (s *anytlsStream) SetWriteDeadline(t time.Time) error {
 }
 
 func (s *anytlsStream) deliver(data []byte) {
-	s.mu.Lock()
-	closed := s.closed
-	s.mu.Unlock()
-	if closed {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	select {
+	case <-s.done:
 		return
+	default:
 	}
 	// recvLoop transfers ownership of this frame; it never reuses its payload.
-	defer func() { _ = recover() }()
-	s.incoming <- data
+	select {
+	case s.incoming <- data:
+	case <-s.done:
+	}
+}
+
+// Signal a blocked sender before closing the queue. Readers can drain frames
+// queued before FIN without racing a send against close(incoming).
+func (s *anytlsStream) closeIncoming() {
+	close(s.done)
+	s.deliveryMu.Lock()
+	close(s.incoming)
+	s.deliveryMu.Unlock()
+}
+
+func (s *anytlsSession) newStream(id uint32) *anytlsStream {
+	return &anytlsStream{id: id, sess: s, incoming: make(chan []byte, 32), done: make(chan struct{})}
 }
 
 func newServerAnyTLSSession(conn net.Conn, padding string, onStream func(*anytlsStream)) *anytlsSession {
@@ -485,7 +503,7 @@ func (s *anytlsSession) openStream() (*anytlsStream, error) {
 		return nil, io.ErrClosedPipe
 	}
 	s.nextID++
-	stream := &anytlsStream{id: s.nextID, sess: s, incoming: make(chan []byte, 32)}
+	stream := s.newStream(s.nextID)
 	s.streams[stream.id] = stream
 	s.mu.Unlock()
 	if err := s.writeFrame(anytlsCmdSYN, stream.id, nil); err != nil {
@@ -508,13 +526,14 @@ func (s *anytlsSession) Close() error {
 	streams := s.streams
 	s.streams = map[uint32]*anytlsStream{}
 	s.mu.Unlock()
+	err := s.conn.Close()
 	for _, stream := range streams {
 		stream.mu.Lock()
 		stream.closed = true
 		stream.mu.Unlock()
-		stream.once.Do(func() { close(stream.incoming) })
+		stream.once.Do(stream.closeIncoming)
 	}
-	return s.conn.Close()
+	return err
 }
 
 func (s *anytlsSession) recvLoop() {
@@ -583,8 +602,8 @@ func (s *anytlsSession) recvLoop() {
 			s.mu.Lock()
 			_, exists := s.streams[sid]
 			var stream *anytlsStream
-			if !exists {
-				stream = &anytlsStream{id: sid, sess: s, incoming: make(chan []byte, 32)}
+			if !exists && !s.closed {
+				stream = s.newStream(sid)
 				s.streams[sid] = stream
 			}
 			handler := s.onStream
@@ -627,7 +646,7 @@ func (s *anytlsSession) finishStream(sid uint32) {
 		stream.mu.Lock()
 		stream.closed = true
 		stream.mu.Unlock()
-		close(stream.incoming)
+		stream.closeIncoming()
 	})
 }
 

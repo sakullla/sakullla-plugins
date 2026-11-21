@@ -44,6 +44,32 @@ func TestAnyTLSConcurrentCloseUnblocksDelivery(t *testing.T) {
 	})
 }
 
+func TestAnyTLSSessionCloseUnblocksFullStream(t *testing.T) {
+	session := newServerAnyTLSSession(&frameInputConn{}, defaultAnyTLSPaddingScheme, nil)
+	stream, err := session.openStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		for i := 0; i < cap(stream.incoming); i++ {
+			stream.deliver([]byte("queued"))
+		}
+		close(full)
+		stream.deliver([]byte("in flight while listener is removed"))
+		close(done)
+	}()
+	<-full
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session removal left frame delivery blocked")
+	}
+}
+
 type shortStreamWriter struct{}
 
 func (shortStreamWriter) Write(p []byte) (int, error) { return len(p) / 2, nil }

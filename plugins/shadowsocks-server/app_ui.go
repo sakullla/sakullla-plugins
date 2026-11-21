@@ -47,18 +47,19 @@ type listenUserView struct {
 }
 
 type listenAPIView struct {
-	ID                string           `json:"id"`
-	AgentID           string           `json:"agent_id"`
-	Port              int              `json:"port"`
-	Protocol          string           `json:"protocol,omitempty"`
-	Method            string           `json:"method"`
-	Family            string           `json:"family"`
-	CertificateID     int              `json:"certificate_id,omitempty"`
-	CertificateDomain string           `json:"certificate_domain,omitempty"`
-	PaddingScheme     string           `json:"padding_scheme,omitempty"`
-	Bound             bool             `json:"bound"`
-	HostPort          string           `json:"host_port,omitempty"`
-	Users             []listenUserView `json:"users"`
+	ID                 string           `json:"id"`
+	AgentID            string           `json:"agent_id"`
+	Port               int              `json:"port"`
+	Protocol           string           `json:"protocol,omitempty"`
+	Method             string           `json:"method"`
+	Family             string           `json:"family"`
+	CertificateID      int              `json:"certificate_id,omitempty"`
+	CertificateDomain  string           `json:"certificate_domain,omitempty"`
+	PaddingScheme      string           `json:"padding_scheme,omitempty"`
+	Bound              bool             `json:"bound"`
+	CertificatePending bool             `json:"certificate_pending,omitempty"`
+	HostPort           string           `json:"host_port,omitempty"`
+	Users              []listenUserView `json:"users"`
 }
 
 type publicCertificateView struct {
@@ -339,6 +340,33 @@ func (c *Controller) serveDefaults(writer http.ResponseWriter, request *http.Req
 	writeListenJSON(writer, http.StatusOK, listenAPIResponse{Ready: true, Defaults: &defaults, Access: readWriteAccess()})
 }
 
+type listenerGrantContextKey struct{}
+
+type listenerGrant struct {
+	token  string
+	id     string
+	domain string
+}
+
+// The host binds a short-lived grant to the authorized mutation. Only state.put
+// receives the token, including when the previous directory must be restored.
+func listenerMutationContext(request *http.Request, deleteID string) (context.Context, error) {
+	ctx := request.Context()
+	g := listenerGrant{
+		token:  request.Header.Get("X-NRE-Listener-Grant"),
+		id:     request.Header.Get("X-NRE-Listener-ID"),
+		domain: request.Header.Get("X-NRE-Listener-Certificate-Domain"),
+	}
+	if g == (listenerGrant{}) {
+		return ctx, nil
+	}
+	if g.token == "" || len(g.token) > 64 || !refPattern.MatchString(g.id) ||
+		(deleteID != "" && deleteID != g.id) || (deleteID == "" && !validCertificateDomain(g.domain)) {
+		return ctx, ErrDenied
+	}
+	return context.WithValue(ctx, listenerGrantContextKey{}, g), nil
+}
+
 func (c *Controller) serveListenCollection(writer http.ResponseWriter, request *http.Request) {
 	if _, err := c.uiIdentity(request); err != nil {
 		writeListenJSON(writer, http.StatusForbidden, listenAPIResponse{Error: "无权访问"})
@@ -363,7 +391,12 @@ func (c *Controller) serveListenCollection(writer http.ResponseWriter, request *
 			writeListenJSON(writer, http.StatusBadRequest, listenAPIResponse{Error: publicListenError(ErrInvalid)})
 			return
 		}
-		view, err := c.createListen(request.Context(), body)
+		ctx, err := listenerMutationContext(request, "")
+		if err != nil {
+			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+			return
+		}
+		view, err := c.createListen(ctx, body)
 		if err != nil {
 			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
 			return
@@ -418,7 +451,12 @@ func (c *Controller) serveListenItem(writer http.ResponseWriter, request *http.R
 		}
 		body, _ := decodeListenWrite(request)
 		c.rememberRequestNode(request.Context(), body.AgentID, requestNode(body))
-		if err := c.deleteListen(request.Context(), listenID, body.AgentID); err != nil {
+		ctx, err := listenerMutationContext(request, listenID)
+		if err != nil {
+			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
+			return
+		}
+		if err := c.deleteListen(ctx, listenID, body.AgentID); err != nil {
 			writeListenJSON(writer, listenStatus(err), listenAPIResponse{Error: publicListenError(err)})
 			return
 		}
@@ -880,6 +918,9 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 	if body.Protocol == ProtocolAnyTLS {
 		return c.createAnyTLSListen(ctx, body)
 	}
+	if _, granted := ctx.Value(listenerGrantContextKey{}).(listenerGrant); granted {
+		return listenAPIView{}, ErrDenied
+	}
 	if body.CertificateID != 0 || strings.TrimSpace(body.PaddingScheme) != "" || (body.Protocol != "" && body.Protocol != ProtocolShadowsocks) {
 		return listenAPIView{}, ErrInvalid
 	}
@@ -951,29 +992,41 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 	return c.projectListen(ctx, listener.ID)
 }
 
+func anyTLSUserPassword(password string) (string, error) {
+	if password == "" {
+		return GenerateLegacyPassword()
+	}
+	if strings.ContainsAny(password, "\r\n\x00") || strings.TrimSpace(password) == "" {
+		return "", ErrInvalid
+	}
+	return password, nil
+}
+
 func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
+	if body.CertificateID <= 0 {
+		return listenAPIView{}, ErrPublicCertificate
+	}
 	c.rememberRequestNode(ctx, body.AgentID, requestNode(body))
-	if strings.TrimSpace(body.Password) != "" && strings.ContainsAny(body.Password, "\r\n\x00") {
-		return listenAPIView{}, ErrInvalid
-	}
-	certificates, err := c.publicCertificates(ctx, body.AgentID)
-	if err != nil {
-		return listenAPIView{}, err
-	}
-	selected, err := selectableCertificate(certificates, body.CertificateID)
-	if err != nil {
-		return listenAPIView{}, err
+	grant, granted := ctx.Value(listenerGrantContextKey{}).(listenerGrant)
+	domain := grant.domain
+	if !granted {
+		certificates, err := c.publicCertificates(ctx, body.AgentID)
+		if err != nil {
+			return listenAPIView{}, err
+		}
+		selected, err := selectableCertificate(certificates, body.CertificateID)
+		if err != nil {
+			return listenAPIView{}, err
+		}
+		domain = selected.Domain
 	}
 	scheme, err := canonicalPaddingScheme(body.PaddingScheme)
 	if err != nil {
 		return listenAPIView{}, err
 	}
-	password := strings.TrimSpace(body.Password)
-	if password == "" {
-		password, err = GenerateLegacyPassword()
-		if err != nil {
-			return listenAPIView{}, err
-		}
+	password, err := anyTLSUserPassword(body.Password)
+	if err != nil {
+		return listenAPIView{}, err
 	}
 	userID, err := NewAccountID()
 	if err != nil {
@@ -983,7 +1036,7 @@ func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteReq
 	if user.Name == "" {
 		user.Name = DefaultUserName(userID)
 	}
-	spec := ListenSpec{AgentID: body.AgentID, Protocol: ProtocolAnyTLS, Port: body.Port, CertificateID: selected.ID, CertificateDomain: selected.Domain, PaddingScheme: scheme}
+	spec := ListenSpec{ListenID: grant.id, AgentID: body.AgentID, Protocol: ProtocolAnyTLS, Port: body.Port, CertificateID: body.CertificateID, CertificateDomain: domain, PaddingScheme: scheme}
 	current := c.directory()
 	next, listener, user, err := current.CreateListen(spec, user, "", "")
 	if err != nil {
@@ -1039,16 +1092,7 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 	}
 	var password string
 	if listener.AnyTLS() {
-		if strings.TrimSpace(body.Password) != "" && strings.ContainsAny(body.Password, "\r\n\x00") {
-			return listenAPIView{}, ErrInvalid
-		}
-		password = strings.TrimSpace(body.Password)
-		if password == "" {
-			password, err = GenerateLegacyPassword()
-			if err != nil {
-				return listenAPIView{}, err
-			}
-		}
+		password, err = anyTLSUserPassword(body.Password)
 	} else {
 		serverPSK, resolveErr := c.resolveMappedPSK(ctx, listener.Method, listener.ServerSecretRef, listener.ServerSecretVersion)
 		if resolveErr != nil {
@@ -1348,13 +1392,27 @@ func (c *Controller) projectUser(ctx context.Context, userID string) (listenUser
 	if !ok {
 		return listenUserView{}, ErrDenied
 	}
-	return c.projectUserView(ctx, listener, user, c.shareNode(ctx, listener.AgentID)), nil
+	return c.projectUserView(ctx, listener, user, c.shareNode(ctx, listener.AgentID), c.listenerCertificatePending(ctx, listener)), nil
+}
+
+func (c *Controller) listenerCertificatePending(ctx context.Context, listener ListenRule) bool {
+	if !listener.AnyTLS() || c.managedRuntime == nil || c.managedRuntime.client == nil {
+		return false
+	}
+	var state struct {
+		Found bool `json:"found"`
+		Value bool `json:"value"`
+	}
+	key := "listener-certificate-ready/" + listener.ID
+	err := callHost(ctx, c.managedRuntime.client, "state.get", map[string]any{"key": key}, &state)
+	return err != nil || (state.Found && !state.Value)
 }
 
 func (c *Controller) projectListenView(ctx context.Context, listener ListenRule, node NodeAddresses) listenAPIView {
+	pending := c.listenerCertificatePending(ctx, listener)
 	users := make([]listenUserView, 0, len(listener.Users))
 	for _, user := range listener.Users {
-		users = append(users, c.projectUserView(ctx, listener, user, node))
+		users = append(users, c.projectUserView(ctx, listener, user, node, pending))
 	}
 	bound := false
 	if c.listenHost != nil {
@@ -1368,22 +1426,23 @@ func (c *Controller) projectListenView(ctx context.Context, listener ListenRule,
 		protocol = ProtocolAnyTLS
 	}
 	return listenAPIView{
-		ID:                listener.ID,
-		AgentID:           listener.AgentID,
-		Port:              listener.Port,
-		Protocol:          protocol,
-		Method:            listener.Method,
-		Family:            family,
-		CertificateID:     listener.CertificateID,
-		CertificateDomain: listener.CertificateDomain,
-		PaddingScheme:     listener.PaddingScheme,
-		Bound:             bound,
-		HostPort:          endpoint.HostPort,
-		Users:             users,
+		ID:                 listener.ID,
+		AgentID:            listener.AgentID,
+		Port:               listener.Port,
+		Protocol:           protocol,
+		Method:             listener.Method,
+		Family:             family,
+		CertificateID:      listener.CertificateID,
+		CertificateDomain:  listener.CertificateDomain,
+		PaddingScheme:      listener.PaddingScheme,
+		Bound:              bound && !pending,
+		CertificatePending: pending,
+		HostPort:           endpoint.HostPort,
+		Users:              users,
 	}
 }
 
-func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, user User, node NodeAddresses) listenUserView {
+func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, user User, node NodeAddresses, certificatePending bool) listenUserView {
 	family := AccountFamilyOf(listener.Method)
 	method := listener.Method
 	if listener.AnyTLS() {
@@ -1401,6 +1460,10 @@ func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, u
 		view.Reason = disabledNoShare
 		return view
 	}
+	if certificatePending {
+		view.Reason = "等待节点确认证书"
+		return view
+	}
 	endpoint := ProjectShareEndpoint(ListenBinding{Port: listener.Port, TCP: true, UDP: true}, node)
 	if !endpoint.Available {
 		view.Reason = missingPublicHost
@@ -1416,7 +1479,7 @@ func (c *Controller) projectUserView(ctx context.Context, listener ListenRule, u
 	}
 	if listener.AnyTLS() {
 		share, shareErr := BuildAnyTLSShare(AnyTLSShareAccount{Password: password, Host: endpoint.Host, Port: listener.Port, SNI: listener.CertificateDomain, Name: user.Name})
-		if shareErr != nil || share.URI == "" || share.QR.Content != share.URI || len(share.QR.PNG) == 0 || strings.Contains(share.URI, "insecure=1") {
+		if shareErr != nil || share.URI == "" || share.QR.Content != share.URI || len(share.QR.PNG) == 0 {
 			view.Reason = shareUnavailable
 			return view
 		}

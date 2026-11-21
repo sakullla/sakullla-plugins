@@ -60,9 +60,6 @@ func (exec *listenExecutor) rememberUpstreamPadding(id, scheme string) {
 
 func (b *boundListen) handleAnyTLS(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	if !b.certificateReady(ctx) {
-		return
-	}
 	tlsConn, err := b.terminateAnyTLS(ctx, conn)
 	if err != nil || tlsConn == nil {
 		return
@@ -70,33 +67,34 @@ func (b *boundListen) handleAnyTLS(ctx context.Context, conn net.Conn) {
 	if tlsConn != conn {
 		defer tlsConn.Close()
 	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	session := newServerAnyTLSSession(tlsConn, b.snapshotPadding(), func(stream *anytlsStream) {
+		b.serveAnyTLSStream(sessionCtx, stream)
+	})
+	// Removing the listener must interrupt both a pending hello and an idle session.
+	stop := context.AfterFunc(ctx, func() { _ = session.Close() })
+	defer stop()
 	_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := readAnyTLSClientHello(tlsConn, b.anytlsIdentities(ctx)); err != nil {
 		return
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
-	session := newServerAnyTLSSession(tlsConn, b.snapshotPadding(), func(stream *anytlsStream) {
-		b.serveAnyTLSStream(ctx, stream)
-	})
 	session.recvLoop()
 }
 
-func (b *boundListen) certificateReady(ctx context.Context) bool {
-	if b == nil || b.certificateID <= 0 {
-		return false
-	}
-	if b.exec != nil && b.exec.managed != nil {
-		return b.exec.managed.certificateUsable(ctx, b.agentID, b.certificateID)
-	}
-	return true
-}
-
 func (b *boundListen) terminateAnyTLS(ctx context.Context, conn net.Conn) (net.Conn, error) {
-	if b != nil && b.exec != nil && b.exec.tlsTerminate != nil {
-		return b.exec.tlsTerminate(ctx, b.certificateID, conn)
+	b.mu.Lock()
+	exec, agentID, id := b.exec, b.agentID, b.certificateID
+	b.mu.Unlock()
+	if id <= 0 || exec == nil || (exec.managed != nil && !exec.managed.certificateUsable(ctx, agentID, id)) {
+		return nil, ErrPublicCertificate
 	}
-	if b != nil && b.exec != nil && b.exec.managed != nil {
-		return b.exec.managed.terminateCertificate(ctx, b.certificateID, conn)
+	if exec.tlsTerminate != nil {
+		return exec.tlsTerminate(ctx, id, conn)
+	}
+	if exec.managed != nil {
+		return exec.managed.terminateCertificate(ctx, id, conn)
 	}
 	return nil, ErrTypedHandlesUnavailable
 }
@@ -172,7 +170,8 @@ func (b *boundListen) serveAnyTLSTCP(ctx context.Context, stream *anytlsStream, 
 		_ = stream.sess.handshakeFailure(stream, "closed")
 		return
 	}
-	defer remote.Close()
+	release := closeAnyTLSRemoteOnCancel(ctx, remote)
+	defer release()
 	if decision.Action == RouteUpstream {
 		if decision.Upstream.AnyTLS() {
 			remote, err = b.wrapAnyTLSUpstream(ctx, remote, *decision.Upstream, target, nil)
@@ -190,6 +189,16 @@ func (b *boundListen) serveAnyTLSTCP(ctx context.Context, stream *anytlsStream, 
 	}
 	b.recordRouteFailure(decision, "")
 	relayBidirectional(stream, remote)
+}
+
+// DialContext stops governing the connection once the dial succeeds. A remote
+// peer may keep its read side open even after the client session has ended.
+func closeAnyTLSRemoteOnCancel(ctx context.Context, conn net.Conn) func() {
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return func() {
+		stop()
+		_ = conn.Close()
+	}
 }
 
 func (b *boundListen) serveAnyTLSUoT(ctx context.Context, stream *anytlsStream) {
@@ -237,7 +246,8 @@ func (b *boundListen) serveAnyTLSUoTConnect(ctx context.Context, stream *anytlsS
 			_ = stream.sess.handshakeFailure(stream, "closed")
 			return
 		}
-		defer raw.Close()
+		release := closeAnyTLSRemoteOnCancel(ctx, raw)
+		defer release()
 		remote, wrapErr := b.wrapAnyTLSUpstream(ctx, raw, *decision.Upstream, net.JoinHostPort(uotMagicV2, "443"), nil)
 		if wrapErr != nil {
 			b.recordRouteFailure(decision, upstreamFailureReason(wrapErr))
@@ -266,7 +276,8 @@ func (b *boundListen) serveAnyTLSUoTConnect(ctx context.Context, stream *anytlsS
 		_ = stream.sess.handshakeFailure(stream, "closed")
 		return
 	}
-	defer remote.Close()
+	release := closeAnyTLSRemoteOnCancel(ctx, remote)
+	defer release()
 	if err := stream.sess.handshakeSuccess(stream); err != nil {
 		return
 	}
