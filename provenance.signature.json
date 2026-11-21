@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "algorithm": "ed25519",
+  "identity": "sakullla-official-root-2026",
+  "payload_sha256": "20a2a00e338374951c3a67db489adac3d7ceb306f8ee74fb840e235f79987456",
+  "signature": "0OJKsHcpuRfzkQYNyrcRX4lfeY0Uy4fy0emzzujHG9NMurum38oiEimG8sDvyMvPQON16HJ1u/Hg6JehaWA4Ag=="
+}
