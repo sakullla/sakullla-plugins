@@ -67,11 +67,10 @@ func (b *boundListen) handleAnyTLS(ctx context.Context, conn net.Conn) {
 	if tlsConn != conn {
 		defer tlsConn.Close()
 	}
-	sessionCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	session := newServerAnyTLSSession(tlsConn, b.snapshotPadding(), func(stream *anytlsStream) {
-		b.serveAnyTLSStream(sessionCtx, stream)
+		b.serveAnyTLSStream(stream.ctx, stream)
 	})
+	session.parent = ctx
 	// Removing the listener must interrupt both a pending hello and an idle session.
 	stop := context.AfterFunc(ctx, func() { _ = session.Close() })
 	defer stop()

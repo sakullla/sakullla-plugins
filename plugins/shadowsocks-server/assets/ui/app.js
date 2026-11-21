@@ -1967,7 +1967,7 @@ const openAppend = (listen) => {
   }
   if (appendNote) {
     appendNote.textContent = isAnyTLSListen(listen)
-      ? "每个用户拥有独立密码，名称会写入 anytls:// 链接备注。留空则自动生成。"
+      ? "同一监听的用户需使用不同密码。名称会写入 anytls:// 链接备注，密码留空则自动生成。"
       : "每个用户拥有独立密钥，名称会写入 ss:// 链接备注。留空则自动生成。";
   }
   if (appendForm) appendForm.reset();

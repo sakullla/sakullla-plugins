@@ -35,7 +35,10 @@ type datasetRuntimeFake struct {
 	registers    []pluginsdk.DatasetSourceRegisterRequest
 }
 
-func (fake *datasetRuntimeFake) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+func (fake *datasetRuntimeFake) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	if call.Operation == "state.get" || call.Operation == "state.put" {
+		return fake.managedRuntimeFake.Call(ctx, call, target)
+	}
 	fake.datasetMu.Lock()
 	defer fake.datasetMu.Unlock()
 	switch call.Operation {

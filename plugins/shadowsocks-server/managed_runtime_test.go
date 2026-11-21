@@ -32,9 +32,38 @@ type managedRuntimeFake struct {
 	listErr         error
 	listCalls       int
 	tlsTerminateErr error
+	listenerIntents json.RawMessage
 }
 
-func (*managedRuntimeFake) Call(context.Context, pluginsdk.HostRuntimeCall, any) error { return nil }
+func (fake *managedRuntimeFake) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+	var req struct {
+		Key   string
+		Value json.RawMessage
+	}
+	if err := json.Unmarshal(call.Payload, &req); err != nil {
+		return err
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if req.Key == listenerSecretJournalKey {
+		switch call.Operation {
+		case "state.put":
+			fake.listenerIntents = append(json.RawMessage(nil), req.Value...)
+			return copyHostResult(map[string]bool{"stored": true}, target)
+		case "state.get":
+			return copyHostResult(map[string]any{"found": len(fake.listenerIntents) > 0, "value": fake.listenerIntents}, target)
+		}
+	}
+	if ref, ok := strings.CutPrefix(req.Key, "listener-secret-version/"); ok {
+		for key := range fake.secrets {
+			if version, ok := strings.CutPrefix(key, ref+"\x00"); ok {
+				return copyHostResult(map[string]any{"found": true, "value": version}, target)
+			}
+		}
+		return copyHostResult(map[string]any{"found": true, "value": ""}, target)
+	}
+	return nil
+}
 
 func (fake *managedRuntimeFake) ListPublicCertificates(context.Context, string) (pluginsdk.PublicCertificateListResponse, error) {
 	fake.mu.Lock()

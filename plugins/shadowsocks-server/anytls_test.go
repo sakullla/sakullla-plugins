@@ -372,6 +372,75 @@ func TestAnyTLSCancellationReleasesIdleDestination(t *testing.T) {
 	}
 }
 
+func TestAnyTLSStreamFINClosesOnlyItsIdleDestination(t *testing.T) {
+	client, inbound := net.Pipe()
+	defer client.Close()
+	destinations := make(chan net.Conn, 2)
+	bound := &boundListen{
+		certificateID: 7,
+		exec:          &listenExecutor{tlsTerminate: func(_ context.Context, _ int, conn net.Conn) (net.Conn, error) { return conn, nil }},
+		secrets:       staticSecrets{"alice\x00v1": "password"},
+		anytlsUsers:   []ListenApplyUser{{ID: "alice", Enabled: true, SecretRef: "alice", SecretVersion: "v1"}},
+		dialer: &recordingDialer{open: func() net.Conn {
+			conn, peer := net.Pipe()
+			destinations <- peer
+			return conn
+		}},
+	}
+	go bound.handleAnyTLS(t.Context(), inbound)
+	session, err := startClientAnyTLSSession(client, []byte("password"), defaultAnyTLSPaddingScheme, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	open := func() (*anytlsStream, net.Conn) {
+		t.Helper()
+		stream, err := session.openStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		address, err := encodeSocksAddr("example.org:443")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = stream.Write(address); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case peer := <-destinations:
+			t.Cleanup(func() { _ = peer.Close() })
+			return stream, peer
+		case <-time.After(time.Second):
+			t.Fatal("stream did not reach its destination")
+			return nil, nil
+		}
+	}
+	first, idle := open()
+	second, live := open()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf [1]byte
+	_ = idle.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := idle.Read(buf[:]); err != io.EOF {
+		t.Fatalf("FIN retained the first destination: %v", err)
+	}
+	_ = live.SetDeadline(time.Now().Add(time.Second))
+	if _, err := second.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(live, buf[:]); err != nil || buf[0] != 'x' {
+		t.Fatalf("second stream lost its connection: %v", err)
+	}
+	if _, err := live.Write([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	_ = second.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(second, buf[:]); err != nil || buf[0] != 'y' {
+		t.Fatalf("second stream lost its reply: %v", err)
+	}
+}
+
 type dialerDial struct{ *anytlsRecordingDialer }
 
 func (d dialerDial) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -570,6 +639,11 @@ func TestAnyTLSProbeStaysReadOnly(t *testing.T) {
 
 func newAnyTLSUIController(t *testing.T, managed *hostCapabilityRuntime, host *uiListenHost, state ListenCatalogStore) *Controller {
 	t.Helper()
+	return startManagedUIController(t, managed, host, state, "generation-a")
+}
+
+func startManagedUIController(t *testing.T, managed *hostCapabilityRuntime, host *uiListenHost, state ListenCatalogStore, generation string) *Controller {
+	t.Helper()
 	controller, err := NewController(ControllerConfig{
 		PackageDigest: "package", ArtifactDigest: "artifact", InstanceID: "instance-a",
 		ManagedRuntime: managed, ListenRuntime: newHostCapabilityRuntime(host), ListenState: state,
@@ -580,15 +654,15 @@ func newAnyTLSUIController(t *testing.T, managed *hostCapabilityRuntime, host *u
 	if _, err = controller.Handshake(context.Background(), pluginsdk.RPCHandshakeRequest{
 		ABI: pluginsdk.RPCABIV1, PluginID: PluginID, PluginVersion: PluginVersion,
 		PackageDigest: "package", ArtifactDigest: "artifact", GrantedScopes: requiredGrants(),
-		Generation: "generation-a", RequiredFeatures: supportedFeatures(),
+		Generation: generation, RequiredFeatures: supportedFeatures(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	wire, _ := json.Marshal(Configuration{Generation: "generation-a"})
-	if result := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-a", Config: wire}); result.Error != nil {
+	wire, _ := json.Marshal(Configuration{Generation: generation})
+	if result := controller.Prepare(context.Background(), pluginsdk.LifecycleRequest{Generation: generation, Config: wire}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: "generation-a"}); result.Error != nil {
+	if result := controller.Activate(context.Background(), pluginsdk.LifecycleRequest{Generation: generation}); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	t.Cleanup(controller.stopListenReconciler)
@@ -624,6 +698,14 @@ func TestAnyTLSCreateRequiresCertificateAndKeepsShadowsocks(t *testing.T) {
 	}
 	if parseShare(listen.Users[0]).User.Username() != " a:@b/c " {
 		t.Fatal("first password changed")
+	}
+	duplicate := uiJSON(t, controller, http.MethodPost, "/api/listens/"+listen.ID+"/users", `{"agent_id":"agent-1","name":"different username","password":" a:@b/c "}`)
+	if duplicate.Code != http.StatusBadRequest || !strings.Contains(duplicate.Body.String(), ErrDuplicateAnyTLSPassword.Error()) || fake.createCalls != 1 {
+		t.Fatalf("duplicate password response=%d, created credentials=%d", duplicate.Code, fake.createCalls)
+	}
+	hash := anytlsPasswordHash([]byte("shared"))
+	if matchAnyTLSPassword(hash[:], []anytlsIdentity{{id: "one", hash: hash}, {id: "two", hash: hash}}) != "" {
+		t.Fatal("accepted an ambiguous password from a legacy configuration")
 	}
 	for _, tt := range []struct{ name, password string }{{"explicit", " @:/?# "}, {"generated", ""}} {
 		body, err := json.Marshal(map[string]string{"agent_id": "agent-1", "name": tt.name, "password": tt.password})
@@ -674,10 +756,13 @@ type listenerGrantTestHost struct {
 	writes []listenerStateRequest
 }
 
-func (host *listenerGrantTestHost) Call(_ context.Context, call pluginsdk.HostRuntimeCall, target any) error {
+func (host *listenerGrantTestHost) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, target any) error {
 	var request listenerStateRequest
 	if err := json.Unmarshal(call.Payload, &request); err != nil {
 		return err
+	}
+	if request.Key == listenerSecretJournalKey || strings.HasPrefix(request.Key, "listener-secret-version/") {
+		return host.managedRuntimeFake.Call(ctx, call, target)
 	}
 	switch call.Operation {
 	case "state.put":

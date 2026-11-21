@@ -44,22 +44,24 @@ type controllerEpoch struct{ live atomic.Bool }
 
 type Controller struct {
 	*rpcplugin.Adapter
-	mu             sync.Mutex
-	configuration  Configuration
-	epoch          *controllerEpoch
-	commit         *rpcplugin.Handle[*controllerEpoch]
-	service        *rpcplugin.Handle[*Service]
-	published      *Service
-	transaction    *rpcplugin.Handle[PreparedAdmission]
-	admission      TypedHandleAdmission
-	listenHost     *hostCapabilityRuntime
-	listenState    ListenCatalogStore
-	listenExec     *listenExecutor
-	controlSecrets *issuedSecrets
-	instanceID     string
-	managedRuntime *hostCapabilityRuntime
-	reconcileStop  func()
-	remoteSources  []remoteSourceRecord
+	mu                   sync.Mutex
+	directoryMu          sync.Mutex
+	directoryUnconfirmed bool
+	configuration        Configuration
+	epoch                *controllerEpoch
+	commit               *rpcplugin.Handle[*controllerEpoch]
+	service              *rpcplugin.Handle[*Service]
+	published            *Service
+	transaction          *rpcplugin.Handle[PreparedAdmission]
+	admission            TypedHandleAdmission
+	listenHost           *hostCapabilityRuntime
+	listenState          ListenCatalogStore
+	listenExec           *listenExecutor
+	controlSecrets       *issuedSecrets
+	instanceID           string
+	managedRuntime       *hostCapabilityRuntime
+	reconcileStop        func()
+	remoteSources        []remoteSourceRecord
 }
 
 func NewController(config ControllerConfig) (*Controller, error) {

@@ -23,6 +23,16 @@ func (c *Controller) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	if pluginsdk.ServePluginUIAsset(writer, request, panelUIAssets, "assets/ui") {
 		return
 	}
+	// A directory mutation spans persistence, Agent application and possible rollback.
+	// The collection GET also reconciles the live Agent against that directory.
+	if request.Method == http.MethodPost || request.URL.Path == "/api/listens" {
+		c.directoryMu.Lock()
+		defer c.directoryMu.Unlock()
+		if err := c.confirmDirectory(request.Context()); err != nil {
+			writeListenJSON(writer, http.StatusServiceUnavailable, listenAPIResponse{Error: serviceNotReady})
+			return
+		}
+	}
 	if !c.uiReady() {
 		writeListenJSON(writer, http.StatusServiceUnavailable, listenAPIResponse{Error: serviceNotReady})
 		return

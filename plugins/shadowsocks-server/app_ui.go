@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -718,9 +719,21 @@ func (c *Controller) commitDirectory(ctx context.Context, next Configuration) er
 	c.mu.Unlock()
 	if state != nil {
 		if err := state.StoreListens(ctx, next.Listeners); err != nil {
-			return err
+			// A dropped state.put response can still have committed on the host.
+			stored, found, readErr := state.LoadListens(ctx)
+			if readErr != nil {
+				c.directoryUnconfirmed = true
+				return err
+			}
+			if !found || !reflect.DeepEqual(cloneListeners(stored), cloneListeners(next.Listeners)) {
+				return err
+			}
 		}
 	}
+	return c.publishDirectory(next)
+}
+
+func (c *Controller) publishDirectory(next Configuration) error {
 	c.mu.Lock()
 	published := c.published
 	c.configuration = clone(next)
@@ -728,6 +741,30 @@ func (c *Controller) commitDirectory(ctx context.Context, next Configuration) er
 	if published != nil {
 		return published.commitDirectory(next)
 	}
+	return nil
+}
+
+// A later writer must not replace a directory whose preceding commit is still
+// indeterminate. The last in-memory directory is the initial state when no row exists.
+func (c *Controller) confirmDirectory(ctx context.Context) error {
+	if !c.directoryUnconfirmed {
+		return nil
+	}
+	listeners, found, err := c.listenState.LoadListens(ctx)
+	if err != nil {
+		return err
+	}
+	if found {
+		config := c.directory()
+		config.Listeners = listeners
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		if err := c.publishDirectory(config); err != nil {
+			return err
+		}
+	}
+	c.directoryUnconfirmed = false
 	return nil
 }
 
@@ -743,18 +780,25 @@ func (c *Controller) secrets() *issuedSecrets {
 	return c.controlSecrets
 }
 
-func (c *Controller) putSecret(ctx context.Context, ref, version, material string) (string, error) {
+func (c *Controller) putSecret(ctx context.Context, agentID, ref, version, material string) (string, error) {
 	if ref == "" || version == "" {
 		return version, nil
 	}
 	if c.managedRuntime != nil {
+		intent := listenerSecretIntent{AgentID: agentID, Ref: ref}
+		if err := c.stageListenerSecrets(ctx, []listenerSecretIntent{intent}); err != nil {
+			return "", err
+		}
 		value := []byte(material)
 		reference, err := c.managedRuntime.importSecret(ctx, ref, value)
 		clear(value)
 		if err != nil || reference.ID != ref {
 			return "", ErrTypedHandlesUnavailable
 		}
-		c.secrets().put(reference.ID, reference.Version, material)
+		intent.Version = reference.Version
+		if err := c.stageListenerSecrets(ctx, []listenerSecretIntent{intent}); err != nil {
+			return "", err
+		}
 		return reference.Version, nil
 	}
 	c.secrets().put(ref, version, material)
@@ -912,6 +956,7 @@ func selectableCertificate(certificates []publicCertificateView, id int) (public
 }
 
 func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
+	defer c.recoverListenerSecrets(ctx, false)
 	if err := c.requireMutableAgent(ctx, body.AgentID); err != nil {
 		return listenAPIView{}, err
 	}
@@ -958,7 +1003,7 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 		return listenAPIView{}, err
 	}
 	previous := current
-	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	userVersion, err := c.putSecret(ctx, body.AgentID, user.SecretRef, user.SecretVersion, password)
 	if err != nil {
 		return listenAPIView{}, err
 	}
@@ -970,7 +1015,7 @@ func (c *Controller) createListen(ctx context.Context, body listenWriteRequest) 
 		user.SecretVersion = userVersion
 	}
 	if SS2022Method(method) {
-		serverVersion, secretErr := c.putSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK)
+		serverVersion, secretErr := c.putSecret(ctx, body.AgentID, listener.ServerSecretRef, listener.ServerSecretVersion, serverPSK)
 		if secretErr != nil {
 			err = secretErr
 			return listenAPIView{}, err
@@ -1000,6 +1045,22 @@ func anyTLSUserPassword(password string) (string, error) {
 		return "", ErrInvalid
 	}
 	return password, nil
+}
+
+func (c *Controller) checkAnyTLSUserPassword(ctx context.Context, listener ListenRule, password string) error {
+	candidate := anytlsPasswordHash([]byte(password))
+	for _, user := range listener.Users {
+		secret, err := c.resolveMaterial(ctx, user.SecretRef, user.SecretVersion)
+		if err != nil {
+			return err
+		}
+		hash := anytlsPasswordHash(secret)
+		clear(secret)
+		if candidate == hash {
+			return ErrDuplicateAnyTLSPassword
+		}
+	}
+	return nil
 }
 
 func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteRequest) (listenAPIView, error) {
@@ -1042,7 +1103,7 @@ func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteReq
 	if err != nil {
 		return listenAPIView{}, err
 	}
-	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	userVersion, err := c.putSecret(ctx, body.AgentID, user.SecretRef, user.SecretVersion, password)
 	if err != nil {
 		return listenAPIView{}, err
 	}
@@ -1063,6 +1124,7 @@ func (c *Controller) createAnyTLSListen(ctx context.Context, body listenWriteReq
 }
 
 func (c *Controller) appendListenUser(ctx context.Context, listenID string, body listenWriteRequest) (listenAPIView, error) {
+	defer c.recoverListenerSecrets(ctx, false)
 	current := c.directory()
 	listener, ok := current.Listen(listenID)
 	if !ok {
@@ -1093,6 +1155,9 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 	var password string
 	if listener.AnyTLS() {
 		password, err = anyTLSUserPassword(body.Password)
+		if err == nil {
+			err = c.checkAnyTLSUserPassword(ctx, listener, password)
+		}
 	} else {
 		serverPSK, resolveErr := c.resolveMappedPSK(ctx, listener.Method, listener.ServerSecretRef, listener.ServerSecretVersion)
 		if resolveErr != nil {
@@ -1108,7 +1173,7 @@ func (c *Controller) appendListenUser(ctx context.Context, listenID string, body
 		return listenAPIView{}, err
 	}
 	previous := current
-	userVersion, err := c.putSecret(ctx, user.SecretRef, user.SecretVersion, password)
+	userVersion, err := c.putSecret(ctx, agentID, user.SecretRef, user.SecretVersion, password)
 	if err != nil {
 		return listenAPIView{}, err
 	}
@@ -1211,6 +1276,18 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		return err
 	}
 	previous := current
+	if c.managedRuntime != nil {
+		intents := make([]listenerSecretIntent, 0, len(listener.Users)+1)
+		for _, user := range listener.Users {
+			intents = append(intents, listenerSecretIntent{AgentID: agentID, Ref: user.SecretRef, Version: user.SecretVersion})
+		}
+		if listener.ServerSecretRef != "" {
+			intents = append(intents, listenerSecretIntent{AgentID: agentID, Ref: listener.ServerSecretRef, Version: listener.ServerSecretVersion})
+		}
+		if err := c.stageListenerSecrets(ctx, intents); err != nil {
+			return err
+		}
+	}
 	if err = c.commitDirectory(ctx, next); err != nil {
 		return err
 	}
@@ -1218,17 +1295,7 @@ func (c *Controller) deleteListen(ctx context.Context, listenID, agentID string)
 		_ = c.commitDirectory(ctx, previous)
 		return err
 	}
-	if c.managedRuntime != nil {
-		for _, user := range listener.Users {
-			if err := c.managedRuntime.revokeSecret(ctx, user.SecretRef, user.SecretVersion); err != nil {
-				return err
-			}
-		}
-		if listener.ServerSecretRef != "" {
-			return c.managedRuntime.revokeSecret(ctx, listener.ServerSecretRef, listener.ServerSecretVersion)
-		}
-	}
-	return nil
+	return c.recoverListenerSecrets(ctx, false)
 }
 
 func (c *Controller) applyAgentListens(ctx context.Context, agentID string) error {
@@ -1317,7 +1384,12 @@ func (c *Controller) reconcileListensUntilStopped(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.reconcileStoredListens(ctx)
+			c.directoryMu.Lock()
+			if c.confirmDirectory(ctx) == nil {
+				c.reconcileStoredListens(ctx)
+				_ = c.recoverListenerSecrets(ctx, true)
+			}
+			c.directoryMu.Unlock()
 		}
 	}
 }
@@ -1721,6 +1793,8 @@ func publicListenError(err error) string {
 		return bindFailedText
 	case errors.Is(err, ErrTraditionalMultiUser):
 		return ErrTraditionalMultiUser.Error()
+	case errors.Is(err, ErrDuplicateAnyTLSPassword):
+		return ErrDuplicateAnyTLSPassword.Error()
 	case errors.Is(err, ErrDenied):
 		return "账号不存在或操作被拒绝"
 	case errors.Is(err, ErrMissingShareHost):

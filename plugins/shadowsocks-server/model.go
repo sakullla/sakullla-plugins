@@ -55,6 +55,7 @@ var (
 	ErrPortConflict            = errors.New("该节点已使用此端口")
 	ErrExecutionUnavailable    = errors.New("该节点暂时无法执行监听")
 	ErrTraditionalMultiUser    = errors.New("传统方法不能在同一端口追加用户")
+	ErrDuplicateAnyTLSPassword = errors.New("此监听已有用户使用这个密码，请为新用户设置不同的密码")
 	ErrPublicCertificate       = errors.New("没有可选服务端证书或未选择证书")
 )
 var refPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,127}$`)

@@ -2,6 +2,7 @@ package shadowsocksserver
 
 import (
 	"bufio"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
@@ -218,10 +219,15 @@ func matchAnyTLSPassword(presented []byte, users []anytlsIdentity) string {
 		return ""
 	}
 	matched := ""
+	matches := 0
 	for _, user := range users {
 		if subtle.ConstantTimeCompare(presented, user.hash[:]) == 1 {
 			matched = user.id
+			matches++
 		}
+	}
+	if matches != 1 {
+		return ""
 	}
 	return matched
 }
@@ -264,6 +270,7 @@ func readAnyTLSClientHello(conn io.Reader, users []anytlsIdentity) (string, erro
 }
 
 type anytlsSession struct {
+	parent      context.Context
 	conn        net.Conn
 	isClient    bool
 	padding     string
@@ -287,7 +294,9 @@ type anytlsStream struct {
 	id           uint32
 	sess         *anytlsSession
 	incoming     chan []byte
-	done         chan struct{}
+	ctx          context.Context
+	cancel       context.CancelFunc
+	done         <-chan struct{}
 	deliveryMu   sync.Mutex
 	readBuf      []byte
 	readMu       sync.Mutex
@@ -456,14 +465,19 @@ func (s *anytlsStream) deliver(data []byte) {
 // Signal a blocked sender before closing the queue. Readers can drain frames
 // queued before FIN without racing a send against close(incoming).
 func (s *anytlsStream) closeIncoming() {
-	close(s.done)
+	s.cancel()
 	s.deliveryMu.Lock()
 	close(s.incoming)
 	s.deliveryMu.Unlock()
 }
 
 func (s *anytlsSession) newStream(id uint32) *anytlsStream {
-	return &anytlsStream{id: id, sess: s, incoming: make(chan []byte, 32), done: make(chan struct{})}
+	parent := s.parent
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	return &anytlsStream{id: id, sess: s, incoming: make(chan []byte, 32), ctx: ctx, cancel: cancel, done: ctx.Done()}
 }
 
 func newServerAnyTLSSession(conn net.Conn, padding string, onStream func(*anytlsStream)) *anytlsSession {
