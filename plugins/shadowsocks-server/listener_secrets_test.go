@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -122,23 +123,23 @@ func TestManagedListenCreateAndAppendReadBackBeforeRetiringSecrets(t *testing.T)
 type interruptedSecretHost struct {
 	managedRuntimeFake
 	interrupt string
-	offline   bool
+	offline   atomic.Bool
 }
 
 func (h *interruptedSecretHost) ScopedSecret(ctx context.Context, req pluginsdk.ScopedSecretRequest) (pluginsdk.ScopedSecretResponse, error) {
-	if h.offline {
+	if h.offline.Load() {
 		return pluginsdk.ScopedSecretResponse{}, context.Canceled
 	}
 	res, err := h.managedRuntimeFake.ScopedSecret(ctx, req)
 	if err == nil && req.Action == h.interrupt {
-		h.offline = true
+		h.offline.Store(true)
 		return pluginsdk.ScopedSecretResponse{}, context.Canceled
 	}
 	return res, err
 }
 
 func (h *interruptedSecretHost) Call(ctx context.Context, call pluginsdk.HostRuntimeCall, dst any) error {
-	if h.offline {
+	if h.offline.Load() {
 		return context.Canceled
 	}
 	return h.managedRuntimeFake.Call(ctx, call, dst)
@@ -175,15 +176,19 @@ func TestManagedListenerCleanupAfterGenerationStops(t *testing.T) {
 				fake.interrupt = action
 				reply := uiJSON(t, current, "POST", path, body)
 				if action == pluginsdk.ScopedSecretRevoke {
-					if reply.Code != http.StatusOK || fake.offline || fake.revokes != 0 || len(host.live) != 1 || host.live[0].ID != keep.ID {
-						t.Fatalf("delete response=%d, stopped=%v, revokes=%d, listeners=%v", reply.Code, fake.offline, fake.revokes, host.live)
+					current.directoryMu.Lock()
+					stopped, revokes := fake.offline.Load(), fake.revokes
+					live := len(host.live) == 1 && host.live[0].ID == keep.ID
+					current.directoryMu.Unlock()
+					if reply.Code != http.StatusOK || stopped || revokes != 0 || !live {
+						t.Fatalf("delete response=%d, stopped=%v, revokes=%d, preserved listen=%v", reply.Code, stopped, revokes, live)
 					}
 					time.Sleep(listenReconcileInterval + time.Second)
 					synctest.Wait()
 				} else if reply.Code == http.StatusOK {
 					t.Fatal("interrupted create reported success")
 				}
-				if !fake.offline {
+				if !fake.offline.Load() {
 					t.Fatal("host did not interrupt the generation")
 				}
 				var pending []listenerSecretIntent
@@ -192,7 +197,8 @@ func TestManagedListenerCleanupAfterGenerationStops(t *testing.T) {
 				}
 				current.stopListenReconciler()
 				synctest.Wait()
-				fake.offline, fake.interrupt = false, ""
+				fake.offline.Store(false)
+				fake.interrupt = ""
 				successor := startManagedUIController(t, newHostCapabilityRuntime(fake), host, state, "generation-b")
 				defer successor.stopListenReconciler()
 				time.Sleep(listenReconcileInterval + time.Second)
@@ -346,7 +352,7 @@ func TestAnyTLSCommittedUserChangeRetriesFullApplyOnSamePort(t *testing.T) {
 			// Stop precisely after the durable directory commit, before Agent apply
 			// or retirement. No calls to the old generation's host can complete.
 			stopAfterCommit := errors.New("generation stopped after state.put")
-			store.afterStore = func() { host.online = false; fake.offline = true; panic(stopAfterCommit) }
+			store.afterStore = func() { host.online = false; fake.offline.Store(true); panic(stopAfterCommit) }
 			func() {
 				defer func() {
 					if got := recover(); got != stopAfterCommit {
@@ -357,7 +363,7 @@ func TestAnyTLSCommittedUserChangeRetriesFullApplyOnSamePort(t *testing.T) {
 			}()
 			current.stopListenReconciler()
 			store.afterStore = nil
-			fake.offline = false
+			fake.offline.Store(false)
 			successor := startManagedUIController(t, newHostCapabilityRuntime(fake), host, store, "generation-b")
 			defer successor.stopListenReconciler()
 			checkPending := func(want int) {
